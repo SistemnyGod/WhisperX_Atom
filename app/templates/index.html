@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WhisperX Web</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<main class="wrap">
+<h1>WhisperX Web</h1>
+
+
+<section class="card">
+<h2>Запись</h2>
+<div class="row">
+<button id="btnStart">Начать запись</button>
+<button id="btnStop" disabled>Остановить</button>
+</div>
+<audio id="player" controls></audio>
+<div class="row">
+<button id="btnUpload" disabled>Загрузить и транскрибировать</button>
+</div>
+</section>
+
+
+<section class="card">
+<h2>Статус</h2>
+<pre id="status">—</pre>
+</section>
+
+
+<section class="card">
+<h2>Транскрипт</h2>
+<textarea id="output" rows="14" placeholder="Здесь появится текст..."></textarea>
+</section>
+</main>
+
+
+<script src="/static/app.js"></script>
+</body>
+</html>

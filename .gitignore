@@ -1,0 +1,40 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual env
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+build/
+dist/
+*.spec.bak
+
+# Runtime data / outputs
+data/
+whisperx_results/
+
+# Local model artifacts
+models/
+pretrained_models/
+
+# Local watch folders with large audio
+ЗДЕСЬ ПОЛУЧАЕМ РЕЗУЛЬТАТ ТРАНСКРИБАЦИИ/
+ЗДЕСЬ СКИДЫВАЕМ ФАЙЛ ДЛЯ ТРАНСКРИБАЦИИ/
+
+# Local state
+whisperx_gui_settings.json
+
+# Decompiled/temp
+app.cpython-310.py
+app.cpython-39.py_failed
