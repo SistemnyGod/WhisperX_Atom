@@ -14,6 +14,9 @@ import whisperx
 from whisperx.diarize import DiarizationPipeline as WhisperXDiarizationPipeline
 
 from app.storage import read_job_json, write_job_json
+from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
+from media_binaries import require_binary
+from transcription_quality import preprocess_filter, preprocess_output_path
 
 
 def _as_bool(name: str, default: bool = False) -> bool:
@@ -35,22 +38,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _read_glossary_rules(raw: str):
-    rules = []
-    if not raw:
-        return rules
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=>" not in line:
-            continue
-        source, target = [part.strip() for part in line.split("=>", 1)]
-        if not source:
-            continue
-        pattern = source[3:].strip() if source.startswith("re:") else re.escape(source)
-        try:
-            rules.append((re.compile(pattern, flags=re.IGNORECASE), target))
-        except re.error:
-            continue
-    return rules
+    return parse_glossary_rules(raw)
 
 
 def _apply_rules(text: str, rules):
@@ -80,16 +68,22 @@ class PipelineContext:
 class PipelineConfig:
     asr_model: str
     asr_backend: str
+    language: str | None
     device: str
     compute_type: str
     batch_size: int
     preprocess_asr: bool
     asr_beam_size: int
+    vad_onset: float
+    chunk_size: int
+    initial_prompt: str
+    hotwords_raw: str
     enable_alignment: bool
     enable_diarization: bool
     min_speakers: int
     max_speakers: int
     hf_token: str
+    use_glossary: bool
     glossary_rules_raw: str
     enable_speaker_clustering: bool
     use_torch_compile: bool
@@ -102,19 +96,28 @@ class PipelineConfig:
         compute = os.getenv("COMPUTE_TYPE", "float16")
         if device == "cpu" and compute == "float16":
             compute = "float32"
+        language = (os.getenv("LANGUAGE") or os.getenv("ASR_LANGUAGE") or "ru").strip() or None
+        if language == "auto":
+            language = None
         return cls(
             asr_model=os.getenv("WHISPERX_MODEL", "large-v3"),
             asr_backend=os.getenv("ASR_BACKEND", "whisperx").lower(),
+            language=language,
             device=device,
             compute_type=compute,
             batch_size=_as_int("BATCH_SIZE", 8),
             preprocess_asr=_as_bool("PREPROCESS_ASR", True),
             asr_beam_size=_as_int("BEAM_SIZE", 7),
+            vad_onset=float(os.getenv("VAD_ONSET", "0.40")),
+            chunk_size=_as_int("CHUNK_SIZE", 20),
+            initial_prompt=(os.getenv("INITIAL_PROMPT", "") or "").strip(),
+            hotwords_raw=(os.getenv("HOTWORDS", "") or "").strip(),
             enable_alignment=_as_bool("ENABLE_ALIGNMENT", True),
             enable_diarization=_as_bool("ENABLE_DIARIZATION", True),
             min_speakers=max(1, _as_int("MIN_SPEAKERS", 2)),
             max_speakers=max(1, _as_int("MAX_SPEAKERS", 12)),
             hf_token=(os.getenv("HF_TOKEN") or "").strip(),
+            use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
             enable_speaker_clustering=_as_bool("SPEAKER_CLUSTERING", False),
             use_torch_compile=_as_bool("TORCH_COMPILE", False),
@@ -130,9 +133,31 @@ class ModelCacheManager:
     def _asr_key(self, model: str, device: str, compute_type: str, backend: str, options: tuple) -> tuple:
         return (backend, model, device, compute_type, options)
 
-    def get_asr_model(self, model: str, device: str, compute_type: str, backend: str):
+    def get_asr_model(
+        self,
+        model: str,
+        device: str,
+        compute_type: str,
+        backend: str,
+        *,
+        language: str | None,
+        beam_size: int,
+        vad_onset: float,
+        chunk_size: int,
+        initial_prompt: str,
+        hotwords: str,
+    ):
         asr_options = tuple(
-            sorted({"beam_size": _as_int("BEAM_SIZE", 7), "language": None, "initial_prompt": None}.items())
+            sorted(
+                {
+                    "beam_size": beam_size,
+                    "language": language,
+                    "vad_onset": vad_onset,
+                    "chunk_size": chunk_size,
+                    "initial_prompt": initial_prompt or "",
+                    "hotwords": hotwords or "",
+                }.items()
+            )
         )
         key = self._asr_key(model, device, compute_type, backend, asr_options)
         if key not in self._asr:
@@ -141,7 +166,21 @@ class ModelCacheManager:
 
                 self._asr[key] = WhisperModel(model, device=device, compute_type=compute_type)
             else:
-                self._asr[key] = whisperx.load_model(model, device=device, compute_type=compute_type)
+                self._asr[key] = whisperx.load_model(
+                    model,
+                    device=device,
+                    compute_type=compute_type,
+                    language=language,
+                    asr_options={
+                        "beam_size": beam_size,
+                        "initial_prompt": initial_prompt or None,
+                        "hotwords": hotwords or None,
+                    },
+                    vad_options={
+                        "vad_onset": float(vad_onset),
+                        "chunk_size": int(chunk_size),
+                    },
+                )
                 if PipelineConfig.from_env().use_torch_compile:
                     try:
                         if hasattr(self._asr[key], "model"):
@@ -166,6 +205,7 @@ class ModelCacheManager:
 class TranscriptionPipeline:
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
         self.config = config or PipelineConfig.from_env()
+        self.project_root = Path(__file__).resolve().parent.parent
         self.cache = ModelCacheManager()
         self.audio_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
         self.asr_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
@@ -175,7 +215,9 @@ class TranscriptionPipeline:
         self._workers: list[asyncio.Task[None]] = []
         self._running = False
 
-        self._glossary_rules = _read_glossary_rules(self.config.glossary_rules_raw)
+        glossary_text = load_glossary_text(self.project_root, self.config.glossary_rules_raw) if self.config.use_glossary else ""
+        self._glossary_rules = _read_glossary_rules(glossary_text)
+        self._hotwords_text = load_hotwords_text(self.project_root, self.config.hotwords_raw)
 
     async def start(self) -> None:
         if self._running:
@@ -337,7 +379,10 @@ class TranscriptionPipeline:
         for path in (ctx.asr_audio_path, ctx.diar_audio_path):
             if not path or not path.exists():
                 continue
-            if not (path.name.endswith(".asr.wav") or path.name.endswith(".diar.wav")):
+            if not any(
+                path.name.endswith(suffix)
+                for suffix in (".asr.wav", ".asr_soft.wav", ".diar.wav", ".diar_soft.wav")
+            ):
                 continue
             try:
                 path.unlink()
@@ -347,11 +392,27 @@ class TranscriptionPipeline:
     def _run_asr(self, ctx: PipelineContext) -> dict:
         source = str(ctx.asr_audio_path or ctx.audio_path)
         if self.config.asr_backend == "faster-whisper":
-            model = self.cache.get_asr_model(self.config.asr_model, self.config.device, self.config.compute_type, "faster-whisper")
+            model = self.cache.get_asr_model(
+                self.config.asr_model,
+                self.config.device,
+                self.config.compute_type,
+                "faster-whisper",
+                language=self.config.language,
+                beam_size=self.config.asr_beam_size,
+                vad_onset=self.config.vad_onset,
+                chunk_size=self.config.chunk_size,
+                initial_prompt=self.config.initial_prompt,
+                hotwords=self._hotwords_text,
+            )
             segments_iter, info = model.transcribe(
                 source,
                 beam_size=self.config.asr_beam_size,
                 word_timestamps=True,
+                language=self.config.language,
+                vad_filter=True,
+                vad_parameters={"threshold": self.config.vad_onset},
+                initial_prompt=self.config.initial_prompt or None,
+                hotwords=self._hotwords_text or None,
             )
             segments = list(segments_iter)
             all_words = []
@@ -385,7 +446,19 @@ class TranscriptionPipeline:
                 "language": info.language,
             }
 
-        model = self.cache.get_asr_model(self.config.asr_model, self.config.device, self.config.compute_type, "whisperx")
+        require_binary("ffmpeg", extra_roots=[self.project_root])
+        model = self.cache.get_asr_model(
+            self.config.asr_model,
+            self.config.device,
+            self.config.compute_type,
+            "whisperx",
+            language=self.config.language,
+            beam_size=self.config.asr_beam_size,
+            vad_onset=self.config.vad_onset,
+            chunk_size=self.config.chunk_size,
+            initial_prompt=self.config.initial_prompt,
+            hotwords=self._hotwords_text,
+        )
         result = model.transcribe(source, batch_size=self.config.batch_size)
         if not isinstance(result, dict):
             raise RuntimeError("Unexpected ASR result format from whisperx")
@@ -531,23 +604,18 @@ class TranscriptionPipeline:
 
         for seg in result.get("segments", []):
             text = seg.get("text", "")
-            seg["text"], _ = _apply_rules(text, self._glossary_rules)
+            seg["text"], _ = apply_glossary_rules(text, self._glossary_rules)
         for word in result.get("word_segments", []):
             key = "word" if "word" in word else "text" if "text" in word else None
             if key and word.get(key):
-                word[key], _ = _apply_rules(str(word[key]), self._glossary_rules)
+                word[key], _ = apply_glossary_rules(str(word[key]), self._glossary_rules)
         return result
 
     def _preprocess_audio(self, input_path: Path, asr: bool) -> Path:
-        suffix = ".asr.wav" if asr else ".diar.wav"
-        output_path = input_path.parent / f"{input_path.stem}{suffix}"
-        filters = (
-            "highpass=f=90,lowpass=f=7600,afftdn=nf=-20,acompressor=threshold=-22dB:ratio=2:attack=5:release=60"
-            if asr
-            else "highpass=f=120,lowpass=f=7500,afftdn=nf=-25,acompressor=threshold=-28dB:ratio=4:attack=5:release=80"
-        )
+        profile = "asr_soft" if asr else "diar"
+        output_path = preprocess_output_path(input_path, profile)
         command = [
-            "ffmpeg",
+            str(require_binary("ffmpeg", extra_roots=[self.project_root])),
             "-y",
             "-i",
             str(input_path),
@@ -556,7 +624,7 @@ class TranscriptionPipeline:
             "-ar",
             "16000",
             "-af",
-            filters,
+            preprocess_filter(profile),
             str(output_path),
         ]
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)

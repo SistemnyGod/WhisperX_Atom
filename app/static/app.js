@@ -1,4 +1,4 @@
-﻿let mediaRecorder;
+let mediaRecorder;
 let chunks = [];
 let blob = null;
 let jobId = null;
