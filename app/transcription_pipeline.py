@@ -15,7 +15,8 @@ from whisperx.diarize import DiarizationPipeline as WhisperXDiarizationPipeline
 
 from app.storage import read_job_json, write_job_json
 from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
-from media_binaries import require_binary
+from media_binaries import media_has_audio_stream, require_binary
+from processing_runtime import VIDEO_EXTENSIONS
 from transcription_quality import preprocess_filter, preprocess_output_path
 
 
@@ -264,11 +265,24 @@ class TranscriptionPipeline:
                 return
             try:
                 await self._set_status(ctx.job_id, "running", "audio")
+                is_video = ctx.audio_path.suffix.lower() in VIDEO_EXTENSIONS
+                if is_video:
+                    has_audio = await asyncio.to_thread(
+                        media_has_audio_stream,
+                        ctx.audio_path,
+                        extra_roots=[self.project_root],
+                    )
+                    if not has_audio:
+                        raise RuntimeError(f"В видео нет аудиодорожки: {ctx.audio_path}")
+
                 asr_path = ctx.audio_path
-                if self.config.preprocess_asr:
+                if self.config.preprocess_asr or is_video:
                     asr_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=True)
                 ctx.asr_audio_path = asr_path
-                diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)
+
+                diar_path = None
+                if self.config.enable_diarization:
+                    diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)
                 ctx.diar_audio_path = diar_path
                 await self.asr_queue.put(ctx)
             except Exception as exc:

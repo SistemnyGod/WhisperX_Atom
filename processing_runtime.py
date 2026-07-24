@@ -10,6 +10,11 @@ from typing import Any
 from local_io import atomic_write_json, atomic_write_text
 
 
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".flac"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg", ".3gp"}
+MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+
+
 class RunStage:
     QUEUED = "queued"
     FFMPEG = "ffmpeg"

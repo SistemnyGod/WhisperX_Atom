@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import WhisperXApp
+from app import WhisperXApp, WhisperXService
 from auto_transcribe_watch import AutoTranscribeWatcher, WatchConfig
 from diarization_quality import (
     choose_best_diarization_candidate,
@@ -26,7 +26,9 @@ from live_runtime import (
     concatenate_wav_files,
 )
 from local_io import atomic_write_json, atomic_write_text
+from media_binaries import media_has_audio_stream
 from processing_runtime import (
+    MEDIA_EXTENSIONS,
     PROFILES,
     RunJournal,
     RunStage,
@@ -216,6 +218,111 @@ class NonWebRiskTests(unittest.TestCase):
         self.assertEqual(config.model_name, profile.model)
         self.assertEqual(config.batch_size, profile.batch_size)
         self.assertEqual(config.vad_onset, profile.vad_onset)
+
+    def test_media_extensions_include_common_video_formats(self) -> None:
+        self.assertIn(".mp4", MEDIA_EXTENSIONS)
+        self.assertIn(".mov", MEDIA_EXTENSIONS)
+        self.assertIn(".mkv", MEDIA_EXTENSIONS)
+
+    def test_media_has_audio_stream_reads_ffprobe_audio_stream(self) -> None:
+        with patch("media_binaries.require_binary", return_value=Path("ffprobe.exe")), patch(
+            "media_binaries.subprocess.check_output",
+            return_value=b"audio\n",
+        ):
+            self.assertTrue(media_has_audio_stream("meeting.mp4"))
+
+    def test_media_has_audio_stream_returns_false_without_audio_stream(self) -> None:
+        with patch("media_binaries.require_binary", return_value=Path("ffprobe.exe")), patch(
+            "media_binaries.subprocess.check_output",
+            return_value=b"",
+        ):
+            self.assertFalse(media_has_audio_stream("silent.mp4"))
+
+    def test_gui_validation_accepts_video_files(self) -> None:
+        gui = WhisperXApp.__new__(WhisperXApp)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.media_has_audio_stream", return_value=True):
+            video = Path(tmp) / "meeting.mp4"
+            video.write_bytes(b"not-a-real-video")
+
+            ok, error = gui._validate_audio_file(str(video), "meeting")
+
+        self.assertTrue(ok)
+        self.assertEqual(error, "")
+
+    def test_gui_validation_rejects_video_without_audio_stream(self) -> None:
+        gui = WhisperXApp.__new__(WhisperXApp)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.media_has_audio_stream", return_value=False):
+            video = Path(tmp) / "silent.mp4"
+            video.write_bytes(b"not-a-real-video")
+
+            ok, error = gui._validate_audio_file(str(video), "meeting")
+
+        self.assertFalse(ok)
+        self.assertIn("аудиодорож", error)
+
+    def test_gui_preflight_requires_ffprobe_for_video_even_without_preprocess(self) -> None:
+        service = WhisperXService(log_cb=lambda _: None, progress_cb=lambda _: None)
+        request = {
+            "selected_file": "meeting.mp4",
+            "reference_file": "",
+            "source_file": "",
+            "preprocess": False,
+            "diarize": False,
+            "backend": "faster-whisper",
+            "auto_model": False,
+        }
+
+        with patch("app.require_ffmpeg_tools", return_value=(Path("ffmpeg.exe"), Path("ffprobe.exe"))) as tools, patch(
+            "app.media_has_audio_stream",
+            return_value=True,
+        ) as has_audio:
+            service.ensure_audio_dependencies(request)
+
+        self.assertTrue(tools.call_args.kwargs["require_ffprobe"])
+        has_audio.assert_called_once()
+
+    def test_gui_preflight_rejects_video_without_audio_stream(self) -> None:
+        service = WhisperXService(log_cb=lambda _: None, progress_cb=lambda _: None)
+        request = {
+            "selected_file": "silent.mp4",
+            "reference_file": "",
+            "source_file": "",
+            "preprocess": False,
+            "diarize": False,
+            "backend": "faster-whisper",
+            "auto_model": False,
+        }
+
+        with patch("app.require_ffmpeg_tools", return_value=(Path("ffmpeg.exe"), Path("ffprobe.exe"))), patch(
+            "app.media_has_audio_stream",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "аудиодорож"):
+                service.ensure_audio_dependencies(request)
+
+    def test_watcher_accepts_video_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            watcher = AutoTranscribeWatcher(Path(tmp))
+            video = watcher.input_dir / "meeting.mp4"
+            ignored = watcher.input_dir / "notes.txt"
+            temp_asr = watcher.input_dir / "meeting.asr_retry.mp4"
+            video.write_bytes(b"")
+            ignored.write_text("skip", encoding="utf-8")
+            temp_asr.write_bytes(b"")
+
+            pending = watcher.iter_pending_files()
+
+        self.assertEqual([path.name for path in pending], ["meeting.mp4"])
+
+    def test_watcher_rejects_video_without_audio_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            watcher = AutoTranscribeWatcher(Path(tmp))
+            video = watcher.input_dir / "silent.mp4"
+            video.write_bytes(b"")
+
+            with patch("auto_transcribe_watch.media_has_audio_stream", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "аудиодорож"):
+                    watcher.ensure_supported_media(video)
 
     def test_watcher_skips_asr_and_diar_temp_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -655,6 +762,19 @@ class NonWebRiskTests(unittest.TestCase):
         self.assertIn("self.root.after(", worker_body)
         self.assertIn("self._show_completed_result", worker_body)
 
+    def test_gui_completion_notification_is_shown_from_result_handler(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+        result_handler = source.split("    def _show_completed_result(", 1)[1].split(
+            "    def open_last_output", 1
+        )[0]
+        worker_body = source.split("    def _transcribe_worker(self, cancel: threading.Event):", 1)[1].split(
+            "    def export_txt(self):", 1
+        )[0]
+
+        self.assertIn("self._show_completion_notification(output_paths)", result_handler)
+        self.assertNotIn("_show_completion_notification", worker_body)
+        self.assertIn("messagebox.showinfo", source.split("    def _show_completion_notification", 1)[1])
+
     def test_retry_source_from_history_item_uses_existing_failed_or_processed_audio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -805,6 +925,18 @@ class NonWebRiskTests(unittest.TestCase):
         self.assertEqual(data["diarization_score"], 91.5)
         self.assertEqual(data["diarization_score_scope"], "pre_reference_filter")
         self.assertEqual(data["diarization_reasons"], ["speaker_count_in_expected_range"])
+
+    def test_web_pipeline_skips_diar_audio_when_diarization_disabled(self) -> None:
+        source = Path("app/transcription_pipeline.py").read_text(encoding="utf-8")
+        worker_audio = source.split("    async def worker_audio(self) -> None:", 1)[1].split(
+            "    async def worker_asr(self) -> None:", 1
+        )[0]
+
+        self.assertIn("media_has_audio_stream", worker_audio)
+        self.assertIn("if self.config.preprocess_asr or is_video:", worker_audio)
+        guard_index = worker_audio.index("if self.config.enable_diarization:")
+        diar_index = worker_audio.index("diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)")
+        self.assertLess(guard_index, diar_index)
 
     def test_gui_settings_source_does_not_persist_token_fields(self) -> None:
         source = Path("app.py").read_text(encoding="utf-8")

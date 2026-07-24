@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -114,3 +115,24 @@ def require_ffmpeg_tools(
     ffmpeg_path = require_binary("ffmpeg", extra_roots=extra_roots)
     ffprobe_path = require_binary("ffprobe", extra_roots=extra_roots) if require_ffprobe else None
     return ffmpeg_path, ffprobe_path
+
+
+def media_has_audio_stream(path: str | Path, extra_roots: list[Path] | None = None) -> bool:
+    ffprobe_path = require_binary("ffprobe", extra_roots=extra_roots)
+    command = [
+        str(ffprobe_path),
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        output = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=30)
+    except Exception:
+        return False
+    return any(line.strip().lower() == "audio" for line in output.decode("utf-8", errors="ignore").splitlines())

@@ -41,9 +41,12 @@ from live_runtime import (
     concatenate_wav_files,
 )
 from local_io import atomic_write_json, atomic_write_text
-from media_binaries import MissingBinaryError, require_binary, require_ffmpeg_tools
+from media_binaries import MissingBinaryError, media_has_audio_stream, require_binary, require_ffmpeg_tools
 from processing_runtime import (
+    AUDIO_EXTENSIONS,
+    MEDIA_EXTENSIONS,
     PROFILE_LABELS,
+    VIDEO_EXTENSIONS,
     RunJournal,
     RunStage,
     RunStatus,
@@ -72,7 +75,12 @@ from runtime_secrets import load_hf_token_from_env
 
 SETTINGS_PATH = Path("whisperx_gui_settings.json")
 RESULTS_DIR = Path("whisperx_results")
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".flac"}
+MEDIA_FILETYPES = [
+    ("Media", " ".join(f"*{suffix}" for suffix in sorted(MEDIA_EXTENSIONS))),
+    ("Audio", " ".join(f"*{suffix}" for suffix in sorted(AUDIO_EXTENSIONS))),
+    ("Video", " ".join(f"*{suffix}" for suffix in sorted(VIDEO_EXTENSIONS))),
+    ("All", "*.*"),
+]
 
 
 warnings.filterwarnings(
@@ -532,25 +540,44 @@ class WhisperXService:
         except Exception:
             return 0.0
 
+    def _is_video_input(self, path: Any) -> bool:
+        value = str(path or "").strip()
+        return bool(value) and Path(value).suffix.lower() in VIDEO_EXTENSIONS
+
+    def _iter_video_inputs(self, request: dict[str, Any]):
+        for key in ("selected_file", "reference_file", "source_file"):
+            value = str(request.get(key) or "").strip()
+            if value and self._is_video_input(value):
+                yield Path(value)
+
+    def _ensure_video_audio_streams(self, request: dict[str, Any]) -> None:
+        for video_path in self._iter_video_inputs(request):
+            if not media_has_audio_stream(video_path, extra_roots=[self.project_root]):
+                raise RuntimeError(f"В видео нет аудиодорожки: {video_path}")
+
     def ensure_audio_dependencies(self, request: dict[str, Any]):
+        uses_video = any(self._iter_video_inputs(request))
         needs_ffmpeg = any(
             [
                 request.get("preprocess"),
                 request.get("diarize"),
                 request.get("backend") == "whisperx",
                 bool(request.get("reference_file")),
+                uses_video,
             ]
         )
         if not needs_ffmpeg and not request.get("auto_model"):
             return
 
         ffmpeg_path, ffprobe_path = require_ffmpeg_tools(
-            require_ffprobe=bool(request.get("auto_model")),
+            require_ffprobe=bool(request.get("auto_model")) or uses_video,
             extra_roots=[self.project_root],
         )
         self.log(f"FFmpeg: {ffmpeg_path}")
         if ffprobe_path is not None:
             self.log(f"FFprobe: {ffprobe_path}")
+        if uses_video:
+            self._ensure_video_audio_streams(request)
 
     def pick_model_by_audio_complexity(self, path: str, device: str) -> str:
         duration_sec = self._get_audio_duration_sec(path)
@@ -2305,6 +2332,7 @@ class WhisperXApp:
         self.result.delete("1.0", "end")
         self.result.insert("end", f"{text}\n\n{summary}")
         self.refresh_history()
+        self._show_completion_notification(output_paths)
 
     def open_last_output(self, kind: str):
         target = self.last_output_path if kind == "json" else self.last_txt_path
@@ -2667,7 +2695,7 @@ class WhisperXApp:
         self.refresh_history()
 
     def _history_retry_source(self, item: dict[str, Any]) -> Path | None:
-        return retry_source_from_history_item(item, AUDIO_EXTENSIONS)
+        return retry_source_from_history_item(item, MEDIA_EXTENSIONS)
 
     def retry_history_selection(self):
         if self.tm.busy():
@@ -2726,17 +2754,38 @@ class WhisperXApp:
         self.log(f"ERROR: {message}")
         self.root.after(0, lambda: messagebox.showerror(title, message))
 
+    def _show_completion_notification(self, output_paths: dict[str, str]):
+        txt_path = output_paths.get("txt")
+        json_path = output_paths.get("json")
+        details = txt_path or json_path or "результат сохранен"
+        self.log(f"Transcription completed: {details}")
+        try:
+            self.root.bell()
+        except Exception:
+            pass
+        messagebox.showinfo("Транскрибация завершена", f"Результат сохранен:\n{details}")
+
     def _validate_audio_file(self, path: str | None, label: str) -> tuple[bool, str]:
         if not path:
             return False, f"Не выбран файл: {label}"
         p = Path(path)
         if not p.exists() or not p.is_file():
             return False, f"Файл не найден: {path}"
-        if p.suffix.lower() not in AUDIO_EXTENSIONS:
+        suffix = p.suffix.lower()
+        if suffix not in MEDIA_EXTENSIONS:
             return False, (
-                f"Неподдерживаемый формат для '{label}': {p.suffix or '[без расширения]'}.\n"
-                f"Поддерживаются: {', '.join(sorted(AUDIO_EXTENSIONS))}"
+                f"Неподдерживаемый формат для '{label}': {p.suffix or '[без расширения]'}\n"
+                f"Поддерживаются: {', '.join(sorted(MEDIA_EXTENSIONS))}"
             )
+        if suffix in VIDEO_EXTENSIONS:
+            service = getattr(self, "service", None)
+            extra_root = getattr(service, "project_root", Path.cwd())
+            try:
+                has_audio = media_has_audio_stream(p, extra_roots=[extra_root])
+            except MissingBinaryError as exc:
+                return False, str(exc)
+            if not has_audio:
+                return False, f"В видео нет аудиодорожки: {path}"
         return True, ""
 
     def _cfg(self):
@@ -2807,7 +2856,7 @@ class WhisperXApp:
         }
 
     def select_file(self):
-        fp = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac"), ("All", "*.*")])
+        fp = filedialog.askopenfilename(filetypes=MEDIA_FILETYPES)
         if fp:
             ok, err = self._validate_audio_file(fp, "файл совещания")
             if not ok:
@@ -2817,7 +2866,7 @@ class WhisperXApp:
             self.file_label.configure(text=Path(fp).name)
 
     def select_reference_file(self):
-        fp = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac"), ("All", "*.*")])
+        fp = filedialog.askopenfilename(filetypes=MEDIA_FILETYPES)
         if fp:
             ok, err = self._validate_audio_file(fp, "файл представления")
             if not ok:

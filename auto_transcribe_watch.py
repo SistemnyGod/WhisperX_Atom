@@ -23,8 +23,10 @@ from diarization_quality import (
 )
 from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
 from local_io import atomic_write_json, atomic_write_text
-from media_binaries import require_binary
+from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import (
+    MEDIA_EXTENSIONS,
+    VIDEO_EXTENSIONS,
     RunJournal,
     RunStage,
     RunStatus,
@@ -44,7 +46,6 @@ from transcription_quality import (
 )
 
 
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".flac"}
 INPUT_DIR_NAME = "ЗДЕСЬ СКИДЫВАЕМ ФАЙЛ ДЛЯ ТРАНСКРИБАЦИИ"
 OUTPUT_DIR_NAME = "ЗДЕСЬ ПОЛУЧАЕМ РЕЗУЛЬТАТ ТРАНСКРИБАЦИИ"
 
@@ -168,6 +169,10 @@ class AutoTranscribeWatcher:
         if self.ffmpeg_path is None:
             self.ffmpeg_path = require_binary("ffmpeg", extra_roots=[self.root_dir])
         return self.ffmpeg_path
+
+    def ensure_supported_media(self, path: Path) -> None:
+        if path.suffix.lower() in VIDEO_EXTENSIONS and not media_has_audio_stream(path, extra_roots=[self.root_dir]):
+            raise RuntimeError(f"В видео нет аудиодорожки: {path}")
 
     def _preprocess_with_profile(self, input_path: Path, profile: str, log_message: str) -> Path:
         output_path = preprocess_output_path(input_path, profile)
@@ -990,6 +995,7 @@ class AutoTranscribeWatcher:
         try:
             current_stage = RunStage.FFMPEG
             journal.update(stage=current_stage, status=RunStatus.RUNNING)
+            self.ensure_supported_media(audio_path)
             audio_duration = self.get_audio_duration_sec(audio_path)
             journal.update(audio_duration=audio_duration)
             if audio_duration > 0:
@@ -1153,7 +1159,7 @@ class AutoTranscribeWatcher:
         for path in self.input_dir.iterdir():
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in AUDIO_EXTENSIONS:
+            if path.suffix.lower() not in MEDIA_EXTENSIONS:
                 continue
             lower_name = path.name.lower()
             lower_stem = path.stem.lower()
@@ -1169,7 +1175,7 @@ class AutoTranscribeWatcher:
         self.log(f"FFmpeg: {ffmpeg_path}")
         self.log(f"📂 Папка входа: {self.input_dir}")
         self.log(f"📁 Папка результата: {self.output_dir}")
-        self.log("👀 Ожидание новых аудиофайлов...")
+        self.log("👀 Ожидание новых аудио- и видеофайлов...")
         try:
             while True:
                 pending_files = self.iter_pending_files()
