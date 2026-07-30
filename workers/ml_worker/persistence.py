@@ -12,12 +12,30 @@ class JobRepository:
     def __init__(self) -> None:
         self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
 
-    def claim_message(self, message_id: str | None) -> bool:
+    def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
         if not message_id:
             return True
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute("INSERT INTO inbox_messages(message_id) VALUES(%s) ON CONFLICT DO NOTHING RETURNING message_id", (message_id,)).fetchone()
+            row = connection.execute(
+                """
+                INSERT INTO inbox_messages(message_id, job_id, lease_expires_at, worker_id)
+                VALUES(%s, %s, now() + interval '30 minutes', %s)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    job_id=excluded.job_id,
+                    lease_expires_at=excluded.lease_expires_at,
+                    worker_id=excluded.worker_id
+                WHERE inbox_messages.lease_expires_at IS NULL OR inbox_messages.lease_expires_at < now()
+                RETURNING message_id
+                """,
+                (message_id, job_id, socket.gethostname()),
+            ).fetchone()
             return row is not None
+
+    def job_state(self, job_id: str | None) -> tuple[str, str] | None:
+        if not job_id:
+            return None
+        with psycopg.connect(self.conninfo) as connection:
+            return connection.execute("SELECT status, stage FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
     def release_message(self, message_id: str | None) -> None:
         if not message_id:

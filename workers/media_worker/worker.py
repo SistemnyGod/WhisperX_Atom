@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from .media_worker import prepare_media
-from .persistence import claim_message, release_message, update_asset, update_job
+from .persistence import claim_message, job_state, release_message, update_asset, update_job
 
 
 async def run() -> None:
@@ -26,10 +26,19 @@ async def run() -> None:
     while True:
         for message in await subscription.fetch(1, timeout=30):
             payload = json.loads(message.data)
-            if not claim_message(str(payload.get("message_id", ""))):
+            job_id = payload["job_id"]
+            message_id = str(payload.get("message_id", ""))
+            if not claim_message(message_id, job_id):
+                state = job_state(job_id)
+                if state is None or state[0] in ("READY", "FAILED") or state[1] == "READY_FOR_ASR":
+                    await message.ack()
+                else:
+                    await message.nak()
+                continue
+            state = job_state(job_id)
+            if state is not None and state[1] in ("READY_FOR_ASR", "TRANSCRIBING", "ALIGNING", "DIARIZING", "QUALITY_CHECK", "PERSISTING", "READY"):
                 await message.ack()
                 continue
-            job_id = payload["job_id"]
             try:
                 update_job(job_id, "RUNNING", "VALIDATING", 5)
                 source = Path(payload["storage_key"])
@@ -50,7 +59,7 @@ async def run() -> None:
                 update_job(job_id, "QUEUED", "READY_FOR_ASR", 25)
                 await message.ack()
             except Exception as exc:
-                release_message(str(payload.get("message_id", "")))
+                release_message(message_id)
                 update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), "MEDIA_PROCESSING_FAILED")
                 await message.nak()
 

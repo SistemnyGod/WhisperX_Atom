@@ -19,9 +19,15 @@ class GpuWorker:
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         async with self._semaphore:
-            if not self._repository.claim_message(str(message.get("message_id", ""))):
-                return None
             job_id = str(message["job_id"])
+            if not self._repository.claim_message(str(message.get("message_id", "")), job_id):
+                state = self._repository.job_state(job_id)
+                if state is not None and state[0] not in ("READY", "FAILED"):
+                    raise RuntimeError("message_claimed_by_active_worker")
+                return None
+            state = self._repository.job_state(job_id)
+            if state is not None and state[0] == "READY":
+                return None
             self._repository.update_job(job_id, "RUNNING", "TRANSCRIBING", 20)
             request = ProcessingRequest(job_id=job_id, media_path=Path(message["storage_key"]), language=message.get("language", "ru"), profile=message.get("profile", "meeting"), min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
 
