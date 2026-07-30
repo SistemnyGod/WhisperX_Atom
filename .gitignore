@@ -16,6 +16,8 @@ venv/
 Thumbs.db
 
 # Build / packaging
+bin/
+obj/
 build/
 dist/
 *.spec.bak
