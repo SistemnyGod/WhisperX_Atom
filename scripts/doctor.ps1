@@ -1,6 +1,19 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([switch]$SkipRegistry)
 $ErrorActionPreference = "Stop"
+$repo = Split-Path -Parent $PSScriptRoot
+$envFile = Join-Path $repo ".env"
+if (Test-Path -LiteralPath $envFile) {
+  foreach ($line in Get-Content -LiteralPath $envFile) {
+    if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
+      $key = $Matches[1]
+      $value = $Matches[2].Trim().Trim('"')
+      if ([string]::IsNullOrEmpty((Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value)) {
+        Set-Item -Path "Env:$key" -Value $value
+      }
+    }
+  }
+}
 $failures = @()
 function Check($name, [scriptblock]$action) { try { & $action; Write-Host "[OK] $name" -ForegroundColor Green } catch { $script:failures += $name; Write-Host "[FAIL] $name`: $($_.Exception.Message)" -ForegroundColor Red } }
 Check "Docker Engine" { docker info | Out-Null }
