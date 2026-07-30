@@ -36,6 +36,23 @@ class HotFolderImportTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertTrue(list(archive.rglob("daily.flac")))
 
+    def test_part_file_waits_for_atomic_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            partial = inbox / "meeting.wav.part"
+            partial.write_bytes(b"partial")
+            importer = HotFolderImporter()
+            importer.inbox = inbox
+            importer.staging = root / "staging"
+            importer.archive = root / "archive"
+            importer.rejected = root / "rejected"
+            importer.scan_once()
+            importer.scan_once()
+            self.assertTrue(partial.exists())
+            self.assertFalse((root / "rejected").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

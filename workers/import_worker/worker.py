@@ -92,7 +92,7 @@ class HotFolderImporter:
             previous = self._stable.get(key)
             count = previous[2] + 1 if previous and previous[:2] == (stat.st_size, stat.st_mtime_ns) else 1
             self._stable[key] = (stat.st_size, stat.st_mtime_ns, count)
-            if count < 2:
+            if path.name.endswith(".part") or count < 2:
                 continue
             self._stable.pop(key, None)
             try:
