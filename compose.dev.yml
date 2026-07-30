@@ -185,7 +185,7 @@ services:
 
   gateway:
     profiles: ["core", "gpu"]
-    image: caddy:2-alpine
+    image: caddy:2.8-alpine
     restart: unless-stopped
     ports:
       - "8000:80"
