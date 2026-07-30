@@ -154,7 +154,15 @@ app.MapPost("/api/internal/tusd/hooks", async (JsonElement payload, HttpRequest 
         return Results.BadRequest(new { error = "unsupported_audio_format" });
     if (size <= 0 || size > 8L * 1024 * 1024 * 1024)
         return Results.BadRequest(new { error = "media_size_limit" });
-    var job = await db.CompleteUploadAsync(new UploadCompleteRequest(reservationId, "/data/uploads/" + uploadId, "", size, 0));
+    var storageKey = "/data/uploads/" + uploadId;
+    var uploadedPath = StorageHelpers.StoragePath(storageKey);
+    if (!File.Exists(uploadedPath))
+        return Results.Conflict(new { error = "upload_file_not_ready" });
+    var actualSize = new FileInfo(uploadedPath).Length;
+    if (size > 0 && actualSize != size)
+        return Results.BadRequest(new { error = "upload_size_mismatch" });
+    var sha256 = await StorageHelpers.ComputeSha256Async(uploadedPath);
+    var job = await db.CompleteUploadAsync(new UploadCompleteRequest(reservationId, storageKey, sha256, actualSize, 0));
     return job is null ? Results.NotFound(new { error = "upload_reservation_not_found" }) : Results.Accepted("/api/jobs/" + job.Id, job);
 });
 
