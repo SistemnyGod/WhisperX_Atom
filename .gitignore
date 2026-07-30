@@ -29,8 +29,8 @@ models/
 pretrained_models/
 
 # Local watch folders with large audio
-ЗДЕСЬ ПОЛУЧАЕМ РЕЗУЛЬТАТ ТРАНСКРИБАЦИИ/
-ЗДЕСЬ СКИДЫВАЕМ ФАЙЛ ДЛЯ ТРАНСКРИБАЦИИ/
+Р—Р”Р•РЎР¬ РџРћР›РЈР§РђР•Рњ Р Р•Р—РЈР›Р¬РўРђРў РўР РђРќРЎРљР РР‘РђР¦РР/
+Р—Р”Р•РЎР¬ РЎРљРР”Р«Р’РђР•Рњ Р¤РђР™Р› Р”Р›РЇ РўР РђРќРЎРљР РР‘РђР¦РР/
 
 # Local state
 whisperx_gui_settings.json
@@ -38,3 +38,22 @@ whisperx_gui_settings.json
 # Decompiled/temp
 app.cpython-310.py
 app.cpython-39.py_failed
+
+# Server-first local configuration and generated state
+.env
+.env.*
+!.env.example
+node_modules/
+npm-debug.log*
+*.db
+*.sqlite
+*.sqlite3
+/storage/
+/uploads/
+/archive/
+/staging/
+/derived/
+/logs/
+tests/regression-audio/*
+!tests/regression-audio/README.md
+!tests/regression-audio/manifest.json

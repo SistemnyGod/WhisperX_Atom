@@ -1,0 +1,206 @@
+name: whisperx-atom
+
+x-media-volumes: &media-volumes
+  - ${WHISPERX_DATA_HOST:-D:/WhisperXAtom/Data}:/data
+  - ${WHISPERX_INBOX_HOST:-D:/WhisperXAtom/Inbox}:/data/inbox
+  - ${WHISPERX_ARCHIVE_HOST:-D:/WhisperXAtom/Archive}:/data/archive
+
+services:
+  postgres:
+    profiles: ["core", "gpu"]
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whisperx_atom}
+      POSTGRES_USER: ${POSTGRES_USER:-whisperx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whisperx} -d ${POSTGRES_DB:-whisperx_atom}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    profiles: ["core", "gpu"]
+    image: nats:2.11-alpine
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  tusd:
+    profiles: ["core", "gpu"]
+    image: tusproject/tusd:v2.6
+    restart: unless-stopped
+    command: ["-host", "0.0.0.0", "-port", "1080", "-upload-dir", "/data/uploads", "-hooks-http", "http://api:8080/api/internal/tusd/hooks?secret=${TUS_HOOK_SECRET:-local-dev-secret}"]
+    environment:
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
+    volumes: *media-volumes
+    depends_on:
+      api:
+        condition: service_started
+
+  api:
+    profiles: ["core", "gpu"]
+    build:
+      context: ./apps/server/WhisperX.Atom.Api
+    restart: unless-stopped
+    environment:
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD:-change-me-postgres}
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD:-change-me-postgres}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN:-local-import-secret}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes: *media-volumes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  outbox-relay:
+    profiles: ["core", "gpu"]
+    build:
+      context: .
+      dockerfile: workers/outbox_relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import workers.outbox_relay.worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  import-worker:
+    profiles: ["core", "gpu"]
+    build:
+      context: .
+      dockerfile: workers/import_worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:8080
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN:-local-import-secret}
+      INBOX_ROOT: /data/inbox
+      STAGING_ROOT: /data/staging
+      ARCHIVE_ROOT: /data/archive
+      REJECTED_ROOT: /data/rejected
+      IMPORT_INTERVAL_SECONDS: ${IMPORT_INTERVAL_SECONDS:-5}
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes: *media-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import workers.import_worker.worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  media-worker:
+    profiles: ["core", "gpu"]
+    build:
+      context: .
+      dockerfile: workers/media_worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      MEDIA_ROOT: /data
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes: *media-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import workers.media_worker.worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  gpu-worker:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: workers/ml_worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      HF_TOKEN: ${HF_TOKEN:-}
+      WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
+      DEVICE: cuda
+      GPU_CONCURRENCY: "1"
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ${WHISPERX_DATA_HOST:-D:/WhisperXAtom/Data}:/data
+      - ${WHISPERX_INBOX_HOST:-D:/WhisperXAtom/Inbox}:/data/inbox
+      - ${WHISPERX_ARCHIVE_HOST:-D:/WhisperXAtom/Archive}:/data/archive
+      - model_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import torch; assert torch.cuda.is_available()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  web:
+    profiles: ["core", "gpu"]
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  gateway:
+    profiles: ["core", "gpu"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+      tusd:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  nats_data:
+  model_cache:
+

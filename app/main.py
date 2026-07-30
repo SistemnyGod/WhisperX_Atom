@@ -45,7 +45,10 @@ async def create_job(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
 
-    job_id, audio_path = await save_upload(file)
+    try:
+        job_id, audio_path = await save_upload(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     write_job_json(
         job_id,

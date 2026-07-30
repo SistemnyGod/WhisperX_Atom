@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "Jfoge6Kg6n4=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\AI_server\\Desktop\\Atom agent\\apps\\server\\WhisperX.Atom.Api\\WhisperX.Atom.Api.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\AI_server\\.nuget\\packages\\npgsql\\8.0.6\\npgsql.8.0.6.nupkg.sha512"
+  ],
+  "logs": []
+}

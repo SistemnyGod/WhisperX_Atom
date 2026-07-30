@@ -1,0 +1,4 @@
+﻿# Supported runtime constraints for the server-first GPU image.
+# Torch is supplied by the pytorch/pytorch:2.8.0-cuda12.8 base image.
+whisperx==3.7.5
+pyannote.audio==3.3.2

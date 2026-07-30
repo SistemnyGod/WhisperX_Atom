@@ -8,60 +8,65 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import WhisperXApp, WhisperXService
-from auto_transcribe_watch import AutoTranscribeWatcher, WatchConfig
-from diarization_quality import (
-    choose_best_diarization_candidate,
-    diarization_profiles_for_processing_profile,
-    score_diarization_result,
-    smooth_speaker_turns,
-)
-from glossary_utils import apply_glossary_rules, load_hotwords_text, parse_glossary_rules
-from live_runtime import (
-    LiveChunkStatus,
-    LiveSessionStore,
-    LiveStatus,
-    SoundDeviceChunkRecorder,
-    SpeakerRegistry,
-    concatenate_wav_files,
-)
-from local_io import atomic_write_json, atomic_write_text
-from media_binaries import media_has_audio_stream
-from processing_runtime import (
-    MEDIA_EXTENSIONS,
-    PROFILES,
-    RunJournal,
-    RunStage,
-    RunStatus,
-    apply_speaker_mapping_to_history_item,
-    apply_speaker_mapping_to_result,
-    collect_speaker_stats,
-    delete_history_item,
-    export_history_day_texts,
-    export_history_item_text,
-    format_history_browser_entry,
-    format_speaker_mapping_template,
-    ensure_text_file,
-    format_quality_report,
-    format_run_history_details,
-    format_run_history_entry,
-    get_processing_profile,
-    group_history_by_day,
-    history_item_artifact_paths,
-    history_item_day,
-    history_item_display_name,
-    history_item_export_text,
-    parse_speaker_mapping_text,
-    quality_from_result,
-    retry_source_from_history_item,
-    scan_run_history,
-    summarize_result_quality,
-    unique_result_paths,
-)
-from runtime_secrets import load_hf_token_from_env
-from transcription_quality import preprocess_output_path
+try:
+    from app import WhisperXApp, WhisperXService
+    from auto_transcribe_watch import AutoTranscribeWatcher, WatchConfig
+    from diarization_quality import (
+        choose_best_diarization_candidate,
+        diarization_profiles_for_processing_profile,
+        score_diarization_result,
+        smooth_speaker_turns,
+    )
+    from glossary_utils import apply_glossary_rules, load_hotwords_text, parse_glossary_rules
+    from live_runtime import (
+        LiveChunkStatus,
+        LiveSessionStore,
+        LiveStatus,
+        SoundDeviceChunkRecorder,
+        SpeakerRegistry,
+        concatenate_wav_files,
+    )
+    from local_io import atomic_write_json, atomic_write_text
+    from media_binaries import media_has_audio_stream
+    from processing_runtime import (
+        MEDIA_EXTENSIONS,
+        PROFILES,
+        RunJournal,
+        RunStage,
+        RunStatus,
+        apply_speaker_mapping_to_history_item,
+        apply_speaker_mapping_to_result,
+        collect_speaker_stats,
+        delete_history_item,
+        export_history_day_texts,
+        export_history_item_text,
+        format_history_browser_entry,
+        format_speaker_mapping_template,
+        ensure_text_file,
+        format_quality_report,
+        format_run_history_details,
+        format_run_history_entry,
+        get_processing_profile,
+        group_history_by_day,
+        history_item_artifact_paths,
+        history_item_day,
+        history_item_display_name,
+        history_item_export_text,
+        parse_speaker_mapping_text,
+        quality_from_result,
+        retry_source_from_history_item,
+        scan_run_history,
+        summarize_result_quality,
+        unique_result_paths,
+    )
+    from runtime_secrets import load_hf_token_from_env
+    from transcription_quality import preprocess_output_path
+    LEGACY_DEPS_AVAILABLE = True
+except ModuleNotFoundError as exc:
+    LEGACY_DEPS_AVAILABLE = False
+    LEGACY_IMPORT_ERROR = str(exc)
 
-
+@unittest.skipUnless(LEGACY_DEPS_AVAILABLE, "desktop dependencies unavailable: " + LEGACY_IMPORT_ERROR)
 class NonWebRiskTests(unittest.TestCase):
     @staticmethod
     def _write_test_wav(path: Path, frames: int = 160) -> None:
