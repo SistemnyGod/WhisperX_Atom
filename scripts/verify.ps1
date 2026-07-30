@@ -21,6 +21,7 @@ Set-Location $repo
 Invoke-Check "API build" { dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --nologo }
 Invoke-Check "Python compile" { py -3.12 -m compileall -q whisperx_atom workers }
 Invoke-Check "Python tests" { py -3.12 -m unittest discover -s tests -v 2>&1 }
+Invoke-Check "PowerShell E2E syntax" { [scriptblock]::Create((Get-Content scripts/e2e-core.ps1 -Raw)) | Out-Null }
 if (-not $SkipWeb) {
   Push-Location apps/web
   try {
