@@ -51,7 +51,7 @@ def probe_audio(path: Path) -> dict:
 
 
 def _run_ffmpeg(input_path: Path, output_path: Path, args: list[str]) -> None:
-    temporary = output_path.with_suffix(output_path.suffix + ".part")
+    temporary = output_path.with_name(output_path.stem + ".part" + output_path.suffix)
     temporary.unlink(missing_ok=True)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), *args, str(temporary)]
     subprocess.run(command, check=True, timeout=900)
