@@ -35,6 +35,21 @@ Vue + Uppy/Tus
 
 Медиа-байты не передаются через NATS. Worker-контракты содержат только идентификаторы и storage keys.
 
+## Core E2E smoke
+
+После запуска core-профиля можно выполнить один из сценариев: логин и создание
+совещания, tus-загрузку с автоматическим hook или hot-folder импорт. Сам файл
+передаётся параметром, поэтому тест не хранит медиа в Git:
+
+```powershell
+.\scripts\e2e-core.ps1 -AudioPath .\sample\meeting.flac
+.\scripts\e2e-core.ps1 -InboxPath .\sample\meeting.flac
+```
+
+Скрипт ожидает `READY`/`FAILED`, получает transcript и завершает работу с
+ненулевым кодом при ошибке. Для локального HTTP dev-профиля используется
+`COOKIE_SECURE=false`; в HTTPS deployment это значение должно быть `true`.
+
 ## Проверки
 
 ```powershell
