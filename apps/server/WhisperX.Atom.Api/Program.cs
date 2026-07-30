@@ -295,6 +295,13 @@ public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IRead
 
 public static class StorageHelpers
 {
+    public static async Task<string> ComputeSha256Async(string path)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
     public static string StoragePath(string storageKey)
     {
         var normalized = storageKey.Replace("\\", "/");
