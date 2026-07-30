@@ -59,3 +59,6 @@ npm-debug.log*
 tests/regression-audio/*
 !tests/regression-audio/README.md
 !tests/regression-audio/manifest.json
+
+# Local secret container
+Токен.docx
