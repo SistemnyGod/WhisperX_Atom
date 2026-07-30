@@ -44,6 +44,15 @@ class ServerFirstContractTests(unittest.TestCase):
             path.write_bytes(b"partial")
             self.assertTrue(path.name.endswith(".part"))
 
+    def test_inbox_leases_and_workers_support_redelivery(self):
+        migration = Path("apps/server/WhisperX.Atom.Api/Migrations/002_inbox_leases.sql").read_text(encoding="utf-8")
+        media_worker = Path("workers/media_worker/worker.py").read_text(encoding="utf-8")
+        gpu_worker = Path("workers/ml_worker/worker.py").read_text(encoding="utf-8")
+        self.assertIn("lease_expires_at", migration)
+        self.assertIn("await message.nak()", media_worker)
+        self.assertIn("await message.nak()", gpu_worker)
+        self.assertIn("READY_FOR_ASR", media_worker)
+
 
 if __name__ == "__main__":
     unittest.main()
