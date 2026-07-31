@@ -307,14 +307,45 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
 {
     if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
     var key = $"/data/recordings/{sessionId:N}/{trackId:N}/{sequence:D8}.flac";
-    var path = StorageHelpers.StoragePath(key); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    await using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan)) await request.Body.CopyToAsync(output);
-    var size = new FileInfo(path).Length;
-    var sha = await StorageHelpers.ComputeSha256Async(path);
-    var start = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
-    var count = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
-    var stored = await store.RegisterChunkAsync(sessionId, trackId, sequence, key, start, count, size, sha);
-    return stored ? Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha }) : Results.Conflict(new { error = "chunk_not_registered" });
+    var path = StorageHelpers.StoragePath(key);
+    var partPath = path + ".part";
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    try
+    {
+        await using (var output = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await request.Body.CopyToAsync(output);
+        var size = new FileInfo(partPath).Length;
+        var sha = await StorageHelpers.ComputeSha256Async(partPath);
+        var expectedSha = request.Headers["X-Chunk-SHA256"].ToString();
+        if (!string.IsNullOrWhiteSpace(expectedSha) && !string.Equals(expectedSha, sha, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_checksum_mismatch" });
+        }
+        if (File.Exists(path))
+        {
+            var existingSha = await StorageHelpers.ComputeSha256Async(path);
+            File.Delete(partPath);
+            return string.Equals(existingSha, sha, StringComparison.OrdinalIgnoreCase)
+                ? Results.Ok(new { sequence, storageKey = key, sizeBytes = new FileInfo(path).Length, sha256 = existingSha, idempotent = true })
+                : Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+        }
+        var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
+        var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
+        var stored = await store.RegisterChunkAsync(sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        if (!stored)
+        {
+            File.Delete(partPath);
+            return Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+        }
+        File.Move(partPath, path, true);
+        return Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha });
+    }
+    catch
+    {
+        if (File.Exists(partPath)) File.Delete(partPath);
+        throw;
+    }
 });
 
 app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/missing-chunks", async (Guid sessionId, Guid trackId, int expectedCount, HttpContext context, UnifiedProductStore store) =>
@@ -744,7 +775,7 @@ public sealed class Database(IConfiguration configuration)
         var meetingId = Guid.NewGuid();
         var title = Path.GetFileNameWithoutExtension(request.OriginalName);
         await using var meeting = new NpgsqlCommand("INSERT INTO meetings(id,title,status) VALUES(@id,@title,'CREATED')", connection, tx);
-        meeting.Parameters.AddWithValue("id", meetingId); meeting.Parameters.AddWithValue("title", string.IsNullOrWhiteSpace(title) ? "Безымянная запись" : title);
+        meeting.Parameters.AddWithValue("id", meetingId); meeting.Parameters.AddWithValue("title", string.IsNullOrWhiteSpace(title) ? "Р‘РµР·С‹РјСЏРЅРЅР°СЏ Р·Р°РїРёСЃСЊ" : title);
         await meeting.ExecuteNonQueryAsync();
         var assetId = Guid.NewGuid();
         await using var asset = new NpgsqlCommand("INSERT INTO media_assets(id,meeting_id,original_name,storage_key,sha256,size_bytes,status,source_type) VALUES(@id,@meeting,@name,@key,@sha,@size,'UPLOADED',@source)", connection, tx);
@@ -888,10 +919,3 @@ public sealed class Database(IConfiguration configuration)
 
 
 }
-
-
-
-
-
-
-

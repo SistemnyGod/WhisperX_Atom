@@ -41,6 +41,45 @@ public sealed class SpoolStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task CreateSessionAsync(string sessionId, Guid? meetingId = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "INSERT OR IGNORE INTO recording_sessions(id,meeting_id,state,started_at) VALUES($id,$meeting,'RECORDING',$started)";
+        command.Parameters.AddWithValue("$id", sessionId);
+        command.Parameters.AddWithValue("$meeting", (object?)meetingId?.ToString() ?? DBNull.Value);
+        command.Parameters.AddWithValue("$started", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task SetSessionStateAsync(string sessionId, string state, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET state=$state, finished_at=CASE WHEN $state IN ('IDLE','FINALIZING','FAILED') THEN COALESCE(finished_at,$finished) ELSE finished_at END WHERE id=$id";
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$finished", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", sessionId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task AddEventAsync(string sessionId, string eventType, long? mediaTimeMs = null, string payloadJson = "{}", CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO recording_events(id,session_id,event_type,media_time_ms,payload_json,created_at) VALUES($id,$session,$type,$media,$payload,$created)";
+        command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$type", eventType);
+        command.Parameters.AddWithValue("$media", (object?)mediaTimeMs ?? DBNull.Value);
+        command.Parameters.AddWithValue("$payload", payloadJson);
+        command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task UpsertChunkAsync(RecordingChunk chunk, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);

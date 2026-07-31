@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Program.cs" />
+    <Compile Remove="Program.cs;RecordingCoordinator.cs;AgentApiClient.cs" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
   </ItemGroup>
 </Project>

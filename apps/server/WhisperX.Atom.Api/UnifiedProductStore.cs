@@ -101,7 +101,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var command = new NpgsqlCommand("""
             INSERT INTO recording_chunks(id,session_id,track_id,sequence,storage_key,start_sample,sample_count,size_bytes,sha256,status,confirmed_at)
             VALUES(@id,@session,@track,@sequence,@key,@start,@count,@size,@sha,'CONFIRMED',now())
-            ON CONFLICT(track_id,sequence) DO UPDATE SET storage_key=excluded.storage_key,start_sample=excluded.start_sample,sample_count=excluded.sample_count,size_bytes=excluded.size_bytes,sha256=excluded.sha256,status='CONFIRMED',confirmed_at=now()
+            ON CONFLICT(track_id,sequence) DO UPDATE SET storage_key=excluded.storage_key,start_sample=excluded.start_sample,sample_count=excluded.sample_count,size_bytes=excluded.size_bytes,sha256=excluded.sha256,status='CONFIRMED',confirmed_at=now() WHERE recording_chunks.sha256=excluded.sha256
             """, connection);
         command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId); command.Parameters.AddWithValue("sequence", sequence); command.Parameters.AddWithValue("key", storageKey); command.Parameters.AddWithValue("start", startSample); command.Parameters.AddWithValue("count", sampleCount); command.Parameters.AddWithValue("size", sizeBytes); command.Parameters.AddWithValue("sha", sha256); return await command.ExecuteNonQueryAsync() > 0;
     }
