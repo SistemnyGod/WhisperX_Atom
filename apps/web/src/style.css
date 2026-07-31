@@ -25,3 +25,5 @@ progress { width: 100%; }
 .error { color: #b42318; }
 @media (max-width: 850px) { .layout { grid-template-columns: 1fr; } .segment { grid-template-columns: 60px 100px 1fr; } }
 
+
+.status { margin-left: 0.5rem; color: #64748b; font-size: 0.75rem; font-weight: 500; }

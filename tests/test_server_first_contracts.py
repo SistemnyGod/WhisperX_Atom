@@ -71,6 +71,35 @@ class ServerFirstContractTests(unittest.TestCase):
         subscription.fetch.assert_awaited_once_with(1, timeout=0.01)
 
 
+    def test_gpu_image_uses_ml_only_dependency_bundle(self):
+        dockerfile = Path("workers/ml_worker/Dockerfile").read_text(encoding="utf-8")
+        requirements = Path("workers/ml_worker/requirements.gpu.txt").read_text(encoding="utf-8")
+        self.assertIn("requirements.gpu.txt", dockerfile)
+        self.assertNotIn("COPY requirements.txt /srv/requirements.txt", dockerfile)
+        self.assertIn("whisperx==3.7.5", requirements)
+        self.assertIn("pyannote.audio==3.3.2", requirements)
+
+    def test_latest_transcript_query_does_not_mix_versions(self):
+        api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
+        self.assertIn("t.version=(SELECT MAX(version)", api)
+
+    def test_gpu_e2e_script_has_separate_terminal_contract(self):
+        script = Path("scripts/e2e-gpu.ps1").read_text(encoding="utf-8")
+        core = Path("scripts/e2e-core.ps1").read_text(encoding="utf-8")
+        self.assertIn("WaitForGpu = $true", script)
+        self.assertIn("WithGpu = $true", script)
+        self.assertIn("READY_FOR_ASR", Path("workers/media_worker/worker.py").read_text(encoding="utf-8"))
+        self.assertIn("$WaitForGpu", core)
+    def test_llm_profile_is_reproducible(self):
+        compose = Path("compose.dev.yml").read_text(encoding="utf-8")
+        download = Path("scripts/llm-download.ps1").read_text(encoding="utf-8")
+        smoke = Path("scripts/llm-smoke.ps1").read_text(encoding="utf-8")
+        self.assertIn("Qwen3-8B-Q5_K_M.gguf", compose)
+        self.assertIn("server-cuda-b9445@sha256:39f4f2c5", compose)
+        self.assertIn("7c41481f57cb95916b40956ab2f0b139b296d974", download)
+        self.assertIn("json_object", smoke)
+        self.assertIn("--reasoning", compose)
+        self.assertIn("response_format", smoke)
 if __name__ == "__main__":
     unittest.main()
 

@@ -1,0 +1,12 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# Torch/torchaudio are supplied by the CUDA base image. Keep these versions
+# constrained so pip does not silently replace the runtime CUDA stack.
+whisperx==3.7.5
+pyannote.audio==3.3.2
+faster-whisper>=1.0.0,<2.0.0
+numpy>=1.26.0,<3.0.0
+scikit-learn>=1.4.0,<2.0.0
+huggingface-hub>=0.19.0,<1.0.0
+nats-py>=2.9,<3
+psycopg[binary]>=3.2,<4

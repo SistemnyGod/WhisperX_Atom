@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onBeforeUnmount } from "vue";
+﻿import { createApp, ref, computed, onMounted, onBeforeUnmount } from "vue";
 import Uppy from "@uppy/core";
 import Tus from "@uppy/tus";
 import "./style.css";
@@ -18,6 +18,7 @@ const app = {
     const selected = ref<Meeting | null>(null);
     const jobs = ref<Job[]>([]);
     const segments = ref<Segment[]>([]);
+    const transcriptStatus = ref("PENDING");
     const media = ref<Media[]>([]);
     const speakers = ref<Speaker[]>([]);
     const title = ref("");
@@ -60,6 +61,7 @@ const app = {
       if (!selected.value) return;
       jobs.value = await api(`/api/meetings/${selected.value.id}/jobs`);
       const transcript = await api(`/api/meetings/${selected.value.id}/transcript`);
+      transcriptStatus.value = transcript.status || "PENDING";
       segments.value = transcript.segments || [];
       media.value = await api(`/api/meetings/${selected.value.id}/media`);
       speakers.value = await api(`/api/meetings/${selected.value.id}/speakers`).catch(() => []);
@@ -138,7 +140,7 @@ const app = {
     onMounted(async () => { try { await api("/api/auth/me"); authenticated.value = true; await loadMeetings(); } catch { /* login */ } });
     onBeforeUnmount(closeEvents);
 
-    return { username, password, authenticated, meetings, selected, jobs, segments, media, speakers, title, description, file, error, selectedTitle, previewUrl, login, logout, createMeeting, selectMeeting, chooseFile, upload, seek, retryJob, renameSpeaker, mergeSpeaker };
+    return { username, password, authenticated, meetings, selected, jobs, segments, transcriptStatus, media, speakers, title, description, file, error, selectedTitle, previewUrl, login, logout, createMeeting, selectMeeting, chooseFile, upload, seek, retryJob, renameSpeaker, mergeSpeaker };
   },
   template: `
     <main class="shell">
@@ -151,9 +153,9 @@ const app = {
             <div class="toolbar"><input type="file" accept=".wav,.flac,.mp3,.m4a,.aac,.ogg,.opus" @change="chooseFile" /><button @click="upload" :disabled="!file">Загрузить и обработать</button></div><p v-if="error" class="error">{{ error }}</p>
             <audio id="meeting-audio" :src="previewUrl" controls></audio>
             <h2>Медиа</h2><div v-for="asset in media" :key="asset.id" class="job"><span>{{ asset.originalName }}</span><small>{{ asset.status }} · {{ asset.sizeBytes }} bytes · {{ asset.durationMs ? Math.round(asset.durationMs / 1000) + " s" : "duration pending" }} · {{ asset.sha256 || "SHA ожидается" }}</small><small>archive: {{ asset.archiveStorageKey ? "ready" : "pending" }} · preview: {{ asset.previewStorageKey ? "ready" : "pending" }} · ASR: {{ asset.asrStorageKey ? "ready" : "pending" }}</small></div>
-            <h2>Обработка</h2><div v-for="job in jobs" :key="job.id" class="job"><span>{{ job.stage }}</span><progress :value="job.progress" max="100"></progress><small>{{ job.status }}<span v-if="job.error"> — {{ job.error }}</span><button v-if="job.status === "FAILED"" class="secondary" @click="retryJob(job)">Повторить</button></small></div>
+            <h2>Обработка</h2><div v-for="job in jobs" :key="job.id" class="job"><span>{{ job.stage }}</span><progress :value="job.progress" max="100"></progress><small>{{ job.status }}<span v-if="job.error"> — {{ job.error }}</span><button v-if="job.status === 'FAILED'" class="secondary" @click="retryJob(job)">Повторить</button></small></div>
             <h2>Спикеры</h2><div v-if="!speakers.length" class="empty">Спикеры появятся после диаризации.</div><div v-for="speaker in speakers" :key="speaker.id" class="speaker"><span>{{ speaker.displayName }}</span><button class="secondary" @click="renameSpeaker(speaker)">Переименовать</button><button class="secondary" @click="mergeSpeaker(speaker)">Объединить</button></div>
-            <h2>Стенограмма</h2><div v-if="!segments.length" class="empty">Сегменты появятся после обработки.</div><button v-for="segment in segments" :key="segment.id" class="segment" @click="seek(segment)"><span class="time">{{ Math.floor(segment.startMs / 60000).toString().padStart(2, "0") }}:{{ Math.floor(segment.startMs / 1000 % 60).toString().padStart(2, "0") }}</span><b>{{ segment.speaker || "Спикер N" }}</b><span>{{ segment.text }}</span></button>
+            <h2>Стенограмма <small class="status">{{ transcriptStatus }}</small></h2><div v-if="!segments.length" class="empty">Сегменты появятся после обработки.</div><button v-for="segment in segments" :key="segment.id" class="segment" @click="seek(segment)"><span class="time">{{ Math.floor(segment.startMs / 60000).toString().padStart(2, "0") }}:{{ Math.floor(segment.startMs / 1000 % 60).toString().padStart(2, "0") }}</span><b>{{ segment.speaker || "Спикер N" }}</b><span>{{ segment.text }}</span></button>
           </template></section>
         </div>
       </template>

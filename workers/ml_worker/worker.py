@@ -42,7 +42,7 @@ class GpuWorker:
                 return payload
             except Exception as exc:
                 self._repository.release_message(str(message.get("message_id", "")))
-                self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), "GPU_PROCESSING_FAILED")
+                self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), error_code_for(exc))
                 raise
 
 

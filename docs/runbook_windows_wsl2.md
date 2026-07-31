@@ -55,3 +55,32 @@ docker compose -f compose.dev.yml logs -f gpu-worker
 ```
 
 Smoke-сценарий использует login cookie, tusd hook или hot-folder importer и завершается с ошибкой, если job не становится `READY`.
+
+## Local LLM
+
+The first tested summary runtime is the official `Qwen/Qwen3-8B-GGUF`
+`Qwen3-8B-Q5_K_M.gguf` at revision
+`7c41481f57cb95916b40956ab2f0b139b296d974`. Its SHA-256 is
+`068BAE163FAA96AD48032DAF4E071A6A28FE67D8DCC95367609C2FF165E52738`.
+The CUDA 12.x server image is pinned to digest
+`sha256:39f4f2c5fd4537f85208f905e70269b5b691fbc6de00fd916c37a60a710b7d52`.
+The model is stored outside
+Docker images under `C:\WhisperXAtom\Models`.
+
+```powershell
+.\scripts\llm-download.ps1
+docker compose -f compose.dev.yml --profile llm up -d llama-server
+.\scripts\llm-smoke.ps1
+```
+
+The development API is bound only to `127.0.0.1:8081`. The server uses a
+32K context, Q8 KV cache, Flash Attention, one slot, and disabled reasoning
+for deterministic meeting summaries.
+
+On the RTX 5060 Ti 16 GB baseline, the loaded 32K service used about 14.8 GB
+VRAM, generated roughly 58-67 tokens/s in short smokes, and completed a cold
+restart plus Russian JSON smoke in about 57 seconds.
+
+The RTX 5060 Ti is shared by speech processing and the LLM. Until the GPU
+scheduler is connected, do not run `gpu-worker` and `llama-server` at the
+same time. Stop the inactive service before starting the other workload.

@@ -7,7 +7,9 @@ param(
   [string]$InboxPath,
   [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }),
   [int]$TimeoutSeconds = 180,
-  [switch]$StartCore
+  [switch]$StartCore,
+  [switch]$WithGpu,
+  [switch]$WaitForGpu
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +44,8 @@ function Wait-Job([string]$MeetingId) {
     if ($jobs.Count -gt 0) {
       $job = $jobs[0]
       Write-Host ("job {0}: {1}/{2} {3}%" -f $job.id, $job.status, $job.stage, $job.progress)
-      if ($job.status -in @("READY", "FAILED")) { return $job }
+      $terminal = if ($WaitForGpu) { @("READY", "FAILED") } else { @("QUEUED", "READY", "FAILED") }
+      if ($job.status -in $terminal) { return $job }
     }
     Start-Sleep -Seconds 2
   } while ((Get-Date) -lt $deadline)
@@ -50,8 +53,11 @@ function Wait-Job([string]$MeetingId) {
 }
 
 if ($StartCore) {
-  docker compose -f compose.dev.yml --profile core up -d
-  if ($LASTEXITCODE -ne 0) { throw "Unable to start core Compose profile" }
+  $composeArgs = @("compose", "-f", "compose.dev.yml", "--profile", "core")
+  if ($WithGpu) { $composeArgs += "--profile"; $composeArgs += "gpu" }
+  $composeArgs += @("up", "-d")
+  & docker @composeArgs
+  if ($LASTEXITCODE -ne 0) { throw "Unable to start Compose profile" }
 }
 
 Wait-Ready
@@ -100,8 +106,9 @@ if ($InboxPath) {
   if ($job.status -eq "FAILED") { throw "hot-folder job failed: $($job.error)" }
 }
 
-if ($meeting) {
+if ($meeting -and $WaitForGpu) {
   $transcript = Invoke-Api GET "/api/meetings/$($meeting.id)/transcript"
   Write-Host ("transcript status: {0}; segments: {1}" -f $transcript.status, @($transcript.segments).Count)
+  if ($transcript.status -ne "READY" -or @($transcript.segments).Count -eq 0) { throw "GPU E2E produced no ready transcript" }
 }
-Write-Host "Core E2E smoke completed."
+Write-Host "E2E smoke completed."

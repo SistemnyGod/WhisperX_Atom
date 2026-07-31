@@ -685,7 +685,7 @@ public sealed class Database(IConfiguration configuration)
         string status = "PENDING";
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT t.id,t.status,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting ORDER BY s.ordinal", connection);
+            "SELECT t.id,t.status,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) ORDER BY s.ordinal", connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())

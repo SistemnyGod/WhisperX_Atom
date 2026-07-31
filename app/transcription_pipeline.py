@@ -201,7 +201,7 @@ class ModelCacheManager:
         if key not in self._diarizer:
             self._diarizer[key] = WhisperXDiarizationPipeline(use_auth_token=hf_token, device=device)
         return self._diarizer[key]
-
+\n    def clear(self) -> None:\n        """Release cached model references at the end of a GPU job."""\n        self._asr.clear()\n        self._align.clear()\n        self._diarizer.clear()\n
 
 class TranscriptionPipeline:
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
