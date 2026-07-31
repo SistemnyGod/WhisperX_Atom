@@ -3,7 +3,7 @@
 ## Первичная настройка
 
 1. Установите Docker Desktop с включённым WSL2 backend и NVIDIA Container Toolkit.
-2. Создайте каталоги `D:\WhisperXAtom\Data`, `D:\WhisperXAtom\Inbox` и `D:\WhisperXAtom\Archive`.
+2. Создайте каталоги `C:\WhisperXAtom\Data`, `C:\WhisperXAtom\Inbox` и `C:\WhisperXAtom\Archive`.
 3. Скопируйте `.env.example` в `.env` и задайте уникальные `POSTGRES_PASSWORD`, `BOOTSTRAP_ADMIN_PASSWORD`, `TUS_HOOK_SECRET`, `IMPORT_WORKER_TOKEN` и действительный `HF_TOKEN`. `.env` не коммитится.
 4. Выполните preflight:
 

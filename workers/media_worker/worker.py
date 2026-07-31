@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from workers.nats_utils import fetch_available
+
 from .media_worker import prepare_media
 from .persistence import claim_message, job_state, release_message, update_asset, update_job
 
@@ -24,7 +26,7 @@ async def run() -> None:
     subscription = await jetstream.pull_subscribe("media.ingest", durable="whisperx-media")
     root = Path(os.getenv("MEDIA_ROOT", "/data"))
     while True:
-        for message in await subscription.fetch(1, timeout=30):
+        for message in await fetch_available(subscription, nats.errors.TimeoutError):
             payload = json.loads(message.data)
             job_id = payload["job_id"]
             message_id = str(payload.get("message_id", ""))

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from workers.nats_utils import fetch_available
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MAX_UPLOAD_BYTES
 from whisperx_atom.contracts import ProcessingRequest, ProcessingResult
 
@@ -37,6 +38,10 @@ class ServerFirstContractTests(unittest.TestCase):
         self.assertIn("/api/internal/imports", api)
         self.assertNotIn("/api/uploads/complete", web)
 
+    def test_internal_import_contract_binds_snake_case_payload(self):
+        api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
+        for name in ("original_name", "source_type", "source_path", "storage_key", "size_bytes", "sha256"):
+            self.assertIn(f'JsonPropertyName("{name}")', api)
     def test_media_paths_are_independent_of_job_json(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "staging" / "job.part"
@@ -52,6 +57,18 @@ class ServerFirstContractTests(unittest.TestCase):
         self.assertIn("await message.nak()", media_worker)
         self.assertIn("await message.nak()", gpu_worker)
         self.assertIn("READY_FOR_ASR", media_worker)
+
+    def test_idle_jetstream_timeout_returns_empty_batch(self):
+        class IdleTimeout(Exception):
+            pass
+
+        subscription = AsyncMock()
+        subscription.fetch.side_effect = IdleTimeout
+
+        batch = asyncio.run(fetch_available(subscription, IdleTimeout, timeout=0.01))
+
+        self.assertEqual(batch, ())
+        subscription.fetch.assert_awaited_once_with(1, timeout=0.01)
 
 
 if __name__ == "__main__":

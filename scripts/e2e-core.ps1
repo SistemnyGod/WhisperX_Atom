@@ -5,7 +5,7 @@ param(
   [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "change-me-now" }),
   [string]$AudioPath,
   [string]$InboxPath,
-  [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "D:\WhisperXAtom\Inbox" }),
+  [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }),
   [int]$TimeoutSeconds = 180,
   [switch]$StartCore
 )

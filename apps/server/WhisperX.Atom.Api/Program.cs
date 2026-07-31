@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -281,7 +282,13 @@ public record LoginRequest(string Username, string Password);
 public record MeetingCreateRequest(string Title, string? Description);
 public record UploadReservationRequest(string FileName, long SizeBytes);
 public record UploadCompleteRequest(Guid UploadId, string StorageKey, string Sha256, long SizeBytes, long DurationMs);
-public record ImportRequest(string OriginalName, string SourceType, string SourcePath, string StorageKey, long SizeBytes, string Sha256);
+public record ImportRequest(
+    [property: JsonPropertyName("original_name")] string OriginalName,
+    [property: JsonPropertyName("source_type")] string SourceType,
+    [property: JsonPropertyName("source_path")] string SourcePath,
+    [property: JsonPropertyName("storage_key")] string StorageKey,
+    [property: JsonPropertyName("size_bytes")] long SizeBytes,
+    [property: JsonPropertyName("sha256")] string Sha256);
 public sealed record MediaAssetRow(Guid Id, Guid MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record SpeakerRow(Guid Id, string StableKey, string DisplayName);
 public record SpeakerRenameRequest(string DisplayName);

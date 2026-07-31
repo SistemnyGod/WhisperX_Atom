@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from workers.nats_utils import fetch_available
 from whisperx_atom.contracts import ProcessingRequest
 from whisperx_atom.processing import ProcessingService
 from .persistence import JobRepository
@@ -60,7 +61,7 @@ async def run() -> None:
         pass
     subscription = await jetstream.pull_subscribe("ml.transcribe", durable="whisperx-gpu")
     while True:
-        for message in await subscription.fetch(1, timeout=30):
+        for message in await fetch_available(subscription, nats.errors.TimeoutError):
             try:
                 await worker.handle(json.loads(message.data))
                 await message.ack()

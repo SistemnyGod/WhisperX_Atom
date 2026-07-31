@@ -30,7 +30,7 @@ if (-not $SkipWeb) {
   } finally { Pop-Location }
 }
 if (-not $SkipDocker) {
-  Invoke-Check "Compose config" { docker compose -f compose.dev.yml config }
+  Invoke-Check "Compose config" { docker compose -f compose.dev.yml --profile core config --quiet }
 }
 if (-not $SkipGpu) {
   Invoke-Check "GPU runtime" { docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi }

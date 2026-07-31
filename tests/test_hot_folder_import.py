@@ -5,10 +5,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workers.import_worker.worker import HotFolderImporter, is_candidate, safe_filename
+from workers.import_worker.worker import HotFolderImporter, atomic_copy, is_candidate, safe_filename
 
 
 class HotFolderImportTests(unittest.TestCase):
+    def test_atomic_copy_preserves_source_and_never_leaves_part_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "inbox" / "sample.flac"
+            target = root / "staging" / "sample.flac"
+            source.parent.mkdir()
+            source.write_bytes(b"audio-data")
+
+            atomic_copy(source, target)
+
+            self.assertEqual(target.read_bytes(), b"audio-data")
+            self.assertTrue(source.exists())
+            self.assertEqual(list(target.parent.glob("*.part")), [])
     def test_safe_filename_rejects_traversal(self) -> None:
         self.assertEqual(safe_filename("../../meeting?.flac"), "meeting_.flac")
         with tempfile.TemporaryDirectory() as directory:

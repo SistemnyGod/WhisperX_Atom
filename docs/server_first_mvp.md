@@ -1,4 +1,4 @@
-﻿# WhisperX Atom server-first MVP
+# WhisperX Atom server-first MVP
 
 ## Запуск
 
@@ -75,7 +75,7 @@ docker compose -f compose.dev.yml config
 
 - tusd завершает загрузку через защищённый `POST /api/internal/tusd/hooks`; браузер не вызывает completion напрямую.
 - `workers/import_worker` сканирует `/data/inbox`, ждёт два стабильных прохода, проверяет аудио через FFprobe, считает SHA-256 и регистрирует один job через `POST /api/internal/imports`.
-- Windows-хост монтирует `D:\WhisperXAtom\Data`, `Inbox` и `Archive` в общий `/data`; оригинал остаётся доступным до успешной подготовки производных.
+- Windows-хост монтирует `C:\WhisperXAtom\Data`, `Inbox` и `Archive` в общий `/data`; оригинал остаётся доступным до успешной подготовки производных.
 - API отдаёт `/api/meetings/{id}/media` и Range-enabled `/api/media/{id}/preview`; Web подписывается на SSE и использует display name спикеров.
 - NATS consumers используют `inbox_messages`, а jobs сохраняют worker/lease/heartbeat/error fields.
 

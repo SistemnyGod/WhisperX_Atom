@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES
@@ -31,6 +32,33 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def atomic_copy(source: Path, target: Path, *, expected_sha256: str | None = None) -> None:
+    """Copy across filesystems without exposing a partial target."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    expected_size = source.stat().st_size
+    if target.exists():
+        if target.stat().st_size == expected_size and (
+            expected_sha256 is None or sha256_file(target) == expected_sha256
+        ):
+            return
+        raise FileExistsError(f"target already exists with different content: {target}")
+
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{time.time_ns()}.part")
+    try:
+        with source.open("rb") as input_file, temporary.open("xb") as output_file:
+            shutil.copyfileobj(input_file, output_file, length=4 * 1024 * 1024)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        if temporary.stat().st_size != expected_size:
+            raise OSError("copied file size mismatch")
+        if expected_sha256 is not None and sha256_file(temporary) != expected_sha256:
+            raise OSError("copied file checksum mismatch")
+        shutil.copystat(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def is_candidate(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in ALLOWED_AUDIO_EXTENSIONS and not path.name.endswith(".part")
 
@@ -44,7 +72,7 @@ def import_payload(path: Path, staging: Path) -> dict[str, object]:
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / safe_filename(path.name)
     if path.resolve() != target.resolve():
-        path.replace(target)
+        atomic_copy(path, target, expected_sha256=digest)
     return {
         "original_name": path.name,
         "source_type": "hot-folder",
@@ -61,8 +89,12 @@ def post_import(api_url: str, token: str, payload: dict[str, object]) -> dict:
         "Content-Type": "application/json",
         "X-Import-Worker-Token": token,
     })
-    with urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:2048]
+        raise RuntimeError(f"import API rejected request ({exc.code}): {detail}") from exc
 
 
 class HotFolderImporter:
@@ -102,6 +134,7 @@ class HotFolderImporter:
                 payload = import_payload(path, self.staging)
                 result = post_import(self.api_url, self.token, payload)
                 self._archive(Path(payload["storage_key"]), str(payload["sha256"]), str(payload["original_name"]))
+                path.unlink(missing_ok=True)
                 LOG.info("registered %s as %s", payload["original_name"], result)
                 processed += 1
             except Exception as exc:  # keep scanning other files
@@ -113,16 +146,15 @@ class HotFolderImporter:
 
     def _archive(self, staged: Path, digest: str, name: str) -> None:
         target = self.archive / digest / safe_filename(name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            shutil.copy2(staged, target)
+        atomic_copy(staged, target, expected_sha256=digest)
 
     def _reject(self, path: Path, reason: str) -> None:
         target = self.rejected / safe_filename(path.name)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             target = target.with_name(target.stem + "-" + str(int(time.time())) + target.suffix)
-        path.replace(target)
+        atomic_copy(path, target)
+        path.unlink(missing_ok=True)
         target.with_suffix(target.suffix + ".reason.txt").write_text(reason, encoding="utf-8")
 
 
