@@ -164,6 +164,10 @@ class LlamaCppClient:
         self._model = model
         self._timeout = timeout_seconds
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def invoke_json(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
         import httpx
 

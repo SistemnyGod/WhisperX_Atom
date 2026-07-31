@@ -6,6 +6,7 @@ using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<Database>();
+builder.Services.AddSingleton<UnifiedProductStore>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyHeader().AllowAnyMethod().AllowCredentials().SetIsOriginAllowed(_ => true)));
 
@@ -13,10 +14,43 @@ var app = builder.Build();
 app.UseCors();
 
 var db = app.Services.GetRequiredService<Database>();
+var unified = app.Services.GetRequiredService<UnifiedProductStore>();
 await db.InitializeAsync();
 
 app.Use(async (context, next) =>
 {
+    if (context.Request.Path.StartsWithSegments("/api/v1/agents/enroll"))
+    {
+        var expectedEnrollment = builder.Configuration["AGENT_ENROLLMENT_SECRET"] ?? "";
+        var suppliedEnrollment = context.Request.Headers["X-Agent-Enrollment-Secret"].ToString();
+        var expectedBytes = Encoding.UTF8.GetBytes(expectedEnrollment);
+        var suppliedBytes = Encoding.UTF8.GetBytes(suppliedEnrollment);
+        if (expectedBytes.Length == 0 || !CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { error = "agent_enrollment_required" });
+            return;
+        }
+        await next();
+        return;
+    }
+
+    if (context.Request.Path.StartsWithSegments("/api/v1/agents") || context.Request.Path.StartsWithSegments("/api/v1/recording-sessions"))
+    {
+        var agentIdText = context.Request.Headers["X-Agent-Id"].ToString();
+        var authorization = context.Request.Headers.Authorization.ToString();
+        var token = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? authorization[7..].Trim() : "";
+        if (!Guid.TryParse(agentIdText, out var agentId) || string.IsNullOrWhiteSpace(token) || await unified.AuthenticateAgentAsync(agentId, token) is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { error = "agent_authentication_required" });
+            return;
+        }
+        context.Items["agent_id"] = agentId;
+        await next();
+        return;
+    }
+
     if (context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
         context.Request.Path.StartsWithSegments("/api/auth/login") ||
@@ -179,6 +213,8 @@ app.MapPost("/api/internal/imports", async (ImportRequest request, HttpRequest h
     return Results.Accepted("/api/jobs/" + job.Id, job);
 });
 
+static bool AgentMatches(HttpContext context, Guid agentId) => context.Items.TryGetValue("agent_id", out var item) && item is Guid authenticated && authenticated == agentId;
+
 static bool SecretMatches(HttpRequest request, string? expected)
 {
     if (string.IsNullOrWhiteSpace(expected)) return false;
@@ -211,6 +247,106 @@ static long? JsonLong(JsonElement value, params string[] path)
     return obj.Value.ValueKind == JsonValueKind.String && long.TryParse(obj.Value.GetString(), out number) ? number : null;
 }
 
+app.MapPost("/api/v1/agents/enroll", async (AgentEnrollRequest request, HttpRequest http, UnifiedProductStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Name)) return Results.BadRequest(new { error = "agent_name_required" });
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var agent = await store.EnrollAgentAsync(request.Name, request.RoomId, token, request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"));
+    return Results.Ok(new { agentId = agent.Id, agent, token });
+});
+
+app.MapPost("/api/v1/agents/{agentId:guid}/heartbeat", async (Guid agentId, AgentHeartbeatRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!AgentMatches(context, agentId)) return Results.Unauthorized();
+    return await store.HeartbeatAsync(agentId, request.Status ?? "ONLINE", request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"))
+        ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.MapGet("/api/v1/agents/{agentId:guid}/commands/events", async (Guid agentId, long? after, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    if (!AgentMatches(context, agentId)) { response.StatusCode = 401; return; }
+    response.Headers.ContentType = "text/event-stream"; response.Headers.CacheControl = "no-cache";
+    var cursor = after ?? 0;
+    for (var i = 0; i < 60 && !cancellationToken.IsCancellationRequested; i++)
+    {
+        var commands = await store.PendingCommandsAsync(agentId, cursor);
+        foreach (var command in commands)
+        {
+            cursor = Math.Max(cursor, command.Cursor);
+            await response.WriteAsync($"id: {command.Cursor}\nevent: command\ndata: {JsonSerializer.Serialize(command)}\n\n", cancellationToken);
+        }
+        await response.Body.FlushAsync(cancellationToken);
+        if (commands.Count > 0) return;
+        await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+    }
+});
+
+app.MapPost("/api/v1/agents/{agentId:guid}/commands/{commandId:guid}/result", async (Guid agentId, Guid commandId, AgentCommandResultRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!AgentMatches(context, agentId)) return Results.Unauthorized();
+    return await store.CompleteCommandAsync(commandId, request.Status ?? "COMPLETED", request.Result ?? JsonDocument.Parse("{}")) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.MapGet("/api/agents", async (UnifiedProductStore store) => Results.Ok(await store.ListAgentsAsync()));
+
+app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId);
+    return session is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{session.Id}", session);
+});
+
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
+    var track = await store.CreateRecordingTrackAsync(sessionId, request.TrackType, request.DeviceId, request.SampleRate, request.Channels);
+    return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
+});
+
+app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/chunks/{sequence:int}", async (Guid sessionId, Guid trackId, int sequence, HttpRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
+    var key = $"/data/recordings/{sessionId:N}/{trackId:N}/{sequence:D8}.flac";
+    var path = StorageHelpers.StoragePath(key); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    await using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan)) await request.Body.CopyToAsync(output);
+    var size = new FileInfo(path).Length;
+    var sha = await StorageHelpers.ComputeSha256Async(path);
+    var start = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
+    var count = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
+    var stored = await store.RegisterChunkAsync(sessionId, trackId, sequence, key, start, count, size, sha);
+    return stored ? Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha }) : Results.Conflict(new { error = "chunk_not_registered" });
+});
+
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/missing-chunks", async (Guid sessionId, Guid trackId, int expectedCount, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
+    return Results.Ok(new { missing = await store.MissingChunksAsync(sessionId, trackId, Math.Clamp(expectedCount, 0, 100000)) });
+});
+
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
+    return await store.FinalizeRecordingAsync(sessionId) ? Results.Accepted() : Results.NotFound();
+});
+
+app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, RecordingCommandRequest request, UnifiedProductStore store) =>
+{
+    if (request.AgentId == Guid.Empty) return Results.BadRequest(new { error = "agent_id_required" });
+    if (!await db.MeetingExistsAsync(id)) return Results.NotFound();
+    var commandId = await store.CreateCommandAsync(request.AgentId, request.CommandType, request.Payload ?? JsonDocument.Parse("{}"));
+    return Results.Accepted($"/api/agents/{request.AgentId}", new { commandId });
+});
+
+app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.GetLatestSummaryAsync(id)));
+app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, UnifiedProductStore store) =>
+{
+    var jobId = await store.QueueSummaryAsync(id);
+    return jobId is null ? Results.Conflict(new { error = "transcript_required" }) : Results.Accepted($"/api/jobs/{jobId}", new { jobId });
+});
+app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListDecisionsAsync(id)));
+app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListActionItemsAsync(id)));
+app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, UnifiedProductStore store) => await store.UpdateActionItemAsync(id, request.Task, request.Responsible, request.Deadline, request.Status) ? Results.Ok(new { ok = true }) : Results.NotFound());
+app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, UnifiedProductStore store) => Results.Ok(await store.AnswerAssistantAsync(request.MeetingId, request.Query)));
 app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id) => Results.Ok(await db.ListJobsAsync(id)));
 
 app.MapGet("/api/meetings/{id:guid}/media", async (Guid id) => Results.Ok(await db.ListMediaAsync(id)));
@@ -278,6 +414,14 @@ app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
 
 app.Run();
 
+public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
+public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
+public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
+public record CreateRecordingSessionRequest(Guid MeetingId);
+public record CreateTrackRequest(string TrackType, string? DeviceId, int SampleRate = 48000, int Channels = 1);
+public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
+public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
+public record AssistantQueryRequest(string Query, Guid? MeetingId);
 public record LoginRequest(string Username, string Password);
 public record MeetingCreateRequest(string Title, string? Description);
 public record UploadReservationRequest(string FileName, long SizeBytes);
@@ -320,7 +464,7 @@ public static class StorageHelpers
 
 public static class MediaPolicy
 {
-    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus" };
+    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
     public static bool IsAllowedExtension(string name) => Extensions.Contains(Path.GetExtension(name));
 }
 public sealed class PasswordService

@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <DefaultItemExcludesInProjectFolder>$(DefaultItemExcludesInProjectFolder);obj\**\*;bin\**\*</DefaultItemExcludesInProjectFolder>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'WhisperX.Atom.Recorder.Core'">
+    <BaseIntermediateOutputPath>obj\core\</BaseIntermediateOutputPath>
+    <OutputPath>bin\core\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'WhisperX.Atom.Recorder.Service'">
+    <BaseIntermediateOutputPath>obj\service\</BaseIntermediateOutputPath>
+    <OutputPath>bin\service\</OutputPath>
+  </PropertyGroup>
+</Project>

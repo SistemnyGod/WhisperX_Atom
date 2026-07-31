@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 from typing import Any
@@ -74,5 +75,26 @@ class JobRepository:
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words",
                     (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label, str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", []))),
                 )
-            connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s", (job_id,))
-            connection.execute("UPDATE meetings SET status='READY' WHERE id=%s", (meeting_id,))
+            summary_job = connection.execute(
+                "SELECT id FROM jobs WHERE meeting_id=%s AND type='SUMMARIZE' AND status NOT IN ('READY','FAILED','CANCELLED') ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+            if summary_job is None:
+                summary_job_id = connection.execute(
+                    "INSERT INTO jobs(id,meeting_id,type,status,stage,progress) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0) RETURNING id",
+                    (meeting_id,),
+                ).fetchone()[0]
+                message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
+                payload = json.dumps({
+                    "message_id": str(message_id),
+                    "job_id": str(summary_job_id),
+                    "meeting_id": meeting_id,
+                    "transcript_id": str(transcript_id),
+                    "source_hash": result.get("source_hash"),
+                })
+                connection.execute(
+                    "INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)",
+                    (message_id, payload),
+                )
+            connection.execute("UPDATE jobs SET status='READY',stage='TRANSCRIPT_READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s", (job_id,))
+            connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))

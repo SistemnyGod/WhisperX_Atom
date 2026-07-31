@@ -162,9 +162,9 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data
-      - ${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox
-      - ${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive
+      - '${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data'
+      - '${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox'
+      - '${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive'
       - model_cache:/root/.cache/huggingface
     deploy:
       resources:
@@ -221,6 +221,25 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+  summary-worker:
+    profiles: ["llm"]
+    build:
+      context: .
+      dockerfile: workers/summary_worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      NATS_URL: nats://nats:4222
+      LLM_BASE_URL: http://llama-server:8080/v1
+      LLM_MODEL_ALIAS: qwen3-8b
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      llama-server:
+        condition: service_started
+
   web:
     profiles: ["core", "gpu"]
     build:
@@ -250,4 +269,3 @@ volumes:
   postgres_data:
   nats_data:
   model_cache:
-

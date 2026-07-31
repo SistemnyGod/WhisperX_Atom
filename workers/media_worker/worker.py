@@ -20,7 +20,7 @@ async def run() -> None:
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     jetstream = client.jetstream()
     try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe"])
+        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize"])
     except Exception:
         pass
     subscription = await jetstream.pull_subscribe("media.ingest", durable="whisperx-media")
