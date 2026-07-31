@@ -55,5 +55,5 @@ Web создаёт команды через `/api/meetings/{id}/recording-comma
 1. Используются default audio devices текущей Windows-сессии.
 2. Формат сохраняется в native WASAPI (на тестовой машине это 48 kHz, 32-bit float, 2 канала); нормализация в mono 16 kHz выполняется серверным media pipeline.
 3. `ATOM_AGENT_TOKEN` пока задаётся через окружение; перенос секрета в DPAPI и enrollment из UI — следующий hardening-шаг.
-4. Upload FLAC-чанков в центральную recording session будет добавлен после окончательной привязки локальных track IDs к серверным track IDs.
+4. При наличии Agent credentials и meetingId Agent создаёт server session/tracks, загружает FLAC-чанки с SHA-256, удаляет локальный файл только после подтверждения и вызывает finalize.
 5. Для реальной проверки используйте короткую копию записи или Web upload; большие файлы Audacity остаются ручным пилотным набором.

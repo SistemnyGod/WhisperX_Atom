@@ -6,6 +6,8 @@ using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder;
 
+public sealed record RecordingTrackInfo(string TrackId, string TrackType, int SampleRate, int Channels);
+
 public sealed class RecordingCoordinator : IAsyncDisposable
 {
     private readonly SpoolStore _spool;
@@ -29,6 +31,20 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     }
 
     public string? SessionId => _sessionId;
+
+    public IReadOnlyList<RecordingTrackInfo> ActiveTracks
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var tracks = new List<RecordingTrackInfo>();
+                if (_microphone is not null) tracks.Add(_microphone.Info);
+                if (_systemAudio is not null) tracks.Add(_systemAudio.Info);
+                return tracks;
+            }
+        }
+    }
 
     public async Task<string> StartAsync(CancellationToken cancellationToken = default)
     {
@@ -157,6 +173,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private readonly IWaveIn _capture;
         private readonly PcmFlacChunkWriter _writer;
         private readonly ILogger _logger;
+        private readonly RecordingTrackInfo _info;
         private int _started;
 
         public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger)
@@ -165,10 +182,13 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             _capture = capture;
             _logger = logger;
             var trackId = Guid.NewGuid().ToString("N");
+            _info = new RecordingTrackInfo(trackId, trackType, capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
             _writer = new PcmFlacChunkWriter(sessionId, trackId, trackType, capture.WaveFormat, spool, dataRoot, ffmpegPath, logger);
             _capture.DataAvailable += OnDataAvailable;
             _capture.RecordingStopped += OnRecordingStopped;
         }
+
+        public RecordingTrackInfo Info => _info;
 
         public void Start()
         {

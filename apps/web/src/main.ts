@@ -130,7 +130,7 @@ const app = {
       if (type === "STOP" && !window.confirm("Завершить запись? Agent попросит подтверждение локально.")) return;
       const agent = onlineAgent();
       if (!agent) { error.value = "Нет зарегистрированного Recorder Agent"; return; }
-      try { await api(`/api/meetings/${selected.value.id}/recording-commands`, jsonOptions("POST", { agentId: agent.id, commandType: type, payload: {} })); notice.value = type === "START" ? "Команда начала записи отправлена" : "Команда отправлена Agent"; await loadAgents(); }
+      try { await api(`/api/meetings/${selected.value.id}/recording-commands`, jsonOptions("POST", { agentId: agent.id, commandType: type, payload: { meetingId: selected.value.id } })); notice.value = type === "START" ? "Команда начала записи отправлена" : "Команда отправлена Agent"; await loadAgents(); }
       catch (exc) { error.value = exc instanceof Error ? exc.message : "Команда не отправлена"; }
     }
     async function rebuildSummary() { if (!selected.value) return; busy.value = true; try { await api(`/api/meetings/${selected.value.id}/summary/rebuild`, { method: "POST" }); notice.value = "Саммари поставлено в очередь"; await refreshSelected(); } catch (exc) { error.value = exc instanceof Error ? exc.message : "Не удалось поставить саммари"; } finally { busy.value = false; } }

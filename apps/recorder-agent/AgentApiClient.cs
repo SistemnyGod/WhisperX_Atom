@@ -38,8 +38,7 @@ public sealed class AgentApiClient : IDisposable
             var line = await reader.ReadLineAsync(cancellationToken);
             if (line is null) break;
             if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
-            var json = line[6..];
-            var command = JsonSerializer.Deserialize<AgentCommandEnvelope>(json);
+            var command = JsonSerializer.Deserialize<AgentCommandEnvelope>(line[6..]);
             if (command is not null) result.Add(command);
         }
         return result;
@@ -53,6 +52,84 @@ public sealed class AgentApiClient : IDisposable
         request.Content = JsonContent.Create(new { status, result });
         using var response = await _http.SendAsync(request, cancellationToken);
         return response.IsSuccessStatusCode;
+    }
+
+    public async Task<Guid> BindSessionAsync(string localSessionId, Guid meetingId, IReadOnlyList<RecordingTrackInfo> tracks, SpoolStore spool, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
+        var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+        var serverSessionId = existingServerSession ?? await CreateServerSessionAsync(meetingId, cancellationToken);
+        foreach (var track in tracks)
+        {
+            var existingBinding = await spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken);
+            if (existingBinding is not null) continue;
+            var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, cancellationToken);
+            await spool.UpsertServerBindingAsync(new ServerBinding(localSessionId, track.TrackId, serverSessionId, serverTrackId), cancellationToken);
+        }
+        return serverSessionId;
+    }
+
+    public async Task<int> UploadPendingChunksAsync(SpoolStore spool, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return 0;
+        var uploaded = 0;
+        foreach (var chunk in await spool.PendingChunksAsync(50, cancellationToken))
+        {
+            var binding = await spool.GetServerBindingAsync(chunk.SessionId, chunk.TrackId, cancellationToken);
+            if (binding is null || !File.Exists(chunk.LocalPath)) continue;
+            await UploadChunkAsync(binding, chunk, cancellationToken);
+            await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
+            try { File.Delete(chunk.LocalPath); } catch (IOException) { }
+            uploaded++;
+        }
+        return uploaded;
+    }
+
+    public async Task FinalizeServerSessionAsync(Guid serverSessionId, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return;
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/finalize"));
+        AddAuthentication(request);
+        using var response = await _http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private async Task<Guid> CreateServerSessionAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, "api/v1/recording-sessions"));
+        AddAuthentication(request);
+        request.Content = JsonContent.Create(new { meetingId });
+        using var response = await _http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        return document.RootElement.GetProperty("id").GetGuid();
+    }
+
+    private async Task<Guid> CreateServerTrackAsync(Guid serverSessionId, RecordingTrackInfo track, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/tracks"));
+        AddAuthentication(request);
+        request.Content = JsonContent.Create(new { trackType = track.TrackType, deviceId = (string?)null, sampleRate = track.SampleRate, channels = track.Channels });
+        using var response = await _http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        return document.RootElement.GetProperty("id").GetGuid();
+    }
+
+    private async Task UploadChunkAsync(ServerBinding binding, RecordingChunk chunk, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Put, new Uri(_baseUri, $"api/v1/recording-sessions/{binding.ServerSessionId}/tracks/{binding.ServerTrackId}/chunks/{chunk.Sequence}"));
+        AddAuthentication(request);
+        request.Headers.Add("X-Chunk-SHA256", chunk.Sha256);
+        request.Headers.Add("X-Start-Sample", chunk.StartSample.ToString());
+        request.Headers.Add("X-Sample-Count", chunk.SampleCount.ToString());
+        await using var stream = File.OpenRead(chunk.LocalPath);
+        using var content = new StreamContent(stream);
+        content.Headers.ContentType = new MediaTypeHeaderValue("audio/flac");
+        content.Headers.ContentLength = chunk.SizeBytes;
+        request.Content = content;
+        using var response = await _http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
     }
 
     private void AddAuthentication(HttpRequestMessage request)

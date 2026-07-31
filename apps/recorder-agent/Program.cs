@@ -39,38 +39,47 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         if (int.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_AUTORECORD_SECONDS"), out var seconds) && seconds > 0)
         {
             logger.LogInformation("Automatic recording smoke is enabled for {Seconds} seconds.", seconds);
-            await recorder.StartAsync(stoppingToken);
+            var localSession = await recorder.StartAsync(stoppingToken);
             try { await Task.Delay(TimeSpan.FromSeconds(seconds), stoppingToken); }
-            finally { await recorder.StopAsync(CancellationToken.None); }
+            finally
+            {
+                await recorder.StopAsync(CancellationToken.None);
+                await UploadAndFinalizeAsync(localSession, CancellationToken.None);
+            }
         }
 
         var cursor = long.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_COMMAND_CURSOR"), out var initialCursor) ? initialCursor : 0;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (api.IsConfigured)
-            {
-                try
-                {
-                    var commands = await api.ReadCommandsAsync(cursor, stoppingToken);
-                    foreach (var command in commands)
-                    {
-                        cursor = Math.Max(cursor, command.Cursor);
-                        var result = await ExecuteCommandAsync(command, stoppingToken);
-                        await api.CompleteCommandAsync(command.Id, result.Status, result.Payload, stoppingToken);
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Agent command channel is unavailable.");
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                }
-            }
-            else
+            if (!api.IsConfigured)
             {
                 var pending = await spool.PendingChunksAsync(1, stoppingToken);
                 logger.LogDebug("Spool pending chunks: {Count}", pending.Count);
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                continue;
+            }
+
+            try
+            {
+                using var pollTimeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                pollTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                IReadOnlyList<AgentCommandEnvelope> commands;
+                try { commands = await api.ReadCommandsAsync(cursor, pollTimeout.Token); }
+                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { commands = Array.Empty<AgentCommandEnvelope>(); }
+                foreach (var command in commands)
+                {
+                    cursor = Math.Max(cursor, command.Cursor);
+                    var result = await ExecuteCommandAsync(command, stoppingToken);
+                    await api.CompleteCommandAsync(command.Id, result.Status, result.Payload, stoppingToken);
+                }
+                var uploaded = await api.UploadPendingChunksAsync(spool, stoppingToken);
+                if (uploaded > 0) logger.LogInformation("Uploaded {Count} confirmed audio chunks.", uploaded);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Agent command or upload channel is unavailable; local spool remains authoritative.");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }
@@ -85,7 +94,14 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                 case "START":
                 case "START_RECORDING":
                     var session = await recorder.StartAsync(cancellationToken);
-                    return ("COMPLETED", new { ok = true, sessionId = session, state = state.State.ToString() });
+                    var meetingId = ReadMeetingId(command.Payload) ?? ReadEnvironmentMeetingId();
+                    Guid? serverSession = null;
+                    if (meetingId is Guid meeting)
+                    {
+                        try { serverSession = await api.BindSessionAsync(session, meeting, recorder.ActiveTracks, spool, cancellationToken); }
+                        catch (Exception ex) { logger.LogWarning(ex, "Server session binding failed; recording continues locally. Session={SessionId}", session); }
+                    }
+                    return ("COMPLETED", new { ok = true, sessionId = session, serverSessionId = serverSession, state = state.State.ToString() });
                 case "PAUSE":
                 case "PAUSE_RECORDING":
                     await recorder.PauseAsync(cancellationToken);
@@ -96,8 +112,10 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                     return ("COMPLETED", new { ok = true, state = state.State.ToString() });
                 case "STOP":
                 case "STOP_RECORDING":
+                    var localSession = recorder.SessionId;
                     await recorder.StopAsync(cancellationToken);
-                    return ("COMPLETED", new { ok = true, state = state.State.ToString() });
+                    var finalized = await UploadAndFinalizeAsync(localSession, cancellationToken);
+                    return ("COMPLETED", new { ok = true, serverFinalized = finalized, state = state.State.ToString() });
                 case "STATUS":
                 case "GET_STATUS":
                     return ("COMPLETED", new { ok = true, state = state.State.ToString(), sessionId = recorder.SessionId });
@@ -111,9 +129,37 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         }
     }
 
+    private async Task<bool> UploadAndFinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
+    {
+        if (!api.IsConfigured || string.IsNullOrWhiteSpace(localSessionId)) return false;
+        try
+        {
+            await api.UploadPendingChunksAsync(spool, cancellationToken);
+            var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+            if (serverSessionId is not Guid server) return false;
+            await api.FinalizeServerSessionAsync(server, cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Server finalize failed; chunks remain in the local spool. Session={SessionId}", localSessionId);
+            return false;
+        }
+    }
+
+    private static Guid? ReadMeetingId(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("meetingId", out var value)) return null;
+        return value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id) ? id : null;
+    }
+
+    private static Guid? ReadEnvironmentMeetingId() => Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_MEETING_ID"), out var id) ? id : null;
+
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        var localSession = recorder.SessionId;
         await recorder.StopAsync(cancellationToken);
+        await UploadAndFinalizeAsync(localSession, cancellationToken);
         await base.StopAsync(cancellationToken);
     }
 }
