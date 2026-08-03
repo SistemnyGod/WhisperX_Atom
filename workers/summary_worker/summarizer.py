@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -10,51 +11,55 @@ SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["summary", "topics", "decisions", "action_items", "risks", "open_questions"],
     "properties": {
-        "summary": {"type": "string"},
-        "topics": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string", "maxLength": 600},
+        "topics": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 220}},
         "decisions": {
             "type": "array",
+            "maxItems": 4,
             "items": {
                 "type": "object",
                 "required": ["text", "evidence_segment_ids"],
                 "properties": {
-                    "text": {"type": "string"},
-                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "text": {"type": "string", "maxLength": 260},
+                    "evidence_segment_ids": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
                 },
             },
         },
         "action_items": {
             "type": "array",
+            "maxItems": 4,
             "items": {
                 "type": "object",
                 "required": ["task", "responsible", "deadline", "evidence_segment_ids"],
                 "properties": {
-                    "task": {"type": "string"},
-                    "responsible": {"type": ["string", "null"]},
-                    "deadline": {"type": ["string", "null"]},
-                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "task": {"type": "string", "maxLength": 260},
+                    "responsible": {"type": ["string", "null"], "maxLength": 100},
+                    "deadline": {"type": ["string", "null"], "maxLength": 60},
+                    "evidence_segment_ids": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
                 },
             },
         },
         "risks": {
             "type": "array",
+            "maxItems": 4,
             "items": {
                 "type": "object",
                 "required": ["text", "evidence_segment_ids"],
                 "properties": {
-                    "text": {"type": "string"},
-                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "text": {"type": "string", "maxLength": 260},
+                    "evidence_segment_ids": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
                 },
             },
         },
         "open_questions": {
             "type": "array",
+            "maxItems": 4,
             "items": {
                 "type": "object",
                 "required": ["text", "evidence_segment_ids"],
                 "properties": {
-                    "text": {"type": "string"},
-                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "text": {"type": "string", "maxLength": 260},
+                    "evidence_segment_ids": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
                 },
             },
         },
@@ -118,9 +123,10 @@ def validate_evidence(payload: dict[str, Any], valid_ids: set[str]) -> dict[str,
 
 
 class SummaryOrchestrator:
-    def __init__(self, invoke_json: JsonInvoker, max_chars: int = 24_000) -> None:
+    def __init__(self, invoke_json: JsonInvoker, max_chars: int | None = None) -> None:
         self._invoke_json = invoke_json
-        self._max_chars = max_chars
+        configured = os.getenv("LLM_BLOCK_MAX_CHARS", "16000") if max_chars is None else str(max_chars)
+        self._max_chars = max(4000, int(configured))
 
     async def summarize(self, segments: list[TranscriptSegment]) -> dict[str, Any]:
         if not segments:
@@ -158,6 +164,31 @@ class SummaryOrchestrator:
         return result
 
 
+def parse_json_content(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith(chr(96) * 3):
+        text = text.removeprefix(chr(96) * 3).removeprefix("json").removesuffix(chr(96) * 3).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        starts = [index for index, char in enumerate(text) if char == "{"]
+        value = None
+        for start in starts:
+            try:
+                candidate, _ = decoder.raw_decode(text[start:])
+                if isinstance(candidate, dict):
+                    value = candidate
+                    break
+            except json.JSONDecodeError:
+                continue
+        if value is None:
+            raise ValueError("llm_invalid_json")
+    if not isinstance(value, dict):
+        raise ValueError("llm_invalid_json")
+    return value
+
+
 class LlamaCppClient:
     def __init__(self, base_url: str, model: str = "qwen3-8b", timeout_seconds: int = 600) -> None:
         self._url = base_url.rstrip("/") + "/chat/completions"
@@ -171,18 +202,41 @@ class LlamaCppClient:
     async def invoke_json(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
         import httpx
 
-        body = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 2048,
-            "response_format": {"type": "json_object", "schema": schema},
-        }
+        max_tokens = max(512, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "3072")))
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(self._url, json=body)
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        result = json.loads(content)
-        if not isinstance(result, dict):
-            raise ValueError("llm_response_is_not_an_object")
-        return result
+            for attempt in range(2):
+                request_messages = messages
+                if attempt:
+                    request_messages = [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": "Повтори ответ строго как один валидный JSON-объект без Markdown и пояснений. Уменьши каждую коллекцию максимум до 4 элементов; длина текста каждого элемента — до 260 символов. Не обрывай JSON.",
+                        },
+                    ]
+                body = {
+                    "model": self._model,
+                    "messages": request_messages,
+                    "temperature": 0.1,
+                    "max_tokens": min(4096, max_tokens * (attempt + 1)),
+                    "response_format": {"type": "json_object", "schema": schema},
+                }
+                response = await client.post(self._url, json=body)
+                response.raise_for_status()
+                payload = response.json()
+                choice = payload["choices"][0]
+                content = choice["message"]["content"]
+                if choice.get("finish_reason") == "length" and attempt == 0:
+                    continue
+                if not isinstance(content, str):
+                    raise ValueError("llm_response_content_is_not_text")
+                content = content.strip()
+                if content.startswith("```"):
+                    content = content.removeprefix("```").removeprefix("json").removesuffix("```").strip()
+                try:
+                    return parse_json_content(content)
+                except (json.JSONDecodeError, ValueError):
+                    if attempt == 1:
+                        raise ValueError("llm_invalid_json")
+                    continue
+        raise ValueError("llm_invalid_json")

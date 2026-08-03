@@ -11,7 +11,11 @@ from psycopg.types.json import Jsonb
 
 class JobRepository:
     def __init__(self) -> None:
-        self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
+        self._conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
+
+    @property
+    def conninfo(self) -> str:
+        return self._conninfo
 
     def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
         if not message_id:
@@ -53,6 +57,9 @@ class JobRepository:
 
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> None:
         with psycopg.connect(self.conninfo) as connection:
+            # Serialize transcript versions and summary-job creation per meeting.
+            if connection.execute("SELECT id FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone() is None:
+                raise RuntimeError("meeting_not_found")
             existing = connection.execute("SELECT id, version FROM transcripts WHERE meeting_id=%s ORDER BY version DESC LIMIT 1", (meeting_id,)).fetchone()
             version = int(existing[1]) + 1 if existing else 1
             transcript_id = connection.execute(

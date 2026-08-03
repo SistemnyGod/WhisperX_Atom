@@ -5,6 +5,7 @@ from workers.summary_worker.summarizer import (
     SummaryOrchestrator,
     TranscriptSegment,
     build_blocks,
+    parse_json_content,
     validate_evidence,
 )
 
@@ -38,6 +39,14 @@ class SummaryWorkerTests(unittest.TestCase):
         self.assertIsNone(action["deadline"])
         self.assertEqual(["1"], action["evidence_segment_ids"])
         self.assertFalse(action["needs_review"])
+
+    def test_json_parser_accepts_markdown_and_prefix(self):
+        result = parse_json_content("Ответ:\n" + chr(96) * 3 + "json\n{\"summary\": \"ok\"}\n" + chr(96) * 3)
+        self.assertEqual("ok", result["summary"])
+
+    def test_json_parser_rejects_truncated_json(self):
+        with self.assertRaises(ValueError):
+            parse_json_content("{\"summary\": \"unterminated")
 
     def test_orchestrator_adds_source_hash(self):
         async def fake_invoker(messages, schema):

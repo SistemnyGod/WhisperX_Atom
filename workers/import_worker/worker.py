@@ -106,42 +106,60 @@ class HotFolderImporter:
         self.api_url = os.getenv("API_URL", "http://api:8080")
         self.token = os.getenv("IMPORT_WORKER_TOKEN", "")
         self.interval = float(os.getenv("IMPORT_INTERVAL_SECONDS", "5"))
+        self.batch_size = max(1, int(os.getenv("IMPORT_BATCH_SIZE", "8")))
+        self.max_stable_paths = max(self.batch_size * 4, int(os.getenv("IMPORT_MAX_STABLE_PATHS", "2048")))
         self._stable: dict[str, tuple[int, int, int]] = {}
 
     def scan_once(self) -> int:
         self.inbox.mkdir(parents=True, exist_ok=True)
         processed = 0
-        current: set[str] = set()
-        for path in sorted(self.inbox.iterdir()):
-            if not path.is_file():
-                continue
-            current.add(str(path))
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue
-            key = str(path)
-            previous = self._stable.get(key)
-            count = previous[2] + 1 if previous and previous[:2] == (stat.st_size, stat.st_mtime_ns) else 1
-            self._stable[key] = (stat.st_size, stat.st_mtime_ns, count)
-            if path.name.endswith(".part") or count < 2:
-                continue
-            self._stable.pop(key, None)
-            try:
-                if not is_candidate(path):
-                    self._reject(path, "unsupported_extension")
+        inspected = 0
+        try:
+            entries = os.scandir(self.inbox)
+        except OSError as exc:
+            # A hot folder can contain thousands of files. Do not crash the
+            # service when Windows/Docker cannot enumerate it in one attempt.
+            LOG.warning("unable to scan hot folder %s: %s", self.inbox, exc)
+            return 0
+
+        with entries:
+            for entry in entries:
+                if inspected >= self.batch_size:
+                    break
+                inspected += 1
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    path = Path(entry.path)
+                    stat = entry.stat(follow_symlinks=False)
+                except (FileNotFoundError, OSError):
                     continue
-                payload = import_payload(path, self.staging)
-                result = post_import(self.api_url, self.token, payload)
-                self._archive(Path(payload["storage_key"]), str(payload["sha256"]), str(payload["original_name"]))
-                path.unlink(missing_ok=True)
-                LOG.info("registered %s as %s", payload["original_name"], result)
-                processed += 1
-            except Exception as exc:  # keep scanning other files
-                LOG.exception("failed to import %s", path)
-                if path.exists():
-                    self._reject(path, type(exc).__name__ + ":" + str(exc))
-        self._stable = {key: value for key, value in self._stable.items() if key in current}
+                key = str(path)
+                previous = self._stable.get(key)
+                count = previous[2] + 1 if previous and previous[:2] == (stat.st_size, stat.st_mtime_ns) else 1
+                self._stable[key] = (stat.st_size, stat.st_mtime_ns, count)
+                if path.name.endswith(".part") or count < 2:
+                    continue
+                self._stable.pop(key, None)
+                try:
+                    if not is_candidate(path):
+                        self._reject(path, "unsupported_extension")
+                        continue
+                    payload = import_payload(path, self.staging)
+                    result = post_import(self.api_url, self.token, payload)
+                    self._archive(Path(payload["storage_key"]), str(payload["sha256"]), str(payload["original_name"]))
+                    path.unlink(missing_ok=True)
+                    LOG.info("registered %s as %s", payload["original_name"], result)
+                    processed += 1
+                except Exception as exc:  # keep scanning other files
+                    LOG.exception("failed to import %s", path)
+                    if path.exists():
+                        self._reject(path, type(exc).__name__ + ":" + str(exc))
+
+        # The worker is intentionally bounded. Keep the stability cache bounded
+        # too, otherwise a noisy hot folder could become an unbounded RAM sink.
+        while len(self._stable) > self.max_stable_paths:
+            self._stable.pop(next(iter(self._stable)))
         return processed
 
     def _archive(self, staged: Path, digest: str, name: str) -> None:

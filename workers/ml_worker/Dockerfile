@@ -7,5 +7,6 @@ COPY workers/ml_worker/requirements.gpu.txt /srv/ml-requirements.txt
 RUN pip install --no-cache-dir --no-deps whisperx==3.7.5 pyannote.audio==3.3.2
 RUN pip install --no-cache-dir -r /srv/ml-requirements.txt
 COPY . /srv
+COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
 ENV PYTHONPATH=/srv
 CMD ["python", "-m", "workers.ml_worker.worker"]

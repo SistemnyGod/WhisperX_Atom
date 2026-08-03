@@ -69,18 +69,24 @@ Docker images under `C:\WhisperXAtom\Models`.
 
 ```powershell
 .\scripts\llm-download.ps1
-docker compose -f compose.dev.yml --profile llm up -d llama-server
+docker compose -f compose.dev.yml --profile llm-diagnostic up -d llama-server
 .\scripts\llm-smoke.ps1
 ```
 
 The development API is bound only to `127.0.0.1:8081`. The server uses a
-32K context, Q8 KV cache, Flash Attention, one slot, and disabled reasoning
+16K context, Q8 KV cache, Flash Attention, one slot, and disabled reasoning
 for deterministic meeting summaries.
 
-On the RTX 5060 Ti 16 GB baseline, the loaded 32K service used about 14.8 GB
-VRAM, generated roughly 58-67 tokens/s in short smokes, and completed a cold
-restart plus Russian JSON smoke in about 57 seconds.
+On the RTX 5060 Ti 16 GB baseline, the 16K profile leaves more VRAM headroom
+for WhisperX/pyannote transitions while retaining roughly 50+ tokens/s in
+short Russian JSON smokes. Long transcripts are processed with map/reduce.
 
-The RTX 5060 Ti is shared by speech processing and the LLM. Until the GPU
-scheduler is connected, do not run `gpu-worker` and `llama-server` at the
-same time. Stop the inactive service before starting the other workload.
+The Desktop production profile uses a shared PostgreSQL GPU lease. WhisperX
+runs first; summary-worker then starts the pinned llama.cpp subprocess only
+while it owns the same lease and terminates it before releasing the GPU. Do not
+run the diagnostic `llama-server` at the same time as the production workers.
+
+The diagnostic `llama-server` is available only with the `llm-diagnostic`
+profile and is intended for a short isolated smoke. The normal Desktop profile
+uses `--profile gpu --profile llm` so the full recording-to-summary pipeline is
+automatic and does not require manual container stops.

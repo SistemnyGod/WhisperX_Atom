@@ -62,3 +62,6 @@ tests/regression-audio/*
 
 # Local secret container
 Токен.docx
+
+# Generated Desktop publish/installer output
+artifacts/

@@ -7,8 +7,13 @@ using Npgsql;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
+var allowedOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? string.Empty)
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
-    policy.AllowAnyHeader().AllowAnyMethod().AllowCredentials().SetIsOriginAllowed(_ => true)));
+{
+    if (allowedOrigins.Length > 0)
+        policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+}));
 
 var app = builder.Build();
 app.UseCors();
@@ -62,13 +67,17 @@ app.Use(async (context, next) =>
         return;
     }
 
-    if (!context.Request.Cookies.TryGetValue("wa_session", out var session) ||
-        !await db.IsSessionValidAsync(session))
+    if (!context.Request.Cookies.TryGetValue("wa_session", out var session))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await context.Response.WriteAsJsonAsync(new { error = "authentication_required" });
         return;
     }
+
+    var user = await db.GetUserForSessionAsync(session);
+    if (user is null) { context.Response.StatusCode = StatusCodes.Status401Unauthorized; await context.Response.WriteAsJsonAsync(new { error = "authentication_required" }); return; }
+    if (!RoleAllows(user.Role, context.Request.Method, context.Request.Path)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "insufficient_role" }); return; }
+    context.Items["user_role"] = user.Role;
 
     await next();
 });
@@ -88,6 +97,22 @@ app.MapGet("/ready", async () =>
     }
 });
 
+app.MapGet("/api/system/status", async () =>
+{
+    try
+    {
+        await db.PingAsync();
+        var root = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+        var path = Path.GetPathRoot(Path.GetFullPath(root)) ?? Path.DirectorySeparatorChar.ToString();
+        var drive = new DriveInfo(path);
+        return Results.Ok(new { ready = true, postgres = true, freeBytes = drive.AvailableFreeSpace, totalBytes = drive.TotalSize, checkedAt = DateTimeOffset.UtcNow });
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "System status check failed");
+        return Results.Ok(new { ready = false, postgres = false, freeBytes = 0L, totalBytes = 0L, checkedAt = DateTimeOffset.UtcNow });
+    }
+});
 app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IConfiguration configuration) =>
 {
     var user = await db.FindUserAsync(request.Username);
@@ -145,6 +170,10 @@ app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservation
 {
     if (!await db.MeetingExistsAsync(id))
         return Results.NotFound();
+    if (string.IsNullOrWhiteSpace(request.FileName) ||
+        !MediaPolicy.IsAllowedExtension(request.FileName) ||
+        request.SizeBytes <= 0 || request.SizeBytes > MediaPolicy.MaxUploadBytes)
+        return Results.BadRequest(new { error = "unsupported_or_oversized_media" });
 
     var uploadId = Guid.NewGuid();
     await db.CreateUploadReservationAsync(id, uploadId, request.FileName, request.SizeBytes);
@@ -160,8 +189,9 @@ app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservation
 app.MapPost("/api/uploads/complete", async (HttpRequest request, UploadCompleteRequest payload, IConfiguration configuration) =>
 {
     var expectedSecret = configuration["TUS_HOOK_SECRET"];
-    if (!string.IsNullOrEmpty(expectedSecret) &&
-        request.Headers["X-Tus-Hook-Secret"] != expectedSecret)
+    var suppliedSecret = request.Headers["X-Tus-Hook-Secret"].ToString();
+    if (string.IsNullOrWhiteSpace(expectedSecret) || string.IsNullOrWhiteSpace(suppliedSecret) ||
+        !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedSecret), Encoding.UTF8.GetBytes(suppliedSecret)))
         return Results.Unauthorized();
 
     var job = await db.CompleteUploadAsync(payload);
@@ -175,7 +205,7 @@ app.MapPost("/api/internal/tusd/hooks", async (JsonElement payload, HttpRequest 
     var eventType = JsonValue(payload, "Type") ?? JsonValue(payload, "Event", "Type") ?? JsonValue(payload, "Event", "TypeName");
     if (!string.Equals(eventType, "post-finish", StringComparison.OrdinalIgnoreCase))
         return Results.Ok(new { ignored = true, eventType });
-    var upload = JsonObject(payload, "Upload") ?? payload;
+    var upload = JsonObject(payload, "Event", "Upload") ?? JsonObject(payload, "Upload") ?? payload;
     var uploadIdText = JsonValue(upload, "ID") ?? JsonValue(upload, "Id");
     var metadata = JsonObject(upload, "MetaData") ?? JsonObject(upload, "Metadata");
     var reservationText = metadata.HasValue ? (JsonValue(metadata.Value, "reservationId") ?? JsonValue(metadata.Value, "reservation_id")) : null;
@@ -214,6 +244,18 @@ app.MapPost("/api/internal/imports", async (ImportRequest request, HttpRequest h
 });
 
 static bool AgentMatches(HttpContext context, Guid agentId) => context.Items.TryGetValue("agent_id", out var item) && item is Guid authenticated && authenticated == agentId;
+
+static bool RoleAllows(string role, string method, PathString path)
+{
+    if (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase)) return true;
+    if (HttpMethods.IsGet(method) || HttpMethods.IsHead(method)) return true;
+    if (!string.Equals(role, "Editor", StringComparison.OrdinalIgnoreCase)) return false;
+    if (HttpMethods.IsPatch(method)) return true;
+    return HttpMethods.IsPost(method) &&
+        (path.StartsWithSegments("/api/assistant/queries") ||
+         path.Value?.Contains("/speakers/merge", StringComparison.OrdinalIgnoreCase) == true ||
+         path.Value?.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) == true);
+}
 
 static bool SecretMatches(HttpRequest request, string? expected)
 {
@@ -284,7 +326,7 @@ app.MapGet("/api/v1/agents/{agentId:guid}/commands/events", async (Guid agentId,
 app.MapPost("/api/v1/agents/{agentId:guid}/commands/{commandId:guid}/result", async (Guid agentId, Guid commandId, AgentCommandResultRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!AgentMatches(context, agentId)) return Results.Unauthorized();
-    return await store.CompleteCommandAsync(commandId, request.Status ?? "COMPLETED", request.Result ?? JsonDocument.Parse("{}")) ? Results.Ok(new { ok = true }) : Results.NotFound();
+    return await store.CompleteCommandAsync(agentId, commandId, request.Status ?? "COMPLETED", request.Result ?? JsonDocument.Parse("{}")) ? Results.Ok(new { ok = true }) : Results.NotFound();
 });
 
 app.MapGet("/api/agents", async (UnifiedProductStore store) => Results.Ok(await store.ListAgentsAsync()));
@@ -292,20 +334,23 @@ app.MapGet("/api/agents", async (UnifiedProductStore store) => Results.Ok(await 
 app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
-    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId);
+    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId, request.Title, request.StartedAt);
     return session is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{session.Id}", session);
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
-    var track = await store.CreateRecordingTrackAsync(sessionId, request.TrackType, request.DeviceId, request.SampleRate, request.Channels);
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.SampleRate, request.Channels);
     return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
 });
 
 app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/chunks/{sequence:int}", async (Guid sessionId, Guid trackId, int sequence, HttpRequest request, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (!await store.AgentOwnsTrackAsync(agentId, sessionId, trackId)) return Results.NotFound();
+    if (request.ContentLength is > 134217728) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    if (sequence < 0) return Results.BadRequest(new { error = "chunk_sequence_invalid" });
     var key = $"/data/recordings/{sessionId:N}/{trackId:N}/{sequence:D8}.flac";
     var path = StorageHelpers.StoragePath(key);
     var partPath = path + ".part";
@@ -332,7 +377,7 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
         }
         var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
         var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
-        var stored = await store.RegisterChunkAsync(sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        var stored = await store.RegisterChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
         if (!stored)
         {
             File.Delete(partPath);
@@ -350,21 +395,35 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
 
 app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/missing-chunks", async (Guid sessionId, Guid trackId, int expectedCount, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
-    return Results.Ok(new { missing = await store.MissingChunksAsync(sessionId, trackId, Math.Clamp(expectedCount, 0, 100000)) });
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var missing = await store.MissingChunksAsync(agentId, sessionId, trackId, Math.Clamp(expectedCount, 0, 100000));
+    return missing is null ? Results.NotFound() : Results.Ok(new { missing });
 });
 
-app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid sessionId, FinalizeRecordingRequest? request, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!context.Items.ContainsKey("agent_id")) return Results.Unauthorized();
-    return await store.FinalizeRecordingAsync(sessionId) ? Results.Accepted() : Results.NotFound();
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var result = await store.FinalizeRecordingAsync(agentId, sessionId, request?.Manifest);
+    if (!result.Found) return Results.NotFound(new { error = result.ErrorCode });
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (request.Events is null || request.Events.Count > 1000) return Results.BadRequest(new { error = "events_invalid" });
+    var accepted = await store.RegisterRecordingEventsAsync(agentId, sessionId, request.Events);
+    return accepted is null ? Results.NotFound() : Results.Ok(new { accepted });
+});
+    if (!result.Accepted) return Results.Conflict(new { error = result.ErrorCode, missing = result.Missing });
+    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId });
 });
 
 app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, RecordingCommandRequest request, UnifiedProductStore store) =>
 {
     if (request.AgentId == Guid.Empty) return Results.BadRequest(new { error = "agent_id_required" });
+    if (string.IsNullOrWhiteSpace(request.CommandType) || request.CommandType.Length > 80)
+        return Results.BadRequest(new { error = "command_type_required" });
     if (!await db.MeetingExistsAsync(id)) return Results.NotFound();
-    var commandId = await store.CreateCommandAsync(request.AgentId, request.CommandType, request.Payload ?? JsonDocument.Parse("{}"));
+    if (!await store.AgentExistsAsync(request.AgentId)) return Results.NotFound(new { error = "agent_not_found" });
+    var commandId = await store.CreateCommandAsync(request.AgentId, request.CommandType.Trim(), request.Payload ?? JsonDocument.Parse("{}"));
     return Results.Accepted($"/api/agents/{request.AgentId}", new { commandId });
 });
 
@@ -376,8 +435,42 @@ app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, UnifiedPr
 });
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListDecisionsAsync(id)));
 app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListActionItemsAsync(id)));
-app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, UnifiedProductStore store) => await store.UpdateActionItemAsync(id, request.Task, request.Responsible, request.Deadline, request.Status) ? Results.Ok(new { ok = true }) : Results.NotFound());
-app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, UnifiedProductStore store) => Results.Ok(await store.AnswerAssistantAsync(request.MeetingId, request.Query)));
+app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, UnifiedProductStore store) =>
+{
+    var task = request.Task?.Trim();
+    var status = request.Status?.Trim().ToUpperInvariant();
+    if (string.IsNullOrWhiteSpace(task) || task.Length > 4000)
+        return Results.BadRequest(new { error = "task_required" });
+    if (status is not ("NEEDS_REVIEW" or "OPEN" or "DONE" or "CANCELLED"))
+        return Results.BadRequest(new { error = "invalid_task_status" });
+    return await store.UpdateActionItemAsync(id, task, request.Responsible?.Trim(), request.Deadline, status)
+        ? Results.Ok(new { ok = true })
+        : Results.NotFound();
+});
+app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, UnifiedProductStore store) =>
+{
+    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query);
+    return query is null ? Results.BadRequest(new { error = "meeting_not_ready_or_query_invalid" }) : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
+});
+app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, UnifiedProductStore store) =>
+{
+    var query = await store.GetAssistantQueryAsync(id);
+    return query is null ? Results.NotFound() : Results.Ok(query);
+});
+app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+    for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+    {
+        var query = await store.GetAssistantQueryAsync(id);
+        if (query is null) { response.StatusCode = 404; return; }
+        await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(query)}\n\n", cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
+        if (query.Status is "READY" or "FAILED" or "NEEDS_REVIEW") return;
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+});
 app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id) => Results.Ok(await db.ListJobsAsync(id)));
 
 app.MapGet("/api/meetings/{id:guid}/media", async (Guid id) => Results.Ok(await db.ListMediaAsync(id)));
@@ -401,8 +494,12 @@ app.MapGet("/api/jobs/{id:guid}", async (Guid id) =>
 
 app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id) =>
 {
+    var current = await db.GetJobAsync(id);
+    if (current is null) return Results.NotFound();
+    if (current.Status is not ("FAILED" or "CANCELLED"))
+        return Results.Conflict(new { error = "job_not_retryable", status = current.Status });
     var job = await db.RetryJobAsync(id);
-    return job is null ? Results.NotFound() : Results.Accepted("/api/jobs/" + id, job);
+    return job is null ? Results.Conflict(new { error = "job_retry_conflict" }) : Results.Accepted("/api/jobs/" + id, job);
 });
 
 app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpResponse response, CancellationToken cancellationToken) =>
@@ -448,7 +545,7 @@ app.Run();
 public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
-public record CreateRecordingSessionRequest(Guid MeetingId);
+public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt);
 public record CreateTrackRequest(string TrackType, string? DeviceId, int SampleRate = 48000, int Channels = 1);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
@@ -472,7 +569,7 @@ public record SpeakerMergeRequest(Guid SourceSpeakerId, Guid TargetSpeakerId);
 public sealed record UserRow(Guid Id, string Username, string PasswordHash, string Role);
 public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
 public sealed record JobRow(Guid Id, Guid MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
-public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words);
+public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
 public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments);
 
 public static class StorageHelpers
@@ -495,6 +592,7 @@ public static class StorageHelpers
 
 public static class MediaPolicy
 {
+    public const long MaxUploadBytes = 8L * 1024 * 1024 * 1024;
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
     public static bool IsAllowedExtension(string name) => Extensions.Contains(Path.GetExtension(name));
 }
@@ -707,12 +805,37 @@ public sealed class Database(IConfiguration configuration)
             normalizedStorageKey = "/data/uploads/" + tusId;
         }
 
+        // Serialize completion of uploads with the same content hash. This avoids a
+        // race where two simultaneous finalizes both pass the duplicate check and
+        // one of them fails on ux_media_assets_sha256 with an HTTP 500.
+        await using (var hashLock = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended(@sha, 0))", connection, tx))
+        {
+            hashLock.Parameters.AddWithValue("sha", payload.Sha256);
+            await hashLock.ExecuteNonQueryAsync();
+        }
+
+        Guid? duplicateOf = null;
+        await using (var duplicate = new NpgsqlCommand(
+            "SELECT id FROM media_assets WHERE sha256=@sha AND upload_id IS DISTINCT FROM @upload ORDER BY created_at LIMIT 1",
+            connection, tx))
+        {
+            duplicate.Parameters.AddWithValue("sha", payload.Sha256);
+            duplicate.Parameters.AddWithValue("upload", payload.UploadId);
+            var value = await duplicate.ExecuteScalarAsync();
+            if (value is Guid id)
+                duplicateOf = id;
+        }
+
         await using var asset = new NpgsqlCommand(
-            "UPDATE media_assets SET storage_key=@key, sha256=@sha, size_bytes=@size, duration_ms=@duration, status='UPLOADED' WHERE upload_id=@upload AND status='UPLOADING' RETURNING id,meeting_id", connection, tx);
+            "UPDATE media_assets SET storage_key=@key, sha256=@sha, duplicate_of=@duplicate, size_bytes=@size, duration_ms=@duration, status=@status WHERE upload_id=@upload AND status='UPLOADING' RETURNING id,meeting_id",
+            connection, tx);
         asset.Parameters.AddWithValue("key", normalizedStorageKey);
-        asset.Parameters.AddWithValue("sha", payload.Sha256);
+        asset.Parameters.AddWithValue("sha", duplicateOf.HasValue ? DBNull.Value : payload.Sha256);
+        asset.Parameters.AddWithValue("duplicate", duplicateOf.HasValue ? duplicateOf.Value : DBNull.Value);
         asset.Parameters.AddWithValue("size", payload.SizeBytes);
         asset.Parameters.AddWithValue("duration", payload.DurationMs);
+        asset.Parameters.AddWithValue("status", duplicateOf.HasValue ? "UPLOADED_DUPLICATE" : "UPLOADED");
         asset.Parameters.AddWithValue("upload", payload.UploadId);
         await using var reader = await asset.ExecuteReaderAsync();
 
@@ -753,6 +876,7 @@ public sealed class Database(IConfiguration configuration)
             stage = "UPLOADED",
             attempt = 0,
             storage_key = normalizedStorageKey,
+            duplicate_of = duplicateOf,
         });
         await using var outbox = new NpgsqlCommand(
             "INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'media.ingest',@payload::jsonb)", connection, tx);
@@ -762,7 +886,6 @@ public sealed class Database(IConfiguration configuration)
         await tx.CommitAsync();
         return new JobRow(jobId, meetingId, "TRANSCRIBE", "QUEUED", "UPLOADED", 0, 0, null);
     }
-
     public async Task<JobRow> RegisterImportAsync(ImportRequest request)
     {
         await using var connection = await OpenAsync();
@@ -775,7 +898,7 @@ public sealed class Database(IConfiguration configuration)
         var meetingId = Guid.NewGuid();
         var title = Path.GetFileNameWithoutExtension(request.OriginalName);
         await using var meeting = new NpgsqlCommand("INSERT INTO meetings(id,title,status) VALUES(@id,@title,'CREATED')", connection, tx);
-        meeting.Parameters.AddWithValue("id", meetingId); meeting.Parameters.AddWithValue("title", string.IsNullOrWhiteSpace(title) ? "Р‘РµР·С‹РјСЏРЅРЅР°СЏ Р·Р°РїРёСЃСЊ" : title);
+        meeting.Parameters.AddWithValue("id", meetingId); meeting.Parameters.AddWithValue("title", string.IsNullOrWhiteSpace(title) ? "Безымянная запись" : title);
         await meeting.ExecuteNonQueryAsync();
         var assetId = Guid.NewGuid();
         await using var asset = new NpgsqlCommand("INSERT INTO media_assets(id,meeting_id,original_name,storage_key,sha256,size_bytes,status,source_type) VALUES(@id,@meeting,@name,@key,@sha,@size,'UPLOADED',@source)", connection, tx);
@@ -837,22 +960,33 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
         await using var command = new NpgsqlCommand(
-            "UPDATE jobs SET status='QUEUED',stage='UPLOADED',progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message", connection, tx);
+            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message", connection, tx);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         var job = ReadJob(reader);
         await reader.CloseAsync();
-        await using var publish = new NpgsqlCommand(
-            "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx);
-        publish.Parameters.AddWithValue("outbox", Guid.NewGuid());
-        publish.Parameters.AddWithValue("message", Guid.NewGuid());
-        publish.Parameters.AddWithValue("id", id);
-        await publish.ExecuteNonQueryAsync();
+
+        var messageId = Guid.NewGuid();
+        await using var publish = job.Type switch
+        {
+            "SUMMARIZE" => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'llm.summarize',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'transcript_id',t.id) FROM jobs j JOIN LATERAL (SELECT id FROM transcripts WHERE meeting_id=j.meeting_id ORDER BY version DESC LIMIT 1) t ON true WHERE j.id=@id", connection, tx),
+            "TRANSCRIBE" => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+            _ => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+        };
+        await using (publish)
+        {
+            publish.Parameters.AddWithValue("outbox", Guid.NewGuid());
+            publish.Parameters.AddWithValue("message", messageId);
+            publish.Parameters.AddWithValue("id", id);
+            await publish.ExecuteNonQueryAsync();
+        }
         await tx.CommitAsync();
         return job;
     }
-
     public async Task<TranscriptRow> GetTranscriptAsync(Guid meetingId)
     {
         var segments = new List<TranscriptSegmentRow>();
@@ -860,7 +994,7 @@ public sealed class Database(IConfiguration configuration)
         string status = "PENDING";
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT t.id,t.status,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) ORDER BY s.ordinal", connection);
+            "SELECT t.id,t.status,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -868,7 +1002,7 @@ public sealed class Database(IConfiguration configuration)
             transcriptId = reader.GetGuid(0);
             status = reader.GetString(1);
             if (!reader.IsDBNull(2))
-                segments.Add(new TranscriptSegmentRow(reader.GetGuid(2), reader.GetInt32(3), reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetDouble(8), reader.IsDBNull(9) ? null : reader.GetFieldValue<JsonDocument>(9)));
+                segments.Add(new TranscriptSegmentRow(reader.GetGuid(2), reader.GetInt32(3), reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetDouble(8), reader.IsDBNull(9) ? null : reader.GetFieldValue<JsonDocument>(9), reader.GetString(10), reader.GetBoolean(11)));
         }
         return new TranscriptRow(transcriptId, meetingId, status, segments);
     }

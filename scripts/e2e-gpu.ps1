@@ -2,7 +2,8 @@
 param(
   [string]$AudioPath,
   [string]$InboxPath,
-  [string]$BaseUrl = "http://localhost:8000",
+  [string]$BaseUrl = "http://localhost:8080",
+  [string]$TusUrl = "http://localhost:1080",
   [int]$TimeoutSeconds = 3600,
   [switch]$Start
 )
@@ -10,6 +11,7 @@ param(
 $script = Join-Path $PSScriptRoot "e2e-core.ps1"
 $params = @{
   BaseUrl = $BaseUrl
+  TusUrl = $TusUrl
   TimeoutSeconds = $TimeoutSeconds
   WaitForGpu = $true
   WithGpu = $true

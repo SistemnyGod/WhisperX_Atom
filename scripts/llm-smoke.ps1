@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [string]$BaseUrl = "http://127.0.0.1:8081",
   [int]$TimeoutSeconds = 600,
@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 if ($Start) {
-  docker compose -f compose.dev.yml --profile llm up -d llama-server
+  docker compose -f compose.dev.yml --profile llm-diagnostic up -d llama-server
   if ($LASTEXITCODE -ne 0) { throw "Unable to start llama-server" }
 }
 

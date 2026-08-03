@@ -1,12 +1,12 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder;
-
-public sealed record RecordingTrackInfo(string TrackId, string TrackType, int SampleRate, int Channels);
 
 public sealed class RecordingCoordinator : IAsyncDisposable
 {
@@ -30,7 +30,17 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
     }
 
-    public string? SessionId => _sessionId;
+    public string? SessionId => _sessionId;    public long? CurrentMediaTimeMs
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var values = new[] { _microphone?.MediaTimeMs, _systemAudio?.MediaTimeMs }.Where(value => value is not null).Select(value => value!.Value).ToArray();
+                return values.Length == 0 ? null : values.Max();
+            }
+        }
+    }
 
     public IReadOnlyList<RecordingTrackInfo> ActiveTracks
     {
@@ -46,8 +56,9 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
     }
 
-    public async Task<string> StartAsync(CancellationToken cancellationToken = default)
+    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default)
     {
+        EnsureStorageAvailable();
         lock (_gate)
         {
             if (_state.State is RecorderState.Recording or RecorderState.Paused)
@@ -59,17 +70,43 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         var sessionId = Guid.NewGuid().ToString("N");
         try
         {
-            await _spool.CreateSessionAsync(sessionId, cancellationToken: cancellationToken);
+            await _spool.CreateSessionAsync(sessionId, meetingId ?? Guid.NewGuid(), title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", cancellationToken);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
 
-            var mic = new WasapiCapture();
-            var loopback = new WasapiLoopbackCapture();
-            _microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger);
-            _systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger);
+            CaptureTrack? microphone = null;
+            CaptureTrack? systemAudio = null;
+            string? microphoneWarning = null;
+            string? systemWarning = null;
+            try
+            {
+                var mic = new WasapiCapture();
+                microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger);
+                microphone.Start();
+            }
+            catch (Exception ex)
+            {
+                microphoneWarning = ex.Message;
+                if (microphone is not null) await microphone.DisposeAsync();
+            }
+            try
+            {
+                var loopback = new WasapiLoopbackCapture();
+                systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger);
+                systemAudio.Start();
+            }
+            catch (Exception ex)
+            {
+                systemWarning = ex.Message;
+                if (systemAudio is not null) await systemAudio.DisposeAsync();
+            }
+            if (microphone is null && systemAudio is null)
+                throw new IOException($"no_audio_source_available; microphone={microphoneWarning}; system={systemWarning}");
+            _microphone = microphone;
+            _systemAudio = systemAudio;
             _sessionId = sessionId;
-            _microphone.Start();
-            _systemAudio.Start();
-            _logger.LogInformation("Recording started. Session={SessionId}, microphone={MicrophoneFormat}, system={SystemFormat}", sessionId, mic.WaveFormat, loopback.WaveFormat);
+            if (microphoneWarning is not null || systemWarning is not null)
+                await _spool.AddEventAsync(sessionId, "AUDIO_SOURCE_WARNING", payloadJson: JsonSerializer.Serialize(new { microphone = microphoneWarning, systemAudio = systemWarning }), cancellationToken: cancellationToken);
+            _logger.LogInformation("Recording started. Session={SessionId}, microphone={Microphone}, systemAudio={SystemAudio}", sessionId, microphone is not null, systemAudio is not null);
             return sessionId;
         }
         catch
@@ -82,6 +119,16 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
     }
 
+    private void EnsureStorageAvailable()
+    {
+        var minimumText = Environment.GetEnvironmentVariable("ATOM_AGENT_MIN_FREE_BYTES");
+        var minimumBytes = long.TryParse(minimumText, out var configured) && configured > 0 ? configured : 512L * 1024 * 1024;
+        var root = Path.GetPathRoot(Path.GetFullPath(_dataRoot));
+        if (string.IsNullOrWhiteSpace(root)) throw new IOException("recording_storage_root_unavailable");
+        var drive = new DriveInfo(root);
+        if (!drive.IsReady || drive.AvailableFreeSpace < minimumBytes)
+            throw new IOException($"recording_storage_low:{drive.AvailableFreeSpace}:{minimumBytes}");
+    }
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
         lock (_gate)
@@ -102,10 +149,10 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             if (!_state.TryTransition(RecorderState.Recording, "recording-resumed"))
                 throw new InvalidOperationException($"Cannot resume from {_state.State}.");
         }
-        if (_microphone is null || _systemAudio is null || _sessionId is null)
+        if (_microphone is null && _systemAudio is null || _sessionId is null)
             throw new InvalidOperationException("No paused recording is available.");
-        _microphone.Resume();
-        _systemAudio.Resume();
+        _microphone?.Resume();
+        _systemAudio?.Resume();
         await _spool.AddEventAsync(_sessionId, "PAUSE_FINISHED", cancellationToken: cancellationToken);
     }
 
@@ -189,6 +236,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
 
         public RecordingTrackInfo Info => _info;
+        public long MediaTimeMs => _writer.MediaTimeMs;
 
         public void Start()
         {
@@ -233,6 +281,8 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
 internal sealed class PcmFlacChunkWriter : IAsyncDisposable
 {
+    private sealed record PendingRawChunk(int Sequence, string RawPath, string OutputPart, string Output, long StartSample, long SampleCount);
+
     private readonly string _sessionId;
     private readonly string _trackId;
     private readonly string _trackType;
@@ -242,12 +292,22 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private readonly string _ffmpegPath;
     private readonly ILogger _logger;
     private readonly object _gate = new();
+    private readonly Channel<PendingRawChunk> _pending = Channel.CreateUnbounded<PendingRawChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    private readonly Task _encoderTask;
     private FileStream? _raw;
     private string? _rawPath;
     private int _sequence;
     private long _startSample;
     private long _sampleCount;
     private bool _disposed;
+    private Exception? _encoderFailure;
+    public long MediaTimeMs
+    {
+        get
+        {
+            lock (_gate) return _format.SampleRate <= 0 ? 0 : (long)Math.Round((_startSample + _sampleCount) * 1000d / _format.SampleRate);
+        }
+    }
 
     public PcmFlacChunkWriter(string sessionId, string trackId, string trackType, WaveFormat format, SpoolStore spool, string root, string ffmpegPath, ILogger logger)
     {
@@ -259,6 +319,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _root = root;
         _ffmpegPath = ffmpegPath;
         _logger = logger;
+        _encoderTask = Task.Run(ProcessQueueAsync);
     }
 
     public void Append(ReadOnlySpan<byte> pcm)
@@ -279,7 +340,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
                 _raw!.Write(pcm.Slice(offset, bytesToWrite));
                 _sampleCount += framesToWrite;
                 offset += bytesToWrite;
-                if (_sampleCount >= targetSamples) FinalizeCurrentChunk();
+                if (_sampleCount >= targetSamples) QueueCurrentChunk();
             }
         }
     }
@@ -288,7 +349,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     {
         lock (_gate)
         {
-            if (!_disposed && _sampleCount > 0) FinalizeCurrentChunk();
+            if (!_disposed && _sampleCount > 0) QueueCurrentChunk();
         }
     }
 
@@ -302,11 +363,12 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _sampleCount = 0;
     }
 
-    private void FinalizeCurrentChunk()
+    private void QueueCurrentChunk()
     {
         if (_raw is null || _rawPath is null || _sampleCount <= 0) return;
         var raw = _raw;
         var rawPath = _rawPath;
+        var sequence = _sequence;
         var sampleCount = _sampleCount;
         var startSample = _startSample;
         _raw = null;
@@ -314,19 +376,36 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _sampleCount = 0;
         raw.Flush(true);
         raw.Dispose();
-
         var directory = Path.GetDirectoryName(rawPath)!;
-        var outputPart = Path.Combine(directory, $"{_sequence:D8}.flac.part");
-        var output = Path.Combine(directory, $"{_sequence:D8}.flac");
-        EncodeFlac(rawPath, outputPart);
-        File.Move(outputPart, output, true);
-        File.Delete(rawPath);
-        var size = new FileInfo(output).Length;
-        var sha = ComputeSha256(output);
-        _spool.UpsertChunkAsync(new RecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, output, startSample, sampleCount, _format.SampleRate, _format.Channels, size, sha, "READY", 0)).GetAwaiter().GetResult();
-        _logger.LogInformation("Audio chunk ready. Session={SessionId}, Track={TrackType}, Sequence={Sequence}, Samples={Samples}", _sessionId, _trackType, _sequence, sampleCount);
+        var outputPart = Path.Combine(directory, $"{sequence:D8}.flac.part");
+        var output = Path.Combine(directory, $"{sequence:D8}.flac");
+        if (!_pending.Writer.TryWrite(new PendingRawChunk(sequence, rawPath, outputPart, output, startSample, sampleCount)))
+            throw new InvalidOperationException("Audio encoder queue is closed.");
         _sequence++;
         _startSample += sampleCount;
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        await foreach (var chunk in _pending.Reader.ReadAllAsync())
+        {
+            try
+            {
+                EncodeFlac(chunk.RawPath, chunk.OutputPart);
+                File.Move(chunk.OutputPart, chunk.Output, true);
+                File.Delete(chunk.RawPath);
+                var size = new FileInfo(chunk.Output).Length;
+                var sha = ComputeSha256(chunk.Output);
+                await _spool.UpsertChunkAsync(new RecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, chunk.Sequence, chunk.Output, chunk.StartSample, chunk.SampleCount, _format.SampleRate, _format.Channels, _trackType, size, sha, "READY", 0));
+                _logger.LogInformation("Audio chunk ready. Session={SessionId}, Track={TrackType}, Sequence={Sequence}, Samples={Samples}", _sessionId, _trackType, chunk.Sequence, chunk.SampleCount);
+            }
+            catch (Exception ex)
+            {
+                _encoderFailure ??= ex;
+                _logger.LogError(ex, "Failed to encode audio chunk. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", _sessionId, _trackType, chunk.Sequence);
+                try { if (File.Exists(chunk.OutputPart)) File.Delete(chunk.OutputPart); } catch (IOException) { }
+            }
+        }
     }
 
     private void EncodeFlac(string input, string output)
@@ -369,16 +448,18 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         lock (_gate)
         {
-            if (_disposed) return ValueTask.CompletedTask;
-            if (_raw is not null && _sampleCount > 0) FlushCurrentChunk();
+            if (_disposed) return;
+            if (_raw is not null && _sampleCount > 0) QueueCurrentChunk();
             _disposed = true;
             _raw?.Dispose();
             _raw = null;
+            _pending.Writer.TryComplete();
         }
-        return ValueTask.CompletedTask;
+        await _encoderTask;
+        if (_encoderFailure is not null) throw new InvalidOperationException("One or more audio chunks failed to encode.", _encoderFailure);
     }
 }

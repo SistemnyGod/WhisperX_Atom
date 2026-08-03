@@ -10,7 +10,7 @@ PREPROCESS_PROFILES: dict[str, dict[str, str]] = {
         "filter": (
             "highpass=f=60,"
             "lowpass=f=7600,"
-            "afftdn=nf=-18,"
+            "afftdn=nf=-20,"
             "dynaudnorm=f=150:g=15,"
             "acompressor=threshold=-26dB:ratio=2.5:attack=5:release=70,"
             "alimiter=limit=-1dB"
@@ -21,7 +21,7 @@ PREPROCESS_PROFILES: dict[str, dict[str, str]] = {
         "filter": (
             "highpass=f=40,"
             "lowpass=f=7800,"
-            "afftdn=nf=-14,"
+            "afftdn=nf=-20,"
             "dynaudnorm=f=120:g=21,"
             "acompressor=threshold=-30dB:ratio=2.0:attack=10:release=120,"
             "alimiter=limit=-1dB"
@@ -32,7 +32,7 @@ PREPROCESS_PROFILES: dict[str, dict[str, str]] = {
         "filter": (
             "highpass=f=90,"
             "lowpass=f=7600,"
-            "afftdn=nf=-18,"
+            "afftdn=nf=-20,"
             "dynaudnorm=f=200:g=17,"
             "acompressor=threshold=-30dB:ratio=3:attack=5:release=90,"
             "alimiter=limit=-1dB"
@@ -43,7 +43,7 @@ PREPROCESS_PROFILES: dict[str, dict[str, str]] = {
         "filter": (
             "highpass=f=65,"
             "lowpass=f=7800,"
-            "afftdn=nf=-14,"
+            "afftdn=nf=-20,"
             "dynaudnorm=f=180:g=22,"
             "acompressor=threshold=-32dB:ratio=2.2:attack=8:release=120,"
             "alimiter=limit=-1dB"

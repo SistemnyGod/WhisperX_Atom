@@ -5,8 +5,10 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from fastapi import UploadFile
+if TYPE_CHECKING:
+    from fastapi import UploadFile
 
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, CHUNK_SIZE, MAX_UPLOAD_BYTES, VIDEO_EXTENSIONS
 
@@ -60,7 +62,7 @@ def _probe_audio(path: Path) -> dict:
     return payload
 
 
-async def save_upload(file: UploadFile):
+async def save_upload(file: "UploadFile"):
     job_id = uuid.uuid4().hex[:12]
     suffix = (Path(file.filename).suffix or ".bin").lower()
     if suffix in VIDEO_EXTENSIONS:

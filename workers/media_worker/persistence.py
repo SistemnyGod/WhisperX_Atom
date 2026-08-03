@@ -10,6 +10,24 @@ def _conninfo() -> str:
     return os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
 
 
+def reset_media_leases() -> None:
+    """Release leases left by a crashed media worker on process startup.
+
+    Only media ingestion stages are reset. GPU and summary jobs use the same
+    inbox table but must not be stolen by this worker.
+    """
+    with psycopg.connect(_conninfo()) as connection:
+        connection.execute(
+            """
+            UPDATE inbox_messages AS inbox
+            SET lease_expires_at=now() - interval '1 second', worker_id=NULL
+            FROM jobs AS job
+            WHERE inbox.job_id=job.id
+              AND job.type='TRANSCRIBE'
+              AND job.stage IN ('UPLOADED','VALIDATING','NORMALIZING')
+            """
+        )
+
 def claim_message(message_id: str | None, job_id: str | None = None) -> bool:
     if not message_id:
         return True
@@ -55,6 +73,6 @@ def update_job(job_id: str, status: str, stage: str, progress: int, error: str |
 def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key: str, asr_key: str, duration_ms: int) -> None:
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
-            "UPDATE media_assets SET sha256=%s,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s",
+            "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s",
             (sha256, archive_key, preview_key, asr_key, duration_ms, media_asset_id),
         )

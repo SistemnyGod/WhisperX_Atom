@@ -1,5 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace WhisperX.Atom.Recorder;
@@ -9,19 +11,45 @@ public sealed record AgentCommandEnvelope(Guid Id, string CommandType, JsonEleme
 public sealed class AgentApiClient : IDisposable
 {
     private readonly HttpClient _http = new();
-    private readonly Uri _baseUri;
-    private readonly Guid _agentId;
-    private readonly string _token;
+    private Uri _baseUri;
+    private Guid _agentId;
+    private string _token;
+    private readonly string _configPath;
+    private readonly object _configurationGate = new();
 
     public AgentApiClient()
     {
-        var baseUrl = (Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL") ?? "http://localhost:8000").TrimEnd('/') + "/";
+        _configPath = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent", "agent-config.json");
+        var config = ReadConfig(_configPath);
+        var baseUrl = (Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL") ?? config?.ServerUrl ?? "http://localhost:8080").TrimEnd('/') + "/";
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
-        Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID"), out _agentId);
-        _token = Environment.GetEnvironmentVariable("ATOM_AGENT_TOKEN") ?? string.Empty;
+        Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
+        _token = Environment.GetEnvironmentVariable("ATOM_AGENT_TOKEN") ?? config?.Token ?? string.Empty;
     }
 
     public bool IsConfigured => _agentId != Guid.Empty && !string.IsNullOrWhiteSpace(_token);
+
+    public async Task ConfigureAsync(string serverUrl, Guid agentId, string token, CancellationToken cancellationToken = default)
+    {
+        if (!Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri) || string.IsNullOrWhiteSpace(token) || agentId == Guid.Empty)
+            throw new InvalidOperationException("agent_configuration_invalid");
+        lock (_configurationGate)
+        {
+            _baseUri = uri;
+            _agentId = agentId;
+            _token = token;
+        }
+        var directory = Path.GetDirectoryName(_configPath)!;
+        Directory.CreateDirectory(directory);
+        var temporary = _configPath + ".part";
+        var protectedToken = Convert.ToBase64String(ProtectedData.Protect(
+            Encoding.UTF8.GetBytes(token),
+            Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
+            DataProtectionScope.LocalMachine));
+        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), protectedToken, true)), cancellationToken);
+        File.Move(temporary, _configPath, true);
+    }
 
     public async Task<IReadOnlyList<AgentCommandEnvelope>> ReadCommandsAsync(long afterCursor, CancellationToken cancellationToken)
     {
@@ -44,6 +72,28 @@ public sealed class AgentApiClient : IDisposable
         return result;
     }
 
+    public async Task<bool> HeartbeatAsync(DeviceHealthSnapshot health, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return false;
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/agents/{_agentId}/heartbeat"));
+        AddAuthentication(request);
+        var version = Environment.GetEnvironmentVariable("ATOM_AGENT_VERSION") ?? "0.1.0";
+        request.Content = JsonContent.Create(new
+        {
+            status = "ONLINE",
+            version,
+            capabilities = new
+            {
+                microphone = health.Microphone,
+                systemAudio = health.SystemAudio,
+                manifest = true,
+                spool = true,
+                deviceHealth = health
+            }
+        });
+        using var response = await _http.SendAsync(request, cancellationToken);
+        return response.IsSuccessStatusCode;
+    }
     public async Task<bool> CompleteCommandAsync(Guid commandId, string status, object result, CancellationToken cancellationToken)
     {
         if (!IsConfigured) return false;
@@ -54,11 +104,13 @@ public sealed class AgentApiClient : IDisposable
         return response.IsSuccessStatusCode;
     }
 
-    public async Task<Guid> BindSessionAsync(string localSessionId, Guid meetingId, IReadOnlyList<RecordingTrackInfo> tracks, SpoolStore spool, CancellationToken cancellationToken)
+    public async Task<Guid> BindSessionAsync(string localSessionId, Guid? meetingId, string? title, IReadOnlyList<RecordingTrackInfo> tracks, SpoolStore spool, CancellationToken cancellationToken)
     {
         if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
         var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-        var serverSessionId = existingServerSession ?? await CreateServerSessionAsync(meetingId, cancellationToken);
+        var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
+        var serverSessionId = created.Item1;
+        if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
         foreach (var track in tracks)
         {
             var existingBinding = await spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken);
@@ -79,30 +131,46 @@ public sealed class AgentApiClient : IDisposable
             if (binding is null || !File.Exists(chunk.LocalPath)) continue;
             await UploadChunkAsync(binding, chunk, cancellationToken);
             await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
-            try { File.Delete(chunk.LocalPath); } catch (IOException) { }
             uploaded++;
         }
         return uploaded;
     }
 
-    public async Task FinalizeServerSessionAsync(Guid serverSessionId, CancellationToken cancellationToken)
+    public async Task<bool> FinalizeServerSessionAsync(Guid serverSessionId, string localSessionId, SpoolStore spool, CancellationToken cancellationToken)
     {
-        if (!IsConfigured) return;
+        if (!IsConfigured) return false;
+        var manifest = await spool.BuildManifestAsync(localSessionId, cancellationToken);
+        if (manifest is null || manifest.ServerSessionId != serverSessionId) return false;
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/finalize"));
         AddAuthentication(request);
+        request.Content = JsonContent.Create(new
+        {
+            manifest = new
+            {
+                session_id = serverSessionId,
+                tracks = manifest.Tracks.Select(track => new
+                {
+                    track_id = track.ServerTrackId,
+                    track_type = track.TrackType,
+                    sample_rate = track.SampleRate,
+                    channels = track.Channels,
+                    expected_chunk_count = track.ExpectedChunkCount
+                })
+            }
+        });
         using var response = await _http.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        return response.IsSuccessStatusCode;
     }
 
-    private async Task<Guid> CreateServerSessionAsync(Guid meetingId, CancellationToken cancellationToken)
+    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, "api/v1/recording-sessions"));
         AddAuthentication(request);
-        request.Content = JsonContent.Create(new { meetingId });
+        request.Content = JsonContent.Create(new { meetingId, title, startedAt = DateTimeOffset.UtcNow });
         using var response = await _http.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
-        return document.RootElement.GetProperty("id").GetGuid();
+        return (document.RootElement.GetProperty("id").GetGuid(), document.RootElement.GetProperty("meetingId").GetGuid());
     }
 
     private async Task<Guid> CreateServerTrackAsync(Guid serverSessionId, RecordingTrackInfo track, CancellationToken cancellationToken)
@@ -137,6 +205,27 @@ public sealed class AgentApiClient : IDisposable
         request.Headers.Add("X-Agent-Id", _agentId.ToString());
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
     }
+
+    private static AgentConfiguration? ReadConfig(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var config = JsonSerializer.Deserialize<AgentConfiguration>(File.ReadAllText(path));
+            if (config is null || !config.Encrypted) return config;
+            var token = Encoding.UTF8.GetString(ProtectedData.Unprotect(
+                Convert.FromBase64String(config.Token),
+                Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
+                DataProtectionScope.LocalMachine));
+            return config with { Token = token };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private sealed record AgentConfiguration(string ServerUrl, string AgentId, string Token, bool Encrypted = false);
 
     public void Dispose() => _http.Dispose();
 }

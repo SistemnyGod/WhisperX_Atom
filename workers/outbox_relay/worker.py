@@ -11,7 +11,7 @@ async def recover_expired(connection) -> None:
     rows = connection.execute("""
         UPDATE jobs j SET status='QUEUED',stage='UPLOADED',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now()
         FROM media_assets a
-        WHERE j.media_asset_id=a.id AND j.status='RUNNING' AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at < now()
+        WHERE j.media_asset_id=a.id AND j.type='TRANSCRIBE' AND j.status='RUNNING' AND j.stage IN ('INGEST','UPLOADED','VALIDATING','NORMALIZING') AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at < now()
         RETURNING j.id,j.meeting_id,j.media_asset_id,j.attempt,a.storage_key,a.source_type
     """).fetchall()
     for job_id, meeting_id, asset_id, attempt, storage_key, source_type in rows:
@@ -28,10 +28,17 @@ async def run() -> None:
     conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     jetstream = client.jetstream()
+    subjects = ["media.ingest", "ml.transcribe", "llm.summarize"]
+    # Existing development streams may have been created before a new subject
+    # was introduced. Update the subject set instead of silently keeping stale
+    # configuration (which would block the oldest outbox message forever).
     try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize"])
+        await jetstream.update_stream(name="WHISPERX", subjects=subjects)
     except Exception:
-        pass
+        try:
+            await jetstream.add_stream(name="WHISPERX", subjects=subjects)
+        except Exception:
+            pass
 
     while True:
         published = False

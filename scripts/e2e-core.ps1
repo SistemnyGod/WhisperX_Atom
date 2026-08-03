@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$BaseUrl = "http://localhost:8000",
+  [string]$BaseUrl = "http://localhost:8080",
+  [string]$TusUrl = $(if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "http://localhost:1080" }),
   [string]$Username = $(if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" }),
   [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "change-me-now" }),
   [string]$AudioPath,
@@ -22,9 +23,15 @@ function Invoke-Api([string]$Method, [string]$Path, $Body = $null) {
     $params.ContentType = "application/json"
     $params.Body = ($Body | ConvertTo-Json -Depth 8 -Compress)
   }
-  return Invoke-RestMethod @params
+  $response = Invoke-WebRequest @params
+  if ([string]::IsNullOrWhiteSpace($response.Content)) { return $null }
+  $parsed = $response.Content | ConvertFrom-Json
+  if ($parsed -is [System.Array]) {
+    foreach ($item in $parsed) { Write-Output $item }
+  } else {
+    Write-Output $parsed
+  }
 }
-
 function Wait-Ready {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
@@ -41,8 +48,8 @@ function Wait-Job([string]$MeetingId) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
     $jobs = @(Invoke-Api GET "/api/meetings/$MeetingId/jobs")
-    if ($jobs.Count -gt 0) {
-      $job = $jobs[0]
+    $job = $jobs | Where-Object { $_.type -eq "TRANSCRIBE" } | Select-Object -First 1
+    if ($null -ne $job) {
       Write-Host ("job {0}: {1}/{2} {3}%" -f $job.id, $job.status, $job.stage, $job.progress)
       $terminal = if ($WaitForGpu) { @("READY", "FAILED") } else { @("QUEUED", "READY", "FAILED") }
       if ($job.status -in $terminal) { return $job }
@@ -76,12 +83,13 @@ if ($AudioPath) {
     "filetype $([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("application/octet-stream")))"
   ) -join ","
   $createHeaders = @{ "Tus-Resumable" = "1.0.0"; "Upload-Length" = [string]$file.Length; "Upload-Metadata" = $metadata }
-  $created = Invoke-WebRequest -Uri "$BaseUrl/files/" -Method Post -Headers $createHeaders -WebSession $session
+  $created = Invoke-WebRequest -Uri "$TusUrl/files/" -Method Post -Headers $createHeaders -WebSession $session
   $location = $created.Headers["Location"]
   if ([string]::IsNullOrWhiteSpace($location)) { throw "tusd did not return Location" }
-  if ($location -notmatch '^https?://') { $location = "$BaseUrl$location" }
-  $patchHeaders = @{ "Tus-Resumable" = "1.0.0"; "Upload-Offset" = "0"; "Content-Type" = "application/offset+octet-stream" }
-  Invoke-WebRequest -Uri $location -Method Patch -Headers $patchHeaders -Body ([IO.File]::ReadAllBytes($file.FullName)) -WebSession $session | Out-Null
+  if ($location -notmatch '^https?://') { $location = "$TusUrl$location" }
+  $curlArgs = @("--fail-with-body", "--silent", "--show-error", "--request", "PATCH", $location, "--header", "Tus-Resumable: 1.0.0", "--header", "Upload-Offset: 0", "--header", "Content-Type: application/offset+octet-stream", "--data-binary", "@$($file.FullName)")
+  & curl.exe @curlArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "tus PATCH failed for $($file.Name)" }
   Write-Host "tus upload completed: $($file.Name)"
   $job = Wait-Job $meeting.id
   if ($job.status -eq "FAILED") { throw "tus job failed: $($job.error)" }

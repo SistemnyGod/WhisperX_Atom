@@ -8,7 +8,7 @@
 docker compose --profile core --profile gpu -f compose.dev.yml up -d --build
 ```
 
-Веб-интерфейс: `http://localhost:8000`
+Веб-интерфейс: `http://localhost:8080`
 
 Локальная dev-учётная запись задаётся в Compose:
 

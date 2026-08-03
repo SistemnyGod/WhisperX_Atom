@@ -7,7 +7,7 @@ x-media-volumes: &media-volumes
 
 services:
   postgres:
-    profiles: ["core", "gpu"]
+    profiles: ["core", "gpu", "llm"]
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
@@ -23,7 +23,7 @@ services:
       retries: 20
 
   nats:
-    profiles: ["core", "gpu"]
+    profiles: ["core", "gpu", "llm"]
     image: nats:2.11-alpine
     restart: unless-stopped
     command: ["-js", "-sd", "/data", "-m", "8222"]
@@ -45,6 +45,8 @@ services:
     command: ["-host", "0.0.0.0", "-port", "1080", "-upload-dir", "/data/uploads", "-hooks-http", "http://api:8080/api/internal/tusd/hooks?secret=${TUS_HOOK_SECRET:-local-dev-secret}"]
     environment:
       TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
+    ports:
+      - "127.0.0.1:1080:1080"
     volumes: *media-volumes
     depends_on:
       api:
@@ -62,12 +64,13 @@ services:
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
       TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
       IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN:-local-import-secret}
+      AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET:-change-me-agent-enrollment}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes: *media-volumes
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]
@@ -111,6 +114,8 @@ services:
       ARCHIVE_ROOT: /data/archive
       REJECTED_ROOT: /data/rejected
       IMPORT_INTERVAL_SECONDS: ${IMPORT_INTERVAL_SECONDS:-5}
+      IMPORT_BATCH_SIZE: ${IMPORT_BATCH_SIZE:-8}
+      IMPORT_MAX_STABLE_PATHS: ${IMPORT_MAX_STABLE_PATHS:-2048}
     depends_on:
       api:
         condition: service_healthy
@@ -156,6 +161,14 @@ services:
       WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
       DEVICE: cuda
       GPU_CONCURRENCY: "1"
+      GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
+      GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+      # pyannote 3.3.2 checkpoints are trusted local/HF artifacts and require the pre-2.6 torch.load behavior.
+      # Block accidental diagnostic llama-server if it is started with GPU layers.
+      GPU_ENFORCE_NO_RESIDENT_LLM: "true"
+      LLM_HEALTH_HOST: llama-server
+      LLM_HEALTH_PORT: "8080"
+      TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
     depends_on:
       nats:
         condition: service_healthy
@@ -180,7 +193,7 @@ services:
       retries: 5
 
   llama-server:
-    profiles: ["llm"]
+    profiles: ["llm-diagnostic"]
     image: ghcr.io/ggml-org/llama.cpp:server-cuda-b9445@sha256:39f4f2c5fd4537f85208f905e70269b5b691fbc6de00fd916c37a60a710b7d52
     restart: unless-stopped
     command:
@@ -193,9 +206,10 @@ services:
       - --port
       - "8080"
       - --ctx-size
-      - "${LLM_CONTEXT_SIZE:-32768}"
+      - "${LLM_CONTEXT_SIZE:-16384}"
+      # Keep the resident diagnostic LLM off the GPU by default. Set LLM_GPU_LAYERS=99 only for an exclusive manual LLM smoke.
       - --n-gpu-layers
-      - "99"
+      - "${LLM_GPU_LAYERS:-0}"
       - --flash-attn
       - "on"
       - --cache-type-k
@@ -212,6 +226,12 @@ services:
       - --metrics
     ports:
       - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     volumes:
       - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
     deploy:
@@ -222,6 +242,11 @@ services:
               count: 1
               capabilities: [gpu]
   summary-worker:
+    healthcheck:
+      test: ["CMD", "python3.12", "-c", "import workers.summary_worker.worker"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     profiles: ["llm"]
     build:
       context: .
@@ -230,18 +255,32 @@ services:
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
       NATS_URL: nats://nats:4222
-      LLM_BASE_URL: http://llama-server:8080/v1
+      LLM_MODEL_PATH: /models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf
+      LLM_GPU_LAYERS: ${LLM_GPU_LAYERS:-99}
+      LLM_CONTEXT_SIZE: ${LLM_CONTEXT_SIZE:-16384}
       LLM_MODEL_ALIAS: qwen3-8b
+      LLM_BLOCK_MAX_CHARS: ${LLM_BLOCK_MAX_CHARS:-16000}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-3072}
+      GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
+      GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+    volumes:
+      - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       postgres:
         condition: service_healthy
       nats:
         condition: service_healthy
-      llama-server:
-        condition: service_started
 
+  # Optional diagnostics only. The product UI is the Windows Desktop app.
   web:
-    profiles: ["core", "gpu"]
+    profiles: ["diagnostic-web"]
     build:
       context: ./apps/web
     restart: unless-stopped
@@ -249,8 +288,9 @@ services:
       api:
         condition: service_healthy
 
+  # Optional browser diagnostics only; not part of the Desktop product runtime.
   gateway:
-    profiles: ["core", "gpu"]
+    profiles: ["diagnostic-web"]
     image: caddy:2.8-alpine
     restart: unless-stopped
     ports:
