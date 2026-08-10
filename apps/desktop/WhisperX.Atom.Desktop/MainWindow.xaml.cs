@@ -31,10 +31,16 @@ public partial class MainWindow : Window
     private ICollectionView? _meetingsView;
     private int _statusRefreshGate;
 
+    private sealed record DashboardFacts(bool SummaryQueried, bool SummaryReady, bool TasksQueried, int OpenTasks, bool JobsQueried, bool HasActiveJob);
+
     public MainWindow()
     {
         InitializeComponent();
         var settings = DesktopSettings.Load();
+        var displayName = string.IsNullOrWhiteSpace(settings.Username) ? "Локальный пользователь" : settings.Username.Trim();
+        HeaderUserNameText.Text = displayName;
+        HeaderUserEmailText.Text = string.Empty;
+        HeaderAvatarText.Text = displayName.Length >= 2 ? displayName[..2].ToUpperInvariant() : "WX";
         ApiUrlTextBox.Text = settings.ApiUrl;
         UsernameTextBox.Text = settings.Username;
         _server.Dispose();
@@ -46,7 +52,96 @@ public partial class MainWindow : Window
             await RefreshStatusAsync();
             UpdatePlayerPosition();
         };
+        ResetDashboard("Войдите в API, чтобы загрузить совещания");
     }
+
+    private void ResetDashboard(string message)
+    {
+        DashboardMeetingsList.ItemsSource = Array.Empty<DesktopMeeting>();
+        DashboardMeetingsEmptyText.Text = message;
+        DashboardMeetingsEmptyText.Visibility = Visibility.Visible;
+        DashboardProcessingText.Text = "—";
+        DashboardSummariesText.Text = "—";
+        DashboardTasksText.Text = "—";
+        DashboardStorageMetricText.Text = "Ожидание проверки";
+        DashboardStoragePercentText.Text = "—";
+        DashboardStorageBar.Value = 0;
+    }
+
+    private async Task RefreshDashboardMetricsAsync(IReadOnlyList<DesktopMeeting> meetings, CancellationToken cancellationToken = default)
+    {
+        var recent = meetings.OrderByDescending(item => item.CreatedAt).Take(7).ToArray();
+        DashboardMeetingsList.ItemsSource = recent;
+        DashboardMeetingsEmptyText.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DashboardMeetingsEmptyText.Text = recent.Length == 0 ? "Нет загруженных совещаний" : string.Empty;
+
+        if (meetings.Count == 0)
+        {
+            DashboardProcessingText.Text = "0";
+            DashboardSummariesText.Text = "0";
+            DashboardTasksText.Text = "0";
+            return;
+        }
+
+        var candidates = meetings
+            .Where(item => Guid.TryParse(item.Id, out _))
+            .Take(30)
+            .ToArray();
+        var facts = await Task.WhenAll(candidates.Select(item => GetDashboardFactsAsync(Guid.Parse(item.Id), cancellationToken)));
+
+        var summaryFacts = facts.Where(item => item.SummaryQueried).ToArray();
+        var taskFacts = facts.Where(item => item.TasksQueried).ToArray();
+        var jobFacts = facts.Where(item => item.JobsQueried).ToArray();
+        DashboardProcessingText.Text = jobFacts.Length > 0
+            ? jobFacts.Count(item => item.HasActiveJob).ToString(CultureInfo.InvariantCulture)
+            : meetings.Count(item => !IsTerminalMeetingStatus(item.Status)).ToString(CultureInfo.InvariantCulture);
+        DashboardSummariesText.Text = summaryFacts.Length > 0
+            ? summaryFacts.Count(item => item.SummaryReady).ToString(CultureInfo.InvariantCulture)
+            : "—";
+        DashboardTasksText.Text = taskFacts.Length > 0
+            ? taskFacts.Sum(item => item.OpenTasks).ToString(CultureInfo.InvariantCulture)
+            : "—";
+    }
+
+    private async Task<DashboardFacts> GetDashboardFactsAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        var summaryQueried = false;
+        var summaryReady = false;
+        var tasksQueried = false;
+        var openTasks = 0;
+        var jobsQueried = false;
+        var hasActiveJob = false;
+
+        try
+        {
+            var summary = await _server.GetSummaryAsync(meetingId, cancellationToken);
+            summaryQueried = true;
+            summaryReady = summary is not null && string.Equals(summary.Status, "READY", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { }
+
+        try
+        {
+            var tasks = await _server.GetTasksAsync(meetingId, cancellationToken);
+            tasksQueried = true;
+            openTasks = tasks.Count(item => !IsTerminalTaskStatus(item.Status));
+        }
+        catch { }
+
+        try
+        {
+            var jobs = await _server.GetJobsAsync(meetingId, cancellationToken);
+            jobsQueried = true;
+            hasActiveJob = jobs.Any(item => !IsTerminalJobStatus(item.Status));
+        }
+        catch { }
+
+        return new DashboardFacts(summaryQueried, summaryReady, tasksQueried, openTasks, jobsQueried, hasActiveJob);
+    }
+
+    private static bool IsTerminalMeetingStatus(string status) => status.ToUpperInvariant() is "READY" or "DONE" or "COMPLETED" or "FAILED" or "CANCELLED";
+    private static bool IsTerminalJobStatus(string status) => status.ToUpperInvariant() is "READY" or "DONE" or "COMPLETED" or "FAILED" or "CANCELLED";
+    private static bool IsTerminalTaskStatus(string status) => status.ToUpperInvariant() is "DONE" or "COMPLETED" or "CLOSED" or "CANCELLED";
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
@@ -92,6 +187,8 @@ public partial class MainWindow : Window
         await CheckServerAsync();
         if (!string.IsNullOrWhiteSpace(_server.GetSessionCookie()))
             await LoadMeetingsAsync();
+        else
+            ResetDashboard("Войдите в API, чтобы загрузить совещания");
     }
 
     private void Window_Closed(object? sender, EventArgs e)
@@ -136,6 +233,8 @@ public partial class MainWindow : Window
                 "Idle" => "Ожидание",
                 _ => status.State,
             };
+            DashboardActiveText.Text = status.Ok && (status.State is "Recording" or "Paused") ? "1" : status.Ok ? "0" : "—";
+            DashboardActiveHintText.Text = status.Ok ? "По данным Recorder Agent" : "Recorder Agent недоступен";
             SessionText.Text = string.IsNullOrWhiteSpace(status.SessionId) ? "Сессия не создана" : $"Сессия: {status.SessionId}";
             UpdateRecordingControls(status.Ok, status.State);
             if (status.Health is not null)
@@ -143,6 +242,12 @@ public partial class MainWindow : Window
                 MicrophoneText.Text = $"Микрофон: {(status.Health.Microphone ? "работает" : "не найден")} ({status.Health.CaptureDeviceCount} устройств)";
                 SystemAudioText.Text = $"Системный звук: {(status.Health.SystemAudio ? "работает" : "не найден")} ({status.Health.RenderDeviceCount} устройств)";
                 StorageText.Text = $"Диск: {FormatBytes(status.Health.FreeBytes)} свободно из {FormatBytes(status.Health.TotalBytes)}";
+                DashboardStorageMetricText.Text = $"{FormatBytes(status.Health.FreeBytes)} из {FormatBytes(status.Health.TotalBytes)}";
+                var usedPercent = status.Health.TotalBytes > 0
+                    ? Math.Clamp((1d - status.Health.FreeBytes / (double)status.Health.TotalBytes) * 100d, 0d, 100d)
+                    : 0d;
+                DashboardStorageBar.Value = usedPercent;
+                DashboardStoragePercentText.Text = $"{usedPercent:0}% занято";
                 DeviceErrorText.Text = status.Health.Error ?? string.Empty;
             }
             LastErrorText.Text = status.Error ?? string.Empty;
@@ -153,6 +258,11 @@ public partial class MainWindow : Window
             AgentStatusText.Text = "Недоступен";
             AgentStatusText.Foreground = Brushes.OrangeRed;
             RecordingStateText.Text = "Сервис недоступен";
+            DashboardActiveText.Text = "—";
+            DashboardActiveHintText.Text = "Recorder Agent недоступен";
+            DashboardStorageMetricText.Text = "Нет данных";
+            DashboardStoragePercentText.Text = "—";
+            DashboardStorageBar.Value = 0;
             LastErrorText.Text = SafeError(ex);
             FooterText.Text = "Recorder Service не отвечает";
             UpdateRecordingControls(false, "Unavailable");
@@ -501,10 +611,12 @@ public partial class MainWindow : Window
             _meetingsView.Filter = FilterMeeting;
             MeetingsList.ItemsSource = _meetingsView;
             MeetingCountText.Text = $"Совещаний: {meetings.Count}";
+            await RefreshDashboardMetricsAsync(meetings);
             FooterText.Text = $"Совещаний загружено: {meetings.Count}";
         }
         catch (Exception ex)
         {
+            ResetDashboard("Не удалось загрузить совещания");
             AdminStatusText.Text = SafeError(ex);
         }
     }

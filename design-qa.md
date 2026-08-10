@@ -1,43 +1,32 @@
 # Design QA
 
-Reference: selected Editorial Control Room concept, adapted to a white/light interface.
-Target viewport: 1440x1024.
-
-## Desktop audit evidence
-
-The current audit used the six screenshots supplied in the review:
-
-1. Home — the recording action was not visually dominant and the content was constrained to the left with excessive empty space.
-2. Meetings — default WPF tab styling, duplicated player/speaker tabs and an unclear empty state.
-3. Sources — only two explanatory cards, with no clear device/readiness hierarchy.
-4. Tasks — a single hand-off card instead of a task register state.
-5. Assistant — controls and response area were visually mixed, with a weak status hierarchy.
-6. Settings — a small preferences card surrounded by unused space and a collapsed diagnostic path.
+Reference: WhisperX Atom Desktop Control Room, white/light shell with cobalt-blue primary actions.
+Target viewport: 1440x900 and 1586x993.
 
 ## Current pass
 
-The Desktop interface now includes:
+The Desktop Home screen now includes:
 
-- an explicit light editorial-control-room shell with a stronger left navigation;
-- a recording-first Home screen with a clear session state, processing state and primary actions;
-- a two-pane Meetings workspace with a searchable meeting list, selected-meeting header and persistent player controls;
-- meeting sections for Overview, Transcript, Summary, Decisions, Tasks and Files;
-- speaker management integrated into the Transcript side panel;
-- meaningful Sources, Tasks, Assistant and Settings compositions with explicit empty and diagnostic states;
-- consistent white surfaces, teal primary actions, coral destructive action, tighter spacing and stretch-to-window layouts.
+- a light control-room shell with left navigation, search, system status and profile area;
+- a recording-first hero with real Recorder Agent state and disabled controls until the service is ready;
+- real meeting rows loaded from `GET /api/meetings`;
+- dashboard counters populated from Recorder Agent/API data, with `—` when the API does not expose a metric;
+- real disk capacity from the agent health response;
+- explicit empty states instead of hardcoded meeting, GPU, CPU, memory and notification values;
+- retained functional controls for recording and file import.
 
 ## Result
 
 final result: blocked
 
-The in-app Windows UI capture could not start because the sandbox helper failed while applying read ACLs. The updated Desktop process did start successfully and the WPF build passed, but a fresh visual screenshot could not be captured and compared side-by-side in this run.
+The WPF build and runtime launch were verified, but this environment cannot capture the Windows surface reliably: screen capture returns an invalid desktop handle and the Computer Use helper cannot start. The supplied user screenshot was used for layout review; a fresh post-change screenshot still requires a working Windows capture path.
 
 ## Automated checks
 
 - `dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore --nologo` — passed, 0 warnings/errors.
-- Desktop process after launch — confirmed running.
-- `git diff --check` — pending final run.
+- Desktop process after launch — confirmed running and responsive.
+- `git diff --check` — passed; only line-ending warnings remain.
 
 ## Follow-up
 
-When Windows capture is available, verify the Home and selected-Meeting screens at 1440x1024 and on a narrow viewport. Check focus states, disabled recording actions, transcript selection-to-player seeking, speaker editing, and empty/error states.
+When Windows capture is available, verify the Home screen at 1440x900 and 1586x993, then continue the same visual system through Meetings and the selected-meeting workspace.
