@@ -15,6 +15,15 @@ The Desktop Home screen now includes:
 - explicit empty states instead of hardcoded meeting, GPU, CPU, memory and notification values;
 - retained functional controls for recording and file import.
 
+Latest Home polish:
+
+- idle state collapses processing details until there is an active recording or job;
+- recording, pause and unavailable states use distinct indicator colors and synchronized labels;
+- the recording marker action now has a real handler;
+- the quick action for a new meeting focuses the recording title field;
+- calendar/series/export actions are visibly disabled until their integrations exist;
+- the desktop window title and card spacing now align more closely with the selected reference.
+
 ## Result
 
 final result: blocked

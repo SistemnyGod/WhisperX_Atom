@@ -225,7 +225,7 @@ public partial class MainWindow : Window
         {
             var status = await _agent.SendAsync("HEALTH");
             AgentStatusText.Text = status.Ok ? "Подключён" : "Недоступен";
-            AgentStatusText.Foreground = status.Ok ? Brushes.LightGreen : Brushes.OrangeRed;
+            AgentStatusText.Foreground = status.Ok ? Brushes.ForestGreen : Brushes.OrangeRed;
             RecordingStateText.Text = status.State switch
             {
                 "Recording" => "Идёт запись",
@@ -233,6 +233,15 @@ public partial class MainWindow : Window
                 "Idle" => "Ожидание",
                 _ => status.State,
             };
+            RecordingIndicator.Fill = status.State switch
+            {
+                "Recording" => Brushes.Crimson,
+                "Paused" => Brushes.DarkOrange,
+                _ => Brushes.LightSlateGray,
+            };
+            ProcessingPanel.Visibility = status.State is "Recording" or "Paused" || ProcessingProgressBar.Visibility == Visibility.Visible
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             DashboardActiveText.Text = status.Ok && (status.State is "Recording" or "Paused") ? "1" : status.Ok ? "0" : "—";
             DashboardActiveHintText.Text = status.Ok ? "По данным Recorder Agent" : "Recorder Agent недоступен";
             SessionText.Text = string.IsNullOrWhiteSpace(status.SessionId) ? "Сессия не создана" : $"Сессия: {status.SessionId}";
@@ -257,7 +266,10 @@ public partial class MainWindow : Window
         {
             AgentStatusText.Text = "Недоступен";
             AgentStatusText.Foreground = Brushes.OrangeRed;
+            AgentStatusIndicator.Fill = Brushes.OrangeRed;
             RecordingStateText.Text = "Сервис недоступен";
+            RecordingIndicator.Fill = Brushes.LightSlateGray;
+            ProcessingPanel.Visibility = Visibility.Visible;
             DashboardActiveText.Text = "—";
             DashboardActiveHintText.Text = "Recorder Agent недоступен";
             DashboardStorageMetricText.Text = "Нет данных";
@@ -279,13 +291,15 @@ public partial class MainWindow : Window
         {
             var ready = await _server.CheckReadyAsync();
             ServerStatusText.Text = ready ? "Готов" : "Недоступен";
-            ServerStatusText.Foreground = ready ? Brushes.LightGreen : Brushes.OrangeRed;
+            ServerStatusText.Foreground = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
+            ServerStatusIndicator.Fill = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
             AdminStatusText.Text = ready ? $"Локальный API подключён: {_server.BaseAddress}" : "Локальный API недоступен.";
         }
         catch (Exception ex)
         {
             ServerStatusText.Text = "Недоступен";
             ServerStatusText.Foreground = Brushes.OrangeRed;
+            ServerStatusIndicator.Fill = Brushes.OrangeRed;
             AdminStatusText.Text = SafeError(ex);
         }
     }
@@ -311,13 +325,14 @@ public partial class MainWindow : Window
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
         Guid? meetingId = Guid.TryParse(_selectedMeeting?.Id, out var id) ? id : null;
-        var title = string.IsNullOrWhiteSpace(RecordingTitleBox.Text)
+        var title = string.IsNullOrWhiteSpace(RecordingTitleBox.Text) || string.Equals(RecordingTitleBox.Text.Trim(), "Новая запись", StringComparison.OrdinalIgnoreCase)
             ? _selectedMeeting?.Title
             : RecordingTitleBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(title)) title = $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}";
         var response = await RunCommandAsync("START", new { meetingId, title });
         if (response?.MeetingId is Guid startedMeetingId)
         {
+            ProcessingPanel.Visibility = Visibility.Visible;
             ProcessingStatusText.Text = $"Запись: {title} · совещание {startedMeetingId}";
             ProcessingErrorText.Text = response.Error == "server_binding_pending" ? "Сервер временно недоступен; запись продолжается локально." : string.Empty;
         }
@@ -325,6 +340,14 @@ public partial class MainWindow : Window
 
     private async void PauseButton_Click(object sender, RoutedEventArgs e) => await RunCommandAsync("PAUSE");
     private async void ResumeButton_Click(object sender, RoutedEventArgs e) => await RunCommandAsync("RESUME");
+
+    private void MarkButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!MarkRecordingButton.IsEnabled) return;
+        ProcessingPanel.Visibility = Visibility.Visible;
+        ProcessingStatusText.Text = "Метка добавлена в текущую запись";
+        FooterText.Text = "Метка добавлена";
+    }
 
     private async void StopButton_Click(object sender, RoutedEventArgs e)
     {
@@ -479,6 +502,8 @@ public partial class MainWindow : Window
         PauseRecordingButton.IsEnabled = connected && string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase);
         ResumeRecordingButton.IsEnabled = connected && string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase);
         StopRecordingButton.IsEnabled = connected && (string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase) || string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase));
+        MarkRecordingButton.IsEnabled = connected && (string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase) || string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase));
+        AgentStatusIndicator.Fill = connected ? Brushes.ForestGreen : Brushes.OrangeRed;
     }
 
     private async void DockerStatusButton_Click(object sender, RoutedEventArgs e)
@@ -542,6 +567,14 @@ public partial class MainWindow : Window
     }
 
     private async void LoadMeetingsButton_Click(object sender, RoutedEventArgs e) => await LoadMeetingsAsync();
+
+    private void NewMeetingQuickAction_Click(object sender, RoutedEventArgs e)
+    {
+        MainNavigationTabs.SelectedIndex = 0;
+        RecordingTitleBox.Focus();
+        RecordingTitleBox.SelectAll();
+        FooterText.Text = "Введите название и запустите новую запись";
+    }
 
     private async void ImportFileButton_Click(object sender, RoutedEventArgs e)
     {
@@ -831,6 +864,7 @@ public partial class MainWindow : Window
         _processingPollCts = new CancellationTokenSource(TimeSpan.FromHours(4));
         var cancellationToken = _processingPollCts.Token;
         ProcessingProgressBar.Visibility = Visibility.Visible;
+        ProcessingPanel.Visibility = Visibility.Visible;
         ProcessingProgressBar.Value = 0;
         ProcessingErrorText.Text = string.Empty;
         try

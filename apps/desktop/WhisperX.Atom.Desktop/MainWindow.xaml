@@ -1,7 +1,7 @@
 <Window x:Class="WhisperX.Atom.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WhisperX Atom" Width="1440" Height="900" MinWidth="1180" MinHeight="720"
+        Title="WhisperX Atom Desktop" Width="1440" Height="900" MinWidth="1180" MinHeight="720"
         Background="{StaticResource WindowBackgroundBrush}" Foreground="{StaticResource TextBrush}"
         FontFamily="Segoe UI" UseLayoutRounding="True" SnapsToDevicePixels="True"
         WindowStartupLocation="CenterScreen" Loaded="Window_Loaded" Closed="Window_Closed">
@@ -80,8 +80,8 @@
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="16"/>
-            <Setter Property="Padding" Value="22"/>
+            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="Padding" Value="18"/>
         </Style>
 
         <Style x:Key="SoftCardBorder" TargetType="{x:Type Border}" BasedOn="{StaticResource CardBorder}">
@@ -201,7 +201,7 @@
                         CornerRadius="15" Padding="10,6" Margin="0,0,14,0">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="8" Height="8" Fill="{StaticResource SuccessBrush}" Margin="0,0,7,0"/>
+                            <Ellipse x:Name="ServerStatusIndicator" Width="8" Height="8" Fill="{StaticResource MutedTextBrush}" Margin="0,0,7,0"/>
                             <TextBlock x:Name="ServerStatusText" Text="Проверка…"
                                        Foreground="#177245" FontSize="12" FontWeight="SemiBold" Margin="0"/>
                         </StackPanel>
@@ -263,7 +263,7 @@
                                     <StackPanel Grid.Column="0" Margin="0,0,22,0">
                                         <TextBlock Text="АКТИВНАЯ ЗАПИСЬ" Foreground="#3564A7"
                                                    FontSize="11" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                                        <TextBox x:Name="RecordingTitleBox" Text=""
+                                        <TextBox x:Name="RecordingTitleBox" Text="Новая запись" ToolTip="Название будущего совещания"
                                                  FontSize="22" FontWeight="SemiBold" Padding="0"
                                                  BorderThickness="0" Background="Transparent"
                                                  Margin="0,0,0,5"/>
@@ -275,7 +275,7 @@
                                                        FontSize="13" Margin="0"/>
                                         </StackPanel>
                                         <StackPanel Orientation="Horizontal" Margin="0,18,0,14">
-                                            <Ellipse Width="20" Height="20" Fill="{StaticResource DangerBrush}"
+                                            <Ellipse x:Name="RecordingIndicator" Width="20" Height="20" Fill="{StaticResource MutedTextBrush}"
                                                      Margin="0,0,13,0" VerticalAlignment="Center"/>
                                             <TextBlock x:Name="RecordingStateText" Text="Ожидание"
                                                        FontSize="32" FontWeight="SemiBold" Margin="0"/>
@@ -298,7 +298,7 @@
                                         <TextBlock x:Name="DeviceErrorText" Text="" Foreground="{StaticResource WarningBrush}"
                                                    FontSize="11" Margin="0,4,0,0"/>
                                         <TextBlock x:Name="StorageText" Text="Диск: проверка" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,6,0,0"/>
-                                        <Border Background="#F3F7FD" BorderBrush="#E0E9F6" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,10,0,0">
+                                        <Border x:Name="ProcessingPanel" Background="#F3F7FD" BorderBrush="#E0E9F6" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,10,0,0" Visibility="Collapsed">
                                             <StackPanel>
                                                 <TextBlock Text="Состояние обработки" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,0,0,4"/>
                                                 <TextBlock x:Name="ProcessingStatusText" Text="Обработка не запущена" Foreground="{StaticResource AccentStrongBrush}" FontSize="11" FontWeight="SemiBold"/>
@@ -313,13 +313,13 @@
                                                 Click="StartButton_Click" Style="{StaticResource PrimaryButton}"
                                                 Height="40" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="PauseRecordingButton" Content="Пауза"
-                                                Click="PauseButton_Click" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="PauseButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="ResumeRecordingButton" Content="Продолжить"
-                                                Click="ResumeButton_Click" Height="38" MinWidth="206" Margin="0,0,0,7"/>
-                                        <Button Content="Метка" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="ResumeButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                        <Button x:Name="MarkRecordingButton" Content="Метка" Click="MarkButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="StopRecordingButton" Content="Завершить"
                                                 Click="StopButton_Click" Style="{StaticResource DangerButton}"
-                                                Height="38" MinWidth="206" Margin="0"/>
+                                                IsEnabled="False" Height="38" MinWidth="206" Margin="0"/>
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -563,12 +563,12 @@
                                 <StackPanel>
                                     <TextBlock Text="Быстрые действия" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12"/>
                                     <Button Content="＋  Новое совещание" Style="{StaticResource PrimaryButton}" MinWidth="290" HorizontalContentAlignment="Left"
-                                            Click="LoadMeetingsButton_Click"/>
-                                    <Button x:Name="ImportButton" Content="&#xE898;  Загрузить файл" FontFamily="Segoe UI"
+                                            Click="NewMeetingQuickAction_Click"/>
+                                    <Button x:Name="ImportButton" Content="Загрузить файл"
                                             Click="ImportFileButton_Click" MinWidth="290" HorizontalContentAlignment="Left"/>
-                                    <Button Content="&#xE8A4;  Создать серию" FontFamily="Segoe UI" MinWidth="290" HorizontalContentAlignment="Left"/>
-                                    <Button Content="&#xE787;  Импорт из календаря" FontFamily="Segoe UI" MinWidth="290" HorizontalContentAlignment="Left"/>
-                                    <Button Content="&#xE74E;  Экспорт журнала" FontFamily="Segoe UI" MinWidth="290" HorizontalContentAlignment="Left" Margin="0"/>
+                                    <Button Content="Создать серию" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" ToolTip="Функция будет доступна после подключения календаря"/>
+                                    <Button Content="Импорт из календаря" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" ToolTip="Функция будет доступна после подключения календаря"/>
+                                    <Button Content="Экспорт журнала" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" Margin="0" ToolTip="Функция будет доступна в следующей версии"/>
                                 </StackPanel>
                             </Border>
                             <Border Style="{StaticResource CardBorder}" Padding="16" Margin="0,0,0,12">
@@ -576,7 +576,7 @@
                                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Text="Состояние агента" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12"/>
                                     <StackPanel Grid.Row="1" Orientation="Horizontal">
-                                        <Ellipse Width="8" Height="8" Fill="{StaticResource SuccessBrush}" Margin="0,0,8,0"/>
+                                        <Ellipse x:Name="AgentStatusIndicator" Width="8" Height="8" Fill="{StaticResource MutedTextBrush}" Margin="0,0,8,0"/>
                                         <StackPanel>
                                             <TextBlock Text="{Binding ElementName=AgentStatusText, Path=Text}" FontWeight="SemiBold" FontSize="12"/>
                                             <TextBlock Text="{Binding ElementName=ProcessingStatusText, Path=Text}" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
