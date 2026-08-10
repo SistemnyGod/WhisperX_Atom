@@ -16,6 +16,12 @@ Build a package:
 The Inno Setup file is `apps/desktop/Installer/WhisperXAtom.iss`. It installs the Desktop UI and registers the Recorder Service.
 
 The browser `web`/`gateway` services are optional diagnostics only; normal Desktop runtime uses the API port directly.
+
+## Launching from Windows
+
+From the repository folder, double-click `run_app.bat` or `start_whisperx_gui.bat`. Both launch the WPF Desktop application through `scripts\launch-desktop.ps1`; they do not require the obsolete root `.venv` or a specific current working directory.
+
+The launcher checks the local Debug/Release output and the published package, and builds the Desktop project with `dotnet` when no executable is present. To select an explicit executable, set `WHISPERX_DESKTOP_EXE` before launch.
 # Building the Windows installer
 
 1. Run `scripts\\publish-desktop.ps1` to create self-contained Desktop and Service binaries.
@@ -42,4 +48,3 @@ Create a database/configuration backup without copying media:
     .\scripts\backup.ps1
 
 The backup contains a PostgreSQL custom dump, compose.dev.yml, .env.example, the WSL2 runbook and a SHA-256 manifest. Add -IncludeMedia only when an archive copy is required. The real .env and its secrets are never included.
-

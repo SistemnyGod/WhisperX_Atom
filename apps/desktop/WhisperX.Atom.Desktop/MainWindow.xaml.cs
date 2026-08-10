@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _detailsCts;
     private ICollectionView? _meetingsView;
     private int _statusRefreshGate;
+    private const string GlobalSearchPlaceholder = "Поиск по совещаниям, стенограммам и задачам...";
 
     private sealed record DashboardFacts(bool SummaryQueried, bool SummaryReady, bool TasksQueried, int OpenTasks, bool JobsQueried, bool HasActiveJob);
 
@@ -60,6 +61,7 @@ public partial class MainWindow : Window
         DashboardMeetingsList.ItemsSource = Array.Empty<DesktopMeeting>();
         DashboardMeetingsEmptyText.Text = message;
         DashboardMeetingsEmptyText.Visibility = Visibility.Visible;
+        DashboardMeetingsEmptyState.Visibility = Visibility.Visible;
         DashboardProcessingText.Text = "—";
         DashboardSummariesText.Text = "—";
         DashboardTasksText.Text = "—";
@@ -73,6 +75,7 @@ public partial class MainWindow : Window
         var recent = meetings.OrderByDescending(item => item.CreatedAt).Take(7).ToArray();
         DashboardMeetingsList.ItemsSource = recent;
         DashboardMeetingsEmptyText.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DashboardMeetingsEmptyState.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         DashboardMeetingsEmptyText.Text = recent.Length == 0 ? "Нет загруженных совещаний" : string.Empty;
 
         if (meetings.Count == 0)
@@ -161,6 +164,12 @@ public partial class MainWindow : Window
             StartRecordingButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             e.Handled = true;
         }
+        else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.K)
+        {
+            GlobalSearchBox.Focus();
+            GlobalSearchBox.SelectAll();
+            e.Handled = true;
+        }
         else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F)
         {
             MeetingSearchBox.Focus();
@@ -226,6 +235,13 @@ public partial class MainWindow : Window
             var status = await _agent.SendAsync("HEALTH");
             AgentStatusText.Text = status.Ok ? "Подключён" : "Недоступен";
             AgentStatusText.Foreground = status.Ok ? Brushes.ForestGreen : Brushes.OrangeRed;
+            RecordingEyebrowText.Text = status.State switch
+            {
+                "Recording" => "АКТИВНАЯ ЗАПИСЬ",
+                "Paused" => "ЗАПИСЬ НА ПАУЗЕ",
+                "Idle" => "ГОТОВНОСТЬ К ЗАПИСИ",
+                _ => "СОСТОЯНИЕ ЗАПИСИ",
+            };
             RecordingStateText.Text = status.State switch
             {
                 "Recording" => "Идёт запись",
@@ -267,6 +283,7 @@ public partial class MainWindow : Window
             AgentStatusText.Text = "Недоступен";
             AgentStatusText.Foreground = Brushes.OrangeRed;
             AgentStatusIndicator.Fill = Brushes.OrangeRed;
+            RecordingEyebrowText.Text = "СЕРВИС НЕДОСТУПЕН";
             RecordingStateText.Text = "Сервис недоступен";
             RecordingIndicator.Fill = Brushes.LightSlateGray;
             ProcessingPanel.Visibility = Visibility.Visible;
@@ -293,6 +310,8 @@ public partial class MainWindow : Window
             ServerStatusText.Text = ready ? "Готов" : "Недоступен";
             ServerStatusText.Foreground = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
             ServerStatusIndicator.Fill = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
+            ServerStatusCard.Background = ready ? new SolidColorBrush(Color.FromRgb(243, 251, 246)) : new SolidColorBrush(Color.FromRgb(255, 247, 247));
+            ServerStatusCard.BorderBrush = ready ? new SolidColorBrush(Color.FromRgb(203, 234, 214)) : new SolidColorBrush(Color.FromRgb(255, 210, 210));
             AdminStatusText.Text = ready ? $"Локальный API подключён: {_server.BaseAddress}" : "Локальный API недоступен.";
         }
         catch (Exception ex)
@@ -300,6 +319,8 @@ public partial class MainWindow : Window
             ServerStatusText.Text = "Недоступен";
             ServerStatusText.Foreground = Brushes.OrangeRed;
             ServerStatusIndicator.Fill = Brushes.OrangeRed;
+            ServerStatusCard.Background = new SolidColorBrush(Color.FromRgb(255, 247, 247));
+            ServerStatusCard.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 210, 210));
             AdminStatusText.Text = SafeError(ex);
         }
     }
@@ -498,11 +519,22 @@ public partial class MainWindow : Window
 
     private void UpdateRecordingControls(bool connected, string state)
     {
-        StartRecordingButton.IsEnabled = connected && string.Equals(state, "Idle", StringComparison.OrdinalIgnoreCase);
-        PauseRecordingButton.IsEnabled = connected && string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase);
-        ResumeRecordingButton.IsEnabled = connected && string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase);
-        StopRecordingButton.IsEnabled = connected && (string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase) || string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase));
-        MarkRecordingButton.IsEnabled = connected && (string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase) || string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase));
+        var isRecording = string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase);
+        var isPaused = string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase);
+        var isActive = isRecording || isPaused;
+        var isIdle = string.Equals(state, "Idle", StringComparison.OrdinalIgnoreCase);
+
+        StartRecordingButton.Visibility = isActive ? Visibility.Collapsed : Visibility.Visible;
+        PauseRecordingButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
+        ResumeRecordingButton.Visibility = isPaused ? Visibility.Visible : Visibility.Collapsed;
+        MarkRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+        StopRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+
+        StartRecordingButton.IsEnabled = connected && isIdle;
+        PauseRecordingButton.IsEnabled = connected && isRecording;
+        ResumeRecordingButton.IsEnabled = connected && isPaused;
+        StopRecordingButton.IsEnabled = connected && isActive;
+        MarkRecordingButton.IsEnabled = connected && isActive;
         AgentStatusIndicator.Fill = connected ? Brushes.ForestGreen : Brushes.OrangeRed;
     }
 
@@ -574,6 +606,50 @@ public partial class MainWindow : Window
         RecordingTitleBox.Focus();
         RecordingTitleBox.SelectAll();
         FooterText.Text = "Введите название и запустите новую запись";
+    }
+
+    private void OpenSettingsQuickAction_Click(object sender, RoutedEventArgs e)
+    {
+        MainNavigationTabs.SelectedIndex = 5;
+        FooterText.Text = "Открыты настройки подключений";
+    }
+
+    private void GlobalSearchBox_GotFocus(object sender, RoutedEventArgs e)
+    {
+        if (string.Equals(GlobalSearchBox.Text, GlobalSearchPlaceholder, StringComparison.Ordinal))
+        {
+            GlobalSearchBox.Clear();
+            GlobalSearchBox.Foreground = (Brush)FindResource("TextBrush");
+        }
+    }
+
+    private void GlobalSearchBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrWhiteSpace(GlobalSearchBox.Text)) return;
+        GlobalSearchBox.Text = GlobalSearchPlaceholder;
+        GlobalSearchBox.Foreground = (Brush)FindResource("MutedTextBrush");
+    }
+
+    private void GlobalSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (MeetingSearchBox is null || string.Equals(GlobalSearchBox.Text, GlobalSearchPlaceholder, StringComparison.Ordinal)) return;
+        if (!string.Equals(MeetingSearchBox.Text, GlobalSearchBox.Text, StringComparison.CurrentCulture))
+            MeetingSearchBox.Text = GlobalSearchBox.Text;
+    }
+
+    private void OpenMeetingsLink_Click(object sender, RoutedEventArgs e)
+    {
+        MainNavigationTabs.SelectedIndex = 1;
+        MeetingsList.Focus();
+        FooterText.Text = "Открыт реестр совещаний";
+    }
+
+    private void DashboardMeetingRow_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: DesktopMeeting meeting }) return;
+        MainNavigationTabs.SelectedIndex = 1;
+        MeetingsList.SelectedItem = MeetingsList.Items.OfType<DesktopMeeting>().FirstOrDefault(item => item.Id == meeting.Id);
+        FooterText.Text = $"Открыто совещание: {meeting.Title}";
     }
 
     private async void ImportFileButton_Click(object sender, RoutedEventArgs e)

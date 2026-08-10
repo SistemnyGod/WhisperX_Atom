@@ -12,6 +12,7 @@
             <Setter Property="Padding" Value="16,14"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
             <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Width" Value="224"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -86,6 +87,15 @@
 
         <Style x:Key="SoftCardBorder" TargetType="{x:Type Border}" BasedOn="{StaticResource CardBorder}">
             <Setter Property="Background" Value="{StaticResource SurfaceElevatedBrush}"/>
+        </Style>
+
+        <Style x:Key="MetricIconBorder" TargetType="{x:Type Border}">
+            <Setter Property="Width" Value="32"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="Padding" Value="7"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Margin" Value="0,0,0,9"/>
         </Style>
 
         <Style x:Key="EyebrowText" TargetType="{x:Type TextBlock}">
@@ -186,8 +196,11 @@
                     <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="Segoe MDL2 Assets"
                                Foreground="{StaticResource MutedTextBrush}" FontSize="15"
                                VerticalAlignment="Center" Margin="0,0,10,0"/>
-                    <TextBlock Grid.Column="1" Text="Поиск по совещаниям, стенограммам и задачам..."
-                               Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" Margin="0"/>
+                    <TextBox Grid.Column="1" x:Name="GlobalSearchBox" Text="Поиск по совещаниям, стенограммам и задачам..."
+                             Foreground="{StaticResource MutedTextBrush}" Background="Transparent" BorderThickness="0"
+                             MinHeight="0" Padding="0" VerticalContentAlignment="Center"
+                             GotFocus="GlobalSearchBox_GotFocus" LostFocus="GlobalSearchBox_LostFocus"
+                             TextChanged="GlobalSearchBox_TextChanged" Margin="0"/>
                     <Border Grid.Column="2" Background="{StaticResource SurfaceStrongBrush}"
                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                             CornerRadius="6" Padding="8,3" VerticalAlignment="Center">
@@ -197,7 +210,7 @@
             </Border>
 
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                <Border Background="#F3FBF6" BorderBrush="#CBEAD6" BorderThickness="1"
+                <Border x:Name="ServerStatusCard" Background="#F3FBF6" BorderBrush="#CBEAD6" BorderThickness="1"
                         CornerRadius="15" Padding="10,6" Margin="0,0,14,0">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal">
@@ -261,7 +274,7 @@
                                         <ColumnDefinition Width="206"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,22,0">
-                                        <TextBlock Text="АКТИВНАЯ ЗАПИСЬ" Foreground="#3564A7"
+                                        <TextBlock x:Name="RecordingEyebrowText" Text="ГОТОВНОСТЬ К ЗАПИСИ" Foreground="#3564A7"
                                                    FontSize="11" FontWeight="SemiBold" Margin="0,0,0,8"/>
                                         <TextBox x:Name="RecordingTitleBox" Text="Новая запись" ToolTip="Название будущего совещания"
                                                  FontSize="22" FontWeight="SemiBold" Padding="0"
@@ -313,13 +326,13 @@
                                                 Click="StartButton_Click" Style="{StaticResource PrimaryButton}"
                                                 Height="40" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="PauseRecordingButton" Content="Пауза"
-                                                Click="PauseButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="PauseButton_Click" IsEnabled="False" Visibility="Collapsed" Height="38" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="ResumeRecordingButton" Content="Продолжить"
-                                                Click="ResumeButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
-                                        <Button x:Name="MarkRecordingButton" Content="Метка" Click="MarkButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="ResumeButton_Click" IsEnabled="False" Visibility="Collapsed" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                        <Button x:Name="MarkRecordingButton" Content="Метка" Click="MarkButton_Click" IsEnabled="False" Visibility="Collapsed" Height="38" MinWidth="206" Margin="0,0,0,7"/>
                                         <Button x:Name="StopRecordingButton" Content="Завершить"
                                                 Click="StopButton_Click" Style="{StaticResource DangerButton}"
-                                                IsEnabled="False" Height="38" MinWidth="206" Margin="0"/>
+                                                IsEnabled="False" Visibility="Collapsed" Height="38" MinWidth="206" Margin="0"/>
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -331,7 +344,9 @@
                                 </Grid.ColumnDefinitions>
                                 <Border Grid.Column="0" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="0,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" Foreground="#2876FF" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#E7F0FF">
+                                            <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" Foreground="#2876FF" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Активные записи" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock Text="2" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="Смотреть все  →" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold" Margin="0"/>
@@ -339,7 +354,9 @@
                                 </Border>
                                 <Border Grid.Column="1" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE823;" FontFamily="Segoe MDL2 Assets" Foreground="#793BFF" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#F0E8FF">
+                                            <TextBlock Text="&#xE823;" FontFamily="Segoe MDL2 Assets" Foreground="#793BFF" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="В обработке" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock Text="3" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="Смотреть все  →" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold" Margin="0"/>
@@ -347,7 +364,9 @@
                                 </Border>
                                 <Border Grid.Column="2" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource SuccessBrush}" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#E7F8EE">
+                                            <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource SuccessBrush}" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Готовые саммари" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock Text="9" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="Смотреть все  →" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold" Margin="0"/>
@@ -355,7 +374,9 @@
                                 </Border>
                                 <Border Grid.Column="3" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" Foreground="#FF6A1A" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#FFF0E8">
+                                            <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" Foreground="#FF6A1A" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Открытые задачи" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock Text="5" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="Открыть задачи  →" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold" Margin="0"/>
@@ -386,7 +407,9 @@
                                 </Grid.ColumnDefinitions>
                                 <Border Grid.Column="0" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="0,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" Foreground="#2876FF" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#E7F0FF">
+                                            <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" Foreground="#2876FF" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Активные записи" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock x:Name="DashboardActiveText" Text="—" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock x:Name="DashboardActiveHintText" Text="Ожидание данных агента" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0"/>
@@ -394,7 +417,9 @@
                                 </Border>
                                 <Border Grid.Column="1" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE823;" FontFamily="Segoe MDL2 Assets" Foreground="#793BFF" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#F0E8FF">
+                                            <TextBlock Text="&#xE823;" FontFamily="Segoe MDL2 Assets" Foreground="#793BFF" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="В обработке" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock x:Name="DashboardProcessingText" Text="—" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="По данным API" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0"/>
@@ -402,7 +427,9 @@
                                 </Border>
                                 <Border Grid.Column="2" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource SuccessBrush}" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#E7F8EE">
+                                            <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource SuccessBrush}" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Готовые саммари" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock x:Name="DashboardSummariesText" Text="—" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="По данным API" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0"/>
@@ -410,7 +437,9 @@
                                 </Border>
                                 <Border Grid.Column="3" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
-                                        <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" Foreground="#FF6A1A" FontSize="17" Margin="0,0,0,7"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#FFF0E8">
+                                            <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" Foreground="#FF6A1A" FontSize="17"/>
+                                        </Border>
                                         <TextBlock Text="Открытые задачи" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
                                         <TextBlock x:Name="DashboardTasksText" Text="—" FontSize="20" FontWeight="SemiBold" Margin="0,3,0,6"/>
                                         <TextBlock Text="По данным API" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0"/>
@@ -419,14 +448,20 @@
                                 <Border Grid.Column="4" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,5,0">
                                     <StackPanel>
                                         <TextBlock Text="Состояние GPU" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="DashboardGpuText" Text="Нет данных" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,6"/>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#F0E8FF">
+                                            <TextBlock Text="&#xE950;" FontFamily="Segoe MDL2 Assets" Foreground="#793BFF" FontSize="16"/>
+                                        </Border>
+                                        <TextBlock x:Name="DashboardGpuText" Text="Нет данных" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,6"/>
                                         <TextBlock Text="Метрика не передаётся агентом" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap"/>
                                     </StackPanel>
                                 </Border>
                                 <Border Grid.Column="5" Style="{StaticResource SoftCardBorder}" Padding="13" Margin="5,0,0,0">
                                     <StackPanel>
+                                        <Border Style="{StaticResource MetricIconBorder}" Background="#E7F0FF">
+                                            <TextBlock Text="&#xE7F1;" FontFamily="Segoe MDL2 Assets" Foreground="#2876FF" FontSize="16"/>
+                                        </Border>
                                         <TextBlock Text="Свободное место" Foreground="{StaticResource MutedTextBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="DashboardStorageMetricText" Text="Ожидание проверки" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,6"/>
+                                        <TextBlock x:Name="DashboardStorageMetricText" Text="Ожидание проверки" FontWeight="SemiBold" FontSize="12" Margin="0,6,0,6"/>
                                         <ProgressBar x:Name="DashboardStorageBar" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,6"/>
                                         <TextBlock x:Name="DashboardStoragePercentText" Text="—" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0"/>
                                     </StackPanel>
@@ -529,7 +564,8 @@
                                     <Grid Grid.Row="0" Margin="0,0,0,12">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <TextBlock Text="Последние совещания" FontSize="16" FontWeight="SemiBold" Margin="0"/>
-                                        <TextBlock Grid.Column="1" Text="Открыть все совещания →" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold" Margin="0"/>
+                                        <Button Grid.Column="1" Content="Открыть все совещания →" Style="{StaticResource GhostButton}"
+                                                Click="OpenMeetingsLink_Click" Margin="0" Padding="0" HorizontalContentAlignment="Right"/>
                                     </Grid>
                                     <Grid Grid.Row="1" Background="{StaticResource SurfaceStrongBrush}" Margin="0,0,0,4">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="128"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
@@ -541,7 +577,8 @@
                                         <ItemsControl x:Name="DashboardMeetingsList">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="10,10">
+                                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="10,10"
+                                                            Cursor="Hand" MouseLeftButtonUp="DashboardMeetingRow_Click">
                                                         <Grid>
                                                             <Grid.ColumnDefinitions><ColumnDefinition Width="128"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
                                                             <TextBlock Text="{Binding CreatedAt, StringFormat={}{0:dd.MM.yyyy HH:mm}}" FontSize="11"/>
@@ -552,7 +589,21 @@
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
-                                        <TextBlock x:Name="DashboardMeetingsEmptyText" Text="Нет загруженных совещаний" Foreground="{StaticResource MutedTextBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,20"/>
+                                        <StackPanel x:Name="DashboardMeetingsEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,24">
+                                            <Border Width="42" Height="42" CornerRadius="21" Background="#E7F0FF" HorizontalAlignment="Center" Margin="0,0,0,10">
+                                                <TextBlock Text="&#xE787;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource AccentBrush}" FontSize="19"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <TextBlock x:Name="DashboardMeetingsEmptyText" Text="Нет загруженных совещаний"
+                                                       Foreground="{StaticResource TextBrush}" FontSize="13" FontWeight="SemiBold"
+                                                       HorizontalAlignment="Center" Margin="0,0,0,4"/>
+                                            <TextBlock Text="Войдите в API или импортируйте первую запись"
+                                                       Foreground="{StaticResource MutedTextBrush}" FontSize="11" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                                <Button Content="Обновить" Click="LoadMeetingsButton_Click" Padding="12,7" Margin="0,0,6,0"/>
+                                                <Button Content="Загрузить файл" Click="ImportFileButton_Click" Style="{StaticResource PrimaryButton}" Padding="12,7"/>
+                                            </StackPanel>
+                                        </StackPanel>
                                     </Grid>
                                 </Grid>
                             </Border>
@@ -566,9 +617,10 @@
                                             Click="NewMeetingQuickAction_Click"/>
                                     <Button x:Name="ImportButton" Content="Загрузить файл"
                                             Click="ImportFileButton_Click" MinWidth="290" HorizontalContentAlignment="Left"/>
-                                    <Button Content="Создать серию" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" ToolTip="Функция будет доступна после подключения календаря"/>
-                                    <Button Content="Импорт из календаря" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" ToolTip="Функция будет доступна после подключения календаря"/>
-                                    <Button Content="Экспорт журнала" MinWidth="290" HorizontalContentAlignment="Left" IsEnabled="False" Margin="0" ToolTip="Функция будет доступна в следующей версии"/>
+                                    <Button Content="Настроить подключения" MinWidth="290" HorizontalContentAlignment="Left"
+                                            Click="OpenSettingsQuickAction_Click"/>
+                                    <TextBlock Text="Календарь и экспорт пока не подключены" Foreground="{StaticResource MutedTextBrush}"
+                                               FontSize="10" TextWrapping="Wrap" Margin="0,2,0,0"/>
                                 </StackPanel>
                             </Border>
                             <Border Style="{StaticResource CardBorder}" Padding="16" Margin="0,0,0,12">

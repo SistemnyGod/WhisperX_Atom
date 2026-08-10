@@ -23,6 +23,15 @@ Latest Home polish:
 - the quick action for a new meeting focuses the recording title field;
 - calendar/series/export actions are visibly disabled until their integrations exist;
 - the desktop window title and card spacing now align more closely with the selected reference.
+- dashboard metrics now use colored icon circles matching the control-room visual language;
+- the empty recent-meetings state now explains the next step and exposes working refresh/import actions.
+- the global search field is now interactive, supports `Ctrl + K`, and filters the meetings registry;
+- recent-meeting rows and the «Открыть все совещания» action now open the working meetings workspace;
+- the backend status chip now changes its surface and border treatment when the API is unavailable.
+- the left navigation is now fixed to the reference's wider control-room rail;
+- recording controls are state-aware and only show actions relevant to idle, recording or paused mode.
+- the recording eyebrow now communicates the actual mode: readiness, active recording, pause, or unavailable service;
+- the quick-actions rail now contains only usable actions and routes connection setup into Settings instead of showing dead disabled controls.
 
 ## Result
 
