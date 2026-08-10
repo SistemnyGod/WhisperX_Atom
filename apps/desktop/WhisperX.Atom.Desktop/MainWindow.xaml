@@ -460,9 +460,12 @@
                                                        HorizontalAlignment="Center" Margin="0,0,0,4"/>
                                             <TextBlock x:Name="DashboardMeetingsEmptyHintText" Text="Войдите в API или импортируйте первую запись"
                                                        Foreground="{StaticResource MutedTextBrush}" FontSize="11" HorizontalAlignment="Center" Margin="0,0,0,12"/>
-                                            <StackPanel x:Name="DashboardMeetingsEmptyActions" Orientation="Horizontal" HorizontalAlignment="Center">
-                                                <Button Content="Обновить" Click="LoadMeetingsButton_Click" Padding="12,7" Margin="0,0,6,0"/>
-                                                <Button Content="Загрузить файл" Click="ImportFileButton_Click" Style="{StaticResource PrimaryButton}" Padding="12,7"/>
+                                            <StackPanel x:Name="DashboardMeetingsEmptyActions" Orientation="Horizontal" HorizontalAlignment="Center"
+                                                        Panel.ZIndex="2" IsHitTestVisible="True" Margin="0,2,0,0">
+                                                <Button Content="Обновить" Click="LoadMeetingsButton_Click" MinWidth="104" MinHeight="38"
+                                                        HorizontalContentAlignment="Center" Padding="14,9" Margin="0,0,8,0"/>
+                                                <Button Content="Загрузить файл" Click="ImportFileButton_Click" Style="{StaticResource PrimaryButton}"
+                                                        MinWidth="124" MinHeight="40" HorizontalContentAlignment="Center" Padding="14,10" Margin="0"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Grid>

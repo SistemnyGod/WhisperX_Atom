@@ -50,6 +50,8 @@ Latest full-shell polish:
 - the header system indicator remains neutral and compact, while the agent state continues to be reported in the operational areas rather than overloaded into the shell;
 - no mock meetings, people, GPU values or notifications were added; all data continues to come from the existing API and IPC clients.
 - button styles now use explicit text content templates for standard, primary, danger and ghost actions; this fixes the low-contrast dark labels previously visible on cobalt primary actions and keeps disabled labels readable.
+- button content templates explicitly reset the global TextBlock margin; the Home empty-state actions use fixed sizes, spacing and z-order so the lower buttons do not visually collide.
+- hover and pressed states are now owned by each button style; the shared control template no longer replaces a primary/danger background with a pale surface, and disabled buttons ignore hover styling.
 
 ## Result
 

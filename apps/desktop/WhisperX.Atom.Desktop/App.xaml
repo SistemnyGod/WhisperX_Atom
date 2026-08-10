@@ -48,7 +48,8 @@
                 <Setter.Value>
                     <DataTemplate>
                         <TextBlock Text="{Binding}" Foreground="{StaticResource TextBrush}"
-                                   FontWeight="SemiBold" TextWrapping="NoWrap"/>
+                                   FontWeight="SemiBold" TextWrapping="NoWrap" Margin="0"
+                                   VerticalAlignment="Center"/>
                     </DataTemplate>
                 </Setter.Value>
             </Setter>
@@ -65,13 +66,6 @@
                                               RecognizesAccessKey="True"/>
                         </Border>
                         <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#F0F5FF"/>
-                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#B8CEFA"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonBorder" Property="Background" Value="#E1ECFF"/>
-                            </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.42"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
@@ -80,6 +74,23 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
+                        <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#F0F5FF"/>
+                    <Setter Property="BorderBrush" Value="#B8CEFA"/>
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsPressed, RelativeSource={RelativeSource Self}}" Value="True"/>
+                        <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#E1ECFF"/>
+                </MultiDataTrigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="PrimaryButton" TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Type Button}}">
@@ -93,15 +104,28 @@
                 <Setter.Value>
                     <DataTemplate>
                         <TextBlock Text="{Binding}" Foreground="White"
-                                   FontWeight="SemiBold" TextWrapping="NoWrap"/>
+                                   FontWeight="SemiBold" TextWrapping="NoWrap" Margin="0"
+                                   VerticalAlignment="Center"/>
                     </DataTemplate>
                 </Setter.Value>
             </Setter>
             <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
+                        <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
                     <Setter Property="Background" Value="{StaticResource AccentStrongBrush}"/>
                     <Setter Property="BorderBrush" Value="{StaticResource AccentStrongBrush}"/>
-                </Trigger>
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsPressed, RelativeSource={RelativeSource Self}}" Value="True"/>
+                        <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#0A49BE"/>
+                    <Setter Property="BorderBrush" Value="#0A49BE"/>
+                </MultiDataTrigger>
             </Style.Triggers>
         </Style>
 
@@ -113,15 +137,20 @@
                 <Setter.Value>
                     <DataTemplate>
                         <TextBlock Text="{Binding}" Foreground="{StaticResource DangerBrush}"
-                                   FontWeight="SemiBold" TextWrapping="NoWrap"/>
+                                   FontWeight="SemiBold" TextWrapping="NoWrap" Margin="0"
+                                   VerticalAlignment="Center"/>
                     </DataTemplate>
                 </Setter.Value>
             </Setter>
             <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
+                        <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
                     <Setter Property="Background" Value="#FFF0F1"/>
                     <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}"/>
-                </Trigger>
+                </MultiDataTrigger>
             </Style.Triggers>
         </Style>
 
@@ -135,7 +164,8 @@
                 <Setter.Value>
                     <DataTemplate>
                         <TextBlock Text="{Binding}" Foreground="{StaticResource AccentStrongBrush}"
-                                   FontWeight="SemiBold" TextWrapping="NoWrap"/>
+                                   FontWeight="SemiBold" TextWrapping="NoWrap" Margin="0"
+                                   VerticalAlignment="Center"/>
                     </DataTemplate>
                 </Setter.Value>
             </Setter>
