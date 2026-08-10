@@ -37,6 +37,10 @@ public partial class MainWindow : Window
     private Guid? _processingMeetingId;
     private Guid? _failedProcessingJobId;
     private AgentIpcHealth? _lastAgentHealth;
+    private string _archiveRoot = DesktopSettings.DefaultArchiveRoot();
+    private string? _lastSyncedArchiveRoot;
+    private string? _localArchiveDirectory;
+    private string? _localArchiveSessionId;
     private const string GlobalSearchPlaceholder = "Поиск по совещаниям, стенограммам и задачам...";
 
     private sealed record DashboardFacts(bool SummaryQueried, bool SummaryReady, bool TasksQueried, int OpenTasks, bool JobsQueried, bool HasActiveJob);
@@ -51,6 +55,8 @@ public partial class MainWindow : Window
         HeaderAvatarText.Text = displayName.Length >= 2 ? displayName[..2].ToUpperInvariant() : "WX";
         ApiUrlTextBox.Text = settings.ApiUrl;
         UsernameTextBox.Text = settings.Username;
+        _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
+        ArchiveRootTextBox.Text = _archiveRoot;
         _server.Dispose();
         _server = new ServerApiClient(settings.ApiUrl);
         _server.RestoreSession(settings.UnprotectSessionCookie());
@@ -256,6 +262,7 @@ public partial class MainWindow : Window
         try
         {
             var status = await _agent.SendAsync("HEALTH");
+            await SyncArchiveRootAsync(status.Ok);
             AgentStatusText.Text = status.Ok ? "Подключён" : "Недоступен";
             AgentStatusText.Foreground = status.Ok ? Brushes.ForestGreen : Brushes.OrangeRed;
             _lastAgentHealth = status.Health;
@@ -274,6 +281,13 @@ public partial class MainWindow : Window
             if (status.Health is not null)
             {
                 var health = status.Health;
+                var archiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? _archiveRoot : health.ArchiveRoot;
+                ArchivePathText.Text = health.PendingUploadSessions > 0
+                    ? $"Архив: {archiveRoot} · ожидают отправки: {health.PendingUploadSessions}"
+                    : $"Архив: {archiveRoot} · локальная копия сохраняется до подтверждения сервера";
+                ArchiveStatusText.Text = health.PendingUploadSessions > 0
+                    ? $"В очереди доставки: {health.PendingUploadSessions}. Agent повторит отправку автоматически."
+                    : "Записи сохраняются в выбранную папку до подтверждения сервера.";
                 MicrophoneText.Text = $"Микрофон: {(health.Microphone ? "готов" : "не найден")} · {health.CaptureDeviceCount} устройств";
                 SystemAudioText.Text = $"Системный звук: {(health.SystemAudio ? "готов" : "не найден")} · {health.RenderDeviceCount} устройств";
                 MicrophoneHintText.Text = health.Microphone ? "Уровень появится после начала записи" : "Подключите или выберите микрофон";
@@ -520,6 +534,7 @@ public partial class MainWindow : Window
         ProcessingStatusText.Text = "Сохранение записи…";
         ProcessingErrorText.Text = string.Empty;
         var response = await RunCommandAsync("STOP");
+        _localArchiveSessionId = response?.SessionId;
         if (response?.MeetingId is Guid meetingId)
         {
             _processingMeetingId = meetingId;
@@ -532,6 +547,7 @@ public partial class MainWindow : Window
             ProcessingProgressBar.Visibility = Visibility.Collapsed;
             ProcessingStatusText.Text = "Запись сохранена локально";
             ProcessingErrorText.Text = "Серверное совещание ещё не связано; проверьте подключение API.";
+            ProcessingRetryButton.Visibility = _localArchiveSessionId is null ? Visibility.Collapsed : Visibility.Visible;
             UpdateRecordingPresentation("Error", true, null, ProcessingErrorText.Text);
         }
     }
@@ -660,7 +676,7 @@ public partial class MainWindow : Window
                 AgentRegistrationPanel.IsEnabled = true;
                 AgentRegistrationPanel.Opacity = 1.0;
                 PasswordBox.Clear();
-                DesktopSettings.Save(_server.BaseAddress.ToString(), UsernameTextBox.Text, _server.GetSessionCookie());
+                DesktopSettings.Save(_server.BaseAddress.ToString(), UsernameTextBox.Text, _server.GetSessionCookie(), _archiveRoot);
                 await LoadMeetingsAsync();
             }
             else
@@ -745,6 +761,58 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
+
+    private async Task SyncArchiveRootAsync(bool agentAvailable)
+    {
+        if (!agentAvailable || string.Equals(_lastSyncedArchiveRoot, _archiveRoot, StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            var response = await _agent.SendAsync("SET_ARCHIVE_ROOT", new { archiveRoot = _archiveRoot });
+            if (response.Ok)
+            {
+                _lastSyncedArchiveRoot = _archiveRoot;
+                ArchiveStatusText.Text = "Папка архива синхронизирована с Recorder Agent";
+            }
+        }
+        catch
+        {
+            ArchiveStatusText.Text = "Путь сохранён в Desktop; Agent синхронизируется после подключения";
+        }
+    }
+
+    private async void SelectArchiveFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dialog = new OpenFolderDialog
+            {
+                Title = "Выберите папку архива записей",
+                InitialDirectory = Directory.Exists(_archiveRoot) ? _archiveRoot : DesktopSettings.DefaultArchiveRoot()
+            };
+            if (dialog.ShowDialog(this) != true) return;
+            Directory.CreateDirectory(dialog.FolderName);
+            _archiveRoot = Path.GetFullPath(dialog.FolderName);
+            ArchiveRootTextBox.Text = _archiveRoot;
+            DesktopSettings.Save(_server.BaseAddress.ToString(), UsernameTextBox.Text, _server.GetSessionCookie(), _archiveRoot);
+            ArchiveStatusText.Text = "Путь сохранён. Проверяю Recorder Agent…";
+            await SyncArchiveRootAsync(true);
+        }
+        catch (Exception ex)
+        {
+            ArchiveStatusText.Text = $"Не удалось выбрать папку: {SafeError(ex)}";
+        }
+    }
+
+    private void OpenArchiveFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(_archiveRoot);
+            Process.Start(new ProcessStartInfo { FileName = _archiveRoot, UseShellExecute = true });
+        }
+        catch (Exception ex) { ArchiveStatusText.Text = $"Не удалось открыть папку: {SafeError(ex)}"; }
+    }
+
     private async void EnrollAgentButton_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -765,6 +833,7 @@ public partial class MainWindow : Window
                 serverUrl = _server.BaseAddress.ToString().TrimEnd('/'),
                 agentId = enrollment.AgentId,
                 token = enrollment.Token,
+                archiveRoot = _archiveRoot,
             });
             AdminStatusText.Text = configured.Ok
                 ? "Recorder Service зарегистрирован и настроен в API."
@@ -951,6 +1020,7 @@ public partial class MainWindow : Window
     private async Task LoadMeetingDetailsAsync(DesktopMeeting meeting, CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(meeting.Id, out var meetingId)) return;
+        await UpdateLocalArchiveStatusAsync(meeting, cancellationToken);
         TranscriptStatusText.Text = "Загрузка результатов…";
         SummaryTextBox.Text = "Загрузка саммари…";
         try
@@ -1002,6 +1072,41 @@ public partial class MainWindow : Window
         catch (Exception ex) { PlayerStatusText.Text = $"Плеер: {SafeError(ex)}"; }
         FooterText.Text = "Данные совещания загружены";
     }
+    private async Task UpdateLocalArchiveStatusAsync(DesktopMeeting meeting, CancellationToken cancellationToken)
+    {
+        _localArchiveDirectory = null;
+        _localArchiveSessionId = null;
+        var meetingsRoot = Path.Combine(_archiveRoot, "Meetings");
+        if (!Directory.Exists(meetingsRoot))
+        {
+            LocalArchiveStatusText.Text = "Локальная копия ещё не создана";
+            return;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(meetingsRoot))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var manifestPath = Path.Combine(directory, "manifest.json");
+            if (!File.Exists(manifestPath)) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath, cancellationToken));
+                var root = document.RootElement;
+                var manifestMeetingId = root.TryGetProperty("meetingId", out var meetingValue) && meetingValue.ValueKind == JsonValueKind.String ? meetingValue.GetString() : null;
+                var manifestTitle = root.TryGetProperty("title", out var titleValue) && titleValue.ValueKind == JsonValueKind.String ? titleValue.GetString() : null;
+                if (!string.Equals(manifestMeetingId, meeting.Id, StringComparison.OrdinalIgnoreCase) && !string.Equals(manifestTitle, meeting.Title, StringComparison.CurrentCultureIgnoreCase)) continue;
+                _localArchiveDirectory = directory;
+                _localArchiveSessionId = root.TryGetProperty("sessionId", out var sessionValue) && sessionValue.ValueKind == JsonValueKind.String ? sessionValue.GetString() : null;
+                var uploadState = root.TryGetProperty("uploadState", out var stateValue) && stateValue.ValueKind == JsonValueKind.String ? stateValue.GetString() : "UNKNOWN";
+                var fileCount = root.TryGetProperty("files", out var filesValue) && filesValue.ValueKind == JsonValueKind.Array ? filesValue.GetArrayLength() : 0;
+                LocalArchiveStatusText.Text = $"Локальная копия: {uploadState}; файлов: {fileCount}; {directory}";
+                return;
+            }
+            catch (JsonException) { }
+        }
+        LocalArchiveStatusText.Text = "Локальная копия для этого совещания не найдена";
+    }
+
     private void TranscriptList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (TranscriptList.SelectedItem is not DesktopTranscriptSegment segment) return;
@@ -1126,7 +1231,20 @@ public partial class MainWindow : Window
 
     private async void RetryProcessingButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_failedProcessingJobId is not Guid jobId) return;
+        if (_failedProcessingJobId is not Guid jobId)
+        {
+            if (string.IsNullOrWhiteSpace(_localArchiveSessionId)) return;
+            try
+            {
+                var retry = await _agent.SendAsync("RETRY_UPLOAD", new { sessionId = _localArchiveSessionId });
+                ProcessingStatusText.Text = retry.Ok ? "Повторная отправка локального архива запущена" : "Не удалось повторить отправку локального архива";
+                ProcessingErrorText.Text = retry.Error ?? string.Empty;
+                ProcessingRetryButton.Visibility = retry.Ok ? Visibility.Collapsed : Visibility.Visible;
+                await RefreshStatusAsync();
+            }
+            catch (Exception ex) { ProcessingErrorText.Text = SafeError(ex); }
+            return;
+        }
         try
         {
             var retried = await _server.RetryJobAsync(jobId);

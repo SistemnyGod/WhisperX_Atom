@@ -316,7 +316,9 @@
                                         <TextBlock x:Name="DeviceErrorText" Text="" Foreground="{StaticResource WarningBrush}"
                                                    FontSize="11" Margin="0,4,0,0" Visibility="Collapsed" TextWrapping="Wrap"/>
                                         <TextBlock x:Name="StorageText" Text="Диск: проверка" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,10,0,0"/>
-                                        <Border x:Name="ProcessingPanel" Background="{StaticResource SurfaceElevatedBrush}" BorderBrush="#DCE7F5" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
+                                         <TextBlock x:Name="ArchivePathText" Text="Архив: проверка" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                         <TextBlock x:Name="LocalArchiveStatusText" Text="Локальная копия появится после остановки записи" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                         <Border x:Name="ProcessingPanel" Background="{StaticResource SurfaceElevatedBrush}" BorderBrush="#DCE7F5" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
                                             <StackPanel>
                                                 <TextBlock Text="Состояние обработки" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,0,0,4"/>
                                                 <TextBlock x:Name="ProcessingStatusText" Text="Обработка не запущена" Foreground="{StaticResource AccentStrongBrush}" FontSize="11" FontWeight="SemiBold"/>
@@ -897,7 +899,20 @@
                             </Border>
                         </Grid>
 
-                        <StackPanel x:Name="EngineeringPanel">
+                         <Border Style="{StaticResource SoftCardBorder}" Margin="0,0,0,16">
+                             <StackPanel>
+                                 <TextBlock Text="Папка архива записей" Style="{StaticResource SectionTitle}" Margin="0,0,0,6"/>
+                                 <Grid>
+                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                     <TextBox x:Name="ArchiveRootTextBox" Grid.Column="0" IsReadOnly="True" ToolTip="Постоянный локальный архив; spool Agent хранится отдельно"/>
+                                     <Button Grid.Column="1" Content="Выбрать" Click="SelectArchiveFolderButton_Click" Margin="8,0,0,0"/>
+                                     <Button Grid.Column="2" Content="Открыть" Click="OpenArchiveFolderButton_Click" Margin="8,0,0,0"/>
+                                 </Grid>
+                                 <TextBlock x:Name="ArchiveStatusText" Text="Записи сохраняются в выбранную папку до подтверждения сервера." Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                             </StackPanel>
+                         </Border>
+
+                         <StackPanel x:Name="EngineeringPanel">
                             <TextBlock Text="Инженерные настройки" Style="{StaticResource SectionTitle}" Margin="0,0,0,0"/>
                             <Border Style="{StaticResource SoftCardBorder}" Margin="0,12,0,0">
                                 <StackPanel>

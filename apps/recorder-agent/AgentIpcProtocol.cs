@@ -27,4 +27,6 @@ public sealed record AgentIpcHealth(
     int RenderDeviceCount,
     long FreeBytes,
     long TotalBytes,
-    string? Error);
+    string? Error,
+    string? ArchiveRoot = null,
+    int PendingUploadSessions = 0);

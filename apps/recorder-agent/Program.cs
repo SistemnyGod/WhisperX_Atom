@@ -18,9 +18,11 @@ try
     var builder = Host.CreateApplicationBuilder(args);
     builder.Services.AddSerilog();
     builder.Services.AddSingleton(new SpoolStore(dataRoot));
+    builder.Services.AddSingleton<AgentStorageSettings>();
     builder.Services.AddSingleton<AgentStateMachine>();
     builder.Services.AddSingleton<RecordingCoordinator>();
     builder.Services.AddSingleton<AgentApiClient>();
+    builder.Services.AddSingleton<LocalArchiveWriter>();
     builder.Services.AddHostedService<AgentPipeHost>();
     builder.Services.AddHostedService<RecorderWorker>();
     builder.Services.AddWindowsService(options => options.ServiceName = "WhisperX Atom Recorder Agent");
@@ -31,7 +33,7 @@ finally
     await Log.CloseAndFlushAsync();
 }
 
-public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, ILogger<RecorderWorker> logger) : BackgroundService
+public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, LocalArchiveWriter archive, ILogger<RecorderWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -58,6 +60,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var configuredCursor = long.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_COMMAND_CURSOR"), out var initialCursor) ? initialCursor : 0;
         var cursor = Math.Max(persistedCursor, configuredCursor);
         var lastHeartbeat = DateTimeOffset.MinValue;
+        var lastRecovery = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (!api.IsConfigured)
@@ -71,9 +74,10 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
 
             try
             {
-                if (!recoveryCompleted)
+                if (!recoveryCompleted || DateTimeOffset.UtcNow - lastRecovery >= TimeSpan.FromSeconds(10))
                 {
                     recoveryCompleted = await RecoverPendingSessionsAsync(stoppingToken);
+                    lastRecovery = DateTimeOffset.UtcNow;
                 }
                 if (DateTimeOffset.UtcNow - lastHeartbeat >= TimeSpan.FromSeconds(30))
                 {
@@ -176,23 +180,39 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var mediaTimeMs = recorder.CurrentMediaTimeMs ?? 0;
         await spool.AddEventAsync(sessionId, eventType, mediaTimeMs, JsonSerializer.Serialize(payload), cancellationToken);
         return ("COMPLETED", new { ok = true, eventType, mediaTimeMs, sessionId });
-    }    private async Task<bool> UploadAndFinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
+    }
+
+    private async Task<bool> UploadAndFinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
     {
-        if (!api.IsConfigured || string.IsNullOrWhiteSpace(localSessionId)) return false;
+        if (string.IsNullOrWhiteSpace(localSessionId)) return false;
+        await archive.CreateAsync(localSessionId, cancellationToken);
+        if (!api.IsConfigured)
+        {
+            await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_API", "API is not configured", cancellationToken);
+            return false;
+        }
         try
         {
+            await archive.SetUploadStateAsync(localSessionId, "UPLOADING", null, cancellationToken);
             await api.UploadPendingChunksAsync(spool, cancellationToken);
             var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-            if (serverSessionId is not Guid server) return false;
+            if (serverSessionId is not Guid server)
+            {
+                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "Server session is not bound", cancellationToken);
+                return false;
+            }
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (finalized)
             {
+                await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
                 await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
             }
+            else await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", "Server did not confirm the session", cancellationToken);
             return finalized;
         }
         catch (Exception ex)
         {
+            try { await archive.SetUploadStateAsync(localSessionId, "ERROR", ex.Message, cancellationToken); } catch (Exception stateError) { logger.LogDebug(stateError, "Could not persist archive upload error. Session={SessionId}", localSessionId); }
             logger.LogWarning(ex, "Server finalize failed; chunks remain in the local spool. Session={SessionId}", localSessionId);
             return false;
         }
@@ -203,8 +223,10 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var completed = true;
         foreach (var localSessionId in await spool.SessionsNeedingRecoveryAsync(cancellationToken))
         {
+            if (string.Equals(localSessionId, recorder.SessionId, StringComparison.Ordinal)) continue;
             try
             {
+                await archive.CreateAsync(localSessionId, cancellationToken);
                 var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
                 if (serverSessionId is null)
                 {

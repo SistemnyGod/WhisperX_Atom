@@ -11,6 +11,8 @@ public sealed class AgentPipeHost(
     AgentStateMachine state,
     SpoolStore spool,
     AgentApiClient api,
+    AgentStorageSettings storage,
+    LocalArchiveWriter archive,
     ILogger<AgentPipeHost> logger) : BackgroundService
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -56,7 +58,7 @@ public sealed class AgentPipeHost(
                 case "STATUS":
                     return Status();
                 case "HEALTH":
-                    return Status(includeHealth: true);
+                    return await StatusAsync(cancellationToken);
                 case "CONFIGURE":
                     var serverUrl = ReadString(request.Payload, "serverUrl");
                     var agentToken = ReadString(request.Payload, "token");
@@ -64,7 +66,20 @@ public sealed class AgentPipeHost(
                     if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(agentToken) || agentId is not Guid configuredAgent)
                         return Error("agent_configuration_invalid");
                     await api.ConfigureAsync(serverUrl, configuredAgent, agentToken, cancellationToken);
+                    var configuredArchiveRoot = ReadString(request.Payload, "archiveRoot");
+                    if (!string.IsNullOrWhiteSpace(configuredArchiveRoot)) await api.SetArchiveRootAsync(configuredArchiveRoot, cancellationToken);
                     return Status();
+                case "SET_ARCHIVE_ROOT":
+                    var archiveRoot = ReadString(request.Payload, "archiveRoot");
+                    if (string.IsNullOrWhiteSpace(archiveRoot)) return Error("archive_root_required");
+                    await api.SetArchiveRootAsync(archiveRoot, cancellationToken);
+                    return Status();
+                case "RETRY_UPLOAD":
+                    var retrySessionId = ReadString(request.Payload, "sessionId");
+                    if (string.IsNullOrWhiteSpace(retrySessionId)) return Error("session_required");
+                    var retryCompleted = await FinalizeAsync(retrySessionId, cancellationToken);
+                    return new AgentIpcResponse(retryCompleted, retryCompleted ? RecorderState.Idle.ToString() : RecorderState.Finalizing.ToString(), retrySessionId,
+                        retryCompleted ? null : "upload_pending", null);
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
                     var title = ReadString(request.Payload, "title");
@@ -129,6 +144,7 @@ public sealed class AgentPipeHost(
         try
         {
             await stop.LocalFinalization;
+            await archive.CreateAsync(stop.SessionId!, CancellationToken.None);
             await FinalizeAsync(stop.SessionId, CancellationToken.None);
         }
         catch (Exception ex)
@@ -139,21 +155,54 @@ public sealed class AgentPipeHost(
     }
     private async Task<bool> FinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
     {
-        if (!api.IsConfigured || string.IsNullOrWhiteSpace(localSessionId)) return false;
-        await api.UploadPendingChunksAsync(spool, cancellationToken);
-        await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
-        var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-        if (serverSessionId is not Guid server) return false;
-        var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
-        if (finalized) await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
-        return finalized;
+        if (string.IsNullOrWhiteSpace(localSessionId)) return false;
+        await archive.CreateAsync(localSessionId, cancellationToken);
+        if (!api.IsConfigured)
+        {
+            await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_API", "API is not configured", cancellationToken);
+            return false;
+        }
+        try
+        {
+            await archive.SetUploadStateAsync(localSessionId, "UPLOADING", null, cancellationToken);
+            await api.UploadPendingChunksAsync(spool, cancellationToken);
+            await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
+            var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+            if (serverSessionId is not Guid server)
+            {
+                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "Server session is not bound", cancellationToken);
+                return false;
+            }
+            var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
+            if (finalized)
+            {
+                await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
+                await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
+            }
+            else await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", "Server did not confirm the session", cancellationToken);
+            return finalized;
+        }
+        catch (Exception ex)
+        {
+            await archive.SetUploadStateAsync(localSessionId, "ERROR", ex.Message, cancellationToken);
+            throw;
+        }
     }
 
-    private AgentIpcResponse Status(bool includeHealth = false)
+    private AgentIpcResponse Status()
     {
-        var health = includeHealth ? DeviceHealthSnapshot.Collect(DataRoot()) : null;
-        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, health is null ? null : new AgentIpcHealth(
-            health.Microphone, health.SystemAudio, health.CaptureDeviceCount, health.RenderDeviceCount, health.FreeBytes, health.TotalBytes, health.Error), null, recorder.CurrentMediaTimeMs);
+        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, null, null, recorder.CurrentMediaTimeMs);
+    }
+
+    private async Task<AgentIpcResponse> StatusAsync(CancellationToken cancellationToken)
+    {
+        var health = DeviceHealthSnapshot.Collect(DataRoot());
+        var pendingUploadSessions = 0;
+        try { pendingUploadSessions = await spool.PendingUploadSessionCountAsync(cancellationToken); }
+        catch (Exception ex) { logger.LogDebug(ex, "Spool database is not initialized while reporting health."); }
+        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, new AgentIpcHealth(
+            health.Microphone, health.SystemAudio, health.CaptureDeviceCount, health.RenderDeviceCount, health.FreeBytes, health.TotalBytes, health.Error,
+            storage.ArchiveRoot, pendingUploadSessions), null, recorder.CurrentMediaTimeMs);
     }
 
     private async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, CancellationToken cancellationToken)

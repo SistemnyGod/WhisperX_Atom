@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace WhisperX.Atom.Desktop;
 
-public sealed record DesktopSettings(string ApiUrl, string Username, string? ProtectedSessionCookie)
+public sealed record DesktopSettings(string ApiUrl, string Username, string? ProtectedSessionCookie, string? ArchiveRoot = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
@@ -16,24 +16,29 @@ public sealed record DesktopSettings(string ApiUrl, string Username, string? Pro
     {
         try
         {
-            if (!File.Exists(FilePath)) return new("http://localhost:8080", "admin", null);
+            if (!File.Exists(FilePath)) return new("http://localhost:8080", "admin", null, DefaultArchiveRoot());
             return JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(FilePath), JsonOptions)
-                ?? new("http://localhost:8080", "admin", null);
+                ?? new("http://localhost:8080", "admin", null, DefaultArchiveRoot());
         }
-        catch (IOException) { return new("http://localhost:8080", "admin", null); }
-        catch (JsonException) { return new("http://localhost:8080", "admin", null); }
+        catch (IOException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
+        catch (JsonException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
     }
 
-    public static void Save(string apiUrl, string username, string? sessionCookie)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
         var settings = new DesktopSettings(apiUrl.TrimEnd('/'), username.Trim(),
-            string.IsNullOrWhiteSpace(sessionCookie) ? null : Protect(sessionCookie));
+            string.IsNullOrWhiteSpace(sessionCookie) ? null : Protect(sessionCookie),
+            string.IsNullOrWhiteSpace(archiveRoot) ? DefaultArchiveRoot() : Path.GetFullPath(archiveRoot.Trim()));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
     }
+
+    public static string DefaultArchiveRoot() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+        "WhisperX Atom");
 
     public string? UnprotectSessionCookie()
     {

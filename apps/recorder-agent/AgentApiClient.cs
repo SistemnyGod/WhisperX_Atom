@@ -16,12 +16,20 @@ public sealed class AgentApiClient : IDisposable
     private string _token;
     private readonly string _configPath;
     private readonly object _configurationGate = new();
+    private readonly AgentStorageSettings _storage;
 
-    public AgentApiClient()
+    public AgentApiClient(AgentStorageSettings storage)
     {
+        _storage = storage;
         _configPath = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent", "agent-config.json");
         var config = ReadConfig(_configPath);
+        var configuredArchiveRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_ARCHIVE_ROOT") ?? config?.ArchiveRoot;
+        if (!string.IsNullOrWhiteSpace(configuredArchiveRoot))
+        {
+            try { _storage.SetArchiveRoot(configuredArchiveRoot); }
+            catch (Exception) { /* Invalid user path is reported when a recording is started. */ }
+        }
         var baseUrl = (Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL") ?? config?.ServerUrl ?? "http://localhost:8080").TrimEnd('/') + "/";
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
@@ -43,11 +51,22 @@ public sealed class AgentApiClient : IDisposable
         var directory = Path.GetDirectoryName(_configPath)!;
         Directory.CreateDirectory(directory);
         var temporary = _configPath + ".part";
-        var protectedToken = Convert.ToBase64String(ProtectedData.Protect(
-            Encoding.UTF8.GetBytes(token),
-            Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
-            DataProtectionScope.LocalMachine));
-        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), protectedToken, true)), cancellationToken);
+        await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true, _storage.ArchiveRoot), cancellationToken);
+        File.Move(temporary, _configPath, true);
+    }
+
+    public async Task SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default)
+    {
+        var normalized = _storage.SetArchiveRoot(archiveRoot);
+        if (!IsConfigured) return;
+        var temporary = _configPath + ".part";
+        var configuration = new AgentConfiguration(
+            _baseUri.ToString().TrimEnd('/'),
+            _agentId.ToString(),
+            ProtectToken(_token),
+            true,
+            normalized);
+        await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
 
@@ -250,7 +269,15 @@ public sealed class AgentApiClient : IDisposable
         }
     }
 
-    private sealed record AgentConfiguration(string ServerUrl, string AgentId, string Token, bool Encrypted = false);
+    private sealed record AgentConfiguration(string ServerUrl, string AgentId, string Token, bool Encrypted = false, string? ArchiveRoot = null);
+
+    private static string ProtectToken(string token) => Convert.ToBase64String(ProtectedData.Protect(
+        Encoding.UTF8.GetBytes(token),
+        Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
+        DataProtectionScope.LocalMachine));
+
+    private static Task PersistConfigurationAsync(string path, AgentConfiguration configuration, CancellationToken cancellationToken) =>
+        File.WriteAllTextAsync(path, JsonSerializer.Serialize(configuration), cancellationToken);
 
     public void Dispose() => _http.Dispose();
 }

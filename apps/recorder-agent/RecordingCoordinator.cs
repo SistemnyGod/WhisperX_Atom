@@ -13,6 +13,7 @@ public sealed record RecordingStopHandle(string? SessionId, Task LocalFinalizati
 public sealed class RecordingCoordinator : IAsyncDisposable
 {
     private readonly SpoolStore _spool;
+    private readonly AgentStorageSettings _storage;
     private readonly AgentStateMachine _state;
     private readonly ILogger<RecordingCoordinator> _logger;
     private readonly string _dataRoot;
@@ -22,10 +23,11 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     private CaptureTrack? _systemAudio;
     private string? _sessionId;
 
-    public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, ILogger<RecordingCoordinator> logger)
+    public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
     {
         _spool = spool;
         _state = state;
+        _storage = storage;
         _logger = logger;
         _dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
@@ -132,6 +134,13 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         var drive = new DriveInfo(root);
         if (!drive.IsReady || drive.AvailableFreeSpace < minimumBytes)
             throw new IOException($"recording_storage_low:{drive.AvailableFreeSpace}:{minimumBytes}");
+        var archiveRoot = Path.GetFullPath(_storage.ArchiveRoot);
+        Directory.CreateDirectory(Path.Combine(archiveRoot, "Meetings"));
+        var archiveDriveRoot = Path.GetPathRoot(archiveRoot);
+        if (string.IsNullOrWhiteSpace(archiveDriveRoot)) throw new IOException("archive_storage_root_unavailable");
+        var archiveDrive = new DriveInfo(archiveDriveRoot);
+        if (!archiveDrive.IsReady || archiveDrive.AvailableFreeSpace < minimumBytes)
+            throw new IOException($"archive_storage_low:{archiveDrive.AvailableFreeSpace}:{minimumBytes}");
     }
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {

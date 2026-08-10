@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Program.cs;RecordingCoordinator.cs;AgentApiClient.cs;DeviceHealth.cs;AgentPipeHost.cs;AgentPipeSecurity.cs" />
+    <Compile Remove="Program.cs;RecordingCoordinator.cs;AgentApiClient.cs;DeviceHealth.cs;AgentPipeHost.cs;AgentPipeSecurity.cs;LocalArchiveWriter.cs" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />

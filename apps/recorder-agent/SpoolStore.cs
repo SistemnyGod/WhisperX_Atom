@@ -25,6 +25,8 @@ public sealed record ServerBinding(string LocalSessionId, string LocalTrackId, G
 public sealed record RecordingManifestTrack(Guid ServerTrackId, string TrackType, int SampleRate, int Channels, int ExpectedChunkCount, long TotalSamples);
 public sealed record PendingCommandResult(Guid CommandId, long Cursor, string Status, JsonElement Result);
 public sealed record RecordingEventRow(string Id, string SessionId, string EventType, long? MediaTimeMs, string PayloadJson, DateTimeOffset CreatedAt);
+public sealed record RecordingSessionInfo(string SessionId, Guid? MeetingId, string? Title, DateTimeOffset? StartedAt);
+public sealed record RecordingArchiveChunk(string TrackId, string TrackType, int Sequence, string LocalPath, long StartSample, long SampleCount, int SampleRate, int Channels, long SizeBytes, string Sha256);
 
 public sealed record RecordingManifest(Guid ServerSessionId, IReadOnlyList<RecordingManifestTrack> Tracks);
 
@@ -115,6 +117,34 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$finished", DateTimeOffset.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$id", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<RecordingSessionInfo?> GetSessionInfoAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT meeting_id,title,started_at FROM recording_sessions WHERE id=$session";
+        command.Parameters.AddWithValue("$session", sessionId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        Guid? meetingId = reader.IsDBNull(0) ? null : Guid.TryParse(reader.GetString(0), out var parsed) ? parsed : null;
+        DateTimeOffset? startedAt = reader.IsDBNull(2) ? null : DateTimeOffset.TryParse(reader.GetString(2), out var started) ? started : null;
+        return new RecordingSessionInfo(sessionId, meetingId, reader.IsDBNull(1) ? null : reader.GetString(1), startedAt);
+    }
+
+    public async Task<IReadOnlyList<RecordingArchiveChunk>> GetArchiveChunksAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT track_id,track_type,sequence,local_path,start_sample,sample_count,sample_rate,channels,size_bytes,sha256 FROM recording_chunks WHERE session_id=$session ORDER BY track_id,sequence";
+        command.Parameters.AddWithValue("$session", sessionId);
+        var result = new List<RecordingArchiveChunk>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new RecordingArchiveChunk(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt64(8), reader.GetString(9)));
+        return result;
     }
 
     public async Task AddEventAsync(string sessionId, string eventType, long? mediaTimeMs = null, string payloadJson = "{}", CancellationToken cancellationToken = default)
@@ -296,11 +326,21 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id FROM recording_sessions WHERE state IN ('RECORDING','FINALIZING') ORDER BY started_at";
+         command.CommandText = "SELECT id FROM recording_sessions WHERE state IN ('RECORDING','FAILED') OR (state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)) ORDER BY started_at";
+         command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddMinutes(-2).ToString("O"));
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) result.Add(reader.GetString(0));
         return result;
+    }
+
+    public async Task<int> PendingUploadSessionCountAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state IN ('FINALIZING','FAILED')";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
     public async Task UpsertChunkAsync(RecordingChunk chunk, CancellationToken cancellationToken = default)
     {
