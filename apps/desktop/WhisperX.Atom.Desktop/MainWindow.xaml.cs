@@ -60,14 +60,21 @@ public partial class MainWindow : Window
     {
         DashboardMeetingsList.ItemsSource = Array.Empty<DesktopMeeting>();
         DashboardMeetingsEmptyText.Text = message;
+        DashboardMeetingsEmptyHintText.Text = message.Contains("Не удалось", StringComparison.OrdinalIgnoreCase)
+            ? "Проверьте подключение к API и повторите обновление"
+            : "Войдите в API или импортируйте первую запись";
+        DashboardMeetingsEmptyActions.Visibility = Visibility.Visible;
         DashboardMeetingsEmptyText.Visibility = Visibility.Visible;
         DashboardMeetingsEmptyState.Visibility = Visibility.Visible;
         DashboardProcessingText.Text = "—";
         DashboardSummariesText.Text = "—";
         DashboardTasksText.Text = "—";
+        DashboardGpuText.Text = "Нет данных";
         DashboardStorageMetricText.Text = "Ожидание проверки";
         DashboardStoragePercentText.Text = "—";
         DashboardStorageBar.Value = 0;
+        RecordingTimerText.Text = "--:--:--";
+        RecordingTimerText.Visibility = Visibility.Collapsed;
     }
 
     private async Task RefreshDashboardMetricsAsync(IReadOnlyList<DesktopMeeting> meetings, CancellationToken cancellationToken = default)
@@ -77,6 +84,8 @@ public partial class MainWindow : Window
         DashboardMeetingsEmptyText.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         DashboardMeetingsEmptyState.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         DashboardMeetingsEmptyText.Text = recent.Length == 0 ? "Нет загруженных совещаний" : string.Empty;
+        DashboardMeetingsEmptyHintText.Text = "Войдите в API или импортируйте первую запись";
+        DashboardMeetingsEmptyActions.Visibility = recent.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         if (meetings.Count == 0)
         {
@@ -249,6 +258,9 @@ public partial class MainWindow : Window
                 "Idle" => "Ожидание",
                 _ => status.State,
             };
+            var hasActiveRecording = status.State is "Recording" or "Paused";
+            RecordingTimerText.Text = hasActiveRecording ? FormatMediaTime(status.MediaTimeMs) : "--:--:--";
+            RecordingTimerText.Visibility = hasActiveRecording ? Visibility.Visible : Visibility.Collapsed;
             RecordingIndicator.Fill = status.State switch
             {
                 "Recording" => Brushes.Crimson,
@@ -292,6 +304,9 @@ public partial class MainWindow : Window
             DashboardStorageMetricText.Text = "Нет данных";
             DashboardStoragePercentText.Text = "—";
             DashboardStorageBar.Value = 0;
+            DashboardGpuText.Text = "Нет данных";
+            RecordingTimerText.Text = "--:--:--";
+            RecordingTimerText.Visibility = Visibility.Collapsed;
             LastErrorText.Text = SafeError(ex);
             FooterText.Text = "Recorder Service не отвечает";
             UpdateRecordingControls(false, "Unavailable");
@@ -307,20 +322,20 @@ public partial class MainWindow : Window
         try
         {
             var ready = await _server.CheckReadyAsync();
-            ServerStatusText.Text = ready ? "Готов" : "Недоступен";
-            ServerStatusText.Foreground = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
-            ServerStatusIndicator.Fill = ready ? Brushes.ForestGreen : Brushes.OrangeRed;
-            ServerStatusCard.Background = ready ? new SolidColorBrush(Color.FromRgb(243, 251, 246)) : new SolidColorBrush(Color.FromRgb(255, 247, 247));
-            ServerStatusCard.BorderBrush = ready ? new SolidColorBrush(Color.FromRgb(203, 234, 214)) : new SolidColorBrush(Color.FromRgb(255, 210, 210));
+            ServerStatusText.Text = "Система";
+            ServerStatusText.Foreground = (Brush)FindResource("TextBrush");
+            ServerStatusIndicator.Fill = ready ? (Brush)FindResource("SuccessBrush") : (Brush)FindResource("MutedTextBrush");
+            ServerStatusCard.Background = (Brush)FindResource("SurfaceStrongBrush");
+            ServerStatusCard.BorderBrush = (Brush)FindResource("BorderBrush");
             AdminStatusText.Text = ready ? $"Локальный API подключён: {_server.BaseAddress}" : "Локальный API недоступен.";
         }
         catch (Exception ex)
         {
-            ServerStatusText.Text = "Недоступен";
-            ServerStatusText.Foreground = Brushes.OrangeRed;
-            ServerStatusIndicator.Fill = Brushes.OrangeRed;
-            ServerStatusCard.Background = new SolidColorBrush(Color.FromRgb(255, 247, 247));
-            ServerStatusCard.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 210, 210));
+            ServerStatusText.Text = "Система";
+            ServerStatusText.Foreground = (Brush)FindResource("TextBrush");
+            ServerStatusIndicator.Fill = (Brush)FindResource("MutedTextBrush");
+            ServerStatusCard.Background = (Brush)FindResource("SurfaceStrongBrush");
+            ServerStatusCard.BorderBrush = (Brush)FindResource("BorderBrush");
             AdminStatusText.Text = SafeError(ex);
         }
     }
@@ -524,11 +539,11 @@ public partial class MainWindow : Window
         var isActive = isRecording || isPaused;
         var isIdle = string.Equals(state, "Idle", StringComparison.OrdinalIgnoreCase);
 
-        StartRecordingButton.Visibility = isActive ? Visibility.Collapsed : Visibility.Visible;
-        PauseRecordingButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
-        ResumeRecordingButton.Visibility = isPaused ? Visibility.Visible : Visibility.Collapsed;
-        MarkRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
-        StopRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+        StartRecordingButton.Visibility = Visibility.Visible;
+        PauseRecordingButton.Visibility = Visibility.Visible;
+        ResumeRecordingButton.Visibility = Visibility.Visible;
+        MarkRecordingButton.Visibility = Visibility.Visible;
+        StopRecordingButton.Visibility = Visibility.Visible;
 
         StartRecordingButton.IsEnabled = connected && isIdle;
         PauseRecordingButton.IsEnabled = connected && isRecording;
@@ -612,6 +627,12 @@ public partial class MainWindow : Window
     {
         MainNavigationTabs.SelectedIndex = 5;
         FooterText.Text = "Открыты настройки подключений";
+    }
+
+    private void OpenSourcesFromHero_Click(object sender, MouseButtonEventArgs e)
+    {
+        MainNavigationTabs.SelectedIndex = 2;
+        FooterText.Text = "Открыты источники записи";
     }
 
     private void GlobalSearchBox_GotFocus(object sender, RoutedEventArgs e)
@@ -713,6 +734,12 @@ public partial class MainWindow : Window
 
     private async Task LoadMeetingsAsync()
     {
+        DashboardMeetingsList.ItemsSource = Array.Empty<DesktopMeeting>();
+        DashboardMeetingsEmptyText.Text = "Загрузка совещаний…";
+        DashboardMeetingsEmptyHintText.Text = "Получаем данные из локального API…";
+        DashboardMeetingsEmptyActions.Visibility = Visibility.Collapsed;
+        DashboardMeetingsEmptyText.Visibility = Visibility.Visible;
+        DashboardMeetingsEmptyState.Visibility = Visibility.Visible;
         try
         {
             var meetings = await _server.GetMeetingsAsync();
@@ -1030,5 +1057,11 @@ public partial class MainWindow : Window
         var index = 0;
         while (size >= 1024 && index < units.Length - 1) { size /= 1024; index++; }
         return $"{size:0.0} {units[index]}";
+    }
+
+    private static string FormatMediaTime(long? mediaTimeMs)
+    {
+        if (mediaTimeMs is null or < 0) return "--:--:--";
+        return TimeSpan.FromMilliseconds(mediaTimeMs.Value).ToString("hh\\:mm\\:ss");
     }
 }

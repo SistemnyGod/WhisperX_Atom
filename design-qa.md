@@ -1,7 +1,7 @@
 # Design QA
 
 Reference: WhisperX Atom Desktop Control Room, white/light shell with cobalt-blue primary actions.
-Target viewport: 1440x900 and 1586x993.
+Target viewport: 1440x900, 1586x992 and 1920x1080.
 
 ## Current pass
 
@@ -27,11 +27,29 @@ Latest Home polish:
 - the empty recent-meetings state now explains the next step and exposes working refresh/import actions.
 - the global search field is now interactive, supports `Ctrl + K`, and filters the meetings registry;
 - recent-meeting rows and the «Открыть все совещания» action now open the working meetings workspace;
-- the backend status chip now changes its surface and border treatment when the API is unavailable.
+- the header now keeps a neutral system label while API and Recorder Agent details stay in their operational areas;
 - the left navigation is now fixed to the reference's wider control-room rail;
 - recording controls are state-aware and only show actions relevant to idle, recording or paused mode.
 - the recording eyebrow now communicates the actual mode: readiness, active recording, pause, or unavailable service;
-- the quick-actions rail now contains only usable actions and routes connection setup into Settings instead of showing dead disabled controls.
+- the quick-actions rail routes usable actions into the existing workflows and keeps calendar/export disabled until integrations exist.
+- the selected recording source area now opens Sources, and the agent card exposes a direct Settings action.
+- hidden demo KPI, meeting and notification blocks were removed; recent meetings render only API data.
+- the recording timer renders only the Recorder Agent `MediaTimeMs` value and stays empty when no session is active.
+- the recent-meetings table now uses compact date, title, status, description and open-action columns.
+- the recording action stack remains visible in idle/offline states with honest disabled controls, matching the reference geometry;
+- the idle state hides the timer until an active Recorder Agent session exists;
+- the left rail was widened slightly so the Home composition reads as a control-room layout rather than a compact legacy form.
+
+Latest full-shell polish:
+
+- the application now uses one cobalt-blue control-room token set across the shell, cards, fields, tabs, progress bars and disabled states;
+- the outer shell has more deliberate breathing room, a wider navigation rail, a taller header and a borderless content frame for a calmer desktop composition;
+- card geometry is now consistent across Home, Meetings, Sources, Tasks, Assistant and Settings with larger radii, tighter borders and stronger surface hierarchy;
+- the recording hero uses the shared blue surface, larger title scale and a more deliberate action column while retaining the existing Idle, Recording, Paused and Unavailable behavior;
+- KPI icon surfaces, meeting status badges, empty-state icon surfaces and assistant response surfaces now share the same semantic blue, green, purple and orange palette;
+- the header system indicator remains neutral and compact, while the agent state continues to be reported in the operational areas rather than overloaded into the shell;
+- no mock meetings, people, GPU values or notifications were added; all data continues to come from the existing API and IPC clients.
+- button styles now use explicit text content templates for standard, primary, danger and ghost actions; this fixes the low-contrast dark labels previously visible on cobalt primary actions and keeps disabled labels readable.
 
 ## Result
 
@@ -44,6 +62,7 @@ The WPF build and runtime launch were verified, but this environment cannot capt
 - `dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore --nologo` — passed, 0 warnings/errors.
 - Desktop process after launch — confirmed running and responsive.
 - `git diff --check` — passed; only line-ending warnings remain.
+- Latest build after the shell pass — passed, 0 warnings/errors.
 
 ## Follow-up
 
