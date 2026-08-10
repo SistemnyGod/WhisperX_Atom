@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.SourcesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="28,24,28,32" Spacing="18">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel>
+                    <TextBlock Text="Источники" FontSize="30" FontWeight="SemiBold" />
+                    <TextBlock Text="Recorder Agent, устройства записи и серверные агенты" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="OpenRecordingButton_Click" />
+                    <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
+                </StackPanel>
+            </Grid>
+
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
+
+            <Grid x:Name="StatusGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
+                <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="#C8DCFF">
+                    <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="10">
+                        <StackPanel>
+                            <TextBlock Text="ЛОКАЛЬНЫЙ ИСТОЧНИК" Style="{StaticResource EyebrowStyle}" />
+                            <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,0" />
+                        </StackPanel>
+                        <ProgressRing Grid.Column="1" x:Name="LoadingRing" Width="22" Height="22" IsActive="False" />
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+                            <Ellipse x:Name="AgentStatusDot" Width="10" Height="10" Fill="#7B8EA4" />
+                            <TextBlock Text="{Binding LocalAgentStatus}" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="18">
+                            <StackPanel>
+                                <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="{Binding RecordingState}" Margin="0,3,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="{Binding PendingUploadsText}" Margin="0,3,0,0" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Grid.Row="3" Spacing="3">
+                            <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding StorageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border x:Name="BackendCard" Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="СЕРВЕР" Style="{StaticResource EyebrowStyle}" />
+                        <TextBlock Text="Зарегистрированные агенты" Style="{StaticResource SectionTitleStyle}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse x:Name="ApiStatusDot" Width="10" Height="10" Fill="#7B8EA4" />
+                            <TextBlock Text="{Binding BackendStatus}" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <TextBlock Text="Список загружается через текущую авторизованную API-сессию. Регистрация и подключение выполняются в настройках." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <Button Content="Открыть настройки подключения" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Grid x:Name="DevicesGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
+                <Border x:Name="MicrophoneCard" Style="{StaticResource CardStyle}" Padding="0">
+                    <StackPanel>
+                        <StackPanel Padding="20,18,20,12" Spacing="5">
+                            <TextBlock Text="Микрофоны" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap">
+                                <Run Text="Выбрано: " /><Run Text="{Binding SelectedMicrophone}" />
+                            </TextBlock>
+                        </StackPanel>
+                        <ListView x:Name="MicrophoneList" ItemsSource="{Binding Microphones}" SelectionMode="None" MaxHeight="260" BorderThickness="0">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="20,10" ColumnDefinitions="*,Auto">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="{Binding State}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <TextBlock x:Name="MicrophoneEmptyText" Text="Активные микрофоны не обнаружены" Foreground="{StaticResource MutedTextBrush}" Padding="20,14,20,20" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="SystemAudioCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
+                    <StackPanel>
+                        <StackPanel Padding="20,18,20,12" Spacing="5">
+                            <TextBlock Text="Системный звук" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap">
+                                <Run Text="Выбрано: " /><Run Text="{Binding SelectedSystemAudio}" />
+                            </TextBlock>
+                        </StackPanel>
+                        <ListView x:Name="SystemAudioList" ItemsSource="{Binding SystemAudioDevices}" SelectionMode="None" MaxHeight="260" BorderThickness="0">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="20,10" ColumnDefinitions="*,Auto">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="{Binding State}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <TextBlock x:Name="SystemAudioEmptyText" Text="Активные устройства вывода не обнаружены" Foreground="{StaticResource MutedTextBrush}" Padding="20,14,20,20" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Style="{StaticResource CardStyle}" Padding="0">
+                <StackPanel>
+                    <Grid Padding="20,18" ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                            <TextBlock Text="Серверные агенты" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Только реальные записи из /api/agents" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,4,0,0" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Настроить подключение" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" />
+                    </Grid>
+                    <Grid Background="#F0F4F9" Padding="20,10" ColumnDefinitions="1.5*,120,180,*">
+                        <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="3" Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                    </Grid>
+                    <ListView x:Name="AgentsList" ItemsSource="{Binding RegisteredAgents}" SelectionMode="None" BorderThickness="0" MaxHeight="320">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Padding="20,12" ColumnDefinitions="1.5*,120,180,*">
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
+                                    <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel x:Name="AgentsEmptyState" Padding="20,26" Spacing="6" HorizontalAlignment="Center">
+                        <SymbolIcon Symbol="Contact" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                        <TextBlock Text="Зарегистрированных агентов нет" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                        <TextBlock Text="Войдите в API или зарегистрируйте Recorder Agent в настройках." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

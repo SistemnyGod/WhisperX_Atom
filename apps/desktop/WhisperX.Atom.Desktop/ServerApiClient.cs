@@ -10,6 +10,11 @@ using System.Text.Json.Serialization;
 namespace WhisperX.Atom.Desktop;
 
 public sealed record DesktopMeeting(string Id, string Title, string? Description, string Status, DateTimeOffset CreatedAt);
+public sealed record DesktopCurrentUser(Guid Id, string Username, string Role)
+{
+    public bool IsPrivileged => string.Equals(Role, "Administrator", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Role, "Operator", StringComparison.OrdinalIgnoreCase);
+}
 public sealed record DesktopTranscript(string Id, string MeetingId, string Status, IReadOnlyList<DesktopTranscriptSegment> Segments);
 public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words)
 {
@@ -21,6 +26,14 @@ public sealed record DesktopSummary(string Id, string MeetingId, Guid? Transcrip
 public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record DesktopAgentEnrollment(string AgentId, string Token);
+public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Status, DateTimeOffset? LastSeenAt)
+{
+    [JsonIgnore]
+    public string LastSeenText => LastSeenAt is null ? "—" : LastSeenAt.Value.LocalDateTime.ToString("dd.MM.yyyy HH:mm:ss");
+
+    [JsonIgnore]
+    public string RoomText => RoomId?.ToString() ?? "Не назначена";
+}
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
@@ -119,6 +132,29 @@ public sealed class ServerApiClient : IDisposable
         using var response = await _http.GetAsync("api/meetings", cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<List<DesktopMeeting>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit = 200, int offset = 0, CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+        offset = Math.Max(0, offset);
+        using var response = await _http.GetAsync($"api/meetings?limit={limit}&offset={offset}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopMeeting>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default)
+    {
+        using var response = await _http.GetAsync("api/auth/me", cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopCurrentUser>(_json, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default)
+    {
+        using var response = await _http.GetAsync("api/agents", cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopAgent>>(_json, cancellationToken) ?? [];
     }
 
     public async Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default)

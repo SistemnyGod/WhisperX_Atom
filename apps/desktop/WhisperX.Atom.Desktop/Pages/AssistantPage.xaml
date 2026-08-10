@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.AssistantPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <Grid Padding="24,20,24,24" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="16">
+            <StackPanel Spacing="3">
+                <TextBlock Text="Помощник" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Вопросы по выбранной встрече или по доступной истории" Foreground="{StaticResource MutedTextBrush}" />
+            </StackPanel>
+
+            <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="18">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="12">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <ComboBox x:Name="ContextBox" Header="Контекст вопроса" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" SelectionChanged="ContextBox_SelectionChanged" />
+                        <TextBlock Grid.Column="1" Text="{Binding RoleText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Bottom" />
+                    </Grid>
+                    <TextBlock x:Name="GlobalHintText" Grid.Row="1" Text="Вопросы по всей истории доступны только Administrator и Operator." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" />
+                    <TextBox x:Name="QuestionBox" Grid.Row="2" Header="Вопрос" PlaceholderText="Задайте вопрос по стенограмме или саммари" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="92" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
+                    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                        <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        <Button x:Name="AskButton" Grid.Column="1" Content="Спросить" Style="{StaticResource PrimaryButtonStyle}" Click="AskButton_Click" />
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <InfoBar x:Name="ErrorInfoBar" Grid.Row="2" IsOpen="False" IsClosable="True" Severity="Error" />
+
+            <Grid x:Name="AssistantContentGrid" Grid.Row="3" ColumnDefinitions="*,360" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16" SizeChanged="AssistantContentGrid_SizeChanged">
+                <Border x:Name="AnswerCard" Style="{StaticResource CardStyle}" Padding="18">
+                    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Ответ" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock x:Name="AnswerText" Text="Ответ появится после обработки запроса." Foreground="{StaticResource PrimaryTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="VoiceAnswerText" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="NoEvidenceText" Text="Ответ пока не содержит подтверждённых источников." Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+                <Border x:Name="EvidenceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="18">
+                    <Grid RowDefinitions="Auto,*">
+                        <TextBlock Text="Источники" Style="{StaticResource SectionTitleStyle}" />
+                        <Grid Grid.Row="1">
+                            <ListView x:Name="EvidenceList" ItemsSource="{Binding Evidence}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Spacing="6" Padding="0,10">
+                                            <TextBlock Text="{Binding Timecode}" Foreground="{StaticResource AccentBrush}" />
+                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                            <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                            <Button Content="Открыть источник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenEvidenceButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                            <TextBlock x:Name="EvidenceEmptyText" Text="Подтверждённые источники появятся здесь." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <ProgressRing x:Name="LoadingRing" Grid.Row="3" IsActive="False" Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,18,0,0" />
+        </Grid>
+    </ScrollViewer>
+</Page>

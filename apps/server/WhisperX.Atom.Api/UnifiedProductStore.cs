@@ -377,7 +377,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         {
             var conditions = string.Join(" OR ", tokens.Select((_, index) => $"s.text ILIKE @term{index}"));
             await using var search = new NpgsqlCommand(
-                $"SELECT s.id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),COALESCE(s.text,'') " +
+                $"SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),COALESCE(s.text,'') " +
                 "FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id " +
                 "LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id " +
                 $"WHERE (@meeting IS NULL OR t.meeting_id=@meeting) AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND ({conditions}) " +
@@ -388,16 +388,18 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             await using var reader = await search.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                var startMs = reader.GetInt32(1);
-                var endMs = reader.GetInt32(2);
+                var evidenceMeetingId = reader.GetGuid(1);
+                var startMs = reader.GetInt32(2);
+                var endMs = reader.GetInt32(3);
                 evidence.Add(new
                 {
+                    meetingId = evidenceMeetingId,
                     segmentId = reader.GetGuid(0),
                     startMs,
                     endMs,
                     timecode = FormatTimecode(startMs),
-                    speaker = reader.GetString(3),
-                    text = reader.GetString(4),
+                    speaker = reader.GetString(4),
+                    text = reader.GetString(5),
                 });
             }
         }

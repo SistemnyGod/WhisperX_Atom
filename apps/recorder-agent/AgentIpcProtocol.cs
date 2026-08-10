@@ -29,4 +29,14 @@ public sealed record AgentIpcHealth(
     long TotalBytes,
     string? Error,
     string? ArchiveRoot = null,
-    int PendingUploadSessions = 0);
+    int PendingUploadSessions = 0,
+    IReadOnlyList<AgentIpcAudioDevice>? CaptureDevices = null,
+    IReadOnlyList<AgentIpcAudioDevice>? RenderDevices = null,
+    string? SelectedMicrophoneDeviceId = null,
+    string? SelectedSystemAudioDeviceId = null);
+
+public sealed record AgentIpcAudioDevice(
+    string Id,
+    string Name,
+    bool IsDefault,
+    string State = "Active");

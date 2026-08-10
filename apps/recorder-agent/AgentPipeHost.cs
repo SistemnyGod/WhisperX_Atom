@@ -68,12 +68,19 @@ public sealed class AgentPipeHost(
                     await api.ConfigureAsync(serverUrl, configuredAgent, agentToken, cancellationToken);
                     var configuredArchiveRoot = ReadString(request.Payload, "archiveRoot");
                     if (!string.IsNullOrWhiteSpace(configuredArchiveRoot)) await api.SetArchiveRootAsync(configuredArchiveRoot, cancellationToken);
+                    if (HasProperty(request.Payload, "microphoneDeviceId") || HasProperty(request.Payload, "systemAudioDeviceId"))
+                        await api.SetAudioDevicesAsync(ReadString(request.Payload, "microphoneDeviceId"), ReadString(request.Payload, "systemAudioDeviceId"), cancellationToken);
                     return Status();
                 case "SET_ARCHIVE_ROOT":
                     var archiveRoot = ReadString(request.Payload, "archiveRoot");
                     if (string.IsNullOrWhiteSpace(archiveRoot)) return Error("archive_root_required");
                     await api.SetArchiveRootAsync(archiveRoot, cancellationToken);
                     return Status();
+                case "SET_AUDIO_DEVICES":
+                    var microphoneDeviceId = ReadString(request.Payload, "microphoneDeviceId");
+                    var systemAudioDeviceId = ReadString(request.Payload, "systemAudioDeviceId");
+                    await api.SetAudioDevicesAsync(microphoneDeviceId, systemAudioDeviceId, cancellationToken);
+                    return await StatusAsync(cancellationToken);
                 case "RETRY_UPLOAD":
                     var retrySessionId = ReadString(request.Payload, "sessionId");
                     if (string.IsNullOrWhiteSpace(retrySessionId)) return Error("session_required");
@@ -196,13 +203,14 @@ public sealed class AgentPipeHost(
 
     private async Task<AgentIpcResponse> StatusAsync(CancellationToken cancellationToken)
     {
-        var health = DeviceHealthSnapshot.Collect(DataRoot());
+        var health = DeviceHealthSnapshot.Collect(DataRoot(), storage);
         var pendingUploadSessions = 0;
         try { pendingUploadSessions = await spool.PendingUploadSessionCountAsync(cancellationToken); }
         catch (Exception ex) { logger.LogDebug(ex, "Spool database is not initialized while reporting health."); }
         return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, new AgentIpcHealth(
             health.Microphone, health.SystemAudio, health.CaptureDeviceCount, health.RenderDeviceCount, health.FreeBytes, health.TotalBytes, health.Error,
-            storage.ArchiveRoot, pendingUploadSessions), null, recorder.CurrentMediaTimeMs);
+            storage.ArchiveRoot, pendingUploadSessions, health.CaptureDevices, health.RenderDevices,
+            storage.MicrophoneDeviceId, storage.SystemAudioDeviceId), null, recorder.CurrentMediaTimeMs);
     }
 
     private async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, CancellationToken cancellationToken)
@@ -223,7 +231,8 @@ public sealed class AgentPipeHost(
         InvalidOperationException when exception.Message.Contains("Cannot resume", StringComparison.OrdinalIgnoreCase) => "recording_cannot_resume",
         InvalidOperationException when exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase) => "recording_already_active",
         IOException when exception.Message.Contains("storage", StringComparison.OrdinalIgnoreCase) => "recording_storage_unavailable",
-        UnauthorizedAccessException => "recording_access_denied",
+        UnauthorizedAccessException => "recording_archive_access_denied",
+        FileNotFoundException or DirectoryNotFoundException or PathTooLongException => "recording_archive_path_unavailable",
         _ => "recorder_command_failed"
     };
 
@@ -234,6 +243,9 @@ public sealed class AgentPipeHost(
     private static string? ReadString(JsonElement payload, string name) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
+
+    private static bool HasProperty(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out _);
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {

@@ -14,10 +14,6 @@ $candidates = [System.Collections.Generic.List[string]]::new()
 if (-not [string]::IsNullOrWhiteSpace($override)) {
     $candidates.Add([IO.Path]::GetFullPath($override))
 }
-$candidates.Add((Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\bin\$Configuration\net10.0-windows\WhisperX.Atom.Desktop.exe"))
-if ($Configuration -ne "Debug") {
-    $candidates.Add((Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\bin\Debug\net10.0-windows\WhisperX.Atom.Desktop.exe"))
-}
 $candidates.Add((Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"))
 
 $desktopExe = $candidates |
@@ -36,16 +32,17 @@ if ([string]::IsNullOrWhiteSpace($desktopExe)) {
 
     Push-Location $repoRoot
     try {
-        & $dotnet.Source build $project --configuration $Configuration --nologo
+        $publishedDesktop = Join-Path $repoRoot "artifacts\desktop\Desktop"
+        & $dotnet.Source publish $project --configuration $Configuration --runtime win-x64 --self-contained true -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -p:PublishSingleFile=false -p:NuGetAudit=false --output $publishedDesktop
         if ($LASTEXITCODE -ne 0) {
-            throw "Desktop build failed with exit code $LASTEXITCODE"
+            throw "Desktop publish failed with exit code $LASTEXITCODE"
         }
     }
     finally {
         Pop-Location
     }
 
-    $desktopExe = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\bin\$Configuration\net10.0-windows\WhisperX.Atom.Desktop.exe"
+    $desktopExe = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
     if (-not (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
         throw "Desktop executable was not created: $desktopExe"
     }

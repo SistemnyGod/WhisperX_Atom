@@ -54,12 +54,12 @@ class AssistantRepository:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute("UPDATE assistant_queries SET status=%s,error_code=%s WHERE id=%s", (status, error, query_id))
 
-    def context(self, meeting_id: str | None) -> tuple[str, dict[str, tuple[int, int]]]:
+    def context(self, meeting_id: str | None) -> tuple[str, dict[str, tuple[str, int, int]]]:
         with psycopg.connect(self.conninfo) as connection:
             if meeting_id:
                 rows = connection.execute(
                     """
-                    SELECT s.id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
@@ -71,7 +71,7 @@ class AssistantRepository:
             else:
                 rows = connection.execute(
                     """
-                    SELECT s.id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
@@ -79,15 +79,15 @@ class AssistantRepository:
                     ORDER BY m.created_at DESC,s.ordinal LIMIT 2400
                     """
                 ).fetchall()
-        valid: dict[str, tuple[int, int]] = {}
+        valid: dict[str, tuple[str, int, int]] = {}
         lines: list[str] = []
-        for segment_id, start_ms, end_ms, speaker, text in rows:
+        for segment_id, meeting_id_value, start_ms, end_ms, speaker, text in rows:
             key = str(segment_id)
-            valid[key] = (int(start_ms), int(end_ms))
+            valid[key] = (str(meeting_id_value), int(start_ms), int(end_ms))
             lines.append(f"[SEG-{key} {int(start_ms)//1000}s {speaker}] {str(text).strip()}")
         return "\n".join(lines), valid
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[int, int]]) -> None:
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int]]) -> None:
         evidence_ids = [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
         evidence_ids = [value for value in evidence_ids if value in valid]
         answer = str(result.get("answer", "")).strip()
@@ -95,7 +95,7 @@ class AssistantRepository:
         voice = re.split(r"(?<=[.!?])\s+", voice)
         voice = " ".join(voice[:3])[:500].strip()
         status = "READY" if evidence_ids else "NEEDS_REVIEW"
-        evidence = [{"segmentId": value, "startMs": valid[value][0], "endMs": valid[value][1]} for value in evidence_ids]
+        evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s",

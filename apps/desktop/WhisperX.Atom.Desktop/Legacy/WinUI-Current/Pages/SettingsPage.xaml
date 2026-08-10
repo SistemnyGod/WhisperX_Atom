@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="28,24,28,32" Spacing="18">
+            <StackPanel>
+                <TextBlock Text="Настройки" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Подключение к API, регистрация Recorder Agent и постоянный локальный архив" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
+            </StackPanel>
+
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="API URL" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
+                        <TextBlock Text="Пользователь" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBox Text="{Binding Username, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
+                        <TextBlock Text="Пароль" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <PasswordBox x:Name="PasswordBox" MinHeight="40" PlaceholderText="Пароль API" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Войти в API" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" />
+                            <Button Content="Проверить backend" Style="{StaticResource SecondaryButtonStyle}" Click="CheckBackendButton_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="Регистрация нужна один раз после входа в локальный API." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
+                        <TextBlock Text="Enrollment secret" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <PasswordBox x:Name="EnrollmentSecretBox" MinHeight="40" PlaceholderText="Значение из .env" />
+                        <Button Content="Зарегистрировать Agent" Style="{StaticResource PrimaryButtonStyle}" Click="RegisterAgentButton_Click" />
+                        <TextBlock Text="{Binding LoginStatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Запись и архив" Style="{StaticResource SectionTitleStyle}" />
+                    <TextBlock Text="Master-файл записи остаётся в этой папке даже после подтверждённой отправки на сервер." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                        <TextBox Text="{Binding ArchiveRoot}" IsReadOnly="True" Style="{StaticResource InputStyle}" />
+                        <Button Grid.Column="1" Content="Выбрать" Style="{StaticResource SecondaryButtonStyle}" Click="SelectArchiveButton_Click" />
+                        <Button Grid.Column="2" Content="Открыть" Style="{StaticResource SecondaryButtonStyle}" Click="OpenArchiveButton_Click" />
+                    </Grid>
+                    <TextBlock Text="Выбор устройств выполняется на экране Запись и синхронизируется с Agent через IPC." Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                </StackPanel>
+            </Border>
+
+            <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="False" Severity="Informational" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

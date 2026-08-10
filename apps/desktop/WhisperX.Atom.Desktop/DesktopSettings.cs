@@ -4,7 +4,13 @@ using System.Text.Json;
 
 namespace WhisperX.Atom.Desktop;
 
-public sealed record DesktopSettings(string ApiUrl, string Username, string? ProtectedSessionCookie, string? ArchiveRoot = null)
+public sealed record DesktopSettings(
+    string ApiUrl,
+    string Username,
+    string? ProtectedSessionCookie,
+    string? ArchiveRoot = null,
+    string? MicrophoneDeviceId = null,
+    string? SystemAudioDeviceId = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
@@ -24,21 +30,31 @@ public sealed record DesktopSettings(string ApiUrl, string Username, string? Pro
         catch (JsonException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
     }
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
         var settings = new DesktopSettings(apiUrl.TrimEnd('/'), username.Trim(),
             string.IsNullOrWhiteSpace(sessionCookie) ? null : Protect(sessionCookie),
-            string.IsNullOrWhiteSpace(archiveRoot) ? DefaultArchiveRoot() : Path.GetFullPath(archiveRoot.Trim()));
+            string.IsNullOrWhiteSpace(archiveRoot) ? DefaultArchiveRoot() : Path.GetFullPath(archiveRoot.Trim()),
+            NormalizeDeviceId(microphoneDeviceId),
+            NormalizeDeviceId(systemAudioDeviceId));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
     }
 
-    public static string DefaultArchiveRoot() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-        "WhisperX Atom");
+    public static string DefaultArchiveRoot()
+    {
+        // Documents is commonly protected by Windows Defender Controlled Folder Access.
+        // Keep the archive user-visible, but outside Documents so the Recorder Service
+        // can write it without requiring a broad antivirus exception.
+        var commonDocuments = Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments);
+        var publicRoot = Directory.GetParent(commonDocuments)?.FullName;
+        return Path.Combine(
+            string.IsNullOrWhiteSpace(publicRoot) ? commonDocuments : publicRoot,
+            "WhisperX Atom");
+    }
 
     public string? UnprotectSessionCookie()
     {
@@ -47,6 +63,8 @@ public sealed record DesktopSettings(string ApiUrl, string Username, string? Pro
         catch (CryptographicException) { return null; }
         catch (FormatException) { return null; }
     }
+
+    private static string? NormalizeDeviceId(string? deviceId) => string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
 
     private static string Protect(string value)
     {

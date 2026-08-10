@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -83,10 +84,18 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             CaptureTrack? systemAudio = null;
             string? microphoneWarning = null;
             string? systemWarning = null;
+            using var deviceEnumerator = new MMDeviceEnumerator();
             try
             {
-                var mic = new WasapiCapture();
-                microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger);
+                MMDevice? selectedDevice = null;
+                try
+                {
+                    selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Capture, _storage.MicrophoneDeviceId);
+                    var mic = selectedDevice is null ? new WasapiCapture() : new WasapiCapture(selectedDevice);
+                    microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger, selectedDevice);
+                    selectedDevice = null;
+                }
+                finally { selectedDevice?.Dispose(); }
                 microphone.Start();
             }
             catch (Exception ex)
@@ -96,8 +105,15 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             }
             try
             {
-                var loopback = new WasapiLoopbackCapture();
-                systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger);
+                MMDevice? selectedDevice = null;
+                try
+                {
+                    selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Render, _storage.SystemAudioDeviceId);
+                    var loopback = selectedDevice is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(selectedDevice);
+                    systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger, selectedDevice);
+                    selectedDevice = null;
+                }
+                finally { selectedDevice?.Dispose(); }
                 systemAudio.Start();
             }
             catch (Exception ex)
@@ -141,6 +157,25 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         var archiveDrive = new DriveInfo(archiveDriveRoot);
         if (!archiveDrive.IsReady || archiveDrive.AvailableFreeSpace < minimumBytes)
             throw new IOException($"archive_storage_low:{archiveDrive.AvailableFreeSpace}:{minimumBytes}");
+    }
+
+    private static MMDevice? ResolveSelectedDevice(MMDeviceEnumerator enumerator, DataFlow flow, string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)) return null;
+        try
+        {
+            var device = enumerator.GetDevice(deviceId);
+            if (device.State != DeviceState.Active)
+            {
+                device.Dispose();
+                throw new InvalidOperationException("selected_audio_device_inactive");
+            }
+            return device;
+        }
+        catch (COMException)
+        {
+            throw new InvalidOperationException("selected_audio_device_unavailable");
+        }
     }
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
@@ -263,12 +298,14 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private readonly PcmFlacChunkWriter _writer;
         private readonly ILogger _logger;
         private readonly RecordingTrackInfo _info;
+        private readonly MMDevice? _device;
         private int _started;
 
-        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger)
+        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, MMDevice? device = null)
         {
             _sessionId = sessionId;
             _capture = capture;
+            _device = device;
             _logger = logger;
             var trackId = Guid.NewGuid().ToString("N");
             _info = new RecordingTrackInfo(trackId, trackType, capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
@@ -321,6 +358,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 try { _capture.StopRecording(); } catch (InvalidOperationException) { }
             }
             _capture.Dispose();
+            _device?.Dispose();
             return _writer.DisposeAsync().AsTask();
         }
     }

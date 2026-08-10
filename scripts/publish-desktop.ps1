@@ -1,5 +1,6 @@
 param(
-    [string]$OutputRoot = (Join-Path $PSScriptRoot "..\artifacts\desktop")
+    [string]$OutputRoot = (Join-Path $PSScriptRoot "..\artifacts\desktop"),
+    [switch]$NoRestore
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,10 +40,21 @@ $voiceProject = Join-Path $repoRoot "apps\voice-host\WhisperX.Atom.Voice.Host\Wh
 $desktopOut = Join-Path $output "Desktop"
 $serviceOut = Join-Path $output "Service"
 $voiceOut = Join-Path $output "VoiceHost"
+$publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 
-dotnet publish $desktopProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:NuGetAudit=false -o $desktopOut
-dotnet publish $serviceProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:NuGetAudit=false -o $serviceOut
-dotnet publish $voiceProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:NuGetAudit=false -o $voiceOut
+# WinUI 3 is published as an unpackaged self-contained directory. Keeping the
+# runtime files beside the exe avoids single-file extraction into a temp folder
+# and keeps the Inno Setup payload transparent to endpoint protection.
+$desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", "-o", $desktopOut) + $publishRestoreArgs
+$servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $serviceOut) + $publishRestoreArgs
+$voicePublishArgs = @($voiceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $voiceOut) + $publishRestoreArgs
+function Invoke-Publish([string[]]$Arguments) {
+    & dotnet publish @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
+}
+Invoke-Publish $desktopPublishArgs
+Invoke-Publish $servicePublishArgs
+Invoke-Publish $voicePublishArgs
 
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output
@@ -54,6 +66,12 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "apps\voice-host\Models\Voice\voice-
 Copy-Item -LiteralPath $bundledLock -Destination $voiceModels
 Copy-Item -LiteralPath $bundledVosk -Destination $voiceModels -Recurse
 $publishedResponses = Join-Path $voiceOut "Assets\VoiceResponses"
+if (-not (Test-Path -LiteralPath $publishedResponses -PathType Container)) {
+    New-Item -ItemType Directory -Force -Path $publishedResponses | Out-Null
+}
+if ((Get-ChildItem -LiteralPath $publishedResponses -Filter *.wav -File -ErrorAction SilentlyContinue).Count -lt 11) {
+    Copy-Item -Path (Join-Path $responseSource "*.wav") -Destination $publishedResponses -Force
+}
 if (-not (Test-Path -LiteralPath $publishedResponses) -or (Get-ChildItem -LiteralPath $publishedResponses -Filter *.wav -File).Count -lt 11) { throw "Published VoiceHost does not contain all WAV responses." }
 $voiceExe = Join-Path $voiceOut "WhisperX.Atom.Voice.Host.exe"
 & $voiceExe --model-smoke $bundledVosk
