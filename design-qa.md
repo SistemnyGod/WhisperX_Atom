@@ -53,6 +53,16 @@ Latest full-shell polish:
 - button content templates explicitly reset the global TextBlock margin; the Home empty-state actions use fixed sizes, spacing and z-order so the lower buttons do not visually collide.
 - hover and pressed states are now owned by each button style; the shared control template no longer replaces a primary/danger background with a pale surface, and disabled buttons ignore hover styling.
 
+Recording workflow pass:
+
+- the hero now follows one clear sequence: title, source/settings, device check, then start;
+- the source action is explicit (`Выбрать источник` / `Настроить источник`) and routes to the existing Sources screen;
+- idle, checking, recording, paused, finalizing, processing, unavailable and error states now have separate labels, indicators and action sets;
+- pause, resume, marker and stop are hidden outside the states where they are valid, so the hero no longer presents five simultaneous controls;
+- `MediaTimeMs` is the only source for the active timer; missing values render as `—`;
+- after STOP the hero shows saving/processing progress, refreshes the meeting list and dashboard, exposes retry for a failed job and offers opening the transcript after success;
+- no decorative audio meters were introduced because the current Agent IPC contract does not provide signal levels; device health remains a real-data check.
+
 ## Result
 
 final result: blocked
@@ -65,6 +75,7 @@ The WPF build and runtime launch were verified, but this environment cannot capt
 - Desktop process after launch — confirmed running and responsive.
 - `git diff --check` — passed; only line-ending warnings remain.
 - Latest build after the shell pass — passed, 0 warnings/errors.
+- Latest build after the recording workflow pass — passed, 0 warnings/errors.
 
 ## Follow-up
 

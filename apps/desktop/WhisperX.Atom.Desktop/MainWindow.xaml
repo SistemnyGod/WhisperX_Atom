@@ -281,22 +281,18 @@
                                                  FontSize="24" FontWeight="SemiBold" Padding="0"
                                                  BorderThickness="0" Background="Transparent"
                                                  Margin="0,0,0,5"/>
-                                        <StackPanel Orientation="Horizontal" Cursor="Hand" MouseLeftButtonUp="OpenSourcesFromHero_Click"
-                                                    ToolTip="Открыть настройки источников записи">
-                                            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets"
-                                                       Foreground="{StaticResource MutedTextBrush}" FontSize="13"
-                                                       Margin="0,0,8,0"/>
-                                            <TextBlock Text="Источник не выбран" Foreground="{StaticResource MutedTextBrush}"
-                                                       FontSize="13" Margin="0"/>
-                                        </StackPanel>
+                                        <Button x:Name="SourceActionButton" Content="Выбрать источник"
+                                                Click="OpenSourceButton_Click" Style="{StaticResource GhostButton}"
+                                                HorizontalContentAlignment="Left" Padding="0" Margin="0,0,0,4"
+                                                ToolTip="Открыть настройки источников записи"/>
                                         <StackPanel Orientation="Horizontal" Margin="0,20,0,16">
                                             <Ellipse x:Name="RecordingIndicator" Width="20" Height="20" Fill="{StaticResource MutedTextBrush}"
                                                      Margin="0,0,13,0" VerticalAlignment="Center"/>
                                             <StackPanel VerticalAlignment="Center">
-                                                <TextBlock x:Name="RecordingStateText" Text="Ожидание"
+                                                <TextBlock x:Name="RecordingStateText" Text="Готово к записи"
                                                            FontSize="30" FontWeight="SemiBold" Margin="0"/>
-                                                <TextBlock x:Name="RecordingTimerText" Text="--:--:--"
-                                                           Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,3,0,0"/>
+                                                <TextBlock x:Name="RecordingTimerText" Text="—"
+                                                           Foreground="{StaticResource MutedTextBrush}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,0"/>
                                             </StackPanel>
                                         </StackPanel>
                                         <Grid>
@@ -304,18 +300,21 @@
                                             <StackPanel Grid.Column="0" Margin="0,0,18,0">
                                                 <TextBlock x:Name="MicrophoneText" Text="Микрофон (комната)"
                                                            Foreground="{StaticResource MutedTextBrush}" FontSize="12"/>
-                                                <TextBlock Text="Уровень недоступен до начала записи" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,5,0,0"/>
+                                                <TextBlock x:Name="MicrophoneHintText" Text="Уровень недоступен до начала записи" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,5,0,0" TextWrapping="Wrap"/>
                                             </StackPanel>
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock x:Name="SystemAudioText" Text="Системный звук"
                                                            Foreground="{StaticResource MutedTextBrush}" FontSize="12"/>
-                                                <TextBlock Text="Уровень недоступен до начала записи" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,5,0,0"/>
+                                                <TextBlock x:Name="SystemAudioHintText" Text="Уровень недоступен до начала записи" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,5,0,0" TextWrapping="Wrap"/>
                                             </StackPanel>
                                         </Grid>
+                                        <TextBlock x:Name="RecordingReadinessText" Text="Проверьте устройства перед началом записи"
+                                                   Foreground="{StaticResource AccentStrongBrush}" FontSize="11" FontWeight="SemiBold"
+                                                   TextWrapping="Wrap" Margin="0,10,0,0"/>
                                         <TextBlock x:Name="SessionText" Text="Сессия не создана"
                                                    Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,10,0,0"/>
                                         <TextBlock x:Name="DeviceErrorText" Text="" Foreground="{StaticResource WarningBrush}"
-                                                   FontSize="11" Margin="0,4,0,0"/>
+                                                   FontSize="11" Margin="0,4,0,0" Visibility="Collapsed" TextWrapping="Wrap"/>
                                         <TextBlock x:Name="StorageText" Text="Диск: проверка" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,10,0,0"/>
                                         <Border x:Name="ProcessingPanel" Background="{StaticResource SurfaceElevatedBrush}" BorderBrush="#DCE7F5" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,12,0,0" Visibility="Collapsed">
                                             <StackPanel>
@@ -324,21 +323,36 @@
                                                 <ProgressBar x:Name="ProcessingProgressBar" Minimum="0" Maximum="100" Visibility="Collapsed" Margin="0,6,0,0"/>
                                                 <TextBlock x:Name="ProcessingErrorText" Text="" Foreground="{StaticResource WarningBrush}" FontSize="10" Margin="0,5,0,0"/>
                                                 <TextBlock x:Name="LastErrorText" Text="" Foreground="{StaticResource DangerBrush}" FontSize="10" Margin="0,3,0,0"/>
+                                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                    <Button x:Name="ProcessingRetryButton" Content="Повторить обработку"
+                                                            Click="RetryProcessingButton_Click" Style="{StaticResource PrimaryButton}"
+                                                            Visibility="Collapsed" MinHeight="32" Padding="12,7" Margin="0,0,8,0"/>
+                                                    <Button x:Name="ProcessingOpenTranscriptButton" Content="Открыть стенограмму"
+                                                            Click="OpenProcessedTranscriptButton_Click" Style="{StaticResource GhostButton}"
+                                                            Visibility="Collapsed" MinHeight="32" Padding="0"/>
+                                                </StackPanel>
                                             </StackPanel>
                                         </Border>
                                     </StackPanel>
                                     <StackPanel Grid.Column="1">
                                         <Button x:Name="StartRecordingButton" Content="Начать запись"
                                                 Click="StartButton_Click" Style="{StaticResource PrimaryButton}"
-                                                Height="40" MinWidth="206" Margin="0,0,0,7"/>
+                                                Height="42" MinWidth="206" Margin="0,0,0,8"
+                                                IsEnabled="False"
+                                                ToolTip="Сначала проверьте Recorder Agent и устройства"/>
+                                        <Button x:Name="CheckDevicesButton" Content="Проверить устройства"
+                                                Click="PreflightButton_Click" Height="36" MinWidth="206" Margin="0,0,0,8"/>
                                         <Button x:Name="PauseRecordingButton" Content="Пауза"
-                                                Click="PauseButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="PauseButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,8" Visibility="Collapsed"/>
                                         <Button x:Name="ResumeRecordingButton" Content="Продолжить"
-                                                Click="ResumeButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
-                                        <Button x:Name="MarkRecordingButton" Content="Метка" Click="MarkButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,7"/>
+                                                Click="ResumeButton_Click" IsEnabled="False" Height="38" MinWidth="206" Margin="0,0,0,8" Visibility="Collapsed"/>
+                                        <Button x:Name="MarkRecordingButton" Content="Метка" Click="MarkButton_Click" IsEnabled="False" Height="34" MinWidth="206" Margin="0,0,0,8" Visibility="Collapsed"/>
                                         <Button x:Name="StopRecordingButton" Content="Завершить"
                                                 Click="StopButton_Click" Style="{StaticResource DangerButton}"
-                                                IsEnabled="False" Height="38" MinWidth="206" Margin="0"/>
+                                                IsEnabled="False" Height="38" MinWidth="206" Margin="0" Visibility="Collapsed"/>
+                                        <TextBlock x:Name="RecordingActionHintText" Text="Проверка устройств обязательна перед стартом"
+                                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap"
+                                                   Margin="0,6,0,0"/>
                                     </StackPanel>
                                 </Grid>
                             </Border>
@@ -590,7 +604,7 @@
                             </Grid>
                         </Border>
 
-                        <TabControl Grid.Row="2" ItemContainerStyle="{StaticResource SectionTabItem}"
+                        <TabControl x:Name="MeetingDetailsTabs" Grid.Row="2" ItemContainerStyle="{StaticResource SectionTabItem}"
                                     Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                             <TabItem Header="Обзор">
                                 <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -883,8 +897,8 @@
                             </Border>
                         </Grid>
 
-                        <Expander x:Name="EngineeringPanel" IsEnabled="False" Header="Инженерные настройки" Foreground="{StaticResource WarningBrush}"
-                                  Padding="0" IsExpanded="False">
+                        <StackPanel x:Name="EngineeringPanel">
+                            <TextBlock Text="Инженерные настройки" Style="{StaticResource SectionTitle}" Margin="0,0,0,0"/>
                             <Border Style="{StaticResource SoftCardBorder}" Margin="0,12,0,0">
                                 <StackPanel>
                                     <TextBlock Text="Раздел для диагностики локального API, Docker/WSL2 и Recorder Service." Foreground="{StaticResource MutedTextBrush}"/>
@@ -900,20 +914,25 @@
                                         <Button Content="Диагностика Docker" Click="DockerStatusButton_Click"/>
                                     </StackPanel>
                                     <TextBlock x:Name="AdminStatusText" Text="Инженерный режим не активирован" Foreground="{StaticResource MutedTextBrush}"/>
-                                    <Grid Margin="0,14,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="250"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="300"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <Label Content="Имя Agent"/><TextBox x:Name="AgentNameBox" Grid.Column="1" Text="WhisperX Atom Desktop" Margin="10,0,14,8"/>
-                                        <Label Grid.Column="2" Content="Enrollment secret"/><PasswordBox x:Name="EnrollmentSecretBox" Grid.Column="3" Margin="10,0,14,8"/>
-                                        <Button Grid.Column="4" Content="Зарегистрировать" Click="EnrollAgentButton_Click"/>
-                                    </Grid>
-                                    <StackPanel Orientation="Horizontal">
-                                        <Button Content="Открыть данные сервера" Click="OpenDataFolderButton_Click"/>
-                                        <Button Content="Открыть spool Agent" Click="OpenAgentSpoolButton_Click"/>
-                                        <Button Content="Открыть журнал помощника" Click="VoiceOpenLogButton_Click"/>
-                                    </StackPanel>
+                                    <Border x:Name="AgentRegistrationPanel" Margin="0,14,0,0" Opacity="0.58">
+                                        <StackPanel>
+                                            <TextBlock Text="Регистрация Agent доступна после входа в API." Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,8"/>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="250"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="300"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <Label Content="Имя Agent"/><TextBox x:Name="AgentNameBox" Grid.Column="1" Text="WhisperX Atom Desktop" Margin="10,0,14,8"/>
+                                                <Label Grid.Column="2" Content="Enrollment secret"/><PasswordBox x:Name="EnrollmentSecretBox" Grid.Column="3" Margin="10,0,14,8"/>
+                                                <Button Grid.Column="4" Content="Зарегистрировать" Click="EnrollAgentButton_Click"/>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button Content="Открыть данные сервера" Click="OpenDataFolderButton_Click"/>
+                                                <Button Content="Открыть spool Agent" Click="OpenAgentSpoolButton_Click"/>
+                                                <Button Content="Открыть журнал помощника" Click="VoiceOpenLogButton_Click"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Border>
-                        </Expander>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

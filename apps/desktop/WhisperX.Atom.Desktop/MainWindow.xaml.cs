@@ -30,6 +30,13 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _detailsCts;
     private ICollectionView? _meetingsView;
     private int _statusRefreshGate;
+    private bool _deviceCheckInProgress;
+    private bool _postStopProcessing;
+    private bool _processingErrorVisible;
+    private bool _processingCompleted;
+    private Guid? _processingMeetingId;
+    private Guid? _failedProcessingJobId;
+    private AgentIpcHealth? _lastAgentHealth;
     private const string GlobalSearchPlaceholder = "Поиск по совещаниям, стенограммам и задачам...";
 
     private sealed record DashboardFacts(bool SummaryQueried, bool SummaryReady, bool TasksQueried, int OpenTasks, bool JobsQueried, bool HasActiveJob);
@@ -47,6 +54,8 @@ public partial class MainWindow : Window
         _server.Dispose();
         _server = new ServerApiClient(settings.ApiUrl);
         _server.RestoreSession(settings.UnprotectSessionCookie());
+        AgentRegistrationPanel.IsEnabled = !string.IsNullOrWhiteSpace(_server.GetSessionCookie());
+        AgentRegistrationPanel.Opacity = AgentRegistrationPanel.IsEnabled ? 1.0 : 0.58;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _timer.Tick += async (_, _) =>
         {
@@ -73,8 +82,13 @@ public partial class MainWindow : Window
         DashboardStorageMetricText.Text = "Ожидание проверки";
         DashboardStoragePercentText.Text = "—";
         DashboardStorageBar.Value = 0;
-        RecordingTimerText.Text = "--:--:--";
-        RecordingTimerText.Visibility = Visibility.Collapsed;
+        RecordingTimerText.Text = "—";
+        RecordingTimerText.Visibility = Visibility.Visible;
+        RecordingReadinessText.Text = message.Contains("Не удалось", StringComparison.OrdinalIgnoreCase)
+            ? "Подключите Recorder Agent и повторите проверку устройств"
+            : "Проверьте устройства перед началом записи";
+        ProcessingRetryButton.Visibility = Visibility.Collapsed;
+        ProcessingOpenTranscriptButton.Visibility = Visibility.Collapsed;
     }
 
     private async Task RefreshDashboardMetricsAsync(IReadOnlyList<DesktopMeeting> meetings, CancellationToken cancellationToken = default)
@@ -244,48 +258,46 @@ public partial class MainWindow : Window
             var status = await _agent.SendAsync("HEALTH");
             AgentStatusText.Text = status.Ok ? "Подключён" : "Недоступен";
             AgentStatusText.Foreground = status.Ok ? Brushes.ForestGreen : Brushes.OrangeRed;
-            RecordingEyebrowText.Text = status.State switch
-            {
-                "Recording" => "АКТИВНАЯ ЗАПИСЬ",
-                "Paused" => "ЗАПИСЬ НА ПАУЗЕ",
-                "Idle" => "ГОТОВНОСТЬ К ЗАПИСИ",
-                _ => "СОСТОЯНИЕ ЗАПИСИ",
-            };
-            RecordingStateText.Text = status.State switch
-            {
-                "Recording" => "Идёт запись",
-                "Paused" => "Пауза",
-                "Idle" => "Ожидание",
-                _ => status.State,
-            };
+            _lastAgentHealth = status.Health;
+            var displayState = _processingErrorVisible && string.Equals(status.State, "Idle", StringComparison.OrdinalIgnoreCase)
+                ? "Error"
+                : _postStopProcessing && string.Equals(status.State, "Idle", StringComparison.OrdinalIgnoreCase)
+                    ? "Processing"
+                    : status.State;
+            UpdateRecordingPresentation(displayState, status.Ok, status.Health, status.Error);
             var hasActiveRecording = status.State is "Recording" or "Paused";
-            RecordingTimerText.Text = hasActiveRecording ? FormatMediaTime(status.MediaTimeMs) : "--:--:--";
-            RecordingTimerText.Visibility = hasActiveRecording ? Visibility.Visible : Visibility.Collapsed;
-            RecordingIndicator.Fill = status.State switch
-            {
-                "Recording" => Brushes.Crimson,
-                "Paused" => Brushes.DarkOrange,
-                _ => Brushes.LightSlateGray,
-            };
-            ProcessingPanel.Visibility = status.State is "Recording" or "Paused" || ProcessingProgressBar.Visibility == Visibility.Visible
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-            DashboardActiveText.Text = status.Ok && (status.State is "Recording" or "Paused") ? "1" : status.Ok ? "0" : "—";
+            RecordingTimerText.Text = hasActiveRecording ? FormatMediaTime(status.MediaTimeMs) : "—";
+            RecordingTimerText.Visibility = Visibility.Visible;
+            DashboardActiveText.Text = status.Ok && hasActiveRecording ? "1" : status.Ok ? "0" : "—";
             DashboardActiveHintText.Text = status.Ok ? "По данным Recorder Agent" : "Recorder Agent недоступен";
             SessionText.Text = string.IsNullOrWhiteSpace(status.SessionId) ? "Сессия не создана" : $"Сессия: {status.SessionId}";
-            UpdateRecordingControls(status.Ok, status.State);
             if (status.Health is not null)
             {
-                MicrophoneText.Text = $"Микрофон: {(status.Health.Microphone ? "работает" : "не найден")} ({status.Health.CaptureDeviceCount} устройств)";
-                SystemAudioText.Text = $"Системный звук: {(status.Health.SystemAudio ? "работает" : "не найден")} ({status.Health.RenderDeviceCount} устройств)";
-                StorageText.Text = $"Диск: {FormatBytes(status.Health.FreeBytes)} свободно из {FormatBytes(status.Health.TotalBytes)}";
-                DashboardStorageMetricText.Text = $"{FormatBytes(status.Health.FreeBytes)} из {FormatBytes(status.Health.TotalBytes)}";
-                var usedPercent = status.Health.TotalBytes > 0
-                    ? Math.Clamp((1d - status.Health.FreeBytes / (double)status.Health.TotalBytes) * 100d, 0d, 100d)
+                var health = status.Health;
+                MicrophoneText.Text = $"Микрофон: {(health.Microphone ? "готов" : "не найден")} · {health.CaptureDeviceCount} устройств";
+                SystemAudioText.Text = $"Системный звук: {(health.SystemAudio ? "готов" : "не найден")} · {health.RenderDeviceCount} устройств";
+                MicrophoneHintText.Text = health.Microphone ? "Уровень появится после начала записи" : "Подключите или выберите микрофон";
+                SystemAudioHintText.Text = health.SystemAudio ? "Уровень появится после начала записи" : "Проверьте системный источник";
+                StorageText.Text = $"Диск: {FormatBytes(health.FreeBytes)} свободно из {FormatBytes(health.TotalBytes)}";
+                DashboardStorageMetricText.Text = $"{FormatBytes(health.FreeBytes)} из {FormatBytes(health.TotalBytes)}";
+                var usedPercent = health.TotalBytes > 0
+                    ? Math.Clamp((1d - health.FreeBytes / (double)health.TotalBytes) * 100d, 0d, 100d)
                     : 0d;
                 DashboardStorageBar.Value = usedPercent;
                 DashboardStoragePercentText.Text = $"{usedPercent:0}% занято";
-                DeviceErrorText.Text = status.Health.Error ?? string.Empty;
+                DeviceErrorText.Text = health.Error ?? string.Empty;
+                DeviceErrorText.Visibility = string.IsNullOrWhiteSpace(health.Error) ? Visibility.Collapsed : Visibility.Visible;
+            }
+            else
+            {
+                _lastAgentHealth = null;
+                MicrophoneText.Text = "Микрофон: нет данных";
+                SystemAudioText.Text = "Системный звук: нет данных";
+                MicrophoneHintText.Text = "Проверка устройства не вернула состояние";
+                SystemAudioHintText.Text = "Проверка устройства не вернула состояние";
+                StorageText.Text = "Диск: ожидание проверки";
+                DeviceErrorText.Text = string.Empty;
+                DeviceErrorText.Visibility = Visibility.Collapsed;
             }
             LastErrorText.Text = status.Error ?? string.Empty;
             FooterText.Text = $"Последняя проверка: {DateTime.Now:T}";
@@ -295,25 +307,91 @@ public partial class MainWindow : Window
             AgentStatusText.Text = "Недоступен";
             AgentStatusText.Foreground = Brushes.OrangeRed;
             AgentStatusIndicator.Fill = Brushes.OrangeRed;
-            RecordingEyebrowText.Text = "СЕРВИС НЕДОСТУПЕН";
-            RecordingStateText.Text = "Сервис недоступен";
-            RecordingIndicator.Fill = Brushes.LightSlateGray;
-            ProcessingPanel.Visibility = Visibility.Visible;
+            _lastAgentHealth = null;
+            UpdateRecordingPresentation("Unavailable", false, null, SafeError(ex));
             DashboardActiveText.Text = "—";
             DashboardActiveHintText.Text = "Recorder Agent недоступен";
             DashboardStorageMetricText.Text = "Нет данных";
             DashboardStoragePercentText.Text = "—";
             DashboardStorageBar.Value = 0;
             DashboardGpuText.Text = "Нет данных";
-            RecordingTimerText.Text = "--:--:--";
-            RecordingTimerText.Visibility = Visibility.Collapsed;
+            RecordingTimerText.Text = "—";
+            RecordingTimerText.Visibility = Visibility.Visible;
+            MicrophoneText.Text = "Микрофон: нет данных";
+            SystemAudioText.Text = "Системный звук: нет данных";
+            MicrophoneHintText.Text = "Подключите Recorder Agent для проверки";
+            SystemAudioHintText.Text = "Подключите Recorder Agent для проверки";
+            StorageText.Text = "Диск: ожидание проверки";
+            DeviceErrorText.Text = string.Empty;
+            DeviceErrorText.Visibility = Visibility.Collapsed;
             LastErrorText.Text = SafeError(ex);
             FooterText.Text = "Recorder Service не отвечает";
-            UpdateRecordingControls(false, "Unavailable");
         }
         finally
         {
             Volatile.Write(ref _statusRefreshGate, 0);
+        }
+    }
+
+    private void UpdateRecordingPresentation(string state, bool connected, AgentIpcHealth? health, string? error)
+    {
+        var normalized = state.Trim();
+        var devicesReady = health is { Microphone: true, SystemAudio: true };
+        var isChecking = _deviceCheckInProgress && string.Equals(normalized, "Idle", StringComparison.OrdinalIgnoreCase);
+        var visibleState = isChecking ? "Checking" : normalized;
+
+        RecordingEyebrowText.Text = visibleState switch
+        {
+            "Recording" => "АКТИВНАЯ ЗАПИСЬ",
+            "Paused" => "ЗАПИСЬ НА ПАУЗЕ",
+            "Checking" => "ПРОВЕРКА УСТРОЙСТВ",
+            "Finalizing" => "ЗАВЕРШЕНИЕ ЗАПИСИ",
+            "Processing" => "ОБРАБОТКА ЗАПИСИ",
+            "Error" => "ОШИБКА ЗАПИСИ",
+            "Unavailable" => "RECORDER AGENT НЕДОСТУПЕН",
+            _ => "ГОТОВНОСТЬ К ЗАПИСИ",
+        };
+        RecordingStateText.Text = visibleState switch
+        {
+            "Recording" => "Идёт запись",
+            "Paused" => "Пауза",
+            "Checking" => "Проверяем устройства",
+            "Finalizing" => "Сохранение записи",
+            "Processing" => "Обработка",
+            "Error" => "Ошибка записи",
+            "Unavailable" => "Recorder Agent недоступен",
+            _ => "Готово к записи",
+        };
+        RecordingIndicator.Fill = visibleState switch
+        {
+            "Recording" => Brushes.Crimson,
+            "Paused" => Brushes.DarkOrange,
+            "Checking" => Brushes.DodgerBlue,
+            "Finalizing" or "Processing" => Brushes.MediumPurple,
+            "Error" or "Unavailable" => Brushes.OrangeRed,
+            _ => Brushes.ForestGreen,
+        };
+        SourceActionButton.Content = connected ? "Настроить источник" : "Выбрать источник";
+        RecordingReadinessText.Text = visibleState switch
+        {
+            "Recording" => "Запись идёт. Метки сохраняются локально в текущую сессию.",
+            "Paused" => "Запись приостановлена. Продолжите или завершите её.",
+            "Checking" => "Получаем реальное состояние Recorder Agent и устройств…",
+            "Finalizing" or "Processing" => "Файл сохраняется, затем будет передан в pipeline обработки.",
+            "Error" => error ?? "Проверьте сообщение об ошибке и повторите обработку.",
+            "Unavailable" => "Подключите Recorder Agent и повторите проверку устройств.",
+            _ when !connected => "Подключите Recorder Agent перед началом записи.",
+            _ when !devicesReady => "Нужно подключить микрофон и системный звук перед началом записи.",
+            _ => "Устройства готовы. Введите название и начните запись.",
+        };
+        UpdateRecordingControls(connected, visibleState, devicesReady);
+        var showProcessing = _postStopProcessing || _processingErrorVisible || _processingCompleted
+            || visibleState is "Finalizing" or "Processing";
+        ProcessingPanel.Visibility = showProcessing ? Visibility.Visible : Visibility.Collapsed;
+        if (string.Equals(visibleState, "Error", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(error))
+        {
+            ProcessingErrorText.Text = error;
+            ProcessingPanel.Visibility = Visibility.Visible;
         }
     }
 
@@ -353,13 +431,54 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             LastErrorText.Text = SafeError(ex);
+            _processingErrorVisible = true;
+            ProcessingPanel.Visibility = Visibility.Visible;
+            ProcessingStatusText.Text = command == "START" ? "Не удалось начать запись" : $"Команда {command} не выполнена";
+            ProcessingErrorText.Text = SafeError(ex);
+            UpdateRecordingPresentation("Error", false, null, SafeError(ex));
             FooterText.Text = $"Команда {command} завершилась ошибкой";
             return null;
         }
     }
 
+    private async void PreflightButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_deviceCheckInProgress) return;
+        _deviceCheckInProgress = true;
+        RecordingReadinessText.Text = "Проверяем Recorder Agent и устройства…";
+        FooterText.Text = "Выполняется проверка устройств";
+        try
+        {
+            await RefreshStatusAsync();
+        }
+        finally
+        {
+            _deviceCheckInProgress = false;
+            await RefreshStatusAsync();
+        }
+    }
+
+    private void OpenSourceButton_Click(object sender, RoutedEventArgs e)
+    {
+        MainNavigationTabs.SelectedIndex = 2;
+        FooterText.Text = "Открыты источники записи";
+    }
+
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!StartRecordingButton.IsEnabled)
+        {
+            RecordingReadinessText.Text = "Сначала подключите Recorder Agent и пройдите проверку устройств.";
+            return;
+        }
+        _processingErrorVisible = false;
+        _processingCompleted = false;
+        _failedProcessingJobId = null;
+        ProcessingRetryButton.Visibility = Visibility.Collapsed;
+        ProcessingOpenTranscriptButton.Visibility = Visibility.Collapsed;
+        ProcessingProgressBar.Visibility = Visibility.Collapsed;
+        ProcessingPanel.Visibility = Visibility.Collapsed;
+        RecordingReadinessText.Text = "Запускаем запись…";
         Guid? meetingId = Guid.TryParse(_selectedMeeting?.Id, out var id) ? id : null;
         var title = string.IsNullOrWhiteSpace(RecordingTitleBox.Text) || string.Equals(RecordingTitleBox.Text.Trim(), "Новая запись", StringComparison.OrdinalIgnoreCase)
             ? _selectedMeeting?.Title
@@ -368,7 +487,6 @@ public partial class MainWindow : Window
         var response = await RunCommandAsync("START", new { meetingId, title });
         if (response?.MeetingId is Guid startedMeetingId)
         {
-            ProcessingPanel.Visibility = Visibility.Visible;
             ProcessingStatusText.Text = $"Запись: {title} · совещание {startedMeetingId}";
             ProcessingErrorText.Text = response.Error == "server_binding_pending" ? "Сервер временно недоступен; запись продолжается локально." : string.Empty;
         }
@@ -389,11 +507,33 @@ public partial class MainWindow : Window
     {
         if (MessageBox.Show("Подтвердить завершение записи?", "WhisperX Atom", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
+        _postStopProcessing = true;
+        _processingErrorVisible = false;
+        _processingCompleted = false;
+        _processingMeetingId = null;
+        _failedProcessingJobId = null;
+        ProcessingRetryButton.Visibility = Visibility.Collapsed;
+        ProcessingOpenTranscriptButton.Visibility = Visibility.Collapsed;
+        ProcessingPanel.Visibility = Visibility.Visible;
+        ProcessingProgressBar.Visibility = Visibility.Visible;
+        ProcessingProgressBar.Value = 0;
+        ProcessingStatusText.Text = "Сохранение записи…";
+        ProcessingErrorText.Text = string.Empty;
         var response = await RunCommandAsync("STOP");
         if (response?.MeetingId is Guid meetingId)
+        {
+            _processingMeetingId = meetingId;
             _ = TrackProcessingAsync(meetingId);
+        }
         else
-            ProcessingStatusText.Text = "Запись завершена локально; серверное совещание ещё не связано.";
+        {
+            _postStopProcessing = false;
+            _processingErrorVisible = true;
+            ProcessingProgressBar.Visibility = Visibility.Collapsed;
+            ProcessingStatusText.Text = "Запись сохранена локально";
+            ProcessingErrorText.Text = "Серверное совещание ещё не связано; проверьте подключение API.";
+            UpdateRecordingPresentation("Error", true, null, ProcessingErrorText.Text);
+        }
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshStatusAsync();
@@ -517,11 +657,16 @@ public partial class MainWindow : Window
             AdminStatusText.Text = ok ? "Вход в локальный API выполнен." : "Ошибка входа.";
             if (ok)
             {
-                EngineeringPanel.IsEnabled = true;
-                EngineeringPanel.IsExpanded = true;
+                AgentRegistrationPanel.IsEnabled = true;
+                AgentRegistrationPanel.Opacity = 1.0;
                 PasswordBox.Clear();
                 DesktopSettings.Save(_server.BaseAddress.ToString(), UsernameTextBox.Text, _server.GetSessionCookie());
                 await LoadMeetingsAsync();
+            }
+            else
+            {
+                AgentRegistrationPanel.IsEnabled = false;
+                AgentRegistrationPanel.Opacity = 0.58;
             }
         }
         catch (Exception ex)
@@ -532,24 +677,43 @@ public partial class MainWindow : Window
 
     private async void CheckServerButton_Click(object sender, RoutedEventArgs e) => await CheckServerAsync();
 
-    private void UpdateRecordingControls(bool connected, string state)
+    private void UpdateRecordingControls(bool connected, string state, bool devicesReady)
     {
         var isRecording = string.Equals(state, "Recording", StringComparison.OrdinalIgnoreCase);
         var isPaused = string.Equals(state, "Paused", StringComparison.OrdinalIgnoreCase);
         var isActive = isRecording || isPaused;
         var isIdle = string.Equals(state, "Idle", StringComparison.OrdinalIgnoreCase);
+        var isUnavailable = string.Equals(state, "Unavailable", StringComparison.OrdinalIgnoreCase);
+        var isReadyForNewRecording = isIdle || string.Equals(state, "Error", StringComparison.OrdinalIgnoreCase);
 
-        StartRecordingButton.Visibility = Visibility.Visible;
-        PauseRecordingButton.Visibility = Visibility.Visible;
-        ResumeRecordingButton.Visibility = Visibility.Visible;
-        MarkRecordingButton.Visibility = Visibility.Visible;
-        StopRecordingButton.Visibility = Visibility.Visible;
+        StartRecordingButton.Visibility = isReadyForNewRecording ? Visibility.Visible : Visibility.Collapsed;
+        CheckDevicesButton.Visibility = isReadyForNewRecording || isUnavailable ? Visibility.Visible : Visibility.Collapsed;
+        PauseRecordingButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
+        ResumeRecordingButton.Visibility = isPaused ? Visibility.Visible : Visibility.Collapsed;
+        MarkRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+        StopRecordingButton.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+        SourceActionButton.Visibility = isReadyForNewRecording || isUnavailable ? Visibility.Visible : Visibility.Collapsed;
 
-        StartRecordingButton.IsEnabled = connected && isIdle;
+        StartRecordingButton.IsEnabled = connected && isReadyForNewRecording && devicesReady;
+        StartRecordingButton.ToolTip = !connected
+            ? "Recorder Agent недоступен"
+            : !devicesReady ? "Подключите микрофон и системный звук" : "Начать запись";
+        CheckDevicesButton.Content = connected ? "Проверить устройства" : "Повторить проверку";
         PauseRecordingButton.IsEnabled = connected && isRecording;
         ResumeRecordingButton.IsEnabled = connected && isPaused;
         StopRecordingButton.IsEnabled = connected && isActive;
         MarkRecordingButton.IsEnabled = connected && isActive;
+        RecordingActionHintText.Text = state switch
+        {
+            "Recording" => "Пауза, метка или завершение записи",
+            "Paused" => "Продолжите запись или завершите её",
+            "Checking" => "Ждём результат проверки",
+            "Finalizing" or "Processing" => "Действия временно недоступны",
+            "Error" => "Можно начать новую запись после проверки устройств",
+            "Unavailable" => "Подключите Recorder Agent",
+            _ when !devicesReady => "Подключите устройства для старта",
+            _ => "Готово к следующему действию",
+        };
         AgentStatusIndicator.Fill = connected ? Brushes.ForestGreen : Brushes.OrangeRed;
     }
 
@@ -960,12 +1124,67 @@ public partial class MainWindow : Window
         return "Операция не выполнена. Откройте вкладку «Администрирование» для диагностики.";
     }
 
+    private async void RetryProcessingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_failedProcessingJobId is not Guid jobId) return;
+        try
+        {
+            var retried = await _server.RetryJobAsync(jobId);
+            if (retried is null)
+            {
+                ProcessingErrorText.Text = "Не удалось поставить обработку на повтор. Проверьте подключение к API.";
+                return;
+            }
+            if (!Guid.TryParse(retried.MeetingId, out var meetingId))
+            {
+                ProcessingErrorText.Text = "API вернул некорректное совещание для повторной обработки.";
+                return;
+            }
+            _failedProcessingJobId = null;
+            _processingErrorVisible = false;
+            _processingCompleted = false;
+            _postStopProcessing = true;
+            ProcessingRetryButton.Visibility = Visibility.Collapsed;
+            ProcessingOpenTranscriptButton.Visibility = Visibility.Collapsed;
+            ProcessingProgressBar.Visibility = Visibility.Visible;
+            ProcessingProgressBar.Value = 0;
+            ProcessingStatusText.Text = "Повторная обработка запущена…";
+            ProcessingErrorText.Text = string.Empty;
+            _ = TrackProcessingAsync(meetingId);
+        }
+        catch (Exception ex)
+        {
+            ProcessingErrorText.Text = SafeError(ex);
+        }
+    }
+
+    private void OpenProcessedTranscriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_processingMeetingId is not Guid meetingId) return;
+        MainNavigationTabs.SelectedIndex = 1;
+        var selected = MeetingsList.Items.OfType<DesktopMeeting>()
+            .FirstOrDefault(item => item.Id.Equals(meetingId.ToString(), StringComparison.OrdinalIgnoreCase));
+        if (selected is not null)
+        {
+            MeetingsList.SelectedItem = selected;
+            MeetingDetailsTabs.SelectedIndex = 1;
+        }
+        FooterText.Text = "Открыта стенограмма завершённой записи";
+    }
+
     private async Task TrackProcessingAsync(Guid meetingId)
     {
         _processingPollCts?.Cancel();
         _processingPollCts?.Dispose();
         _processingPollCts = new CancellationTokenSource(TimeSpan.FromHours(4));
         var cancellationToken = _processingPollCts.Token;
+        _processingMeetingId = meetingId;
+        _postStopProcessing = true;
+        _processingErrorVisible = false;
+        _processingCompleted = false;
+        _failedProcessingJobId = null;
+        ProcessingRetryButton.Visibility = Visibility.Collapsed;
+        ProcessingOpenTranscriptButton.Visibility = Visibility.Collapsed;
         ProcessingProgressBar.Visibility = Visibility.Visible;
         ProcessingPanel.Visibility = Visibility.Visible;
         ProcessingProgressBar.Value = 0;
@@ -975,16 +1194,26 @@ public partial class MainWindow : Window
             while (!cancellationToken.IsCancellationRequested)
             {
                 var jobs = await _server.GetJobsAsync(meetingId, cancellationToken);
+                var failed = jobs.FirstOrDefault(job => string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase));
+                if (failed is not null)
+                {
+                    _failedProcessingJobId = Guid.TryParse(failed.Id, out var failedJobId) ? failedJobId : null;
+                    _postStopProcessing = false;
+                    _processingErrorVisible = true;
+                    ProcessingProgressBar.Visibility = Visibility.Collapsed;
+                    ProcessingRetryButton.Visibility = _failedProcessingJobId is not null ? Visibility.Visible : Visibility.Collapsed;
+                    ProcessingStatusText.Text = "Обработка завершилась с ошибкой";
+                    ProcessingErrorText.Text = string.IsNullOrWhiteSpace(failed.Error)
+                        ? "Повторите обработку после проверки подключения к API."
+                        : failed.Error;
+                    UpdateRecordingPresentation("Error", true, _lastAgentHealth, "Обработка записи завершилась с ошибкой.");
+                    break;
+                }
                 var active = jobs.FirstOrDefault(job => !IsTerminal(job.Status));
                 if (active is not null)
                 {
                     ProcessingProgressBar.Value = Math.Clamp(active.Progress, 0, 100);
                     ProcessingStatusText.Text = $"Обработка: {StageLabel(active.Stage)} · {active.Progress}%";
-                    if (active.Status == "FAILED")
-                    {
-                        ProcessingErrorText.Text = "Обработка завершилась с ошибкой. Стенограмму можно использовать, а саммари — повторить.";
-                        break;
-                    }
                 }
                 else
                 {
@@ -998,24 +1227,38 @@ public partial class MainWindow : Window
                     ProcessingProgressBar.Value = 100;
                     ProcessingStatusText.Text = "Готово: стенограмма и саммари сохранены";
                     ProcessingErrorText.Text = string.Empty;
+                    _processingCompleted = true;
                     break;
                 }
                 if (active is null && transcriptReady && jobs.All(job => job.Type != "SUMMARIZE" || IsTerminal(job.Status)))
                 {
                     ProcessingProgressBar.Value = 100;
                     ProcessingStatusText.Text = "Стенограмма готова; саммари можно пересобрать";
+                    _processingCompleted = true;
                     break;
                 }
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
 
             var meetings = await _server.GetMeetingsAsync(cancellationToken);
-            MeetingsList.ItemsSource = meetings;
+            _meetingsView = CollectionViewSource.GetDefaultView(meetings);
+            _meetingsView.Filter = FilterMeeting;
+            MeetingsList.ItemsSource = _meetingsView;
+            MeetingCountText.Text = $"Совещаний: {meetings.Count}";
+            await RefreshDashboardMetricsAsync(meetings, cancellationToken);
             var selected = meetings.FirstOrDefault(item => item.Id.Equals(meetingId.ToString(), StringComparison.OrdinalIgnoreCase));
             if (selected is not null)
             {
                 MeetingsList.SelectedItem = selected;
                 _selectedMeeting = selected;
+            }
+            if (_processingCompleted)
+            {
+                _postStopProcessing = false;
+                ProcessingOpenTranscriptButton.Visibility = Visibility.Visible;
+                ProcessingProgressBar.Visibility = Visibility.Collapsed;
+                ProcessingStatusText.Text = "Готово. Стенограмма и результаты обновлены.";
+                await RefreshStatusAsync();
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1023,12 +1266,16 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _postStopProcessing = false;
+            _processingErrorVisible = true;
+            ProcessingProgressBar.Visibility = Visibility.Collapsed;
             ProcessingErrorText.Text = SafeError(ex);
             ProcessingStatusText.Text = "Не удалось получить статус обработки";
         }
         finally
         {
-            ProcessingProgressBar.Visibility = Visibility.Collapsed;
+            if (!_processingCompleted && !_processingErrorVisible)
+                ProcessingProgressBar.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -1061,7 +1308,7 @@ public partial class MainWindow : Window
 
     private static string FormatMediaTime(long? mediaTimeMs)
     {
-        if (mediaTimeMs is null or < 0) return "--:--:--";
+        if (mediaTimeMs is null or < 0) return "—";
         return TimeSpan.FromMilliseconds(mediaTimeMs.Value).ToString("hh\\:mm\\:ss");
     }
 }
