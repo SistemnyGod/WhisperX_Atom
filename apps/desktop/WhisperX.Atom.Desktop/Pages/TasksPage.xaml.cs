@@ -191,7 +191,8 @@ public sealed partial class TasksPage : Page
         _updatingLayout = true;
         try
         {
-            var compact = e.NewSize.Width < 1280;
+            ApplyFilterLayout(e.NewSize.Width);
+            var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
             TasksGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(1, GridUnitType.Star);
             TasksGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(360);
             TasksGrid.RowDefinitions[0].Height = compact ? new GridLength(330) : new GridLength(1, GridUnitType.Star);
@@ -203,6 +204,54 @@ public sealed partial class TasksPage : Page
             DetailsCard.Visibility = Visibility.Visible;
         }
         finally { _updatingLayout = false; }
+    }
+
+    private void ApplyFilterLayout(double width)
+    {
+        var mode = ResponsiveLayout.GetMode(width);
+        FiltersGrid.ColumnDefinitions.Clear();
+        FiltersGrid.RowDefinitions.Clear();
+
+        if (mode == PageLayoutMode.Wide)
+        {
+            FiltersGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
+            for (var index = 0; index < 3; index++) FiltersGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            FiltersGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            FiltersGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            PlaceFilter(SearchBox, 0, 0);
+            PlaceFilter(StatusFilterBox, 1, 0);
+            PlaceFilter(DeadlineFilterBox, 2, 0);
+            PlaceFilter(MeetingFilterBox, 3, 0);
+            PlaceFilter(ResponsibleFilterBox, 4, 0);
+            return;
+        }
+
+        if (mode == PageLayoutMode.Standard)
+        {
+            for (var index = 0; index < 3; index++) FiltersGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            for (var index = 0; index < 2; index++) FiltersGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            PlaceFilter(SearchBox, 0, 0, 2);
+            PlaceFilter(StatusFilterBox, 2, 0);
+            PlaceFilter(DeadlineFilterBox, 0, 1);
+            PlaceFilter(MeetingFilterBox, 1, 1);
+            PlaceFilter(ResponsibleFilterBox, 2, 1);
+            return;
+        }
+
+        FiltersGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        for (var index = 0; index < 5; index++) FiltersGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        PlaceFilter(SearchBox, 0, 0);
+        PlaceFilter(StatusFilterBox, 0, 1);
+        PlaceFilter(DeadlineFilterBox, 0, 2);
+        PlaceFilter(MeetingFilterBox, 0, 3);
+        PlaceFilter(ResponsibleFilterBox, 0, 4);
+    }
+
+    private static void PlaceFilter(FrameworkElement element, int column, int row, int columnSpan = 1)
+    {
+        Grid.SetColumn(element, column);
+        Grid.SetRow(element, row);
+        Grid.SetColumnSpan(element, columnSpan);
     }
 
     private void ShowError(string message)

@@ -10,6 +10,9 @@
     <Color x:Key="SurfaceGreenColor">#EAF8F0</Color>
     <Color x:Key="SurfaceOrangeColor">#FFF1E8</Color>
     <Color x:Key="BorderColor">#D9E3F0</Color>
+    <Color x:Key="HeroBorderColor">#C8DCFF</Color>
+    <Color x:Key="TableHeaderColor">#F0F4F9</Color>
+    <Color x:Key="NeutralStatusColor">#7B8EA4</Color>
     <Color x:Key="TextColor">#172338</Color>
     <Color x:Key="MutedTextColor">#66758C</Color>
     <Color x:Key="AccentColor">#1967F2</Color>
@@ -17,6 +20,8 @@
     <Color x:Key="SuccessColor">#16A45C</Color>
     <Color x:Key="WarningColor">#F79009</Color>
     <Color x:Key="DangerColor">#D64550</Color>
+    <Color x:Key="DangerSurfaceColor">#FFF6F6</Color>
+    <Color x:Key="DangerBorderColor">#F0B9BE</Color>
 
     <SolidColorBrush x:Key="PageBackgroundBrush" Color="{StaticResource PageBackgroundColor}" />
     <SolidColorBrush x:Key="SidebarBrush" Color="{StaticResource SidebarColor}" />
@@ -26,6 +31,9 @@
     <SolidColorBrush x:Key="SurfaceGreenBrush" Color="{StaticResource SurfaceGreenColor}" />
     <SolidColorBrush x:Key="SurfaceOrangeBrush" Color="{StaticResource SurfaceOrangeColor}" />
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="HeroBorderBrush" Color="{StaticResource HeroBorderColor}" />
+    <SolidColorBrush x:Key="TableHeaderBrush" Color="{StaticResource TableHeaderColor}" />
+    <SolidColorBrush x:Key="NeutralStatusBrush" Color="{StaticResource NeutralStatusColor}" />
     <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}" />
     <SolidColorBrush x:Key="MutedTextBrush" Color="{StaticResource MutedTextColor}" />
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
@@ -33,4 +41,6 @@
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}" />
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
     <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
+    <SolidColorBrush x:Key="DangerSurfaceBrush" Color="{StaticResource DangerSurfaceColor}" />
+    <SolidColorBrush x:Key="DangerBorderBrush" Color="{StaticResource DangerBorderColor}" />
 </ResourceDictionary>

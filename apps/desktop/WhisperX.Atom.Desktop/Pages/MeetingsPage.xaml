@@ -6,14 +6,16 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
-    <Grid x:Name="PageRoot" Padding="24,20,24,24" RowDefinitions="Auto,*" RowSpacing="16">
-        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+    <Grid x:Name="PageRoot" Padding="{StaticResource PagePadding}" RowDefinitions="Auto,*" RowSpacing="{StaticResource PageGap}">
+        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
             <StackPanel Spacing="3">
-                <TextBlock Text="Совещания" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Совещания" Style="{StaticResource PageTitleStyle}" />
                 <TextBlock Text="История записей, обработка и результаты встреч" Foreground="{StaticResource MutedTextBrush}" />
             </StackPanel>
-            <Button Grid.Column="1" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
-            <Button Grid.Column="2" Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" />
+            <StackPanel x:Name="MeetingsActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                <Button Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
+                <Button Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" />
+            </StackPanel>
         </Grid>
 
         <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="340,*" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
@@ -28,7 +30,7 @@
                         <ListView x:Name="MeetingsList" ItemsSource="{Binding FilteredMeetings}" SelectionMode="Single" SelectionChanged="MeetingsList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,12">
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,12" Margin="0,0,0,2">
                                         <Grid RowDefinitions="Auto,Auto" RowSpacing="5">
                                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
@@ -51,11 +53,14 @@
 
             <Border x:Name="WorkspaceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid RowDefinitions="Auto,Auto,*">
-                    <Grid Padding="20,18" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                         <StackPanel Spacing="3">
                             <TextBlock x:Name="WorkspaceEyebrow" Text="ВЫБРАННОЕ СОВЕЩАНИЕ" Style="{StaticResource EyebrowStyle}" />
-                            <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="24" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                            <TextBlock x:Name="WorkspaceMeta" Foreground="{StaticResource MutedTextBrush}" />
+                            <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="WorkspaceMeta" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                            <Border x:Name="WorkspaceStatusBadge" Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left" Margin="0,4,0,0">
+                                <TextBlock x:Name="WorkspaceStatusText" Text="Ожидает выбора встречи" Foreground="{StaticResource AccentBrush}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            </Border>
                         </StackPanel>
                         <Button x:Name="RetryButton" Grid.Column="1" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
                         <Button x:Name="RefreshWorkspaceButton" Grid.Column="2" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
@@ -84,8 +89,8 @@
                         </StackPanel>
 
                         <Grid x:Name="WorkspaceContent" Visibility="Collapsed">
-                            <TabView x:Name="WorkspaceTabs" IsAddTabButtonVisible="False" TabWidthMode="Equal" SelectionChanged="WorkspaceTabs_SelectionChanged">
-                                <TabViewItem Header="Обзор">
+                            <TabView x:Name="WorkspaceTabs" Style="{StaticResource WorkspaceTabViewStyle}" IsAddTabButtonVisible="False" TabWidthMode="Equal" SelectionChanged="WorkspaceTabs_SelectionChanged">
+                                <TabViewItem Header="Обзор" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20">
                                         <StackPanel Spacing="12">
                                             <TextBlock Text="Pipeline обработки" Style="{StaticResource SectionTitleStyle}" />
@@ -106,7 +111,7 @@
                                     </ScrollViewer>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Стенограмма">
+                                <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20" ColumnDefinitions="*,220" ColumnSpacing="16">
                                         <Grid RowDefinitions="Auto,*" RowSpacing="10">
                                             <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
@@ -140,7 +145,7 @@
                                     </Grid>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Саммари">
+                                <TabViewItem Header="Саммари" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
                                         <StackPanel Spacing="12">
                                             <Grid ColumnDefinitions="*,Auto">
@@ -155,7 +160,7 @@
                                     </ScrollViewer>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Решения">
+                                <TabViewItem Header="Решения" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20">
                                         <ListView ItemsSource="{Binding Decisions}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                             <ListView.ItemTemplate>
@@ -173,7 +178,7 @@
                                     </Grid>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Поручения">
+                                <TabViewItem Header="Поручения" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20">
                                         <ListView ItemsSource="{Binding Tasks}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                             <ListView.ItemTemplate>
@@ -183,7 +188,7 @@
                                                             <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
                                                             <TextBlock Text="{Binding Responsible}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
                                                         </StackPanel>
-                                                        <ComboBox Grid.Column="1" SelectedValue="{Binding Status, Mode=OneWay}" SelectedValuePath="Content" SelectionChanged="TaskStatusCombo_SelectionChanged" MinWidth="140">
+                                                        <ComboBox Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" SelectedValue="{Binding Status, Mode=OneWay}" SelectedValuePath="Content" SelectionChanged="TaskStatusCombo_SelectionChanged" MinWidth="140">
                                                             <ComboBoxItem Content="NEEDS_REVIEW" />
                                                             <ComboBoxItem Content="OPEN" />
                                                             <ComboBoxItem Content="DONE" />
@@ -198,7 +203,7 @@
                                     </Grid>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Файлы">
+                                <TabViewItem Header="Файлы" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20" RowDefinitions="*,Auto" RowSpacing="14">
                                         <ListView x:Name="MediaList" ItemsSource="{Binding Media}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                             <ListView.ItemTemplate>
@@ -225,6 +230,12 @@
                                     </Grid>
                                 </TabViewItem>
                             </TabView>
+                        </Grid>
+                        <Grid x:Name="WorkspaceLoadingOverlay" Visibility="Collapsed" Background="{StaticResource SurfaceBrush}">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                                <ProgressRing IsActive="True" Width="32" Height="32" HorizontalAlignment="Center" />
+                                <TextBlock Text="Загружаю данные встречи…" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
+                            </StackPanel>
                         </Grid>
                     </Grid>
                 </Grid>

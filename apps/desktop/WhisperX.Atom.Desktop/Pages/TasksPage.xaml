@@ -6,18 +6,18 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
-    <Grid x:Name="PageRoot" Padding="24,20,24,24" RowDefinitions="Auto,Auto,*" RowSpacing="14">
+    <Grid x:Name="PageRoot" Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,*" RowSpacing="14">
         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
             <StackPanel Spacing="3">
-                <TextBlock Text="Поручения" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Поручения" Style="{StaticResource PageTitleStyle}" />
                 <TextBlock Text="Общий реестр задач из доступных совещаний" Foreground="{StaticResource MutedTextBrush}" />
             </StackPanel>
             <Button Grid.Column="1" x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
         </Grid>
 
-        <Grid Grid.Row="1" ColumnDefinitions="2*,*,*,*,Auto" ColumnSpacing="8">
+        <Grid x:Name="FiltersGrid" Grid.Row="1" ColumnDefinitions="2*,*,*,*,Auto" RowDefinitions="Auto" ColumnSpacing="8" RowSpacing="8">
             <TextBox x:Name="SearchBox" PlaceholderText="Поиск по задаче, встрече или ответственному" Style="{StaticResource InputStyle}" TextChanged="SearchBox_TextChanged" />
-            <ComboBox x:Name="StatusFilterBox" Grid.Column="1" PlaceholderText="Статус" SelectionChanged="StatusFilterBox_SelectionChanged">
+            <ComboBox x:Name="StatusFilterBox" Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Статус" SelectionChanged="StatusFilterBox_SelectionChanged">
                 <ComboBoxItem Content="Активные" Tag="ACTIVE" IsSelected="True" />
                 <ComboBoxItem Content="Все статусы" Tag="ALL" />
                 <ComboBoxItem Content="На проверке" Tag="NEEDS_REVIEW" />
@@ -25,15 +25,15 @@
                 <ComboBoxItem Content="Готовые" Tag="DONE" />
                 <ComboBoxItem Content="Отменённые" Tag="CANCELLED" />
             </ComboBox>
-            <ComboBox x:Name="DeadlineFilterBox" Grid.Column="2" PlaceholderText="Срок" SelectionChanged="DeadlineFilterBox_SelectionChanged">
+            <ComboBox x:Name="DeadlineFilterBox" Grid.Column="2" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Срок" SelectionChanged="DeadlineFilterBox_SelectionChanged">
                 <ComboBoxItem Content="Любой срок" Tag="ALL" IsSelected="True" />
                 <ComboBoxItem Content="Просроченные" Tag="OVERDUE" />
                 <ComboBoxItem Content="Сегодня" Tag="TODAY" />
                 <ComboBoxItem Content="Ближайшие 7 дней" Tag="NEXT_7_DAYS" />
                 <ComboBoxItem Content="Без срока" Tag="NO_DEADLINE" />
             </ComboBox>
-            <ComboBox x:Name="MeetingFilterBox" Grid.Column="3" PlaceholderText="Совещание" SelectionChanged="MeetingFilterBox_SelectionChanged" />
-            <TextBox x:Name="ResponsibleFilterBox" Grid.Column="4" Width="170" PlaceholderText="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleFilterBox_TextChanged" />
+            <ComboBox x:Name="MeetingFilterBox" Grid.Column="3" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Совещание" SelectionChanged="MeetingFilterBox_SelectionChanged" />
+            <TextBox x:Name="ResponsibleFilterBox" Grid.Column="4" PlaceholderText="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleFilterBox_TextChanged" />
         </Grid>
 
         <Grid x:Name="TasksGrid" Grid.Row="2" ColumnDefinitions="*,360" RowDefinitions="*,0" ColumnSpacing="14" RowSpacing="14">
@@ -79,9 +79,9 @@
                         <TextBlock x:Name="DetailsMeetingText" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                         <TextBox x:Name="TaskEditor" Header="Текст задачи" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" Style="{StaticResource InputStyle}" TextChanged="TaskEditor_TextChanged" />
                         <TextBox x:Name="ResponsibleEditor" Header="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleEditor_TextChanged" />
-                        <DatePicker x:Name="DeadlinePicker" Header="Срок" DateChanged="DeadlinePicker_DateChanged" />
-                        <CheckBox x:Name="NoDeadlineCheckBox" Content="Без срока" Checked="NoDeadlineCheckBox_Changed" Unchecked="NoDeadlineCheckBox_Changed" />
-                        <ComboBox x:Name="StatusEditor" Header="Статус" SelectedValuePath="Content" SelectionChanged="StatusEditor_SelectionChanged">
+                        <DatePicker x:Name="DeadlinePicker" Style="{StaticResource FormDatePickerStyle}" Header="Срок" DateChanged="DeadlinePicker_DateChanged" />
+                        <CheckBox x:Name="NoDeadlineCheckBox" Style="{StaticResource FormCheckBoxStyle}" Content="Без срока" Checked="NoDeadlineCheckBox_Changed" Unchecked="NoDeadlineCheckBox_Changed" />
+                        <ComboBox x:Name="StatusEditor" Style="{StaticResource FormComboBoxStyle}" Header="Статус" SelectedValuePath="Content" SelectionChanged="StatusEditor_SelectionChanged">
                             <ComboBoxItem Content="NEEDS_REVIEW" />
                             <ComboBoxItem Content="OPEN" />
                             <ComboBoxItem Content="DONE" />

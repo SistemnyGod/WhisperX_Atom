@@ -7,16 +7,16 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-        <Grid Padding="24,20,24,24" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="16">
+        <Grid Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="{StaticResource PageGap}">
             <StackPanel Spacing="3">
-                <TextBlock Text="Помощник" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Помощник" Style="{StaticResource PageTitleStyle}" />
                 <TextBlock Text="Вопросы по выбранной встрече или по доступной истории" Foreground="{StaticResource MutedTextBrush}" />
             </StackPanel>
 
             <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="18">
                 <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="12">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                        <ComboBox x:Name="ContextBox" Header="Контекст вопроса" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" SelectionChanged="ContextBox_SelectionChanged" />
+                        <ComboBox x:Name="ContextBox" Header="Контекст вопроса" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" SelectionChanged="ContextBox_SelectionChanged" />
                         <TextBlock Grid.Column="1" Text="{Binding RoleText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Bottom" />
                     </Grid>
                     <TextBlock x:Name="GlobalHintText" Grid.Row="1" Text="Вопросы по всей истории доступны только Administrator и Operator." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" />
@@ -35,7 +35,7 @@
                     <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                         <StackPanel Spacing="12">
                             <TextBlock Text="Ответ" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock x:Name="AnswerText" Text="Ответ появится после обработки запроса." Foreground="{StaticResource PrimaryTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="AnswerText" Text="Ответ появится после обработки запроса." Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
                             <TextBlock x:Name="VoiceAnswerText" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             <TextBlock x:Name="NoEvidenceText" Text="Ответ пока не содержит подтверждённых источников." Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                         </StackPanel>

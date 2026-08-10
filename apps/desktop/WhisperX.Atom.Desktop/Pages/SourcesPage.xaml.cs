@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -58,8 +57,8 @@ public sealed partial class SourcesPage : Page
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
-        AgentStatusDot.Fill = new SolidColorBrush(_viewModel.AgentAvailable ? Colors.SeaGreen : Colors.OrangeRed);
-        ApiStatusDot.Fill = new SolidColorBrush(_viewModel.ApiAvailable ? Colors.SeaGreen : Colors.OrangeRed);
+        AgentStatusDot.Fill = StatusBrush(_viewModel.AgentAvailable, _viewModel.IsLoading);
+        ApiStatusDot.Fill = StatusBrush(_viewModel.ApiAvailable, _viewModel.IsLoading);
         MicrophoneList.Visibility = _viewModel.HasMicrophones ? Visibility.Visible : Visibility.Collapsed;
         MicrophoneEmptyText.Visibility = _viewModel.HasMicrophones ? Visibility.Collapsed : Visibility.Visible;
         SystemAudioList.Visibility = _viewModel.HasSystemAudioDevices ? Visibility.Visible : Visibility.Collapsed;
@@ -78,20 +77,27 @@ public sealed partial class SourcesPage : Page
 
     private void SourcesPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var compact = e.NewSize.Width < 980;
-        ApplyResponsiveLayout(StatusGrid, LocalAgentCard, BackendCard, compact);
-        ApplyResponsiveLayout(DevicesGrid, MicrophoneCard, SystemAudioCard, compact);
+        var wide = ResponsiveLayout.IsWide(e.NewSize.Width);
+        SourcesActionsPanel.Orientation = wide ? Orientation.Horizontal : Orientation.Vertical;
+        ApplyResponsiveLayout(StatusGrid, LocalAgentCard, BackendCard, wide);
+        ApplyResponsiveLayout(DevicesGrid, MicrophoneCard, SystemAudioCard, wide);
     }
 
-    private static void ApplyResponsiveLayout(Grid grid, FrameworkElement first, FrameworkElement second, bool compact)
+    private static Brush StatusBrush(bool available, bool loading)
+    {
+        var key = loading ? "NeutralStatusBrush" : available ? "SuccessBrush" : "DangerBrush";
+        return (Brush)Application.Current.Resources[key];
+    }
+
+    private static void ApplyResponsiveLayout(Grid grid, FrameworkElement first, FrameworkElement second, bool wide)
     {
         grid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
-        grid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        grid.ColumnDefinitions[1].Width = wide ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         grid.RowDefinitions[0].Height = GridLength.Auto;
-        grid.RowDefinitions[1].Height = compact ? GridLength.Auto : new GridLength(0);
+        grid.RowDefinitions[1].Height = wide ? new GridLength(0) : GridLength.Auto;
         Grid.SetColumn(first, 0);
         Grid.SetRow(first, 0);
-        Grid.SetColumn(second, compact ? 0 : 1);
-        Grid.SetRow(second, compact ? 1 : 0);
+        Grid.SetColumn(second, wide ? 1 : 0);
+        Grid.SetRow(second, wide ? 0 : 1);
     }
 }

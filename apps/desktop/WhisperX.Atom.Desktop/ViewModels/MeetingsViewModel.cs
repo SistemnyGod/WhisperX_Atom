@@ -239,6 +239,14 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     public bool CanRetryLatestJob => LatestJob is not null && IsRetryable(LatestJob.Status);
     public string MeetingDateText => Meeting is null ? string.Empty : Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm");
 
+    public void ClearSelection()
+    {
+        Meeting = null;
+        ErrorText = string.Empty;
+        PreviewPath = null;
+        ClearCollections();
+    }
+
     public async Task LoadAsync(DesktopMeeting meeting, CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(meeting.Id, out var meetingId))

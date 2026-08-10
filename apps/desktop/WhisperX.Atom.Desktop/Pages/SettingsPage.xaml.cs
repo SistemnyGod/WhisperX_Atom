@@ -13,7 +13,11 @@ public sealed partial class SettingsPage : Page
     private FrontendServices? _services;
     public SettingsViewModel? ViewModel { get; private set; }
 
-    public SettingsPage() => InitializeComponent();
+    public SettingsPage()
+    {
+        InitializeComponent();
+        SizeChanged += SettingsPage_SizeChanged;
+    }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -86,5 +90,39 @@ public sealed partial class SettingsPage : Page
         StatusInfoBar.Severity = InfoBarSeverity.Error;
         StatusInfoBar.Message = message;
         StatusInfoBar.IsOpen = true;
+    }
+
+    private void SettingsPage_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 420, e.NewSize.Width);
+        ApiActionsPanel.Orientation = ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact
+            ? Orientation.Vertical
+            : Orientation.Horizontal;
+        ConfigureArchiveLayout(ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact);
+    }
+
+    private void ConfigureArchiveLayout(bool compact)
+    {
+        ArchivePathGrid.ColumnDefinitions.Clear();
+        ArchivePathGrid.RowDefinitions.Clear();
+        if (compact)
+        {
+            ArchivePathGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            for (var index = 0; index < 3; index++) ArchivePathGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(SelectArchiveButton, 0);
+            Grid.SetRow(SelectArchiveButton, 1);
+            Grid.SetColumn(OpenArchiveButton, 0);
+            Grid.SetRow(OpenArchiveButton, 2);
+            return;
+        }
+
+        ArchivePathGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        ArchivePathGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        ArchivePathGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        ArchivePathGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetColumn(SelectArchiveButton, 1);
+        Grid.SetRow(SelectArchiveButton, 0);
+        Grid.SetColumn(OpenArchiveButton, 2);
+        Grid.SetRow(OpenArchiveButton, 0);
     }
 }

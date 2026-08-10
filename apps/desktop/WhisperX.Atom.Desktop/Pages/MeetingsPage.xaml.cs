@@ -81,6 +81,7 @@ public sealed partial class MeetingsPage : Page
         _workspaceCts?.Cancel();
         _workspaceCts?.Dispose();
         _workspaceCts = null;
+        _workspace?.ClearSelection();
         PreviewPlayer.Source = null;
         base.OnNavigatedFrom(e);
     }
@@ -103,7 +104,15 @@ public sealed partial class MeetingsPage : Page
     {
         if (_suppressMeetingSelection || _viewModel is null || _workspace is null || _pageCts is null) return;
         _viewModel.SelectedMeeting = MeetingsList.SelectedItem as DesktopMeeting;
-        if (_viewModel.SelectedMeeting is null) return;
+        if (_viewModel.SelectedMeeting is null)
+        {
+            _workspaceCts?.Cancel();
+            _workspace.ClearSelection();
+            PreviewPlayer.Source = null;
+            UpdateWorkspaceState();
+            UpdateWorkspaceText();
+            return;
+        }
         await LoadSelectedMeetingAsync(_viewModel.SelectedMeeting);
     }
 
@@ -163,8 +172,14 @@ public sealed partial class MeetingsPage : Page
         if (_viewModel is null || _pageCts is null) return;
         try
         {
+            _workspaceCts?.Cancel();
+            _workspace?.ClearSelection();
+            MeetingsList.SelectedItem = null;
+            PreviewPlayer.Source = null;
             await _viewModel.RefreshAsync(_pageCts.Token);
             UpdateListState();
+            UpdateWorkspaceState();
+            UpdateWorkspaceText();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(ex.Message); }
@@ -298,7 +313,10 @@ public sealed partial class MeetingsPage : Page
         _updatingLayout = true;
         try
         {
-            var compact = e.NewSize.Width < 1280;
+            var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
+            MeetingsActionsPanel.Orientation = ResponsiveLayout.IsWide(e.NewSize.Width)
+                ? Orientation.Horizontal
+                : Orientation.Vertical;
             MeetingsGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(340);
             MeetingsGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
             MeetingsGrid.RowDefinitions[0].Height = compact ? new GridLength(300) : new GridLength(1, GridUnitType.Star);
@@ -329,6 +347,7 @@ public sealed partial class MeetingsPage : Page
         if (_workspace is null) return;
         WorkspaceEmptyState.Visibility = _workspace.HasMeeting ? Visibility.Collapsed : Visibility.Visible;
         WorkspaceContent.Visibility = _workspace.HasMeeting ? Visibility.Visible : Visibility.Collapsed;
+        WorkspaceLoadingOverlay.Visibility = _workspace.IsLoading ? Visibility.Visible : Visibility.Collapsed;
         RefreshWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         RetryButton.IsEnabled = _workspace.CanRetryLatestJob && !_workspace.IsLoading;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_workspace.ErrorText);
@@ -341,6 +360,7 @@ public sealed partial class MeetingsPage : Page
         if (_workspace is null) return;
         WorkspaceTitle.Text = _workspace.Meeting?.Title ?? "Выберите встречу слева";
         WorkspaceMeta.Text = _workspace.Meeting is null ? string.Empty : $"{_workspace.MeetingDateText} · {_workspace.Meeting.Status}";
+        WorkspaceStatusText.Text = _workspace.Meeting is null ? "Ожидает выбора встречи" : _workspace.IsLoading ? "Загрузка данных встречи" : _workspace.PipelineText;
         PipelineText.Text = _workspace.PipelineText;
         OverviewPipelineText.Text = _workspace.PipelineText;
         DurationText.Text = _workspace.DurationText;

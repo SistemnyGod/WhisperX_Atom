@@ -36,7 +36,14 @@ public sealed class RecordingViewModel : ObservableObject
     public ObservableCollection<AudioDeviceOption> SystemAudioDevices { get; } = [];
     public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) NotifyCommands(); } }
     public string Title { get => _title; set => SetProperty(ref _title, value); }
-    public string? SessionId { get => _sessionId; private set => SetProperty(ref _sessionId, value); }
+    public string? SessionId
+    {
+        get => _sessionId;
+        private set
+        {
+            if (SetProperty(ref _sessionId, value)) OnPropertyChanged(nameof(CanRetryUpload));
+        }
+    }
     public Guid? MeetingId { get => _meetingId; private set => SetProperty(ref _meetingId, value); }
     public long? MediaTimeMs { get => _mediaTimeMs; private set { if (SetProperty(ref _mediaTimeMs, value)) OnPropertyChanged(nameof(MediaTimeLabel)); } }
     public string MediaTimeLabel => MediaTimeMs is long value ? FormatMediaTime(value) : "00:00:00";
@@ -65,6 +72,7 @@ public sealed class RecordingViewModel : ObservableObject
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
     public bool CanStop => State is RecordingState.Recording or RecordingState.Paused;
+    public bool CanRetryUpload => State == RecordingState.Error && !string.IsNullOrWhiteSpace(SessionId);
     public bool CanSelectDevices => State is RecordingState.Idle or RecordingState.Checking or RecordingState.Error;
 
     public async Task StartPollingAsync()
@@ -264,6 +272,7 @@ public sealed class RecordingViewModel : ObservableObject
             _ => "Устройства готовы. Можно начать новую запись."
         };
         OnPropertyChanged(nameof(StateTitle));
+        OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(AgentStatus));
     }
 
@@ -294,6 +303,7 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(CanResume));
         OnPropertyChanged(nameof(CanMark));
         OnPropertyChanged(nameof(CanStop));
+        OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(CanSelectDevices));
         OnPropertyChanged(nameof(AgentStatus));
     }

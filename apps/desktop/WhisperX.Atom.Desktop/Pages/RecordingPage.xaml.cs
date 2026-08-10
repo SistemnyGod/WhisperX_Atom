@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
@@ -18,6 +19,7 @@ public sealed partial class RecordingPage : Page
     public RecordingPage()
     {
         InitializeComponent();
+        SizeChanged += RecordingPage_SizeChanged;
     }
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
@@ -42,6 +44,7 @@ public sealed partial class RecordingPage : Page
     {
         if (e.PropertyName is nameof(RecordingViewModel.Microphones) or nameof(RecordingViewModel.SystemAudioDevices)) SyncSelections();
         if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)) UpdateError();
+        if (e.PropertyName is nameof(RecordingViewModel.State)) UpdateStateIndicator();
     }
 
     private void SyncSelections()
@@ -64,6 +67,7 @@ public sealed partial class RecordingPage : Page
         ErrorInfoBar.IsOpen = ViewModel.HasError;
         ErrorInfoBar.Message = ViewModel.ErrorMessage;
         ErrorInfoBar.Severity = InfoBarSeverity.Error;
+        UpdateStateIndicator();
     }
 
     private async void CheckDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -85,6 +89,7 @@ public sealed partial class RecordingPage : Page
     private async void ResumeButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.ResumeAsync(); UpdateError(); }
     private async void MarkerButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync(); UpdateError(); }
     private async void StopButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.StopRecordingAsync(); UpdateError(); }
+    private async void RetryUploadButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.RetryUploadAsync(); UpdateError(); }
 
     private async void MicrophoneCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -110,5 +115,26 @@ public sealed partial class RecordingPage : Page
         if (folder is null) return;
         await ViewModel.SetArchiveRootAsync(folder.Path);
         UpdateError();
+    }
+
+    private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ResponsiveLayout.SetTwoColumn(RecordingHeroGrid, RecordingMainColumn, RecordingSourcesColumn, 340, e.NewSize.Width);
+        ResponsiveLayout.SetCardColumns(LifeCycleGrid, LifeCycleGrid.Children.OfType<FrameworkElement>().ToArray(), e.NewSize.Width);
+        RecordingActionsPanel.Orientation = Orientation.Vertical;
+    }
+
+    private void UpdateStateIndicator()
+    {
+        if (ViewModel is null) return;
+        var key = ViewModel.State switch
+        {
+            RecordingState.Recording => "DangerBrush",
+            RecordingState.Paused => "WarningBrush",
+            RecordingState.Error or RecordingState.Unavailable => "DangerBrush",
+            RecordingState.Finalizing => "WarningBrush",
+            _ => "AccentBrush"
+        };
+        if (Application.Current.Resources[key] is Brush brush) StateIndicator.Fill = brush;
     }
 }

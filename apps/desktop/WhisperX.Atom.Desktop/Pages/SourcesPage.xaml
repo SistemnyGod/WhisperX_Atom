@@ -7,13 +7,13 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="28,24,28,32" Spacing="18">
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
             <Grid ColumnDefinitions="*,Auto">
                 <StackPanel>
-                    <TextBlock Text="Источники" FontSize="30" FontWeight="SemiBold" />
+                    <TextBlock Text="Источники" Style="{StaticResource PageTitleStyle}" />
                     <TextBlock Text="Recorder Agent, устройства записи и серверные агенты" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
                 </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                <StackPanel x:Name="SourcesActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8">
                     <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="OpenRecordingButton_Click" />
                     <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
                 </StackPanel>
@@ -23,17 +23,19 @@
             <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
 
             <Grid x:Name="StatusGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
-                <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="#C8DCFF">
+                <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}">
                     <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="10">
                         <StackPanel>
                             <TextBlock Text="ЛОКАЛЬНЫЙ ИСТОЧНИК" Style="{StaticResource EyebrowStyle}" />
                             <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,0" />
                         </StackPanel>
                         <ProgressRing Grid.Column="1" x:Name="LoadingRing" Width="22" Height="22" IsActive="False" />
-                        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
-                            <Ellipse x:Name="AgentStatusDot" Width="10" Height="10" Fill="#7B8EA4" />
-                            <TextBlock Text="{Binding LocalAgentStatus}" FontWeight="SemiBold" />
-                        </StackPanel>
+                        <Border Grid.Row="1" Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Ellipse x:Name="AgentStatusDot" Width="10" Height="10" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding LocalAgentStatus}" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
                         <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="18">
                             <StackPanel>
                                 <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
@@ -56,10 +58,12 @@
                     <StackPanel Spacing="10">
                         <TextBlock Text="СЕРВЕР" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="Зарегистрированные агенты" Style="{StaticResource SectionTitleStyle}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Ellipse x:Name="ApiStatusDot" Width="10" Height="10" Fill="#7B8EA4" />
-                            <TextBlock Text="{Binding BackendStatus}" FontWeight="SemiBold" />
-                        </StackPanel>
+                        <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Ellipse x:Name="ApiStatusDot" Width="10" Height="10" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding BackendStatus}" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
                         <TextBlock Text="Список загружается через текущую авторизованную API-сессию. Регистрация и подключение выполняются в настройках." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                         <Button Content="Открыть настройки подключения" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" HorizontalAlignment="Stretch" />
                     </StackPanel>
@@ -127,7 +131,7 @@
                         </StackPanel>
                         <Button Grid.Column="1" Content="Настроить подключение" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" />
                     </Grid>
-                    <Grid Background="#F0F4F9" Padding="20,10" ColumnDefinitions="1.5*,120,180,*">
+                    <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.4*,110,150,*">
                         <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
                         <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
                         <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
@@ -136,7 +140,7 @@
                     <ListView x:Name="AgentsList" ItemsSource="{Binding RegisteredAgents}" SelectionMode="None" BorderThickness="0" MaxHeight="320">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <Grid Padding="20,12" ColumnDefinitions="1.5*,120,180,*">
+                                <Grid Padding="20,12" ColumnDefinitions="1.4*,110,150,*">
                                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                     <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
                                     <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />

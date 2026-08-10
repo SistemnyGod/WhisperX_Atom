@@ -105,7 +105,7 @@ public sealed partial class AssistantPage : Page
 
     private void AssistantContentGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var compact = e.NewSize.Width < 1280;
+        var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
         AssistantContentGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
         AssistantContentGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(360);
         AssistantContentGrid.RowDefinitions[0].Height = compact ? new GridLength(300) : new GridLength(1, GridUnitType.Star);

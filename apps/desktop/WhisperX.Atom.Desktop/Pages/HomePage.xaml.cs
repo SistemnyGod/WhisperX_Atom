@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
@@ -12,22 +13,34 @@ namespace WhisperX_Atom_Desktop.Pages;
 public sealed partial class HomePage : Page
 {
     private FrontendServices? _services;
+    private CancellationTokenSource? _pageCts;
     public HomeViewModel? ViewModel { get; private set; }
 
     public HomePage()
     {
         InitializeComponent();
+        SizeChanged += HomePage_SizeChanged;
     }
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         _services = (FrontendServices)e.Parameter;
+        _pageCts = new CancellationTokenSource();
         ViewModel = new HomeViewModel(_services);
         DataContext = ViewModel;
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
-        await ViewModel.RefreshAsync();
+        await ViewModel.RefreshAsync(_pageCts.Token);
         UpdateEmptyState();
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        _pageCts?.Cancel();
+        _pageCts?.Dispose();
+        _pageCts = null;
+        if (ViewModel is not null) ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
+        base.OnNavigatedFrom(e);
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -41,16 +54,29 @@ public sealed partial class HomePage : Page
         if (ViewModel is null) return;
         MeetingsEmptyState.Visibility = ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
         MeetingsList.Visibility = ViewModel.HasMeetings ? Visibility.Visible : Visibility.Collapsed;
+        RefreshButton.IsEnabled = !ViewModel.IsLoading;
+        var statusBrush = (Brush)Application.Current.Resources[ViewModel.AgentAvailable ? "SuccessBrush" : "NeutralStatusBrush"];
+        AgentIndicator.Fill = statusBrush;
+        AgentRailIndicator.Fill = statusBrush;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText);
         ErrorInfoBar.Message = ViewModel.ErrorText;
     }
 
+    private void HomePage_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ResponsiveLayout.SetTwoColumn(HomeContentGrid, HomeMainColumn, HomeRailColumn, 320, e.NewSize.Width);
+        ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement[] { KpiApiCard, KpiStorageCard, KpiQueueCard }, e.NewSize.Width);
+    }
+
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
+    private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
     private void SettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
+    private void OpenSourcesButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("sources");
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        await ViewModel.RefreshAsync();
+        if (_pageCts is null) return;
+        await ViewModel.RefreshAsync(_pageCts.Token);
         UpdateEmptyState();
     }
 
@@ -66,10 +92,12 @@ public sealed partial class HomePage : Page
         try
         {
             ErrorInfoBar.IsOpen = false;
-            await _services.Backend.ImportFileAsync(file.Path, cancellationToken: CancellationToken.None);
-            if (ViewModel is not null) await ViewModel.RefreshAsync();
+            if (_pageCts is null) return;
+            await _services.Backend.ImportFileAsync(file.Path, cancellationToken: _pageCts.Token);
+            if (ViewModel is not null) await ViewModel.RefreshAsync(_pageCts.Token);
             UpdateEmptyState();
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             ErrorInfoBar.Severity = InfoBarSeverity.Error;

@@ -1,6 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using WinRT.Interop;
 using WhisperX_Atom_Desktop.Pages;
 using WhisperX_Atom_Desktop.Services;
@@ -10,6 +11,8 @@ namespace WhisperX_Atom_Desktop;
 public sealed partial class MainWindow : Window
 {
     private readonly FrontendServices _services;
+    private readonly CancellationTokenSource _statusCts = new();
+    private Task? _statusTask;
     private bool _suppressNavigation;
 
     public MainWindow()
@@ -36,6 +39,8 @@ public sealed partial class MainWindow : Window
             new BackendService(settings),
             settingsStore);
 
+        Closed += MainWindow_Closed;
+        _statusTask = PollSystemStatusAsync(_statusCts.Token);
         NavigateTo("home");
     }
 
@@ -86,5 +91,60 @@ public sealed partial class MainWindow : Window
     {
         if (_suppressNavigation || args.SelectedItem is not NavigationViewItem item) return;
         NavigateToPage(item.Tag?.ToString() ?? "home");
+    }
+
+    private async Task PollSystemStatusAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        do
+        {
+            try
+            {
+                await RefreshSystemStatusAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch
+            {
+                SetSystemStatus("Сервисы недоступны", "DangerBrush");
+            }
+        }
+        while (await timer.WaitForNextTickAsync(cancellationToken));
+    }
+
+    private async Task RefreshSystemStatusAsync(CancellationToken cancellationToken)
+    {
+        SetSystemStatus("Проверка системы", "NeutralStatusBrush");
+        var backendTask = _services.Backend.CheckReadyAsync(cancellationToken);
+        var recorderTask = _services.Recorder.GetHealthAsync(cancellationToken);
+        await Task.WhenAll(backendTask, recorderTask);
+
+        var backendAvailable = await backendTask;
+        var recorderAvailable = (await recorderTask).Ok;
+        SetSystemStatus(
+            backendAvailable && recorderAvailable ? "Система готова" :
+            backendAvailable || recorderAvailable ? "Частично доступна" :
+            "Сервисы недоступны",
+            backendAvailable && recorderAvailable ? "SuccessBrush" :
+            backendAvailable || recorderAvailable ? "WarningBrush" :
+            "DangerBrush");
+    }
+
+    private void SetSystemStatus(string text, string brushKey)
+    {
+        SystemStatusText.Text = text;
+        if (Application.Current.Resources[brushKey] is Brush brush)
+        {
+            SystemStatusIndicator.Fill = brush;
+        }
+    }
+
+    private void MainWindow_Closed(object sender, WindowEventArgs args)
+    {
+        _statusCts.Cancel();
+        _statusCts.Dispose();
+        _services.Backend.Dispose();
     }
 }
