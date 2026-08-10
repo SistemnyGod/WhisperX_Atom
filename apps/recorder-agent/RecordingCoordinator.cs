@@ -8,6 +8,8 @@ using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder;
 
+public sealed record RecordingStopHandle(string? SessionId, Task LocalFinalization);
+
 public sealed class RecordingCoordinator : IAsyncDisposable
 {
     private readonly SpoolStore _spool;
@@ -30,7 +32,9 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
     }
 
-    public string? SessionId => _sessionId;    public long? CurrentMediaTimeMs
+    public string? SessionId => _sessionId;
+
+    public long? CurrentMediaTimeMs
     {
         get
         {
@@ -158,18 +162,25 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        var stop = await RequestStopAsync(cancellationToken);
+        await stop.LocalFinalization;
+    }
+
+    public async Task<RecordingStopHandle> RequestStopAsync(CancellationToken cancellationToken = default)
+    {
         lock (_gate)
         {
-            if (_state.State is RecorderState.Idle) return;
-            if (_state.State is RecorderState.Finalizing) return;
+            if (_state.State is RecorderState.Idle or RecorderState.Finalizing)
+                return new RecordingStopHandle(null, Task.CompletedTask);
             if (!_state.TryTransition(RecorderState.Finalizing, "recording-stopping"))
                 throw new InvalidOperationException($"Cannot stop from {_state.State}.");
         }
 
         var sessionId = _sessionId;
+        Task localFinalization;
         try
         {
-            await StopTracksAsync();
+            localFinalization = BeginStopTracks();
         }
         catch
         {
@@ -184,6 +195,28 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
         lock (_gate) _state.TryTransition(RecorderState.Idle, "recording-finalized");
         _sessionId = null;
+        return new RecordingStopHandle(sessionId, ObserveLocalFinalizationAsync(sessionId, localFinalization));
+    }
+
+    private async Task ObserveLocalFinalizationAsync(string? sessionId, Task localFinalization)
+    {
+        try { await localFinalization; }
+        catch
+        {
+            if (sessionId is not null) await _spool.SetSessionStateAsync(sessionId, "FAILED");
+            throw;
+        }
+    }
+
+    private Task BeginStopTracks()
+    {
+        var mic = _microphone;
+        var system = _systemAudio;
+        _microphone = null;
+        _systemAudio = null;
+        return Task.WhenAll(
+            mic?.BeginDisposeAsync() ?? Task.CompletedTask,
+            system?.BeginDisposeAsync() ?? Task.CompletedTask);
     }
     private async Task StopTracksAsync()
     {
@@ -267,6 +300,11 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
         public async ValueTask DisposeAsync()
         {
+            await BeginDisposeAsync();
+        }
+
+        public Task BeginDisposeAsync()
+        {
             _capture.DataAvailable -= OnDataAvailable;
             _capture.RecordingStopped -= OnRecordingStopped;
             if (Interlocked.Exchange(ref _started, 0) == 1)
@@ -274,7 +312,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 try { _capture.StopRecording(); } catch (InvalidOperationException) { }
             }
             _capture.Dispose();
-            await _writer.DisposeAsync();
+            return _writer.DisposeAsync().AsTask();
         }
     }
 }

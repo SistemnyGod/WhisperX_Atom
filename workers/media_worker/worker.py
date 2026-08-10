@@ -8,7 +8,7 @@ from pathlib import Path
 from workers.nats_utils import fetch_available
 
 from .media_worker import prepare_media
-from .persistence import claim_message, job_state, release_message, reset_media_leases, update_asset, update_job
+from .persistence import claim_message, job_state, mark_ready_for_asr_and_enqueue, release_message, reset_media_leases, update_asset, update_job
 from .recording_assembly import assemble_recording_session
 
 
@@ -22,7 +22,7 @@ async def run() -> None:
     await asyncio.to_thread(reset_media_leases)
     jetstream = client.jetstream()
     try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize"])
+        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     except Exception:
         pass
     subscription = await jetstream.pull_subscribe("media.ingest", durable="whisperx-media")
@@ -35,13 +35,13 @@ async def run() -> None:
             message_id = str(payload.get("message_id", ""))
             if not claim_message(message_id, job_id):
                 state = job_state(job_id)
-                if state is None or state[0] in ("READY", "FAILED") or state[1] == "READY_FOR_ASR":
+                if state is None or state[0] in ("READY", "FAILED", "CANCELLED") or state[1] == "READY_FOR_ASR":
                     await message.ack()
                 else:
                     await message.nak()
                 continue
             state = job_state(job_id)
-            if state is not None and state[1] in ("READY_FOR_ASR", "TRANSCRIBING", "ALIGNING", "DIARIZING", "QUALITY_CHECK", "PERSISTING", "READY"):
+            if state is not None and (state[0] in ("READY", "FAILED", "CANCELLED") or state[1] in ("READY_FOR_ASR", "TRANSCRIBING", "ALIGNING", "DIARIZING", "QUALITY_CHECK", "PERSISTING", "READY")):
                 await message.ack()
                 continue
             if job_id in active_jobs:
@@ -71,13 +71,12 @@ async def run() -> None:
                     "sha256": derivatives.sha256,
                     "duration_ms": derivatives.duration_ms,
                 })
-                await jetstream.publish("ml.transcribe", json.dumps(next_message).encode("utf-8"))
-                update_job(job_id, "QUEUED", "READY_FOR_ASR", 25)
+                await asyncio.to_thread(mark_ready_for_asr_and_enqueue, job_id, next_message)
                 await message.ack()
             except Exception as exc:
                 release_message(message_id)
                 update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), "RECORDING_ASSEMBLY_FAILED" if payload.get("source_type") == "recorder_session" else "MEDIA_PROCESSING_FAILED")
-                await message.nak()
+                await message.ack()
             finally:
                 active_jobs.discard(job_id)
 

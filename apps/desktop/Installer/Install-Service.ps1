@@ -1,12 +1,23 @@
-param([string]$ServiceDirectory = (Join-Path $PSScriptRoot "Service"))
+param(
+    [string]$ServiceDirectory = (Join-Path $PSScriptRoot "Service"),
+    [string]$AllowedUserSid,
+    [string]$AllowedUserSidFile
+)
 $ErrorActionPreference = "Stop"
 $serviceName = "WhisperXAtomRecorder"
 $displayName = "WhisperX Atom Recorder Service"
 $serviceExe = Join-Path $ServiceDirectory "WhisperX.Atom.Recorder.Service.exe"
 if (-not (Test-Path -LiteralPath $serviceExe)) { throw "Service binary not found: $serviceExe" }
+if ([string]::IsNullOrWhiteSpace($AllowedUserSid) -and -not [string]::IsNullOrWhiteSpace($AllowedUserSidFile)) {
+    if (-not (Test-Path -LiteralPath $AllowedUserSidFile -PathType Leaf)) { throw "Installer user SID file not found." }
+    $AllowedUserSid = (Get-Content -LiteralPath $AllowedUserSidFile -Raw).Trim()
+}
+if ([string]::IsNullOrWhiteSpace($AllowedUserSid)) { throw "Installer user SID is required." }
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if ($null -eq $ffmpeg) { throw "FFmpeg is required for FLAC chunk encoding. Install FFmpeg and rerun the installer." }
 [Environment]::SetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH", $ffmpeg.Source, "Machine")
+try { [void][System.Security.Principal.SecurityIdentifier]::new($AllowedUserSid) } catch { throw "Invalid installer user SID: $AllowedUserSid" }
+[Environment]::SetEnvironmentVariable("ATOM_AGENT_ALLOWED_SID", $AllowedUserSid, "Machine")
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($null -ne $existing) {
     if ($existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue }

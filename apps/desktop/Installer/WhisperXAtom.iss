@@ -19,8 +19,11 @@ UninstallDisplayName={#AppName}
 [Files]
 Source: "..\..\..\artifacts\desktop\Desktop\*"; DestDir: "{app}\Desktop"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\..\artifacts\desktop\Service\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\..\artifacts\desktop\VoiceHost\*"; DestDir: "{app}\VoiceHost"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Install-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Uninstall-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Configure-VoiceUser.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
 
 [Icons]
 Name: "{group}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"
@@ -30,8 +33,12 @@ Name: "{commondesktop}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.De
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"""; Flags: waituntilterminated
-Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; Description: "Launch WhisperX Atom"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-VoiceUser.ps1"" -VoiceHostPath ""{app}\VoiceHost\WhisperX.Atom.Voice.Host.exe"" -SidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: runasoriginaluser runhidden waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated
+Filename: "{app}\VoiceHost\WhisperX.Atom.Voice.Host.exe"; Parameters: "--doctor"; Flags: runasoriginaluser runhidden waituntilterminated
+Filename: "{app}\VoiceHost\WhisperX.Atom.Voice.Host.exe"; Flags: runasoriginaluser nowait runhidden
+Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; Description: "Launch WhisperX Atom"; Flags: runasoriginaluser nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-VoiceUser.ps1"" -Remove -SidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveWhisperXAtomVoiceUser"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Uninstall-Service.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveWhisperXAtomService"

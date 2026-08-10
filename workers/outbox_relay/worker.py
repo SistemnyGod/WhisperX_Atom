@@ -28,7 +28,7 @@ async def run() -> None:
     conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     jetstream = client.jetstream()
-    subjects = ["media.ingest", "ml.transcribe", "llm.summarize"]
+    subjects = ["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"]
     # Existing development streams may have been created before a new subject
     # was introduced. Update the subject set instead of silently keeping stale
     # configuration (which would block the oldest outbox message forever).

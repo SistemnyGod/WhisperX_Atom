@@ -1,0 +1,9 @@
+{
+  "product": "WhisperX Atom Voice Commands",
+  "language": "ru-RU",
+  "requiredModel": "vosk-model-small-ru-0.22",
+  "source": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
+  "license": "Apache-2.0",
+  "delivery": "manual-offline-import",
+  "whisperCppRequired": false
+}

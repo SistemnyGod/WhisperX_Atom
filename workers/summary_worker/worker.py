@@ -15,6 +15,7 @@ from workers.gpu_lease import PostgresGpuLease
 from workers.nats_utils import fetch_available
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
 from .llama_subprocess import LocalLlamaServer
+from .assistant import AssistantWorker
 
 LOGGER = logging.getLogger("whisperx.summary-worker")
 
@@ -66,7 +67,7 @@ class SummaryRepository:
                     FROM transcript_segments s
                     JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
-                    WHERE t.id=%s AND t.meeting_id=%s
+                    WHERE t.id=%s AND t.meeting_id=%s AND COALESCE(s.is_hidden,false)=false
                     ORDER BY s.ordinal
                     """,
                     (transcript_id, meeting_id),
@@ -78,7 +79,7 @@ class SummaryRepository:
                     FROM transcript_segments s
                     JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
-                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=%s)
+                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=%s) AND COALESCE(s.is_hidden,false)=false
                     ORDER BY s.ordinal
                     """,
                     (meeting_id, meeting_id),
@@ -180,19 +181,33 @@ async def run() -> None:
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     jetstream = client.jetstream()
     try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize"])
+        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     except Exception:
         pass
-    subscription = await jetstream.pull_subscribe("llm.summarize", durable="summary-worker")
-    worker = SummaryWorker()
-    while True:
-        for message in await fetch_available(subscription, nats.errors.TimeoutError):
-            try:
-                await worker.handle(json.loads(message.data))
-                await message.ack()
-            except Exception:
-                await message.nak()
+    summary_subscription = await jetstream.pull_subscribe("llm.summarize", durable="summary-worker")
+    assistant_subscription = await jetstream.pull_subscribe("llm.assistant", durable="assistant-worker")
+    summary_worker = SummaryWorker()
+    assistant_worker = AssistantWorker()
 
+    async def consume_summary() -> None:
+        while True:
+            for message in await fetch_available(summary_subscription, nats.errors.TimeoutError, timeout=1):
+                try:
+                    await summary_worker.handle(json.loads(message.data))
+                    await message.ack()
+                except Exception:
+                    await message.nak()
+
+    async def consume_assistant() -> None:
+        while True:
+            for message in await fetch_available(assistant_subscription, nats.errors.TimeoutError, timeout=1):
+                try:
+                    await assistant_worker.handle(json.loads(message.data))
+                    await message.ack()
+                except Exception:
+                    await message.nak()
+
+    await asyncio.gather(consume_assistant(), consume_summary())
 
 if __name__ == "__main__":
     asyncio.run(run())

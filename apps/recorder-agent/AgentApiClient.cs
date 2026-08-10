@@ -136,6 +136,31 @@ public sealed class AgentApiClient : IDisposable
         return uploaded;
     }
 
+    public async Task<int> UploadPendingEventsAsync(SpoolStore spool, string localSessionId, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return 0;
+        var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+        if (serverSessionId is not Guid session) return 0;
+        var events = await spool.PendingEventsAsync(localSessionId, 200, cancellationToken);
+        if (events.Count == 0) return 0;
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{session}/events/batch"));
+        AddAuthentication(request);
+        request.Content = JsonContent.Create(new
+        {
+            events = events.Select(item => new
+            {
+                id = Guid.TryParse(item.Id, out var id) ? id : Guid.NewGuid(),
+                eventType = item.EventType,
+                mediaTimeMs = item.MediaTimeMs,
+                payload = JsonDocument.Parse(string.IsNullOrWhiteSpace(item.PayloadJson) ? "{}" : item.PayloadJson),
+                createdAt = item.CreatedAt
+            })
+        });
+        using var response = await _http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        await spool.MarkEventsSyncedAsync(events.Select(item => item.Id), cancellationToken);
+        return events.Count;
+    }
     public async Task<bool> FinalizeServerSessionAsync(Guid serverSessionId, string localSessionId, SpoolStore spool, CancellationToken cancellationToken)
     {
         if (!IsConfigured) return false;

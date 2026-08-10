@@ -11,7 +11,7 @@ internal sealed class RecorderPipeClient
     public async Task<AgentIpcResponse> SendAsync(string command, object? payload, CancellationToken cancellationToken)
     {
         await using var pipe = new NamedPipeClientStream(".", AgentIpcProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        await pipe.ConnectAsync(1500, cancellationToken);
+        await pipe.ConnectAsync(300, cancellationToken);
         using var reader = new StreamReader(pipe);
         await using var writer = new StreamWriter(pipe) { AutoFlush = true };
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload ?? new { }, _json));

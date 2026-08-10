@@ -10,6 +10,9 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="..\Assets\VoiceResponses\*.wav" Link="Assets\VoiceResponses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\WhisperX.Atom.Voice.Core\WhisperX.Atom.Voice.Core.csproj" />
     <ProjectReference Include="..\..\recorder-agent\WhisperX.Atom.Recorder.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />

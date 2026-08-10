@@ -56,6 +56,23 @@ app.Use(async (context, next) =>
         return;
     }
 
+    if (context.Request.Path.StartsWithSegments("/api/assistant/queries"))
+    {
+        var expectedVoiceToken = builder.Configuration["VOICE_HOST_TOKEN"] ?? string.Empty;
+        var suppliedVoiceToken = context.Request.Headers["X-Voice-Host-Token"].ToString();
+        // The API is published on host loopback in the desktop deployment.
+        // Docker Desktop forwards that request through its bridge network, so
+        // the container cannot reliably observe the original loopback address.
+        if (!string.IsNullOrWhiteSpace(expectedVoiceToken) && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedVoiceToken), Encoding.UTF8.GetBytes(suppliedVoiceToken)))
+        {
+            context.Items["voice_host"] = true;
+            await next();
+            return;
+        }
+        // Fall through to the regular cookie session path for Desktop UI users.
+
+    }
+
     if (context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
         context.Request.Path.StartsWithSegments("/api/auth/login") ||
@@ -77,6 +94,7 @@ app.Use(async (context, next) =>
     var user = await db.GetUserForSessionAsync(session);
     if (user is null) { context.Response.StatusCode = StatusCodes.Status401Unauthorized; await context.Response.WriteAsJsonAsync(new { error = "authentication_required" }); return; }
     if (!RoleAllows(user.Role, context.Request.Method, context.Request.Path)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "insufficient_role" }); return; }
+    context.Items["user_id"] = user.Id;
     context.Items["user_role"] = user.Role;
 
     await next();
@@ -148,27 +166,34 @@ app.MapGet("/api/auth/me", async (HttpContext http) =>
         : Results.Ok(new { id = user.Id, username = user.Username, role = user.Role });
 });
 
-app.MapPost("/api/meetings", async (MeetingCreateRequest request) =>
+app.MapPost("/api/meetings", async (MeetingCreateRequest request, HttpContext context) =>
 {
     if (string.IsNullOrWhiteSpace(request.Title))
         return Results.BadRequest(new { error = "title_required" });
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
 
-    var meeting = await db.CreateMeetingAsync(request.Title.Trim(), request.Description);
+    var meeting = await db.CreateMeetingAsync(userId, request.Title.Trim(), request.Description);
     return Results.Created("/api/meetings/" + meeting.Id, meeting);
 });
 
-app.MapGet("/api/meetings", async (int? limit, int? offset) =>
-    Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0))));
-
-app.MapGet("/api/meetings/{id:guid}", async (Guid id) =>
+app.MapGet("/api/meetings", async (int? limit, int? offset, HttpContext context) =>
 {
-    var meeting = await db.GetMeetingAsync(id);
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
+    return Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), userId, IsPrivileged(context)));
+});
+
+app.MapGet("/api/meetings/{id:guid}", async (Guid id, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    var meeting = await db.GetMeetingAsync(id, CurrentUserId(context), IsPrivileged(context));
     return meeting is null ? Results.NotFound() : Results.Ok(meeting);
 });
 
-app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservationRequest request) =>
+app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservationRequest request, HttpContext context) =>
 {
-    if (!await db.MeetingExistsAsync(id))
+    if (!await CanAccessMeetingAsync(context, id))
         return Results.NotFound();
     if (string.IsNullOrWhiteSpace(request.FileName) ||
         !MediaPolicy.IsAllowedExtension(request.FileName) ||
@@ -244,6 +269,18 @@ app.MapPost("/api/internal/imports", async (ImportRequest request, HttpRequest h
 });
 
 static bool AgentMatches(HttpContext context, Guid agentId) => context.Items.TryGetValue("agent_id", out var item) && item is Guid authenticated && authenticated == agentId;
+
+static Guid? CurrentUserId(HttpContext context) => context.Items.TryGetValue("user_id", out var item) && item is Guid userId ? userId : null;
+
+static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
+    (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase));
+
+async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
+{
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    return userId.HasValue && await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
 
 static bool RoleAllows(string role, string method, PathString path)
 {
@@ -405,6 +442,10 @@ app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid 
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var result = await store.FinalizeRecordingAsync(agentId, sessionId, request?.Manifest);
     if (!result.Found) return Results.NotFound(new { error = result.ErrorCode });
+    if (!result.Accepted) return Results.Conflict(new { error = result.ErrorCode, missing = result.Missing });
+    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId });
+});
+
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
@@ -412,31 +453,43 @@ app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (G
     var accepted = await store.RegisterRecordingEventsAsync(agentId, sessionId, request.Events);
     return accepted is null ? Results.NotFound() : Results.Ok(new { accepted });
 });
-    if (!result.Accepted) return Results.Conflict(new { error = result.ErrorCode, missing = result.Missing });
-    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId });
-});
 
-app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, RecordingCommandRequest request, UnifiedProductStore store) =>
+app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, RecordingCommandRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (request.AgentId == Guid.Empty) return Results.BadRequest(new { error = "agent_id_required" });
     if (string.IsNullOrWhiteSpace(request.CommandType) || request.CommandType.Length > 80)
         return Results.BadRequest(new { error = "command_type_required" });
-    if (!await db.MeetingExistsAsync(id)) return Results.NotFound();
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     if (!await store.AgentExistsAsync(request.AgentId)) return Results.NotFound(new { error = "agent_not_found" });
     var commandId = await store.CreateCommandAsync(request.AgentId, request.CommandType.Trim(), request.Payload ?? JsonDocument.Parse("{}"));
     return Results.Accepted($"/api/agents/{request.AgentId}", new { commandId });
 });
 
-app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.GetLatestSummaryAsync(id)));
-app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, UnifiedProductStore store) =>
+app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.GetLatestSummaryAsync(id));
+});
+app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     var jobId = await store.QueueSummaryAsync(id);
     return jobId is null ? Results.Conflict(new { error = "transcript_required" }) : Results.Accepted($"/api/jobs/{jobId}", new { jobId });
 });
-app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListDecisionsAsync(id)));
-app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, UnifiedProductStore store) => Results.Ok(await store.ListActionItemsAsync(id)));
-app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, UnifiedProductStore store) =>
+app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.ListDecisionsAsync(id));
+});
+app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.ListActionItemsAsync(id));
+});
+app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var meetingId = await store.GetActionItemMeetingIdAsync(id);
+    if (meetingId is null || !await CanAccessMeetingAsync(context, meetingId.Value)) return Results.NotFound();
     var task = request.Task?.Trim();
     var status = request.Status?.Trim().ToUpperInvariant();
     if (string.IsNullOrWhiteSpace(task) || task.Length > 4000)
@@ -447,23 +500,27 @@ app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, 
         ? Results.Ok(new { ok = true })
         : Results.NotFound();
 });
-app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, UnifiedProductStore store) =>
+app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store) =>
 {
-    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query);
+    if (request.MeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
+        return Results.NotFound();
+    if (request.MeetingId is null && !IsPrivileged(context) && !context.Items.ContainsKey("voice_host"))
+        return Results.BadRequest(new { error = "meeting_required" });
+    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query, CurrentUserId(context));
     return query is null ? Results.BadRequest(new { error = "meeting_not_ready_or_query_invalid" }) : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
 });
-app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, UnifiedProductStore store) =>
+app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
-    var query = await store.GetAssistantQueryAsync(id);
+    var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context) || context.Items.ContainsKey("voice_host"));
     return query is null ? Results.NotFound() : Results.Ok(query);
 });
-app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
 {
     response.Headers.ContentType = "text/event-stream";
     response.Headers.CacheControl = "no-cache";
     for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
     {
-        var query = await store.GetAssistantQueryAsync(id);
+        var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context) || context.Items.ContainsKey("voice_host"));
         if (query is null) { response.StatusCode = 404; return; }
         await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(query)}\n\n", cancellationToken);
         await response.Body.FlushAsync(cancellationToken);
@@ -471,39 +528,53 @@ app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpRespon
         await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
     }
 });
-app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id) => Results.Ok(await db.ListJobsAsync(id)));
+app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListJobsAsync(id));
+});
 
-app.MapGet("/api/meetings/{id:guid}/media", async (Guid id) => Results.Ok(await db.ListMediaAsync(id)));
+app.MapGet("/api/meetings/{id:guid}/media", async (Guid id, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListMediaAsync(id));
+});
 
-app.MapGet("/api/meetings/{id:guid}/speakers", async (Guid id) => Results.Ok(await db.ListSpeakersAsync(id)));
+app.MapGet("/api/meetings/{id:guid}/speakers", async (Guid id, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListSpeakersAsync(id));
+});
 
-app.MapGet("/api/media/{id:guid}/preview", async (Guid id) =>
+app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) =>
 {
     var media = await db.GetMediaAsync(id);
-    if (media is null || string.IsNullOrWhiteSpace(media.PreviewStorageKey)) return Results.NotFound();
+    if (media is null || !await CanAccessMeetingAsync(context, media.MeetingId) || string.IsNullOrWhiteSpace(media.PreviewStorageKey)) return Results.NotFound();
     var path = StorageHelpers.StoragePath(media.PreviewStorageKey);
     if (!File.Exists(path)) return Results.NotFound();
     return Results.File(File.OpenRead(path), "audio/ogg", enableRangeProcessing: true);
 });
 
-app.MapGet("/api/jobs/{id:guid}", async (Guid id) =>
+app.MapGet("/api/jobs/{id:guid}", async (Guid id, HttpContext context) =>
 {
     var job = await db.GetJobAsync(id);
-    return job is null ? Results.NotFound() : Results.Ok(job);
+    return job is null || !await CanAccessMeetingAsync(context, job.MeetingId) ? Results.NotFound() : Results.Ok(job);
 });
 
-app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id) =>
+app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id, HttpContext context) =>
 {
     var current = await db.GetJobAsync(id);
-    if (current is null) return Results.NotFound();
+    if (current is null || !await CanAccessMeetingAsync(context, current.MeetingId)) return Results.NotFound();
     if (current.Status is not ("FAILED" or "CANCELLED"))
         return Results.Conflict(new { error = "job_not_retryable", status = current.Status });
     var job = await db.RetryJobAsync(id);
     return job is null ? Results.Conflict(new { error = "job_retry_conflict" }) : Results.Accepted("/api/jobs/" + id, job);
 });
 
-app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpResponse response, CancellationToken cancellationToken) =>
+app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, CancellationToken cancellationToken) =>
 {
+    var initialJob = await db.GetJobAsync(id);
+    if (initialJob is null || !await CanAccessMeetingAsync(context, initialJob.MeetingId)) { response.StatusCode = 404; return; }
     response.Headers.ContentType = "text/event-stream";
     response.Headers.CacheControl = "no-cache";
     for (var i = 0; i < 120 && !cancellationToken.IsCancellationRequested; i++)
@@ -523,19 +594,24 @@ app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpResponse response, 
     }
 });
 
-app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id) =>
-    Results.Ok(await db.GetTranscriptAsync(id)));
+app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.GetTranscriptAsync(id));
+});
 
 app.MapPatch("/api/meetings/{meetingId:guid}/speakers/{speakerId:guid}",
-    async (Guid meetingId, Guid speakerId, SpeakerRenameRequest request) =>
+    async (Guid meetingId, Guid speakerId, SpeakerRenameRequest request, HttpContext context) =>
 {
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
     var updated = await db.RenameSpeakerAsync(meetingId, speakerId, request.DisplayName);
     return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
 });
 
 app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
-    async (Guid meetingId, SpeakerMergeRequest request) =>
+    async (Guid meetingId, SpeakerMergeRequest request, HttpContext context) =>
 {
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
     var merged = await db.MergeSpeakersAsync(meetingId, request.SourceSpeakerId, request.TargetSpeakerId);
     return merged ? Results.Ok(new { ok = true }) : Results.NotFound();
 });
@@ -550,6 +626,9 @@ public record CreateTrackRequest(string TrackType, string? DeviceId, int SampleR
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId);
+public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
+public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
+
 public record LoginRequest(string Username, string Password);
 public record MeetingCreateRequest(string Title, string? Description);
 public record UploadReservationRequest(string FileName, long SizeBytes);
@@ -733,33 +812,37 @@ public sealed class Database(IConfiguration configuration)
         await command.ExecuteNonQueryAsync();
     }
 
-    public async Task<MeetingRow> CreateMeetingAsync(string title, string? description)
+    public async Task<MeetingRow> CreateMeetingAsync(Guid ownerId, string title, string? description)
     {
         var id = Guid.NewGuid();
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "INSERT INTO meetings(id,title,description,status) VALUES(@id,@title,@description,'CREATED') RETURNING created_at", connection);
+            "INSERT INTO meetings(id,owner_id,title,description,status) VALUES(@id,@owner,@title,@description,'CREATED') RETURNING created_at", connection);
         command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("owner", ownerId);
         command.Parameters.AddWithValue("title", title);
         command.Parameters.AddWithValue("description", (object?)description ?? DBNull.Value);
         var created = (DateTime)(await command.ExecuteScalarAsync())!;
         return new MeetingRow(id, title, description, "CREATED", created);
     }
 
-    public async Task<bool> MeetingExistsAsync(Guid id)
+    public async Task<bool> UserOwnsMeetingAsync(Guid meetingId, Guid userId)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=@id)", connection);
-        command.Parameters.AddWithValue("id", id);
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=@meeting AND owner_id=@owner)", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("owner", userId);
         return (bool)(await command.ExecuteScalarAsync())!;
     }
 
-    public async Task<IReadOnlyList<MeetingRow>> ListMeetingsAsync(int limit, int offset)
+    public async Task<IReadOnlyList<MeetingRow>> ListMeetingsAsync(int limit, int offset, Guid ownerId, bool includeAll)
     {
         var result = new List<MeetingRow>();
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT id,title,description,status,created_at FROM meetings ORDER BY created_at DESC LIMIT @limit OFFSET @offset", connection);
+            "SELECT id,title,description,status,created_at FROM meetings WHERE @include_all OR owner_id=@owner ORDER BY created_at DESC LIMIT @limit OFFSET @offset", connection);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("owner", ownerId);
         command.Parameters.AddWithValue("limit", limit);
         command.Parameters.AddWithValue("offset", offset);
         await using var reader = await command.ExecuteReaderAsync();
@@ -768,11 +851,13 @@ public sealed class Database(IConfiguration configuration)
         return result;
     }
 
-    public async Task<MeetingRow?> GetMeetingAsync(Guid id)
+    public async Task<MeetingRow?> GetMeetingAsync(Guid id, Guid? ownerId, bool includeAll)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,title,description,status,created_at FROM meetings WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT id,title,description,status,created_at FROM meetings WHERE id=@id AND (@include_all OR owner_id=@owner)", connection);
         command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("owner", (object?)ownerId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null :
             new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));

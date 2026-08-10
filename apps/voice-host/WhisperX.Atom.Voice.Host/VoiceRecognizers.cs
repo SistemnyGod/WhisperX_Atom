@@ -1,47 +1,145 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
-using NAudio.Wave;
-using Vosk;
 
 namespace WhisperX.Atom.Voice.Host;
 
-public interface IVoiceRecognizer : IDisposable
-{
-    Task<string?> RecognizeAsync(ReadOnlyMemory<byte> pcm16kMono, CancellationToken cancellationToken);
-}
+public sealed record VoiceRecognitionResult(string? Text, string? Partial, bool IsEndpoint, double Confidence);
 
-public sealed class VoskRecognizer : IVoiceRecognizer
+public sealed class VoskModel : IDisposable
 {
-    private readonly Model _model;
-    private readonly float _sampleRate;
-    private readonly string? _grammar;
-
-    public VoskRecognizer(string modelPath, float sampleRate = 16000, IEnumerable<string>? grammar = null)
+    internal IntPtr Native { get; private set; }
+    public VoskModel(string modelPath)
     {
         if (!Directory.Exists(modelPath)) throw new DirectoryNotFoundException($"Vosk model not found: {modelPath}");
-        Vosk.Vosk.SetLogLevel(-1);
-        _model = new Model(modelPath);
-        _sampleRate = sampleRate;
-        _grammar = grammar is null ? null : JsonSerializer.Serialize(grammar.Append("[unk]").ToArray());
+        NativeVosk.SetLogLevel(-1);
+        Native = NativeVosk.ModelNewUtf8(modelPath);
+        if (Native == IntPtr.Zero) throw new InvalidOperationException("Vosk native model could not be loaded.");
     }
-
-    public Task<string?> RecognizeAsync(ReadOnlyMemory<byte> pcm16kMono, CancellationToken cancellationToken)
+    public void Dispose()
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        using var recognizer = string.IsNullOrWhiteSpace(_grammar)
-            ? new global::Vosk.VoskRecognizer(_model, _sampleRate)
-            : new global::Vosk.VoskRecognizer(_model, _sampleRate, _grammar);
-        recognizer.AcceptWaveform(pcm16kMono.ToArray(), pcm16kMono.Length);
-        var json = recognizer.FinalResult();
-        using var document = JsonDocument.Parse(json);
-        return Task.FromResult(document.RootElement.TryGetProperty("text", out var text) ? text.GetString() : null);
+        var handle = Native;
+        Native = IntPtr.Zero;
+        if (handle != IntPtr.Zero) NativeVosk.ModelFree(handle);
     }
-
-    public void Dispose() => _model.Dispose();
 }
 
-public sealed class WhisperCppRecognizer(string executablePath, string modelPath, string tempDirectory) : IVoiceRecognizer
+public sealed class VoskRecognizer : IDisposable
+{
+    private readonly VoskModel _model;
+    private readonly float _sampleRate;
+    private readonly string? _grammar;
+    private readonly bool _ownsModel;
+    private IntPtr _recognizer;
+
+    public VoskRecognizer(string modelPath, float sampleRate = 16000, IEnumerable<string>? grammar = null)
+        : this(new VoskModel(modelPath), sampleRate, grammar, true) { }
+
+    private VoskRecognizer(VoskModel model, float sampleRate, IEnumerable<string>? grammar, bool ownsModel)
+    {
+        _model = model;
+        _sampleRate = sampleRate;
+        _grammar = grammar is null ? null : JsonSerializer.Serialize(grammar.Distinct(StringComparer.Ordinal).ToArray(), new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        _ownsModel = ownsModel;
+        _recognizer = CreateRecognizer();
+    }
+
+    public VoskRecognizer CreateSession(IEnumerable<string> grammar) => new(_model, _sampleRate, grammar, false);
+    public VoiceRecognitionResult Accept(ReadOnlySpan<byte> pcm16kMono) => pcm16kMono.IsEmpty ? new(null, null, false, 0) : Accept(pcm16kMono.ToArray());
+    public VoiceRecognitionResult Accept(byte[] pcm16kMono)
+    {
+        if (pcm16kMono.Length == 0) return new(null, null, false, 0);
+        EnsureReady();
+        var endpoint = NativeVosk.RecognizerAcceptWaveform(_recognizer, pcm16kMono, pcm16kMono.Length) != 0;
+        var json = NativeVosk.ReadUtf8(endpoint ? NativeVosk.RecognizerResult(_recognizer) : NativeVosk.RecognizerPartialResult(_recognizer));
+        return ParseResult(json, endpoint);
+    }
+    public VoiceRecognitionResult FinalizeSessionResult()
+    {
+        EnsureReady();
+        var result = ParseResult(NativeVosk.ReadUtf8(NativeVosk.RecognizerFinalResult(_recognizer)), true);
+        ResetSession();
+        return result;
+    }
+    public string? FinalizeSession() => FinalizeSessionResult().Text;
+    public void ResetSession()
+    {
+        var previous = _recognizer;
+        _recognizer = IntPtr.Zero;
+        if (previous != IntPtr.Zero) NativeVosk.RecognizerFree(previous);
+        _recognizer = CreateRecognizer();
+    }
+    public VoiceRecognitionResult RecognizeBatchResult(ReadOnlyMemory<byte> pcm16kMono)
+    {
+        ResetSession();
+        Accept(pcm16kMono.Span);
+        return FinalizeSessionResult();
+    }
+    public string? RecognizeBatch(ReadOnlyMemory<byte> pcm16kMono) => RecognizeBatchResult(pcm16kMono).Text;
+    private IntPtr CreateRecognizer()
+    {
+        var recognizer = string.IsNullOrWhiteSpace(_grammar) ? NativeVosk.RecognizerNew(_model.Native, _sampleRate) : NativeVosk.RecognizerNewGrammarUtf8(_model.Native, _sampleRate, _grammar);
+        if (recognizer == IntPtr.Zero) throw new InvalidOperationException("Vosk native recognizer could not be created.");
+        NativeVosk.RecognizerSetWords(recognizer, 1);
+        return recognizer;
+    }
+    internal static VoiceRecognitionResult ParseResult(string json, bool endpoint)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var text = endpoint && root.TryGetProperty("text", out var textElement) ? textElement.GetString() : null;
+            var partial = !endpoint && root.TryGetProperty("partial", out var partialElement) ? partialElement.GetString() : null;
+            var confidence = 0d;
+            var count = 0;
+            if (root.TryGetProperty("result", out var words) && words.ValueKind == JsonValueKind.Array)
+                foreach (var word in words.EnumerateArray())
+                    if (word.TryGetProperty("conf", out var value) && value.TryGetDouble(out var current)) { confidence += current; count++; }
+            return new(text, partial, endpoint, count == 0 ? 0d : confidence / count);
+        }
+        catch (JsonException) { return new(null, null, endpoint, 0); }
+    }
+    private void EnsureReady() { if (_recognizer == IntPtr.Zero) throw new ObjectDisposedException(nameof(VoskRecognizer)); }
+    public void Dispose()
+    {
+        var recognizer = _recognizer;
+        _recognizer = IntPtr.Zero;
+        if (recognizer != IntPtr.Zero) NativeVosk.RecognizerFree(recognizer);
+        if (_ownsModel) _model.Dispose();
+    }
+}
+
+internal static class NativeVosk
+{
+    private const string Library = "libvosk";
+    [DllImport(Library, EntryPoint = "vosk_set_log_level", CallingConvention = CallingConvention.Cdecl)] internal static extern void SetLogLevel(int level);
+    [DllImport(Library, EntryPoint = "vosk_model_new", CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr ModelNew(IntPtr modelPathUtf8);
+    [DllImport(Library, EntryPoint = "vosk_model_free", CallingConvention = CallingConvention.Cdecl)] internal static extern void ModelFree(IntPtr model);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_new", CallingConvention = CallingConvention.Cdecl)] internal static extern IntPtr RecognizerNew(IntPtr model, float sampleRate);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_new_grm", CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr RecognizerNewGrammar(IntPtr model, float sampleRate, IntPtr grammarUtf8);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_free", CallingConvention = CallingConvention.Cdecl)] internal static extern void RecognizerFree(IntPtr recognizer);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_set_words", CallingConvention = CallingConvention.Cdecl)] internal static extern void RecognizerSetWords(IntPtr recognizer, int words);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_accept_waveform", CallingConvention = CallingConvention.Cdecl)] internal static extern int RecognizerAcceptWaveform(IntPtr recognizer, byte[] data, int length);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_result", CallingConvention = CallingConvention.Cdecl)] internal static extern IntPtr RecognizerResult(IntPtr recognizer);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_partial_result", CallingConvention = CallingConvention.Cdecl)] internal static extern IntPtr RecognizerPartialResult(IntPtr recognizer);
+    [DllImport(Library, EntryPoint = "vosk_recognizer_final_result", CallingConvention = CallingConvention.Cdecl)] internal static extern IntPtr RecognizerFinalResult(IntPtr recognizer);
+    internal static IntPtr ModelNewUtf8(string path) => WithUtf8(path, ModelNew);
+    internal static IntPtr RecognizerNewGrammarUtf8(IntPtr model, float sampleRate, string grammar) => WithUtf8(grammar, value => RecognizerNewGrammar(model, sampleRate, value));
+    internal static string ReadUtf8(IntPtr value) => value == IntPtr.Zero ? "{}" : Marshal.PtrToStringUTF8(value) ?? "{}";
+    private static T WithUtf8<T>(string value, Func<IntPtr, T> action)
+    {
+        var pointer = Marshal.StringToCoTaskMemUTF8(value);
+        try { return action(pointer); }
+        finally { Marshal.FreeCoTaskMem(pointer); }
+    }
+}
+/// <summary>
+/// Kept for the deferred free-question path. Fixed commands must not use it.
+/// </summary>
+public sealed class WhisperCppRecognizer(string executablePath, string modelPath, string tempDirectory) : IDisposable
 {
     public async Task<string?> RecognizeAsync(ReadOnlyMemory<byte> pcm16kMono, CancellationToken cancellationToken)
     {
@@ -81,15 +179,9 @@ public sealed class WhisperCppRecognizer(string executablePath, string modelPath
     private static async Task WriteWavAsync(string path, ReadOnlyMemory<byte> pcm, CancellationToken cancellationToken)
     {
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.SequentialScan);
-        await WriteHeaderAsync(stream, pcm.Length, cancellationToken);
-        await stream.WriteAsync(pcm, cancellationToken);
-    }
-
-    private static async Task WriteHeaderAsync(Stream stream, int dataLength, CancellationToken cancellationToken)
-    {
         var header = new byte[44];
         Encoding.ASCII.GetBytes("RIFF").CopyTo(header, 0);
-        BitConverter.GetBytes(36 + dataLength).CopyTo(header, 4);
+        BitConverter.GetBytes(36 + pcm.Length).CopyTo(header, 4);
         Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(header, 8);
         BitConverter.GetBytes(16).CopyTo(header, 16);
         BitConverter.GetBytes((short)1).CopyTo(header, 20);
@@ -99,8 +191,10 @@ public sealed class WhisperCppRecognizer(string executablePath, string modelPath
         BitConverter.GetBytes((short)2).CopyTo(header, 32);
         BitConverter.GetBytes((short)16).CopyTo(header, 34);
         Encoding.ASCII.GetBytes("data").CopyTo(header, 36);
-        BitConverter.GetBytes(dataLength).CopyTo(header, 40);
+        BitConverter.GetBytes(pcm.Length).CopyTo(header, 40);
         await stream.WriteAsync(header, cancellationToken);
+        await stream.WriteAsync(pcm, cancellationToken);
     }
+
     public void Dispose() { }
 }

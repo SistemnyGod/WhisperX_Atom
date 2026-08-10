@@ -13,7 +13,7 @@ docker compose --profile core --profile gpu -f compose.dev.yml up -d --build
 Локальная dev-учётная запись задаётся в Compose:
 
 - username: `admin`
-- password: `change-me-now`
+- password: the value of `BOOTSTRAP_ADMIN_PASSWORD` from `.env`
 
 Пароль нужно заменить до любого доступа из LAN. Для production cookie должна работать через HTTPS, а `COOKIE_SECURE` — быть `true`.
 

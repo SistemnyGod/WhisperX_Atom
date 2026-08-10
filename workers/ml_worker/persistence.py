@@ -76,11 +76,16 @@ class JobRepository:
                     (meeting_id, label, label.replace("SPEAKER_", "Спикер ")),
                 ).fetchone()[0]
                 speakers[label] = str(speaker_id)
+            technical_events = connection.execute(
+                "SELECT e.event_type,e.media_time_ms FROM recording_events e JOIN recording_sessions rs ON rs.id=e.session_id WHERE rs.meeting_id=%s AND e.media_time_ms IS NOT NULL",
+                (meeting_id,),
+            ).fetchall()
+            technical_events = [(str(event_type).upper(), int(media_time_ms)) for event_type, media_time_ms in technical_events]
             for ordinal, segment in enumerate(result.get("segments", [])):
                 label = segment.get("speaker")
                 connection.execute(
-                    "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words",
-                    (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label, str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", []))),
+                    "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
+                    (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label, str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
                 )
             summary_job = connection.execute(
                 "SELECT id FROM jobs WHERE meeting_id=%s AND type='SUMMARIZE' AND status NOT IN ('READY','FAILED','CANCELLED') ORDER BY created_at DESC LIMIT 1",

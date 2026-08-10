@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 
@@ -60,6 +61,19 @@ def release_message(message_id: str | None) -> None:
         return
     with psycopg.connect(_conninfo()) as connection:
         connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
+
+
+def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> None:
+    """Atomically publish the READY_FOR_ASR state and its durable outbox event."""
+    with psycopg.connect(_conninfo()) as connection:
+        connection.execute(
+            "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s",
+            (socket.gethostname(), job_id),
+        )
+        connection.execute(
+            "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),'ml.transcribe',%s::jsonb)",
+            (json.dumps(payload),),
+        )
 
 
 def update_job(job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:

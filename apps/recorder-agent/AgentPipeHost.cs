@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,18 +14,15 @@ public sealed class AgentPipeHost(
     ILogger<AgentPipeHost> logger) : BackgroundService
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
+    private readonly ConcurrentDictionary<string, Task> _finalizations = new(StringComparer.Ordinal);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Desktop IPC listening on named pipe {PipeName}", AgentIpcProtocol.PipeName);
         while (!stoppingToken.IsCancellationRequested)
         {
-            await using var pipe = new NamedPipeServerStream(
-                AgentIpcProtocol.PipeName,
-                PipeDirection.InOut,
-                1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
+            await using var pipe = AgentPipeSecurity.CreateServer();
+
             try
             {
                 await pipe.WaitForConnectionAsync(stoppingToken);
@@ -98,14 +96,15 @@ public sealed class AgentPipeHost(
                     return await RecordEventAsync("ACTION_ITEM", request.Payload, cancellationToken);
                 case "VOICE_EVENT":
                     var eventType = ReadString(request.Payload, "eventType") ?? "VOICE_COMMAND";
-                    return await RecordEventAsync(eventType, request.Payload, cancellationToken);                case "STOP":
+                    return await RecordEventAsync(eventType, request.Payload, cancellationToken);
+                case "STOP":
                     var localSessionId = recorder.SessionId;
                     var stoppedMeetingId = string.IsNullOrWhiteSpace(localSessionId)
                         ? null
                         : await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
-                    await recorder.StopAsync(cancellationToken);
-                    var finalized = await FinalizeAsync(localSessionId, cancellationToken);
-                    return new AgentIpcResponse(true, state.State.ToString(), localSessionId, finalized ? null : "server_finalize_pending", null, stoppedMeetingId);
+                    var stop = await recorder.RequestStopAsync(cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(stop.SessionId)) TrackFinalization(stop, stoppedMeetingId);
+                    return new AgentIpcResponse(true, RecorderState.Finalizing.ToString(), localSessionId, "server_finalize_pending", null, stoppedMeetingId);
                 default:
                     return Error("unsupported_command");
             }
@@ -113,14 +112,36 @@ public sealed class AgentPipeHost(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Desktop command {Command} failed", request.Command);
-            return Error(ex.Message);
+            return Error(MapError(ex));
         }
     }
 
+    private void TrackFinalization(RecordingStopHandle stop, Guid? meetingId)
+    {
+        if (string.IsNullOrWhiteSpace(stop.SessionId)) return;
+        var task = CompleteFinalizationAsync(stop, meetingId);
+        _finalizations[stop.SessionId] = task;
+        _ = task.ContinueWith(completed => _finalizations.TryRemove(stop.SessionId, out _), TaskScheduler.Default);
+    }
+
+    private async Task CompleteFinalizationAsync(RecordingStopHandle stop, Guid? meetingId)
+    {
+        try
+        {
+            await stop.LocalFinalization;
+            await FinalizeAsync(stop.SessionId, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Recording finalization failed after local stop. Session={SessionId}, Meeting={MeetingId}", stop.SessionId, meetingId);
+            await spool.SetSessionStateAsync(stop.SessionId!, "FAILED", CancellationToken.None);
+        }
+    }
     private async Task<bool> FinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
     {
         if (!api.IsConfigured || string.IsNullOrWhiteSpace(localSessionId)) return false;
         await api.UploadPendingChunksAsync(spool, cancellationToken);
+        await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
         var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
         if (serverSessionId is not Guid server) return false;
         var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
@@ -147,6 +168,16 @@ public sealed class AgentPipeHost(
 
     private static AgentIpcResponse Error(string error) => new(false, RecorderState.Idle.ToString(), null, error, null);
 
+    private static string MapError(Exception exception) => exception switch
+    {
+        InvalidOperationException when exception.Message.Contains("Cannot pause", StringComparison.OrdinalIgnoreCase) => "recording_cannot_pause",
+        InvalidOperationException when exception.Message.Contains("Cannot resume", StringComparison.OrdinalIgnoreCase) => "recording_cannot_resume",
+        InvalidOperationException when exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase) => "recording_already_active",
+        IOException when exception.Message.Contains("storage", StringComparison.OrdinalIgnoreCase) => "recording_storage_unavailable",
+        UnauthorizedAccessException => "recording_access_denied",
+        _ => "recorder_command_failed"
+    };
+
     private static Guid? ReadGuid(JsonElement payload, string name) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) &&
         value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id) ? id : null;
@@ -155,6 +186,16 @@ public sealed class AgentPipeHost(
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
 
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        var pending = _finalizations.Values.ToArray();
+        if (pending.Length > 0)
+        {
+            try { await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(30), cancellationToken); }
+            catch (TimeoutException) { logger.LogWarning("Timed out waiting for {Count} recording finalizations during service shutdown.", pending.Length); }
+        }
+        await base.StopAsync(cancellationToken);
+    }
     private static string DataRoot() => Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
 }

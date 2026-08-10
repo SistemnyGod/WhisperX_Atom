@@ -2,7 +2,11 @@ using System.Globalization;
 
 namespace WhisperX.Atom.Voice;
 
-/// <summary>Small deterministic parser used after Vosk/whisper.cpp recognition.</summary>
+/// <summary>
+/// Deterministic command parser used after Vosk/whisper.cpp recognition.
+/// It deliberately accepts a small, explicit Russian vocabulary so that an
+/// uncertain free-form recognition cannot trigger a recorder command.
+/// </summary>
 public sealed class VoiceIntentParser
 {
     private static readonly string[] WakeWords = ["атом", "atom"];
@@ -10,8 +14,8 @@ public sealed class VoiceIntentParser
     public bool HasWakeWord(string text)
     {
         var normalized = Normalize(text);
-        return WakeWords.Any(word => normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Contains(word, StringComparer.OrdinalIgnoreCase));
+        return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(word => WakeWords.Contains(word, StringComparer.OrdinalIgnoreCase));
     }
 
     public VoiceCommand Parse(string text, double confidence = 1.0)
@@ -21,7 +25,7 @@ public sealed class VoiceIntentParser
         if (string.IsNullOrWhiteSpace(withoutWake))
             return new VoiceCommand(VoiceIntent.Unknown, text, confidence, CreatedAt: DateTimeOffset.UtcNow);
 
-        var command = withoutWake switch
+        var intent = withoutWake switch
         {
             var value when Matches(value, "начни запись", "начать запись", "запись", "старт") => VoiceIntent.StartRecording,
             var value when Matches(value, "пауза", "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
@@ -36,9 +40,10 @@ public sealed class VoiceIntentParser
             _ => IsQuestion(withoutWake) ? VoiceIntent.HistoryQuestion : VoiceIntent.Unknown
         };
 
-        var parameter = command is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.HistoryQuestion
-            ? ExtractParameter(withoutWake, command) : null;
-        return new VoiceCommand(command, text, confidence, parameter, DateTimeOffset.UtcNow);
+        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.HistoryQuestion
+            ? ExtractParameter(withoutWake, intent)
+            : null;
+        return new VoiceCommand(intent, text, confidence, parameter, DateTimeOffset.UtcNow);
     }
 
     private static bool IsQuestion(string value) => value.Contains('?', StringComparison.Ordinal)
@@ -74,6 +79,13 @@ public sealed class VoiceIntentParser
         return value;
     }
 
-    private static string Normalize(string text) => string.Join(' ', text.Trim().ToLower(CultureInfo.GetCultureInfo("ru-RU"))
-        .Replace('ё', 'е').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    private static string Normalize(string text)
+    {
+        var cleaned = new string((text ?? string.Empty).Select(character => char.IsPunctuation(character) ? ' ' : character).ToArray());
+        return string.Join(' ', cleaned
+            .Trim()
+            .ToLower(CultureInfo.GetCultureInfo("ru-RU"))
+            .Replace('\u0451', '\u0435')
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
 }

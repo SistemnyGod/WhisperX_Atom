@@ -25,8 +25,9 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 $postgresDb = Get-EnvValue "POSTGRES_DB" "whisperx_atom"
 $postgresUser = Get-EnvValue "POSTGRES_USER" "whisperx"
-$postgresPassword = Get-EnvValue "POSTGRES_PASSWORD" "change-me-postgres"
+$postgresPassword = Get-EnvValue "POSTGRES_PASSWORD" ""
 $env:PGPASSWORD = $postgresPassword
+if ([string]::IsNullOrWhiteSpace($postgresPassword)) { throw "Set POSTGRES_PASSWORD before running backup.ps1" }
 
 Write-Host "Exporting PostgreSQL..."
 $dumpPath = Join-Path $stage "postgres.dump"

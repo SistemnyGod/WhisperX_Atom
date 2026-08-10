@@ -24,6 +24,7 @@ public sealed record DesktopAgentEnrollment(string AgentId, string Token);
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
 
 public sealed class ServerApiClient : IDisposable
 {
@@ -132,6 +133,19 @@ public sealed class ServerApiClient : IDisposable
         using var response = await _http.PostAsync($"api/jobs/{jobId}/retry", content: null, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
+    }
+    public async Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default)
+    {
+        using var response = await _http.PostAsJsonAsync("api/assistant/queries", new { query, meetingId }, _json, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopAssistantQuery>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default)
+    {
+        using var response = await _http.GetAsync($"api/assistant/queries/{queryId}", cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopAssistantQuery>(_json, cancellationToken);
     }
     public async Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default)
     {

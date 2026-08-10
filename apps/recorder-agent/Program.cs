@@ -107,6 +107,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                     cursor = Math.Max(cursor, command.Cursor);
                 }
                 var uploaded = await api.UploadPendingChunksAsync(spool, stoppingToken);
+                foreach (var session in await spool.SessionsWithPendingEventsAsync(stoppingToken)) await api.UploadPendingEventsAsync(spool, session, stoppingToken);
                 if (uploaded > 0) logger.LogInformation("Uploaded {Count} confirmed audio chunks.", uploaded);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -255,6 +256,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
     }
 
     private static Guid? ReadEnvironmentMeetingId() => Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_MEETING_ID"), out var id) ? id : null;
+    private static string? ReadString(JsonElement payload, string name) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static string? ReadTitle(JsonElement payload) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("title", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 

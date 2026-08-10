@@ -288,7 +288,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     }
 
 
-    public async Task<AssistantQueryRow?> CreateAssistantQueryAsync(Guid? meetingId, string query)
+    public async Task<AssistantQueryRow?> CreateAssistantQueryAsync(Guid? meetingId, string query, Guid? userId)
     {
         query = query?.Trim() ?? string.Empty;
         if (query.Length is 0 or > 2000) return null;
@@ -302,8 +302,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             if (status is not string text || text != "READY") return null;
         }
         var id = Guid.NewGuid();
-        await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,meeting_id,query,status,evidence) VALUES(@id,@meeting,@query,'QUEUED','[]'::jsonb)", connection, tx);
-        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value); insert.Parameters.AddWithValue("query", query);
+        await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,query,status,evidence) VALUES(@id,@user,@meeting,@query,'QUEUED','[]'::jsonb)", connection, tx);
+        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value); insert.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value); insert.Parameters.AddWithValue("query", query);
         await insert.ExecuteNonQueryAsync();
         var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), query_id = id, meeting_id = meetingId, query, kind = "assistant" });
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.assistant',@payload::jsonb)", connection, tx);
@@ -313,11 +313,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return new AssistantQueryRow(id, meetingId, query, "QUEUED", null, null, JsonDocument.Parse("[]"), null, DateTime.UtcNow, null);
     }
 
-    public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id)
+    public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,query,status,answer,voice_answer,evidence,error_code,created_at,completed_at FROM assistant_queries WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,query,status,answer,voice_answer,evidence,error_code,created_at,completed_at FROM assistant_queries WHERE id=@id AND (@include_all OR user_id=@user)", connection);
         command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null : new AssistantQueryRow(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetDateTime(8), reader.IsDBNull(9) ? null : reader.GetDateTime(9));
     }    public async Task<SummaryRow?> GetLatestSummaryAsync(Guid meetingId)
@@ -333,6 +335,15 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     public async Task<IReadOnlyList<ActionItemRow>> ListActionItemsAsync(Guid meetingId)
     {
         var result = new List<ActionItemRow>(); await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT id,meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id,created_at FROM action_items WHERE meeting_id=@id ORDER BY created_at", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new ActionItemRow(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetDateTime(5),reader.GetString(6),reader.IsDBNull(7)?null:reader.GetGuid(7),reader.GetDateTime(8))); return result;
+    }
+
+    public async Task<Guid?> GetActionItemMeetingIdAsync(Guid id)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT meeting_id FROM action_items WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", id);
+        var value = await command.ExecuteScalarAsync();
+        return value is Guid meetingId ? meetingId : null;
     }
 
     public async Task<bool> UpdateActionItemAsync(Guid id, string task, string? responsible, DateTime? deadline, string status)

@@ -1,37 +1,78 @@
+using System.Buffers;
+using System.Buffers.Binary;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace WhisperX.Atom.Voice.Host;
 
-internal static class AudioPcmConverter
+/// <summary>Stateful NAudio WDL resampler: source format -> PCM16/16 kHz/mono.</summary>
+internal sealed class AudioPcmConverter
 {
-    public static byte[] ToMono16K(ReadOnlySpan<byte> input, WaveFormat format)
+    private WaveFormat? _format;
+    private BufferedWaveProvider? _buffered;
+    private WdlResamplingSampleProvider? _resampler;
+
+    public byte[] Convert(byte[] input, int length, WaveFormat format)
     {
-        var channels = Math.Max(1, format.Channels);
-        var sampleSize = Math.Max(1, format.BitsPerSample / 8);
-        var frames = input.Length / (sampleSize * channels);
-        if (frames == 0) return [];
-        var ratio = 16000d / Math.Max(1, format.SampleRate);
-        var outputFrames = Math.Max(1, (int)Math.Round(frames * ratio));
-        var output = new byte[outputFrames * 2];
-        for (var target = 0; target < outputFrames; target++)
+        if (length <= 0) return [];
+        if (!IsSameFormat(_format, format)) Reset(format);
+        _buffered!.AddSamples(input, 0, length);
+
+        var estimated = Math.Max(640, (int)Math.Ceiling(length * 16000d / Math.Max(1, format.AverageBytesPerSecond)) + 128);
+        var samples = ArrayPool<float>.Shared.Rent(estimated);
+        try
         {
-            var source = Math.Min(frames - 1, (int)Math.Round(target / ratio));
-            double sum = 0;
-            for (var channel = 0; channel < channels; channel++)
+            var read = _resampler!.Read(samples, 0, estimated);
+            if (read <= 0) return [];
+            var output = new byte[read * 2];
+            for (var index = 0; index < read; index++)
             {
-                var offset = (source * channels + channel) * sampleSize;
-                sum += ReadSample(input.Slice(offset, sampleSize), format);
+                var value = (short)Math.Clamp(Math.Round(samples[index] * short.MaxValue), short.MinValue, short.MaxValue);
+                BinaryPrimitives.WriteInt16LittleEndian(output.AsSpan(index * 2, 2), value);
             }
-            var sample = (short)Math.Clamp(sum / channels * short.MaxValue, short.MinValue, short.MaxValue);
-            BitConverter.TryWriteBytes(output.AsSpan(target * 2, 2), sample);
+            return output;
         }
-        return output;
+        finally { ArrayPool<float>.Shared.Return(samples); }
     }
 
-    private static double ReadSample(ReadOnlySpan<byte> bytes, WaveFormat format)
+    public void Reset(WaveFormat format)
     {
-        if (format.Encoding == WaveFormatEncoding.IeeeFloat && bytes.Length >= 4) return Math.Clamp(BitConverter.ToSingle(bytes), -1f, 1f);
-        if (bytes.Length >= 2) return BitConverter.ToInt16(bytes) / (double)short.MaxValue;
-        return (bytes[0] - 128) / 128d;
+        _format = format;
+        _buffered = new BufferedWaveProvider(format)
+        {
+            BufferDuration = TimeSpan.FromSeconds(2),
+            DiscardOnBufferOverflow = false,
+            ReadFully = false
+        };
+        ISampleProvider samples = _buffered.ToSampleProvider();
+        if (format.Channels > 1) samples = new DownmixSampleProvider(samples);
+        _resampler = new WdlResamplingSampleProvider(samples, 16000);
+    }
+
+    private static bool IsSameFormat(WaveFormat? left, WaveFormat right) => left is not null
+        && left.SampleRate == right.SampleRate
+        && left.Channels == right.Channels
+        && left.BitsPerSample == right.BitsPerSample
+        && left.Encoding == right.Encoding;
+
+    private sealed class DownmixSampleProvider(ISampleProvider source) : ISampleProvider
+    {
+        private readonly float[] _sourceBuffer = new float[8192];
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, 1);
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            var channels = Math.Max(1, source.WaveFormat.Channels);
+            var framesRequested = Math.Min(count, _sourceBuffer.Length / channels);
+            var read = source.Read(_sourceBuffer, 0, framesRequested * channels);
+            var frames = read / channels;
+            for (var frame = 0; frame < frames; frame++)
+            {
+                double sum = 0;
+                for (var channel = 0; channel < channels; channel++) sum += _sourceBuffer[frame * channels + channel];
+                buffer[offset + frame] = (float)(sum / channels);
+            }
+            return frames;
+        }
     }
 }

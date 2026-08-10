@@ -3,7 +3,7 @@ param(
   [string]$BaseUrl = "http://localhost:8080",
   [string]$TusUrl = $(if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "http://localhost:1080" }),
   [string]$Username = $(if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" }),
-  [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "change-me-now" }),
+  [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "" }),
   [string]$AudioPath,
   [string]$InboxPath,
   [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }),
@@ -14,6 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($Password)) { throw "Set BOOTSTRAP_ADMIN_PASSWORD before running e2e-core.ps1" }
 $BaseUrl = $BaseUrl.TrimEnd("/")
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 

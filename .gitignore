@@ -28,7 +28,15 @@ whisperx_results/
 
 # Local model artifacts
 models/
+!apps/voice-host/
+!apps/voice-host/Models/
+!apps/voice-host/Models/Voice/
+!apps/voice-host/Models/Voice/voice-models.manifest.json
 pretrained_models/
+!apps/voice-host/
+!apps/voice-host/Models/
+!apps/voice-host/Models/Voice/
+!apps/voice-host/Models/Voice/voice-models.manifest.json
 
 # Local watch folders with large audio
 Р—Р”Р•РЎР¬ РџРћР›РЈР§РђР•Рњ Р Р•Р—РЈР›Р¬РўРђРў РўР РђРќРЎРљР РР‘РђР¦РР/

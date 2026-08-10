@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -7,7 +8,7 @@ namespace WhisperX.Atom.Voice.Host;
 
 public sealed class VoiceHostPipeServer(VoiceHostRuntime runtime, ILogger<VoiceHostPipeServer> logger) : BackgroundService
 {
-    private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
+    private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

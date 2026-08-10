@@ -27,7 +27,7 @@ The installer registers `WhisperXAtomRecorder` as an automatic Windows Service a
 
 The Windows host must have FFmpeg on PATH. The Recorder Service uses it to encode local FLAC chunks; the installer checks this requirement during service registration.
 
-For the local development Compose profile the enrollment secret defaults to `change-me-agent-enrollment`; replace it in `.env` before shared/LAN deployment.
+Set `AGENT_ENROLLMENT_SECRET` in `.env` before starting the local Compose profile; the stack has no built-in enrollment fallback.
 
 ## Local acceptance and backup
 

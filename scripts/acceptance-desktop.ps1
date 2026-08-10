@@ -29,7 +29,7 @@ Invoke-Step "Recorder Service build" {
     dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj --no-restore --nologo
 }
 Invoke-Step "Python tests" {
-    py -m pytest -q
+    py -m unittest discover -s tests -q
 }
 Invoke-Step "Python compile" {
     py -m compileall -q whisperx_atom workers

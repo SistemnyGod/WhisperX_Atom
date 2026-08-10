@@ -5,6 +5,7 @@ namespace WhisperX.Atom.Recorder;
 public static class AgentIpcProtocol
 {
     public const string PipeName = "WhisperXAtomAgent";
+    public const int Version = 2;
 }
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload);
@@ -16,7 +17,8 @@ public sealed record AgentIpcResponse(
     string? Error,
     AgentIpcHealth? Health,
     Guid? MeetingId = null,
-    long? MediaTimeMs = null);
+    long? MediaTimeMs = null,
+    int ProtocolVersion = AgentIpcProtocol.Version);
 
 public sealed record AgentIpcHealth(
     bool Microphone,

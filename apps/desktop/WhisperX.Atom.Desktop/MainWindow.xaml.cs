@@ -18,6 +18,8 @@ namespace WhisperX.Atom.Desktop;
 public partial class MainWindow : Window
 {
     private readonly AgentPipeClient _agent = new();
+    private readonly VoiceHostClient _voice = new();
+    private bool _voicePttActive;
     private ServerApiClient _server = new();
     private readonly DispatcherTimer _timer;
     private DesktopMeeting? _selectedMeeting;
@@ -59,6 +61,28 @@ public partial class MainWindow : Window
             ImportButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             e.Handled = true;
         }
+        else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.R && StartRecordingButton.IsEnabled)
+        {
+            StartRecordingButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            e.Handled = true;
+        }
+        else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F)
+        {
+            MeetingSearchBox.Focus();
+            MeetingSearchBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Space && e.OriginalSource is not System.Windows.Controls.Primitives.TextBoxBase && e.OriginalSource is not System.Windows.Controls.PasswordBox)
+        {
+            if (PreviewPlayer.NaturalDuration.HasTimeSpan) PreviewPlayer.Pause();
+            else PreviewPlayer.Play();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            Keyboard.ClearFocus();
+            e.Handled = true;
+        }
         base.OnPreviewKeyDown(e);
     }
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -83,6 +107,20 @@ public partial class MainWindow : Window
         _server.Dispose();
     }
 
+    private async Task RefreshVoiceStatusAsync()
+    {
+        try
+        {
+            var snapshot = await _voice.GetStatusAsync();
+            if (snapshot is null) { VoiceStateText.Text = "SessionHost не подключён"; return; }
+            VoiceStateText.Text = $"Состояние: {snapshot.State}; {(snapshot.Enabled ? "включён" : "выключен")}; {(snapshot.IsSpeaking ? "отвечает" : "ожидает")}";
+            VoiceReadinessText.Text = $"Модель: {(snapshot.ModelReady ? "готова" : "нет")}; целостность: {(snapshot.ModelIntegrityReady ? "OK" : "ошибка")}; native Vosk: {(snapshot.NativeRuntimeReady ? "OK" : "нет")}; микрофон: {(snapshot.MicrophoneReady ? "готов" : "недоступен")}; Recorder: {(snapshot.RecorderPipeReady ? "подключён" : snapshot.RecorderPipeError ?? "недоступен")}";
+            VoiceMetricsText.Text = $"Wake: {Metric(snapshot.WakeLatencyMs)}; intent: {Metric(snapshot.IntentLatencyMs)}; Recorder ACK: {Metric(snapshot.RecorderAckLatencyMs)}; всего: {Metric(snapshot.TotalLatencyMs)}; очередь: {snapshot.AudioQueueDepth}; сбросы: {snapshot.AudioQueueDrops}";
+            VoiceLastText.Text = string.IsNullOrWhiteSpace(snapshot.LastRecognizedText) ? "Команда ещё не распознана" : $"Последняя команда: {snapshot.LastRecognizedText}\nIntent: {snapshot.LastIntent ?? "—"}\nОтвет: {snapshot.LastResponse}";
+            VoiceErrorText.Text = snapshot.LastErrorCode is null ? string.Empty : $"Диагностика: {snapshot.LastErrorCode}";
+        }
+        catch (Exception ex) { VoiceStateText.Text = "SessionHost недоступен"; VoiceErrorText.Text = SafeError(ex); }
+    }
     private async Task RefreshStatusAsync()
     {
         if (Interlocked.Exchange(ref _statusRefreshGate, 1) == 1) return;
@@ -190,6 +228,115 @@ public partial class MainWindow : Window
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshStatusAsync();
+    private async void VoiceRefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshVoiceStatusAsync();
+    private async void VoiceDoctorButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var result = await _voice.SendAsync("DOCTOR");
+            VoiceErrorText.Text = result.Ok ? "Doctor завершён." : result.Error ?? "Doctor завершился с ошибкой.";
+            await RefreshVoiceStatusAsync();
+        }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+
+    private void VoiceOpenLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "VoiceHost");
+        Directory.CreateDirectory(directory);
+        Process.Start(new ProcessStartInfo("explorer.exe", directory) { UseShellExecute = true });
+    }
+
+    private static string Metric(double? value) => value is null ? "—" : $"{value:0} мс";
+
+    private async void VoiceEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        try { await _voice.SendAsync("ENABLE", new { enabled = VoiceEnabledCheckBox.IsChecked == true }); await RefreshVoiceStatusAsync(); }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void VoiceQuietCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        try { await _voice.SendAsync("QUIET_MODE", new { enabled = VoiceQuietCheckBox.IsChecked == true }); }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void VoiceSensitivityBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (VoiceSensitivityBox.SelectedItem is not ComboBoxItem item || item.Content is not string sensitivity) return;
+        try { await _voice.SendAsync("SET_SENSITIVITY", new { sensitivity }); }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void VoicePttButton_Down(object sender, MouseButtonEventArgs e)
+    {
+        if (_voicePttActive) return;
+        try
+        {
+            var response = await _voice.SendAsync("PUSH_TO_TALK_BEGIN");
+            _voicePttActive = response.Ok;
+            VoiceErrorText.Text = response.Ok ? "Говорите команду, затем отпустите кнопку." : response.Error ?? "Не удалось начать Push-to-Talk";
+            if (response.Ok) VoicePttButton.CaptureMouse();
+        }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+
+    private async void VoicePttButton_Up(object sender, MouseButtonEventArgs e) => await EndVoicePttAsync();
+    private async void VoicePttButton_Leave(object sender, MouseEventArgs e)
+    {
+        if (_voicePttActive && !VoicePttButton.IsMouseOver) await EndVoicePttAsync();
+    }
+
+    private async Task EndVoicePttAsync()
+    {
+        if (!_voicePttActive) return;
+        _voicePttActive = false;
+        VoicePttButton.ReleaseMouseCapture();
+        try
+        {
+            var response = await _voice.SendAsync("PUSH_TO_TALK_END");
+            VoiceErrorText.Text = response.Ok ? string.Empty : response.Error ?? "Команда отклонена";
+            await RefreshVoiceStatusAsync();
+        }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void VoiceTextButton_Click(object sender, RoutedEventArgs e) => await SubmitVoiceTextAsync(false);
+    private async Task SubmitVoiceTextAsync(bool ptt)
+    {
+        try
+        {
+            var response = await _voice.SendAsync(ptt ? "PUSH_TO_TALK" : "TEXT", new { text = VoiceTextBox.Text });
+            VoiceErrorText.Text = response.Ok ? string.Empty : response.Error ?? "Команда отклонена";
+            await RefreshVoiceStatusAsync();
+        }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void VoiceTtsButton_Click(object sender, RoutedEventArgs e)
+    {
+        try { await _voice.SendAsync("TEST_TTS"); VoiceErrorText.Text = string.Empty; }
+        catch (Exception ex) { VoiceErrorText.Text = SafeError(ex); }
+    }
+    private async void AssistantQuestionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(AssistantQuestionBox.Text)) return;
+            Guid? meetingId = Guid.TryParse(_selectedMeeting?.Id, out var id) ? id : null;
+            var query = await _server.CreateAssistantQueryAsync(AssistantQuestionBox.Text, meetingId);
+            if (query is null) { AssistantAnswerText.Text = "Не удалось поставить запрос в очередь. Выберите готовое совещание."; return; }
+            AssistantAnswerText.Text = $"Запрос принят: {query.Status}";
+            for (var attempt = 0; attempt < 90; attempt++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2));
+                var current = await _server.GetAssistantQueryAsync(Guid.Parse(query.Id));
+                if (current is null) break;
+                if (current.Status is "READY" or "FAILED" or "NEEDS_REVIEW")
+                {
+                    AssistantAnswerText.Text = current.Answer ?? current.ErrorCode ?? "Ответ не сформирован";
+                    AssistantEvidenceText.Text = current.Evidence.RootElement.ToString();
+                    break;
+                }
+            }
+        }
+        catch (Exception ex) { AssistantAnswerText.Text = SafeError(ex); }
+    }
 
     private async void LoginButton_Click(object sender, RoutedEventArgs e)
     {
@@ -201,6 +348,9 @@ public partial class MainWindow : Window
             AdminStatusText.Text = ok ? "Вход в локальный API выполнен." : "Ошибка входа.";
             if (ok)
             {
+                EngineeringPanel.IsEnabled = true;
+                EngineeringPanel.IsExpanded = true;
+                PasswordBox.Clear();
                 DesktopSettings.Save(_server.BaseAddress.ToString(), UsernameTextBox.Text, _server.GetSessionCookie());
                 await LoadMeetingsAsync();
             }

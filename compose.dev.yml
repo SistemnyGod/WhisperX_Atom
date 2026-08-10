@@ -13,7 +13,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-whisperx_atom}
       POSTGRES_USER: ${POSTGRES_USER:-whisperx}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -42,9 +42,9 @@ services:
     # Docker Desktop exposes Windows bind mounts as root-owned. tusd normally
     # runs as uid 1000 and cannot create /data/uploads on this target.
     user: "0:0"
-    command: ["-host", "0.0.0.0", "-port", "1080", "-upload-dir", "/data/uploads", "-hooks-http", "http://api:8080/api/internal/tusd/hooks?secret=${TUS_HOOK_SECRET:-local-dev-secret}"]
+    command: ["-host", "0.0.0.0", "-port", "1080", "-upload-dir", "/data/uploads", "-hooks-http", "http://api:8080/api/internal/tusd/hooks?secret=${TUS_HOOK_SECRET}"]
     environment:
-      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET}
     ports:
       - "127.0.0.1:1080:1080"
     volumes: *media-volumes
@@ -58,13 +58,14 @@ services:
       context: ./apps/server/WhisperX.Atom.Api
     restart: unless-stopped
     environment:
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD:-change-me-postgres}
-      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD:-change-me-postgres}
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
-      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
-      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET:-local-dev-secret}
-      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN:-local-import-secret}
-      AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET:-change-me-agent-enrollment}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET}
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
+      AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET}
+      VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     depends_on:
       postgres:
@@ -85,7 +86,7 @@ services:
       dockerfile: workers/outbox_relay/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       NATS_URL: nats://nats:4222
     depends_on:
       api:
@@ -108,7 +109,7 @@ services:
     restart: unless-stopped
     environment:
       API_URL: http://api:8080
-      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN:-local-import-secret}
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
       INBOX_ROOT: /data/inbox
       STAGING_ROOT: /data/staging
       ARCHIVE_ROOT: /data/archive
@@ -133,7 +134,7 @@ services:
       dockerfile: workers/media_worker/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       MEDIA_ROOT: /data
       NATS_URL: nats://nats:4222
     depends_on:
@@ -156,7 +157,7 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
-      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       HF_TOKEN: ${HF_TOKEN:-}
       WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
       DEVICE: cuda
@@ -253,7 +254,7 @@ services:
       dockerfile: workers/summary_worker/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD:-change-me-postgres}
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       NATS_URL: nats://nats:4222
       LLM_MODEL_PATH: /models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf
       LLM_GPU_LAYERS: ${LLM_GPU_LAYERS:-99}
@@ -294,7 +295,7 @@ services:
     image: caddy:2.8-alpine
     restart: unless-stopped
     ports:
-      - "8000:80"
+      - "127.0.0.1:8000:80"
     volumes:
       - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:

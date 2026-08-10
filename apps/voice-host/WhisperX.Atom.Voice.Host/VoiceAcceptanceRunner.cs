@@ -1,0 +1,185 @@
+using System.Text.Json;
+using System.Threading.Channels;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using WhisperX.Atom.Voice;
+
+namespace WhisperX.Atom.Voice.Host;
+
+internal static class VoiceAcceptanceRunner
+{
+    public static async Task<int> ReplayAsync(string audioPath, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(audioPath))
+        {
+            Console.Error.WriteLine("Replay audio file was not found.");
+            return 2;
+        }
+
+        var modelPath = ResolveModelPath();
+        var assets = VoiceAssetVerifier.Check(Path.GetDirectoryName(modelPath)!, modelPath);
+        if (!assets.IntegrityReady)
+        {
+            Console.Error.WriteLine(assets.ErrorCode ?? "VOICE_MODEL_MISSING");
+            return 3;
+        }
+
+        using var analyzer = new DryRunAnalyzer(modelPath);
+        using var reader = new AudioFileReader(audioPath);
+        ISampleProvider source = reader;
+        if (reader.WaveFormat.SampleRate != 16000)
+            source = new WdlResamplingSampleProvider(source, 16000);
+
+        var channels = source.WaveFormat.Channels;
+        var samples = new float[320 * channels];
+        var pcm = new byte[640];
+        var detections = 0;
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var read = source.Read(samples, 0, samples.Length);
+            if (read <= 0) break;
+            var frames = read / channels;
+            ConvertToMonoPcm16(samples, frames, channels, pcm);
+            detections += analyzer.Accept(pcm.AsSpan(0, frames * 2));
+            await Task.Yield();
+        }
+        detections += analyzer.FinalizeStream();
+        Console.WriteLine(JsonSerializer.Serialize(new { mode = "replay-dry-run", audioPath, detections }));
+        return 0;
+    }
+
+    public static async Task<int> MicrophoneAsync(int targetDetections, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var modelPath = ResolveModelPath();
+        var assets = VoiceAssetVerifier.Check(Path.GetDirectoryName(modelPath)!, modelPath);
+        if (!assets.IntegrityReady)
+        {
+            Console.Error.WriteLine(assets.ErrorCode ?? "VOICE_MODEL_MISSING");
+            return 3;
+        }
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linked.CancelAfter(timeout);
+        using var analyzer = new DryRunAnalyzer(modelPath);
+        using var capture = new VoiceAudioCapture();
+        var converter = new AudioPcmConverter();
+        var assembler = new PcmFrameAssembler();
+        var queue = Channel.CreateBounded<VoiceAudioBlock>(new BoundedChannelOptions(20)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+        var drops = 0L;
+        capture.AudioAvailable += block =>
+        {
+            if (!queue.Writer.TryWrite(block))
+            {
+                Interlocked.Increment(ref drops);
+                block.Dispose();
+            }
+        };
+        capture.CaptureError += ex =>
+        {
+            Console.Error.WriteLine("MICROPHONE_CAPTURE_FAILED");
+            linked.Cancel();
+        };
+
+        var detections = 0;
+        capture.Start();
+        Console.WriteLine($"Microphone dry-run started. Say {targetDetections} commands beginning with 'Атом'.");
+        try
+        {
+            while (await queue.Reader.WaitToReadAsync(linked.Token))
+            {
+                while (queue.Reader.TryRead(out var block))
+                {
+                    using (block)
+                    {
+                        var pcm = converter.Convert(block.Buffer, block.Length, block.Format);
+                        await assembler.PushAsync(pcm, frame =>
+                        {
+                            detections += analyzer.Accept(frame);
+                            if (detections >= targetDetections) linked.Cancel();
+                            return Task.CompletedTask;
+                        });
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
+        finally
+        {
+            capture.Stop();
+            queue.Writer.TryComplete();
+            while (queue.Reader.TryRead(out var block)) block.Dispose();
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "mic-acceptance-dry-run",
+            detections,
+            targetDetections,
+            audioQueueDrops = drops,
+            completed = detections >= targetDetections
+        }));
+        return detections >= targetDetections ? 0 : 4;
+    }
+
+    private static string ResolveModelPath()
+    {
+        var assetsRoot = Path.Combine(AppContext.BaseDirectory, "Models", "Voice");
+        return Environment.GetEnvironmentVariable("ATOM_VOSK_MODEL")
+            ?? Path.Combine(assetsRoot, "vosk-model-small-ru-0.22");
+    }
+
+    private static void ConvertToMonoPcm16(float[] source, int frames, int channels, byte[] destination)
+    {
+        for (var frame = 0; frame < frames; frame++)
+        {
+            var sum = 0f;
+            for (var channel = 0; channel < channels; channel++)
+                sum += source[frame * channels + channel];
+            var sample = (short)Math.Clamp(sum / channels * short.MaxValue, short.MinValue, short.MaxValue);
+            destination[frame * 2] = (byte)(sample & 0xff);
+            destination[frame * 2 + 1] = (byte)((sample >> 8) & 0xff);
+        }
+    }
+
+    private sealed class DryRunAnalyzer : IDisposable
+    {
+        private readonly VoskRecognizer _recognizer;
+        private readonly VoiceIntentParser _parser = new();
+
+        public DryRunAnalyzer(string modelPath) =>
+            _recognizer = new VoskRecognizer(modelPath, grammar: VoiceHostRuntime.WakePhrases);
+
+        public int Accept(ReadOnlySpan<byte> pcm)
+        {
+            var result = _recognizer.Accept(pcm);
+            return result.IsEndpoint ? Report(result) : 0;
+        }
+
+        public int FinalizeStream() => Report(_recognizer.FinalizeSessionResult());
+
+        private int Report(VoiceRecognitionResult result)
+        {
+            if (string.IsNullOrWhiteSpace(result.Text)) return 0;
+            var hasWake = _parser.HasWakeWord(result.Text);
+            var command = _parser.Parse(result.Text, result.Confidence);
+            var accepted = hasWake && !result.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
+                && result.Confidence >= 0.65 && command.Intent != VoiceIntent.Unknown;
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                text = result.Text,
+                confidence = result.Confidence,
+                intent = command.Intent.ToString(),
+                accepted,
+                dryRun = true
+            }));
+            return accepted ? 1 : 0;
+        }
+
+        public void Dispose() => _recognizer.Dispose();
+    }
+}

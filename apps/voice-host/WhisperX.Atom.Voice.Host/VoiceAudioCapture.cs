@@ -1,19 +1,39 @@
+using System.Buffers;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
-using WhisperX.Atom.Voice;
 
 namespace WhisperX.Atom.Voice.Host;
 
+public sealed class VoiceAudioBlock : IDisposable
+{
+    private byte[]? _buffer;
+    public VoiceAudioBlock(byte[] buffer, int length, WaveFormat format)
+    {
+        _buffer = buffer;
+        Length = length;
+        Format = format;
+    }
+
+    public byte[] Buffer => _buffer ?? throw new ObjectDisposedException(nameof(VoiceAudioBlock));
+    public int Length { get; }
+    public WaveFormat Format { get; }
+    public double DurationMs => Length * 1000d / Math.Max(1, Format.AverageBytesPerSecond);
+
+    public void Dispose()
+    {
+        var buffer = Interlocked.Exchange(ref _buffer, null);
+        if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
+    }
+}
+
+/// <summary>WASAPI callback only copies to pooled memory; processing is performed by one worker.</summary>
 public sealed class VoiceAudioCapture : IDisposable
 {
-    private readonly VoiceRingBuffer _ring = new(16000 * 2 * 3);
-    private readonly VoiceStateMachine _state;
     private WasapiCapture? _capture;
     private readonly object _gate = new();
 
-    public VoiceAudioCapture(VoiceStateMachine state) => _state = state;
-    public event Action<ReadOnlyMemory<byte>>? PcmAvailable;
-
+    public event Action<VoiceAudioBlock>? AudioAvailable;
+    public event Action<Exception>? CaptureError;
     public bool IsRunning => _capture is not null;
 
     public void Start()
@@ -25,7 +45,15 @@ public sealed class VoiceAudioCapture : IDisposable
             capture.DataAvailable += OnDataAvailable;
             capture.RecordingStopped += OnStopped;
             _capture = capture;
-            capture.StartRecording();
+            try { capture.StartRecording(); }
+            catch
+            {
+                capture.DataAvailable -= OnDataAvailable;
+                capture.RecordingStopped -= OnStopped;
+                capture.Dispose();
+                _capture = null;
+                throw;
+            }
         }
     }
 
@@ -33,29 +61,41 @@ public sealed class VoiceAudioCapture : IDisposable
     {
         lock (_gate)
         {
-            if (_capture is null) return;
-            try { _capture.StopRecording(); } catch (InvalidOperationException) { }
-            _capture.Dispose();
+            var capture = _capture;
+            if (capture is null) return;
             _capture = null;
+            try { capture.StopRecording(); } catch (InvalidOperationException) { }
+            capture.DataAvailable -= OnDataAvailable;
+            capture.RecordingStopped -= OnStopped;
+            capture.Dispose();
         }
     }
-
-    public byte[] PreRoll() => _ring.Snapshot();
 
     private void OnDataAvailable(object? sender, WaveInEventArgs args)
     {
+        VoiceAudioBlock? block = null;
         try
         {
-            if (sender is not WasapiCapture capture) return;
-            var pcm = AudioPcmConverter.ToMono16K(args.Buffer.AsSpan(0, args.BytesRecorded), capture.WaveFormat);
-            if (pcm.Length == 0) return;
-            _ring.Append(pcm);
-            PcmAvailable?.Invoke(pcm);
+            if (sender is not WasapiCapture capture || args.BytesRecorded <= 0) return;
+            var rented = ArrayPool<byte>.Shared.Rent(args.BytesRecorded);
+            args.Buffer.AsSpan(0, args.BytesRecorded).CopyTo(rented);
+            block = new VoiceAudioBlock(rented, args.BytesRecorded, capture.WaveFormat);
+            var handler = AudioAvailable;
+            if (handler is null) { block.Dispose(); return; }
+            handler(block);
+            block = null;
         }
-        catch { /* audio callback must never terminate the capture thread */ }
+        catch (Exception ex)
+        {
+            block?.Dispose();
+            CaptureError?.Invoke(ex);
+        }
     }
 
-    private static void OnStopped(object? sender, StoppedEventArgs args) { }
+    private void OnStopped(object? sender, StoppedEventArgs args)
+    {
+        if (args.Exception is not null) CaptureError?.Invoke(args.Exception);
+    }
 
     public void Dispose() => Stop();
 }
