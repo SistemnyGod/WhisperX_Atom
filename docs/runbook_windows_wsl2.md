@@ -82,11 +82,16 @@ for WhisperX/pyannote transitions while retaining roughly 50+ tokens/s in
 short Russian JSON smokes. Long transcripts are processed with map/reduce.
 
 The Desktop production profile uses a shared PostgreSQL GPU lease. WhisperX
-runs first; summary-worker then starts the pinned llama.cpp subprocess only
-while it owns the same lease and terminates it before releasing the GPU. Do not
-run the diagnostic `llama-server` at the same time as the production workers.
+ASR, alignment and pyannote diarization run with `DEVICE=cuda` and
+`COMPUTE_TYPE=float16`; startup fails when `REQUIRE_CUDA=true` but CUDA is not
+available. After that, summary-worker starts Qwen with `LLM_GPU_LAYERS=99`
+only while it owns the same lease and terminates it before releasing the GPU.
+This prevents a silent CPU fallback and avoids ASR/LLM contention on a 16 GB
+card. Do not run the diagnostic `llama-server` at the same time as production
+workers.
 
 The diagnostic `llama-server` is available only with the `llm-diagnostic`
-profile and is intended for a short isolated smoke. The normal Desktop profile
-uses `--profile gpu --profile llm` so the full recording-to-summary pipeline is
-automatic and does not require manual container stops.
+profile and is intended for a short isolated GPU smoke; it uses
+`LLM_DIAGNOSTIC_GPU_LAYERS=99`. The normal Desktop profile uses `--profile gpu
+--profile llm` so the full recording-to-summary pipeline is automatic and does
+not require a resident LLM container.

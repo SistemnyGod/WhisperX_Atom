@@ -17,6 +17,7 @@ class LocalLlamaServer:
         self.port = int(os.getenv("LLM_LOCAL_PORT", "18080"))
         self.start_timeout = max(30, int(os.getenv("LLM_START_TIMEOUT_SECONDS", "300")))
         self.gpu_layers = os.getenv("LLM_GPU_LAYERS", "99")
+        self.require_gpu = os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"}
         self.context_size = os.getenv("LLM_CONTEXT_SIZE", "16384")
         self.process: subprocess.Popen[bytes] | None = None
 
@@ -27,6 +28,12 @@ class LocalLlamaServer:
     def start(self) -> None:
         if not self.model_path.is_file():
             raise FileNotFoundError(f"llm_model_not_found:{self.model_path}")
+        try:
+            gpu_layers = int(self.gpu_layers)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid_llm_gpu_layers:{self.gpu_layers}") from exc
+        if self.require_gpu and gpu_layers <= 0:
+            raise RuntimeError("llm_gpu_required_but_no_layers_configured")
         binary = os.getenv("LLM_SERVER_BINARY", "/opt/llama/llama-server")
         command = [
             binary,
@@ -35,7 +42,7 @@ class LocalLlamaServer:
             "--host", "127.0.0.1",
             "--port", str(self.port),
             "--ctx-size", str(self.context_size),
-            "--n-gpu-layers", str(self.gpu_layers),
+            "--n-gpu-layers", str(gpu_layers),
             "--flash-attn", "on",
             "--cache-type-k", "q8_0",
             "--cache-type-v", "q8_0",

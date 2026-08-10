@@ -160,12 +160,14 @@ services:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       HF_TOKEN: ${HF_TOKEN:-}
       WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
-      DEVICE: cuda
+      DEVICE: ${DEVICE:-cuda}
+      COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
+      REQUIRE_CUDA: ${REQUIRE_CUDA:-true}
       GPU_CONCURRENCY: "1"
       GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
       # pyannote 3.3.2 checkpoints are trusted local/HF artifacts and require the pre-2.6 torch.load behavior.
-      # Block accidental diagnostic llama-server if it is started with GPU layers.
+      # Do not share the GPU with the manually started diagnostic LLM server.
       GPU_ENFORCE_NO_RESIDENT_LLM: "true"
       LLM_HEALTH_HOST: llama-server
       LLM_HEALTH_PORT: "8080"
@@ -208,9 +210,10 @@ services:
       - "8080"
       - --ctx-size
       - "${LLM_CONTEXT_SIZE:-16384}"
-      # Keep the resident diagnostic LLM off the GPU by default. Set LLM_GPU_LAYERS=99 only for an exclusive manual LLM smoke.
+      # This is only for an isolated manual smoke; it always uses GPU offload.
+      # Never leave it running while gpu-worker is processing a meeting.
       - --n-gpu-layers
-      - "${LLM_GPU_LAYERS:-0}"
+      - "${LLM_DIAGNOSTIC_GPU_LAYERS:-99}"
       - --flash-attn
       - "on"
       - --cache-type-k
@@ -258,6 +261,7 @@ services:
       NATS_URL: nats://nats:4222
       LLM_MODEL_PATH: /models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf
       LLM_GPU_LAYERS: ${LLM_GPU_LAYERS:-99}
+      LLM_REQUIRE_GPU: ${LLM_REQUIRE_GPU:-true}
       LLM_CONTEXT_SIZE: ${LLM_CONTEXT_SIZE:-16384}
       LLM_MODEL_ALIAS: qwen3-8b
       LLM_BLOCK_MAX_CHARS: ${LLM_BLOCK_MAX_CHARS:-16000}

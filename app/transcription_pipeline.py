@@ -91,9 +91,11 @@ class PipelineConfig:
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
-        device = os.getenv("DEVICE", "auto")
+        device = os.getenv("DEVICE", "auto").strip().lower()
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda" and not torch.cuda.is_available() and _as_bool("REQUIRE_CUDA", False):
+            raise RuntimeError("cuda_required_but_unavailable")
         compute = os.getenv("COMPUTE_TYPE", "float16")
         if device == "cpu" and compute == "float16":
             compute = "float32"
