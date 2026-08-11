@@ -674,5 +674,5 @@ public sealed class RecordingViewModel : ObservableObject
     private static double ToLevel(double? db) => db is double value ? Math.Clamp((value + 60d) / 60d * 100d, 0d, 100d) : 0d;
     private static string FormatDb(double? db) => db is double value ? $"{value:0} dB peak" : "Нет измерения";
     private static string? NormalizeDeviceId(string? id) => string.IsNullOrWhiteSpace(id) ? null : id.Trim();
-    private static string SafeError(Exception ex) => ex is TimeoutException ? "Recorder Agent не ответил вовремя" : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Recorder Agent не ответил. Проверьте локальный сервис.");
 }

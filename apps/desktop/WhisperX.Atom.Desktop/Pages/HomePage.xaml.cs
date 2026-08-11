@@ -115,7 +115,7 @@ public sealed partial class HomePage : Page
         catch (Exception ex)
         {
             ErrorInfoBar.Severity = InfoBarSeverity.Error;
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось импортировать файл.");
             ErrorInfoBar.IsOpen = true;
         }
     }

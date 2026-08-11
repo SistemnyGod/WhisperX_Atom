@@ -147,9 +147,7 @@ public sealed class MeetingsViewModel : ObservableObject
         || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
         || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
 
-    private static string SafeError(Exception ex) => ex is HttpRequestException
-        ? "Не удалось подключиться к API. Проверьте backend и вход в API."
-        : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось загрузить совещания.");
 }
 
 public sealed class MeetingWorkspaceViewModel : ObservableObject
@@ -432,7 +430,5 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
 
     private static string DisplayStage(string stage) => string.IsNullOrWhiteSpace(stage) ? "Этап не указан" : stage;
     private static bool IsRetryable(string status) => status.Equals("FAILED", StringComparison.OrdinalIgnoreCase) || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
-    private static string SafeError(Exception ex) => ex is HttpRequestException
-        ? "API недоступен"
-        : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось загрузить данные совещания.");
 }

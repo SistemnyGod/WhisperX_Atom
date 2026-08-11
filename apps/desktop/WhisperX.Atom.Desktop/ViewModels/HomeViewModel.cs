@@ -284,7 +284,5 @@ public sealed class HomeViewModel : ObservableObject
 
     private sealed record MeetingMetrics(string Title, bool IsProcessing, bool HasSummary, int OpenTasks, string Stage, int Progress);
 
-    private static string SafeError(Exception ex) => ex is TimeoutException
-        ? "Сервис не ответил вовремя"
-        : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось обновить состояние рабочего стола.");
 }

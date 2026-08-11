@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Net.Http;
+using WhisperX.Atom.Desktop;
 
 namespace WhisperX_Atom_Desktop.Services;
 
@@ -48,4 +50,23 @@ public static class UiStatusMapper
     }
 
     public static string Text(string? code) => Map(code).Text;
+}
+
+public static class UiErrorFormatter
+{
+    public static string Format(Exception exception, string fallback = "Не удалось выполнить операцию.") => exception switch
+    {
+        DesktopApiException { StatusCode: 401 } => "Сеанс API истёк. Войдите повторно.",
+        DesktopApiException { StatusCode: 403 } => "Недостаточно прав для выполнения операции.",
+        DesktopApiException { StatusCode: 404 } => "Запрошенные данные не найдены.",
+        DesktopApiException { ErrorCode: "UPLOAD_CONNECTION_LOST" } => "Соединение потеряно. Локальная запись сохранена, повторите отправку.",
+        DesktopApiException { ErrorCode: "MEDIA_NO_AUDIO" } => "В выбранном файле не найден аудиосигнал.",
+        DesktopApiException { ErrorCode: "MODEL_ACCESS_ERROR" } => "WhisperX не получил доступ к модели.",
+        DesktopApiException { ErrorCode: "CUDA_UNAVAILABLE" } => "GPU недоступен. Проверьте CUDA или дождитесь CPU-обработки.",
+        DesktopApiException { ErrorCode: "TRANSCRIPT_EMPTY" } => "Стенограмма не содержит распознанной речи.",
+        HttpRequestException => "Не удалось подключиться к API. Проверьте backend и соединение.",
+        TimeoutException => "Сервис не ответил вовремя. Повторите попытку.",
+        OperationCanceledException => "Операция отменена.",
+        _ => fallback
+    };
 }

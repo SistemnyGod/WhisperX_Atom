@@ -44,7 +44,14 @@ public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Sta
 }
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
-public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
+public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error)
+{
+    [JsonIgnore]
+    public string StatusText => UiStatusMapper.Text(Status);
+
+    [JsonIgnore]
+    public string StageText => UiStatusMapper.Text(Stage);
+}
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
 
 public enum DesktopAuthState

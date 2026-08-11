@@ -1,10 +1,12 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Media.Core;
 using Windows.Storage.Pickers;
+using Windows.System;
 using WinRT.Interop;
 using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
@@ -22,12 +24,21 @@ public sealed partial class MeetingsPage : Page
     private bool _updatingTaskStatus;
     private bool _updatingLayout;
     private bool _suppressMeetingSelection;
+    private bool _workspaceExpanded;
     private MeetingNavigationTarget? _pendingTarget;
 
     public MeetingsPage()
     {
         InitializeComponent();
         SizeChanged += MeetingsPage_SizeChanged;
+        KeyDown += MeetingsPage_KeyDown;
+        var searchAccelerator = new KeyboardAccelerator
+        {
+            Key = VirtualKey.F,
+            Modifiers = VirtualKeyModifiers.Control
+        };
+        searchAccelerator.Invoked += (_, _) => SearchBox.Focus(FocusState.Keyboard);
+        KeyboardAccelerators.Add(searchAccelerator);
     }
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
@@ -64,13 +75,14 @@ public sealed partial class MeetingsPage : Page
                     _suppressMeetingSelection = true;
                     MeetingsList.SelectedItem = targetMeeting;
                     _suppressMeetingSelection = false;
+                    _workspaceExpanded = true;
                     await LoadSelectedMeetingAsync(targetMeeting);
                     await ApplyPendingTargetAsync();
                 }
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -106,6 +118,7 @@ public sealed partial class MeetingsPage : Page
         _viewModel.SelectedMeeting = MeetingsList.SelectedItem as DesktopMeeting;
         if (_viewModel.SelectedMeeting is null)
         {
+            _workspaceExpanded = false;
             _workspaceCts?.Cancel();
             _workspace.ClearSelection();
             PreviewPlayer.Source = null;
@@ -113,6 +126,7 @@ public sealed partial class MeetingsPage : Page
             UpdateWorkspaceText();
             return;
         }
+        _workspaceExpanded = false;
         await LoadSelectedMeetingAsync(_viewModel.SelectedMeeting);
     }
 
@@ -130,7 +144,7 @@ public sealed partial class MeetingsPage : Page
             UpdateWorkspaceText();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     private async Task ApplyPendingTargetAsync()
@@ -167,6 +181,23 @@ public sealed partial class MeetingsPage : Page
         UpdateListState();
     }
 
+    private void MeetingsPage_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape && _workspaceExpanded)
+        {
+            _workspaceExpanded = false;
+            UpdateWorkspaceState();
+            e.Handled = true;
+        }
+    }
+
+    private void OpenWorkspaceButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace is null || !_workspace.HasMeeting) return;
+        _workspaceExpanded = !_workspaceExpanded;
+        UpdateWorkspaceState();
+    }
+
     private void StatusFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_viewModel is not null && StatusFilterCombo.SelectedItem is string value)
@@ -181,6 +212,7 @@ public sealed partial class MeetingsPage : Page
         {
             _workspaceCts?.Cancel();
             _workspace?.ClearSelection();
+            _workspaceExpanded = false;
             MeetingsList.SelectedItem = null;
             PreviewPlayer.Source = null;
             await _viewModel.RefreshAsync(_pageCts.Token);
@@ -189,7 +221,7 @@ public sealed partial class MeetingsPage : Page
             UpdateWorkspaceText();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     private async void ImportButton_Click(object sender, RoutedEventArgs e)
@@ -209,7 +241,7 @@ public sealed partial class MeetingsPage : Page
             UpdateListState();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     private async void RefreshWorkspaceButton_Click(object sender, RoutedEventArgs e)
@@ -237,7 +269,7 @@ public sealed partial class MeetingsPage : Page
             UpdateWorkspaceText();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     private async void RebuildSummaryButton_Click(object sender, RoutedEventArgs e)
@@ -249,7 +281,7 @@ public sealed partial class MeetingsPage : Page
             UpdateWorkspaceText();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
     private async void TaskStatusCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -263,7 +295,7 @@ public sealed partial class MeetingsPage : Page
             if (!await _workspace.UpdateTaskAsync(updated, _pageCts.Token)) ShowError("Не удалось обновить статус поручения.");
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
         finally { _updatingTaskStatus = false; }
     }
 
@@ -289,7 +321,7 @@ public sealed partial class MeetingsPage : Page
             PreviewStatusText.Text = path;
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { PreviewStatusText.Text = ex.Message; }
+        catch (Exception ex) { PreviewStatusText.Text = UiErrorFormatter.Format(ex, "Не удалось загрузить preview."); }
     }
 
     private void TranscriptSearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -341,8 +373,9 @@ public sealed partial class MeetingsPage : Page
     {
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading;
-        MeetingsList.Visibility = _viewModel.HasFilteredMeetings ? Visibility.Visible : Visibility.Collapsed;
-        ListEmptyState.Visibility = _viewModel.HasFilteredMeetings ? Visibility.Collapsed : Visibility.Visible;
+        ListLoadingRing.IsActive = _viewModel.IsLoading;
+        MeetingsList.Visibility = _viewModel.IsLoading || !_viewModel.HasFilteredMeetings ? Visibility.Collapsed : Visibility.Visible;
+        ListEmptyState.Visibility = _viewModel.IsLoading || _viewModel.HasFilteredMeetings ? Visibility.Collapsed : Visibility.Visible;
         ListEmptyTitle.Text = _viewModel.HasMeetings ? "Ничего не найдено" : "Совещаний нет";
         ListEmptyDescription.Text = string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? _viewModel.StatusText : _viewModel.ErrorText;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
@@ -353,8 +386,11 @@ public sealed partial class MeetingsPage : Page
     {
         if (_workspace is null) return;
         WorkspaceEmptyState.Visibility = _workspace.HasMeeting ? Visibility.Collapsed : Visibility.Visible;
-        WorkspaceContent.Visibility = _workspace.HasMeeting ? Visibility.Visible : Visibility.Collapsed;
+        WorkspaceInspector.Visibility = _workspace.HasMeeting && !_workspaceExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WorkspaceContent.Visibility = _workspace.HasMeeting && _workspaceExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceLoadingOverlay.Visibility = _workspace.IsLoading ? Visibility.Visible : Visibility.Collapsed;
+        OpenWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
+        OpenWorkspaceButton.Content = _workspaceExpanded ? "Свернуть" : "Открыть совещание";
         RefreshWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         RetryButton.IsEnabled = _workspace.CanRetryLatestJob && !_workspace.IsLoading;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_workspace.ErrorText);
@@ -366,8 +402,10 @@ public sealed partial class MeetingsPage : Page
     {
         if (_workspace is null) return;
         WorkspaceTitle.Text = _workspace.Meeting?.Title ?? "Выберите встречу слева";
-        WorkspaceMeta.Text = _workspace.Meeting is null ? string.Empty : $"{_workspace.MeetingDateText} · {_workspace.Meeting.Status}";
-        WorkspaceStatusText.Text = _workspace.Meeting is null ? "Ожидает выбора встречи" : _workspace.IsLoading ? "Загрузка данных встречи" : _workspace.PipelineText;
+        WorkspaceMeta.Text = _workspace.Meeting is null ? string.Empty : $"{_workspace.MeetingDateText} · {UiStatusMapper.Text(_workspace.Meeting.Status)}";
+        var statusCode = _workspace.Meeting?.Status ?? string.Empty;
+        WorkspaceStatusBadge.Status = statusCode;
+        WorkspaceStatusBadge.Text = _workspace.Meeting is null ? "Ожидает выбора встречи" : _workspace.IsLoading ? "Загрузка данных встречи" : UiStatusMapper.Text(statusCode);
         PipelineText.Text = _workspace.PipelineText;
         OverviewPipelineText.Text = _workspace.PipelineText;
         DurationText.Text = _workspace.DurationText;
