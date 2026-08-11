@@ -518,6 +518,7 @@ public sealed class ServerApiClient : IDisposable
     public async Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/summary", null, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<DesktopSummary>(_json, cancellationToken);
     }

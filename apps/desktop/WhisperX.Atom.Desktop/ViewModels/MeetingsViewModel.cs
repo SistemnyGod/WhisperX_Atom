@@ -162,6 +162,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     private string _summaryMetaText = string.Empty;
     private string? _previewPath;
     private DesktopMeeting? _meeting;
+    private DesktopTranscript? _transcript;
     private DesktopSummary? _summary;
     private DesktopJob? _latestJob;
 
@@ -184,6 +185,19 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     public ObservableCollection<DesktopMedia> Media { get; } = [];
     public ObservableCollection<DesktopDecision> Decisions { get; } = [];
     public ObservableCollection<DesktopTask> Tasks { get; } = [];
+
+    public DesktopTranscript? Transcript
+    {
+        get => _transcript;
+        private set
+        {
+            if (!SetProperty(ref _transcript, value)) return;
+            OnPropertyChanged(nameof(HasTranscript));
+            OnPropertyChanged(nameof(TranscriptMetaText));
+            OnPropertyChanged(nameof(TranscriptQualityText));
+            OnPropertyChanged(nameof(TranscriptWarningText));
+        }
+    }
 
     public DesktopSummary? Summary
     {
@@ -258,10 +272,20 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     }
 
     public bool HasMeeting => Meeting is not null;
+    public bool HasTranscript => Transcript is not null && Transcript.Segments.Count > 0;
     public bool HasSummary => Summary is not null;
     public bool HasPreview => !string.IsNullOrWhiteSpace(PreviewPath) && File.Exists(PreviewPath);
     public bool CanRetryLatestJob => LatestJob is not null && IsRetryable(LatestJob.Status);
     public string MeetingDateText => Meeting is null ? string.Empty : Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm");
+    public string TranscriptMetaText => Transcript is null
+        ? "Стенограмма ещё не готова"
+        : $"{Transcript.Segments.Count} сегментов · {FormatDuration(Transcript.Segments.Count == 0 ? 0 : Transcript.Segments.Max(item => item.EndMs))}";
+    public string TranscriptQualityText => Transcript?.QualityScore is double score
+        ? $"Качество: {QualityCategory(score)} ({score:0.#})"
+        : "Качество не рассчитано";
+    public string TranscriptWarningText => Transcript?.IsPartial == true
+        ? "Стенограмма получена с предупреждениями. Текст доступен для чтения и экспорта."
+        : string.Empty;
 
     public void ClearSelection()
     {
@@ -313,6 +337,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
                 : $"{DisplayStatus(LatestJob.Status)} · {DisplayStage(LatestJob.Stage)} · {LatestJob.Progress}%";
 
             var transcript = await transcriptTask;
+            Transcript = transcript;
             if (transcript is not null)
                 foreach (var segment in transcript.Segments.OrderBy(segment => segment.Ordinal)) TranscriptSegments.Add(segment);
 
@@ -387,6 +412,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         Media.Clear();
         Decisions.Clear();
         Tasks.Clear();
+        Transcript = null;
         Summary = null;
         LatestJob = null;
         DurationText = "—";
@@ -418,6 +444,13 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     private static string FormatDuration(long durationMs) => durationMs <= 0
         ? "—"
         : TimeSpan.FromMilliseconds(durationMs).ToString(durationMs >= 3_600_000 ? @"hh\:mm\:ss" : @"mm\:ss");
+
+    private static string QualityCategory(double score) => score switch
+    {
+        >= 85 => "Высокое",
+        >= 65 => "Среднее",
+        _ => "Требует проверки"
+    };
 
     private static string DisplayStatus(string status) => status switch
     {

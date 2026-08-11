@@ -1,10 +1,12 @@
 using System.ComponentModel;
+using System.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Media.Core;
+using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
 using WinRT.Interop;
@@ -108,7 +110,7 @@ public sealed partial class MeetingsPage : Page
     {
         if (e.PropertyName is nameof(MeetingWorkspaceViewModel.HasMeeting) or nameof(MeetingWorkspaceViewModel.IsLoading) or nameof(MeetingWorkspaceViewModel.ErrorText) or nameof(MeetingWorkspaceViewModel.CanRetryLatestJob))
             UpdateWorkspaceState();
-        if (e.PropertyName is nameof(MeetingWorkspaceViewModel.PipelineText) or nameof(MeetingWorkspaceViewModel.DurationText) or nameof(MeetingWorkspaceViewModel.SummaryText) or nameof(MeetingWorkspaceViewModel.SummaryMetaText))
+        if (e.PropertyName is nameof(MeetingWorkspaceViewModel.PipelineText) or nameof(MeetingWorkspaceViewModel.DurationText) or nameof(MeetingWorkspaceViewModel.SummaryText) or nameof(MeetingWorkspaceViewModel.SummaryMetaText) or nameof(MeetingWorkspaceViewModel.TranscriptMetaText) or nameof(MeetingWorkspaceViewModel.TranscriptQualityText) or nameof(MeetingWorkspaceViewModel.TranscriptWarningText))
             UpdateWorkspaceText();
     }
 
@@ -134,6 +136,7 @@ public sealed partial class MeetingsPage : Page
     {
         if (_viewModel is null || _workspace is null || _pageCts is null) return;
         _viewModel.SelectedMeeting = meeting;
+        TranscriptSearchBox.Text = string.Empty;
         _workspaceCts?.Cancel();
         _workspaceCts?.Dispose();
         _workspaceCts = CancellationTokenSource.CreateLinkedTokenSource(_pageCts.Token);
@@ -408,12 +411,7 @@ public sealed partial class MeetingsPage : Page
 
     private void TranscriptSearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_workspace is null) return;
-        var query = TranscriptSearchBox.Text.Trim();
-        IReadOnlyList<DesktopTranscriptSegment> visible = string.IsNullOrWhiteSpace(query)
-            ? _workspace.TranscriptSegments
-            : _workspace.TranscriptSegments.Where(segment => segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
-        TranscriptList.ItemsSource = visible;
+        ApplyTranscriptFilter();
     }
 
     private void TranscriptList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -434,21 +432,39 @@ public sealed partial class MeetingsPage : Page
         _updatingLayout = true;
         try
         {
-            var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
             MeetingsActionsPanel.Orientation = ResponsiveLayout.IsWide(e.NewSize.Width)
                 ? Orientation.Horizontal
                 : Orientation.Vertical;
-            MeetingsGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(1, GridUnitType.Star);
-            MeetingsGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(380);
-            MeetingsGrid.RowDefinitions[0].Height = compact ? new GridLength(300) : new GridLength(1, GridUnitType.Star);
-            MeetingsGrid.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-            Grid.SetColumn(ListCard, 0);
-            Grid.SetRow(ListCard, 0);
-            Grid.SetColumn(WorkspaceCard, compact ? 0 : 1);
-            Grid.SetRow(WorkspaceCard, compact ? 1 : 0);
-            WorkspaceCard.Visibility = Visibility.Visible;
+            ApplyWorkspaceLayout(e.NewSize.Width);
         }
         finally { _updatingLayout = false; }
+    }
+
+    private void ApplyWorkspaceLayout(double width)
+    {
+        var compact = !ResponsiveLayout.IsWide(width);
+        var expanded = _workspaceExpanded && _workspace?.HasMeeting == true;
+
+        // An opened workspace becomes the reading surface. The list is hidden so
+        // the transcript is not squeezed into the former 380px inspector.
+        MeetingsGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
+        MeetingsGrid.ColumnDefinitions[1].Width = expanded || compact
+            ? new GridLength(0)
+            : new GridLength(380);
+        MeetingsGrid.RowDefinitions[0].Height = expanded || !compact
+            ? new GridLength(1, GridUnitType.Star)
+            : new GridLength(300);
+        MeetingsGrid.RowDefinitions[1].Height = expanded || !compact
+            ? new GridLength(0)
+            : new GridLength(1, GridUnitType.Star);
+
+        ListCard.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
+        WorkspaceCard.Visibility = Visibility.Visible;
+        Grid.SetColumn(ListCard, 0);
+        Grid.SetRow(ListCard, 0);
+        Grid.SetColumn(WorkspaceCard, expanded || compact ? 0 : 1);
+        Grid.SetRow(WorkspaceCard, expanded || !compact ? 0 : 1);
+        Grid.SetColumnSpan(WorkspaceCard, expanded ? 2 : 1);
     }
 
     private void UpdateListState()
@@ -471,6 +487,7 @@ public sealed partial class MeetingsPage : Page
         WorkspaceInspector.Visibility = _workspace.HasMeeting && !_workspaceExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceContent.Visibility = _workspace.HasMeeting && _workspaceExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceLoadingOverlay.Visibility = _workspace.IsLoading ? Visibility.Visible : Visibility.Collapsed;
+        ApplyWorkspaceLayout(MeetingsGrid.ActualWidth > 0 ? MeetingsGrid.ActualWidth : PageRoot.ActualWidth);
         OpenWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         OpenWorkspaceButton.Content = _workspaceExpanded ? "Свернуть" : "Открыть совещание";
         RefreshWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
@@ -496,9 +513,12 @@ public sealed partial class MeetingsPage : Page
         OverviewPipelineText.Text = _workspace.PipelineText;
         DurationText.Text = _workspace.DurationText;
         MediaCountText.Text = _workspace.Media.Count.ToString();
+        TranscriptMetaText.Text = _workspace.TranscriptMetaText;
+        TranscriptQualityText.Text = _workspace.TranscriptQualityText;
+        TranscriptWarningText.Text = _workspace.TranscriptWarningText;
         SummaryText.Text = _workspace.SummaryText;
         SummaryMetaText.Text = _workspace.SummaryMetaText;
-        if (string.IsNullOrWhiteSpace(TranscriptSearchBox.Text)) TranscriptList.ItemsSource = _workspace.TranscriptSegments;
+        ApplyTranscriptFilter();
     }
 
     private void UpdateEmptyStates()
@@ -509,6 +529,103 @@ public sealed partial class MeetingsPage : Page
         DecisionsEmptyText.Visibility = _workspace.Decisions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TasksEmptyText.Visibility = _workspace.Tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         MediaEmptyText.Visibility = _workspace.Media.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ApplyTranscriptFilter();
+    }
+
+    private void ApplyTranscriptFilter()
+    {
+        if (_workspace is null) return;
+        var query = TranscriptSearchBox.Text.Trim();
+        IReadOnlyList<DesktopTranscriptSegment> visible = string.IsNullOrWhiteSpace(query)
+            ? _workspace.TranscriptSegments
+            : _workspace.TranscriptSegments
+                .Where(segment => segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase)
+                    || (segment.Speaker?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
+                .ToList();
+        TranscriptList.ItemsSource = visible;
+        TranscriptEmptyState.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        TranscriptEmptyTitle.Text = _workspace.Transcript is null
+            ? "Стенограмма ещё не готова"
+            : string.IsNullOrWhiteSpace(query) ? "Сегментов нет" : "Ничего не найдено";
+        TranscriptEmptyDescription.Text = _workspace.Transcript is null
+            ? "Дождитесь завершения обработки или обновите данные встречи."
+            : string.IsNullOrWhiteSpace(query) ? "Сервер вернул стенограмму без доступных сегментов." : "Измените поисковый запрос.";
+    }
+
+    private async void ExportTranscriptTextButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(false);
+
+    private async void ExportTranscriptSrtButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(true);
+
+    private async Task ExportTranscriptAsync(bool srt)
+    {
+        if (_workspace is null || !_workspace.HasTranscript)
+        {
+            ShowError("Стенограмма пока не содержит сегментов для экспорта.");
+            return;
+        }
+
+        try
+        {
+            var title = SanitizeFileName(_workspace.Meeting?.Title ?? "transcript");
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SuggestedFileName = title + (srt ? ".srt" : ".txt")
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            picker.FileTypeChoices.Add(srt ? "Субтитры SubRip" : "Текстовая стенограмма", new List<string> { srt ? ".srt" : ".txt" });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+
+            var content = srt ? BuildSrt(_workspace.TranscriptSegments) : BuildText(_workspace.Meeting?.Title, _workspace.TranscriptSegments);
+            await FileIO.WriteTextAsync(file, content, Windows.Storage.Streams.UnicodeEncoding.Utf8);
+            ErrorInfoBar.IsOpen = false;
+        }
+        catch (Exception ex)
+        {
+            ShowError(UiErrorFormatter.Format(ex, "Не удалось сохранить стенограмму."));
+        }
+    }
+
+    private static string BuildText(string? title, IEnumerable<DesktopTranscriptSegment> segments)
+    {
+        var builder = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(title)) builder.AppendLine(title.Trim()).AppendLine();
+        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
+            builder.Append('[').Append(segment.TimeLabel).Append("] ").Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
+        }
+        return builder.ToString();
+    }
+
+    private static string BuildSrt(IEnumerable<DesktopTranscriptSegment> segments)
+    {
+        var builder = new StringBuilder();
+        var index = 1;
+        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
+            builder.AppendLine(index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            builder.Append(FormatSrtTime(segment.StartMs)).Append(" --> ").AppendLine(FormatSrtTime(segment.EndMs));
+            builder.Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
+            builder.AppendLine();
+            index++;
+        }
+        return builder.ToString();
+    }
+
+    private static string FormatSrtTime(long milliseconds)
+    {
+        var time = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+        return $"{(int)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00},{time.Milliseconds:000}";
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sanitized = new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(sanitized) ? "transcript" : sanitized;
     }
 
     private void ShowError(string message)

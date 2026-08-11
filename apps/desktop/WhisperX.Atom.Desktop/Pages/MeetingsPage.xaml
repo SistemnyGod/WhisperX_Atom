@@ -135,36 +135,58 @@
                                 </TabViewItem>
 
                                 <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
-                                    <Grid Padding="20" ColumnDefinitions="*,220" ColumnSpacing="16">
-                                        <Grid RowDefinitions="Auto,*" RowSpacing="10">
-                                            <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
-                                            <ListView x:Name="TranscriptList" Grid.Row="1" ItemsSource="{Binding TranscriptSegments}" SelectionMode="Single" SelectionChanged="TranscriptList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                                                <ListView.ItemTemplate>
-                                                    <DataTemplate>
-                                                        <Grid Padding="8,10" ColumnDefinitions="72,*" ColumnSpacing="10">
-                                                                    <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                                            <StackPanel Grid.Column="1" Spacing="3">
-                                                                        <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                                                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                                                            </StackPanel>
-                                                        </Grid>
-                                                    </DataTemplate>
-                                                </ListView.ItemTemplate>
-                                            </ListView>
-                                        </Grid>
-                                        <Border Grid.Column="1" Background="{StaticResource SurfaceBlueBrush}" Padding="14" CornerRadius="10">
-                                            <StackPanel Spacing="8">
-                                                <TextBlock Text="Спикеры" Style="{StaticResource SectionTitleStyle}" />
-                                                <ListView ItemsSource="{Binding Speakers}" SelectionMode="None" BorderThickness="0" MaxHeight="260">
-                                                    <ListView.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <TextBlock Text="{Binding DisplayName}" Padding="0,5" />
-                                                        </DataTemplate>
-                                                    </ListView.ItemTemplate>
-                                                </ListView>
-                                                <TextBlock x:Name="SpeakersEmptyText" Text="Спикеры пока не определены." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                    <Grid Padding="20" RowDefinitions="Auto,*" RowSpacing="12">
+                                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Text="Стенограмма встречи" Style="{StaticResource SectionTitleStyle}" />
+                                                <TextBlock x:Name="TranscriptMetaText" Text="Стенограмма ещё не готова" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                <TextBlock x:Name="TranscriptQualityText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                <TextBlock x:Name="TranscriptWarningText" Foreground="{StaticResource WarningBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                             </StackPanel>
-                                        </Border>
+                                            <Button Grid.Column="1" Content="Скачать TXT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptTextButton_Click" />
+                                            <Button Grid.Column="2" Content="Скачать SRT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptSrtButton_Click" />
+                                        </Grid>
+                                        <Grid Grid.Row="1" ColumnDefinitions="*,260" ColumnSpacing="16">
+                                            <Grid RowDefinitions="Auto,*" RowSpacing="10">
+                                                <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
+                                                <Grid Grid.Row="1">
+                                                    <ListView x:Name="TranscriptList" ItemsSource="{Binding TranscriptSegments}" SelectionMode="Single" SelectionChanged="TranscriptList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                        <ListView.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="10,12">
+                                                                    <Grid ColumnDefinitions="82,*" ColumnSpacing="12">
+                                                                        <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                                        <StackPanel Grid.Column="1" Spacing="4">
+                                                                            <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                                        </StackPanel>
+                                                                    </Grid>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ListView.ItemTemplate>
+                                                    </ListView>
+                                                    <StackPanel x:Name="TranscriptEmptyState" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" Padding="20">
+                                                        <SymbolIcon Symbol="Document" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock x:Name="TranscriptEmptyTitle" Text="Сегментов нет" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                                                        <TextBlock x:Name="TranscriptEmptyDescription" Text="После завершения обработки здесь появится текст стенограммы." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Grid>
+                                            <Border Grid.Column="1" Background="{StaticResource SurfaceBlueBrush}" Padding="14" CornerRadius="10">
+                                                <StackPanel Spacing="8">
+                                                    <TextBlock Text="Спикеры" Style="{StaticResource SectionTitleStyle}" />
+                                                    <ListView ItemsSource="{Binding Speakers}" SelectionMode="None" BorderThickness="0" MaxHeight="360">
+                                                        <ListView.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding DisplayName}" Padding="0,5" />
+                                                            </DataTemplate>
+                                                        </ListView.ItemTemplate>
+                                                    </ListView>
+                                                    <TextBlock x:Name="SpeakersEmptyText" Text="Спикеры пока не определены." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="Нажмите на сегмент, чтобы перейти к его началу в preview, если он доступен." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
                                     </Grid>
                                 </TabViewItem>
 
