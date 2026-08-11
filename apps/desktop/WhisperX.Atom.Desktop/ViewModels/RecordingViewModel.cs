@@ -511,7 +511,6 @@ public sealed class RecordingViewModel : ObservableObject
                 if (!response.Ok || response.SessionStatus is null) continue;
                 var session = response.SessionStatus;
                 ApplySessionStatus(session);
-                if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)) return;
                 if (session.MeetingId is Guid meetingId)
                 {
                     MeetingId = meetingId;
@@ -561,7 +560,8 @@ public sealed class RecordingViewModel : ObservableObject
         ArchivePath = session.ArchivePath;
         _sessionErrorCode = session.ErrorCode;
         _sessionRetryable = session.Retryable;
-        if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)
+            && !HasServerAcceptedRecording(session))
         {
             State = RecordingState.Error;
             ErrorMessage = MapRecordingError(session.ErrorCode ?? session.Error);
@@ -609,6 +609,10 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(AgentStatus));
     }
+
+    private static bool HasServerAcceptedRecording(RecordingSessionStatus session)
+        => session.ProcessingJobId is Guid
+            || session.DeliveryState is "WAITING_SERVER_ASSEMBLY" or "WAITING_SERVER" or "CONFIRMED" or "COMPLETED";
 
     private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
     {
@@ -737,6 +741,8 @@ public sealed class RecordingViewModel : ObservableObject
     private static string MapProcessingError(string value)
     {
         var code = value.ToUpperInvariant();
+        if (code == "TRANSCRIPT_EMPTY")
+            return "WhisperX did not detect speech. Check the selected microphone and its input level, then record again.";
         return code switch
         {
             "UPLOAD_CONNECTION_LOST" => "Соединение с сервером загрузки потеряно. Загрузка продолжится с последнего подтверждённого блока.",

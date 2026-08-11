@@ -1,3 +1,4 @@
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -12,6 +13,7 @@ namespace WhisperX_Atom_Desktop;
 public sealed partial class MainWindow : Window
 {
     private readonly FrontendServices _services;
+    private readonly DispatcherQueue _uiDispatcherQueue = DispatcherQueue.GetForCurrentThread();
     private readonly CancellationTokenSource _statusCts = new();
     private readonly SemaphoreSlim _agentRecoveryGate = new(1, 1);
     private Task? _statusTask;
@@ -21,10 +23,20 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
-        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
-        AppWindow.SetIcon("Assets/AppIcon.ico");
+        try
+        {
+            ExtendsContentIntoTitleBar = true;
+            SetTitleBar(AppTitleBar);
+            AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        }
+        catch
+        {
+            // Custom title-bar APIs are optional on older Windows 10 builds.
+            // The standard title bar remains usable when they are unavailable.
+        }
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        if (File.Exists(iconPath))
+            AppWindow.SetIcon(iconPath);
 
         var settingsStore = new DesktopSettingsStore();
         var settings = settingsStore.Load();
@@ -50,8 +62,13 @@ public sealed partial class MainWindow : Window
             settingsStore);
 
         Closed += MainWindow_Closed;
-        _statusTask = PollSystemStatusAsync(_statusCts.Token);
-        NavigateTo("home");
+        Closed += (_, _) => App.WriteStartupLog("MAIN_WINDOW_CLOSED", null);
+    }
+
+    public void StartBackgroundPolling()
+    {
+        if (_statusTask is null || _statusTask.IsCompleted)
+            _statusTask = PollSystemStatusAsync(_statusCts.Token);
     }
 
     public void NavigateTo(string route, object? payload = null)
@@ -147,7 +164,7 @@ public sealed partial class MainWindow : Window
         var recorderAvailable = (await recorderTask).Ok;
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
-            await RecoverAgentIfNeededAsync(cancellationToken);
+            QueueAgentRecovery(cancellationToken);
         SetSystemStatus(
             backendAvailable && !authenticated ? "Требуется вход" :
             backendAvailable && recorderAvailable ? "Система готова" :
@@ -157,6 +174,15 @@ public sealed partial class MainWindow : Window
             backendAvailable && recorderAvailable ? "SuccessBrush" :
             backendAvailable || recorderAvailable ? "WarningBrush" :
             "DangerBrush");
+    }
+
+    private void QueueAgentRecovery(CancellationToken cancellationToken)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await RecoverAgentIfNeededAsync(cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        }, CancellationToken.None);
     }
 
     private async Task RecoverAgentIfNeededAsync(CancellationToken cancellationToken)
@@ -202,6 +228,12 @@ public sealed partial class MainWindow : Window
 
     private void SetSystemStatus(string text, string brushKey)
     {
+        if (!_uiDispatcherQueue.HasThreadAccess)
+        {
+            _uiDispatcherQueue.TryEnqueue(() => SetSystemStatus(text, brushKey));
+            return;
+        }
+
         SystemStatusText.Text = text;
         if (Application.Current.Resources[brushKey] is Brush brush)
         {

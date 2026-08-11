@@ -19,7 +19,21 @@ public sealed class RecordingDeliveryCoordinator(
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
         string? archivePath = null;
-        try
+        string? localArchiveErrorCode = null;
+        string? localArchiveErrorDetail = null;
+        var previous = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
+        var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+        if (previous?.LocalFinalizeState == "LOCAL_FAILED" && serverSessionId is Guid)
+        {
+            // A server-bound session is recovered to observe the authoritative
+            // media/job state. Do not rebuild a known-failing best-effort local
+            // archive on every recovery pass.
+            archivePath = previous.ArchivePath;
+            localArchiveErrorCode = previous.ErrorCode;
+            localArchiveErrorDetail = previous.ErrorDetail;
+            logger.LogInformation("Skipping previously failed local archive while reconciling server delivery. Session={SessionId}", localSessionId);
+        }
+        else try
         {
             archivePath = await archive.CreateAsync(localSessionId, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
@@ -33,15 +47,25 @@ public sealed class RecordingDeliveryCoordinator(
         }
         catch (Exception ex)
         {
-            return await PersistFailureAsync(localSessionId,
-                new FinalizationResult(false, "LOCAL_ARCHIVE", ClassifyLocalArchiveError(ex), false, archivePath),
-                ex.Message,
-                cancellationToken);
+            // The transport spool is authoritative for server processing.
+            // A local master/preview archive is useful, but its creation must
+            // not prevent already-confirmed audio chunks from being finalized
+            // and transcribed by the server.
+            localArchiveErrorCode = ClassifyLocalArchiveError(ex);
+            localArchiveErrorDetail = ex.Message;
+            await spool.SetFinalizationStateAsync(localSessionId,
+                localFinalizeState: "LOCAL_FAILED",
+                deliveryState: "NOT_STARTED",
+                errorCode: localArchiveErrorCode,
+                errorDetail: localArchiveErrorDetail,
+                cancellationToken: cancellationToken);
+            logger.LogWarning(ex, "Local archive failed; continuing server delivery. Session={SessionId}", localSessionId);
         }
 
         if (!api.IsConfigured)
         {
-            await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_API", "API is not configured", cancellationToken);
+            if (archivePath is not null)
+                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_API", "API is not configured", cancellationToken);
             return await PersistFailureAsync(localSessionId,
                 new FinalizationResult(false, "DELIVERY", "SERVER_UNAVAILABLE", true, archivePath),
                 "API is not configured",
@@ -50,7 +74,6 @@ public sealed class RecordingDeliveryCoordinator(
 
         try
         {
-            var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
             if (serverSessionId is not Guid server)
             {
                 await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "BINDING", cancellationToken: cancellationToken);
@@ -70,11 +93,14 @@ public sealed class RecordingDeliveryCoordinator(
                     cancellationToken);
             }
 
-            await archive.SetUploadStateAsync(localSessionId, "UPLOADING", null, cancellationToken);
+            if (archivePath is not null)
+                await archive.SetUploadStateAsync(localSessionId, "UPLOADING", null, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
-                localFinalizeState: "LOCAL_READY",
+                localFinalizeState: archivePath is null ? "LOCAL_FAILED" : "LOCAL_READY",
                 deliveryState: "UPLOADING",
                 archivePath: archivePath,
+                errorCode: localArchiveErrorCode,
+                errorDetail: localArchiveErrorDetail,
                 cancellationToken: cancellationToken);
             await api.UploadPendingChunksAsync(spool, cancellationToken);
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
@@ -83,20 +109,22 @@ public sealed class RecordingDeliveryCoordinator(
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (!finalized.Accepted)
             {
-                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", finalized.ErrorCode, cancellationToken);
+                if (archivePath is not null)
+                    await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", finalized.ErrorCode, cancellationToken);
                 return await PersistFailureAsync(localSessionId,
                     new FinalizationResult(false, "SERVER_FINALIZE", finalized.ErrorCode ?? "SERVER_FINALIZE_REJECTED", finalized.Retryable, archivePath, server, finalized.MissingChunks, finalized.ErrorCode, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId),
                     finalized.ErrorCode ?? "Server did not confirm the session",
                     cancellationToken);
             }
 
-            await archive.SetUploadStateAsync(localSessionId, "WAITING_SERVER_ASSEMBLY", null, cancellationToken);
+            if (archivePath is not null)
+                await archive.SetUploadStateAsync(localSessionId, "WAITING_SERVER_ASSEMBLY", null, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
-                localFinalizeState: "LOCAL_READY",
+                localFinalizeState: archivePath is null ? "LOCAL_FAILED" : "LOCAL_READY",
                 deliveryState: "WAITING_SERVER_ASSEMBLY",
                 archivePath: archivePath,
-                errorCode: null,
-                errorDetail: null,
+                errorCode: localArchiveErrorCode,
+                errorDetail: localArchiveErrorDetail,
                 retryCount: 0,
                 nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(10),
                 cancellationToken: cancellationToken);
@@ -114,13 +142,14 @@ public sealed class RecordingDeliveryCoordinator(
                 return new FinalizationResult(true, "SERVER_FINALIZE", null, true, archivePath, server, null, null, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId);
 
             await spool.MarkMediaValidatedAsync(localSessionId, cancellationToken);
-            await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
+            if (archivePath is not null)
+                await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
-                localFinalizeState: "LOCAL_READY",
+                localFinalizeState: archivePath is null ? "LOCAL_FAILED" : "LOCAL_READY",
                 deliveryState: "CONFIRMED",
                 archivePath: archivePath,
-                errorCode: null,
-                errorDetail: null,
+                errorCode: localArchiveErrorCode,
+                errorDetail: localArchiveErrorDetail,
                 retryCount: 0,
                 nextRetryAtUtc: null,
                 cancellationToken: cancellationToken);
@@ -144,7 +173,7 @@ public sealed class RecordingDeliveryCoordinator(
         var retryCount = result.Retryable ? (info?.RetryCount ?? 0) + 1 : info?.RetryCount ?? 0;
         var nextRetry = result.Retryable ? DateTimeOffset.UtcNow.Add(GetRetryDelay(retryCount)) : (DateTimeOffset?)null;
         await spool.SetFinalizationStateAsync(sessionId,
-            localFinalizeState: result.Stage == "LOCAL_ARCHIVE" ? "LOCAL_FAILED" : "LOCAL_READY",
+            localFinalizeState: result.ArchivePath is null ? "LOCAL_FAILED" : "LOCAL_READY",
             deliveryState: result.Stage == "LOCAL_ARCHIVE" ? "NOT_STARTED" : "DELIVERY_FAILED",
             archivePath: result.ArchivePath,
             errorCode: result.ErrorCode,

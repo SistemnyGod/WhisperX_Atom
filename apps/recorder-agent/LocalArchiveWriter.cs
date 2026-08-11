@@ -86,8 +86,24 @@ public sealed class LocalArchiveWriter(
         var directory = Path.Combine(storage.ArchiveRoot, "Meetings", folderName);
         var sourceDirectory = Path.Combine(directory, "source");
         var exportDirectory = Path.Combine(directory, "export");
-        Directory.CreateDirectory(sourceDirectory);
-        Directory.CreateDirectory(exportDirectory);
+        try
+        {
+            Directory.CreateDirectory(sourceDirectory);
+            Directory.CreateDirectory(exportDirectory);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or DirectoryNotFoundException or IOException)
+        {
+            // Public Documents can be protected by Windows security controls.
+            // Preserve a durable local archive under ProgramData instead of
+            // failing the whole recording finalization.
+            var fallbackRoot = FallbackArchiveRoot();
+            logger.LogWarning(exception, "Configured archive root is unavailable; using fallback archive root. Session={SessionId}, ArchiveRoot={ArchiveRoot}", sessionId, fallbackRoot);
+            directory = Path.Combine(fallbackRoot, "Meetings", folderName);
+            sourceDirectory = Path.Combine(directory, "source");
+            exportDirectory = Path.Combine(directory, "export");
+            Directory.CreateDirectory(sourceDirectory);
+            Directory.CreateDirectory(exportDirectory);
+        }
 
         var trackFiles = new List<ArchiveFileEntry>();
         foreach (var group in chunks.GroupBy(item => new { item.TrackId, item.TrackType, item.SampleRate, item.Channels }).OrderBy(item => item.Key.TrackType))
@@ -139,25 +155,36 @@ public sealed class LocalArchiveWriter(
         if (_writes.TryGetValue(sessionId, out var pending) && pending.IsValueCreated && pending.Value.IsCompletedSuccessfully)
             return await pending.Value;
 
-        var meetingsRoot = Path.Combine(storage.ArchiveRoot, "Meetings");
-        if (!Directory.Exists(meetingsRoot)) return null;
-        foreach (var directory in Directory.EnumerateDirectories(meetingsRoot))
+        var meetingsRoots = new[]
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var manifestPath = Path.Combine(directory, "manifest.json");
-            if (!File.Exists(manifestPath)) continue;
-            try
+            Path.Combine(storage.ArchiveRoot, "Meetings"),
+            Path.Combine(FallbackArchiveRoot(), "Meetings")
+        }.Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var meetingsRoot in meetingsRoots)
+        {
+            if (!Directory.Exists(meetingsRoot)) continue;
+            foreach (var directory in Directory.EnumerateDirectories(meetingsRoot))
             {
-                var manifest = JsonSerializer.Deserialize<ArchiveManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), _json);
-                if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
-                    && manifest is not null
-                    && IsUsableManifest(directory, manifest))
-                    return directory;
+                cancellationToken.ThrowIfCancellationRequested();
+                var manifestPath = Path.Combine(directory, "manifest.json");
+                if (!File.Exists(manifestPath)) continue;
+                try
+                {
+                    var manifest = JsonSerializer.Deserialize<ArchiveManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), _json);
+                    if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
+                        && manifest is not null
+                        && IsUsableManifest(directory, manifest))
+                        return directory;
+                }
+                catch (JsonException) { logger.LogWarning("Ignoring malformed archive manifest {ManifestPath}", manifestPath); }
             }
-            catch (JsonException) { logger.LogWarning("Ignoring malformed archive manifest {ManifestPath}", manifestPath); }
         }
         return null;
     }
+
+    private static string FallbackArchiveRoot() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "WhisperXAtom", "Archive");
 
     private static bool IsUsableManifest(string directory, ArchiveManifest manifest)
     {

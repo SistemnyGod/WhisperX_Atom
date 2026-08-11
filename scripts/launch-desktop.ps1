@@ -27,26 +27,81 @@ $publishedExe = Join-Path $publishedDesktop "WhisperX.Atom.Desktop.exe"
 function Get-RunningDesktopProcess {
     param([string]$ProcessName)
 
-    $processes = @()
+    # Use the local process table so the launcher can inspect MainWindowHandle.
+    # A process can remain alive after WinUI failed to create a visible window;
+    # treating that process as a successful launch makes subsequent .bat runs
+    # silently do nothing.
+    return @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ProcessName)) -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $path = $null
+            try { $path = $_.Path } catch { }
+            [pscustomobject]@{
+                ProcessId = $_.Id
+                ExecutablePath = $path
+                CommandLine = $null
+                MainWindowHandle = $_.MainWindowHandle
+                Responding = $_.Responding
+            }
+        })
+}
+
+function Test-DesktopWindowReady {
+    param([object]$Process)
+
     try {
-        $processes = @(Get-CimInstance Win32_Process -Filter "Name='$ProcessName'" -ErrorAction Stop |
-            Select-Object ProcessId, ExecutablePath, CommandLine)
+        return ([IntPtr]$Process.MainWindowHandle -ne [IntPtr]::Zero -and $Process.Responding)
     }
     catch {
-        # A non-elevated shell may not be allowed to query Win32_Process.
-        # Fall back to the local process table; Path can be unavailable there too.
-        $processes = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ProcessName)) -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                $path = $null
-                try { $path = $_.Path } catch { }
-                [pscustomobject]@{
-                    ProcessId = $_.Id
-                    ExecutablePath = $path
-                    CommandLine = $null
-                }
-            })
+        return $false
     }
-    return $processes
+}
+
+function Stop-StaleDesktopProcess {
+    param([object]$Process)
+
+    Write-Warning ("DESKTOP_STALE_PROCESS: PID {0} has no visible window; restarting it." -f $Process.ProcessId)
+    Stop-Process -Id ([int]$Process.ProcessId) -Force -ErrorAction Stop
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $stillRunning = Get-Process -Id ([int]$Process.ProcessId) -ErrorAction SilentlyContinue
+    } while ($null -ne $stillRunning -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if ($null -ne $stillRunning) {
+        throw "DESKTOP_STALE_PROCESS_STOP_FAILED: PID $($Process.ProcessId) did not stop."
+    }
+}
+
+function Wait-ForDesktopWindow {
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutSeconds = 30,
+        [int]$StableSeconds = 5
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    $readySince = $null
+    do {
+        $candidate = Get-RunningDesktopProcess $desktopName |
+            Where-Object { $_.ProcessId -eq $ProcessId } |
+            Select-Object -First 1
+        if ($null -eq $candidate) {
+            throw "DESKTOP_EXITED_BEFORE_WINDOW: PID $ProcessId exited before creating a window."
+        }
+        if (Test-DesktopWindowReady $candidate) {
+            if ($null -eq $readySince) {
+                $readySince = [DateTimeOffset]::UtcNow
+            }
+            if ([DateTimeOffset]::UtcNow -ge $readySince.AddSeconds([Math]::Max(1, $StableSeconds))) {
+                return $candidate
+            }
+        }
+        else {
+            $readySince = $null
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    throw "DESKTOP_WINDOW_NOT_READY: PID $ProcessId is running but has no visible responsive window."
 }
 
 $desktopName = Split-Path -Leaf $publishedExe
@@ -63,14 +118,28 @@ if ($runningBeforePublish.Count -gt 0) {
         [IO.Path]::GetFullPath($publishedExe)
     }
     if ($knownPaths -contains $expectedDesktopPath) {
-        Write-Host "WhisperX Atom Desktop is already running from the current published build."
-        return
+        $matching = @($runningBeforePublish | Where-Object {
+            $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $expectedDesktopPath
+        })
+        $ready = @($matching | Where-Object { Test-DesktopWindowReady $_ })
+        if ($ready.Count -gt 0) {
+            Write-Host "WhisperX Atom Desktop is already running from the current published build."
+            return
+        }
+        foreach ($stale in $matching) { Stop-StaleDesktopProcess $stale }
     }
-    if ($knownPaths.Count -gt 0) {
+    elseif ($knownPaths.Count -gt 0) {
         throw ("DESKTOP_ALREADY_RUNNING_DIFFERENT_BUILD: {0}. Close the old Desktop instance before rebuilding." -f ($knownPaths -join "; "))
     }
-    Write-Warning "DESKTOP_PROCESS_PATH_UNAVAILABLE: an existing Desktop process was found, but its path could not be inspected. Rebuilding is skipped."
-    return
+    else {
+        $unknownPath = @($runningBeforePublish | Where-Object { [string]::IsNullOrWhiteSpace($_.ExecutablePath) })
+        $readyUnknown = @($unknownPath | Where-Object { Test-DesktopWindowReady $_ })
+        if ($readyUnknown.Count -gt 0) {
+            Write-Warning "DESKTOP_PROCESS_PATH_UNAVAILABLE: a visible Desktop process is already running; launch was not duplicated."
+            return
+        }
+        foreach ($stale in $unknownPath) { Stop-StaleDesktopProcess $stale }
+    }
 }
 
 $candidates = [System.Collections.Generic.List[string]]::new()
@@ -147,9 +216,14 @@ $workingDirectory = Split-Path -Parent $desktopExe
 $existingDesktop = @(Get-RunningDesktopProcess -ProcessName $desktopName |
     Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($desktopExe)) })
 if ($existingDesktop.Count -gt 0) {
-    Write-Host "WhisperX Atom Desktop is already running."
-    return
+    $ready = @($existingDesktop | Where-Object { Test-DesktopWindowReady $_ })
+    if ($ready.Count -gt 0) {
+        Write-Host "WhisperX Atom Desktop is already running."
+        return
+    }
+    foreach ($stale in $existingDesktop) { Stop-StaleDesktopProcess $stale }
 }
-$process = Start-Process -FilePath $desktopExe -WorkingDirectory $workingDirectory -PassThru
+$process = Start-Process -FilePath $desktopExe -WorkingDirectory $workingDirectory -WindowStyle Normal -PassThru
+Wait-ForDesktopWindow -ProcessId $process.Id | Out-Null
 Write-Host "WhisperX Atom Desktop started. PID=$($process.Id)"
 Write-Host "Executable: $desktopExe"
