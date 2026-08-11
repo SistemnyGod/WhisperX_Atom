@@ -7,22 +7,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$runtimeModule = Join-Path $PSScriptRoot "WhisperX.Runtime.ps1"
+. $runtimeModule
+Set-WhisperXRuntimeEnvironment -RepoPath $repo
 $env:AUTO_SUMMARY_ENABLED = "false"
 $env:DIARIZATION_MODE = "preferred"
-$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $runRoot = Join-Path $repo "artifacts\transcription-mvp\$(Get-Date -Format yyyyMMdd-HHmmss)"
 New-Item -ItemType Directory -Force -Path (Join-Path $runRoot "logs") | Out-Null
 if (-not $InboxPath -and -not (Test-Path -LiteralPath $AudioPath)) {
     throw "Audio file was not found: $AudioPath"
-}
-
-$envFile = Join-Path $repo ".env"
-if (Test-Path -LiteralPath $envFile) {
-    foreach ($line in Get-Content -LiteralPath $envFile) {
-        if ($line -match '^\s*#' -or $line -notmatch '=') { continue }
-        $name, $value = $line -split '=', 2
-        [Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), "Process")
-    }
 }
 
 & (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") -SkipRegistry |

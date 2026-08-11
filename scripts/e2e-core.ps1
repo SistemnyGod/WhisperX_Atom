@@ -1,12 +1,12 @@
 [CmdletBinding()]
 param(
-  [string]$BaseUrl = "http://localhost:8080",
-  [string]$TusUrl = $(if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "http://localhost:1080" }),
-  [string]$Username = $(if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" }),
-  [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "" }),
+  [string]$BaseUrl,
+  [string]$TusUrl,
+  [string]$Username,
+  [string]$Password,
   [string]$AudioPath,
   [string]$InboxPath,
-  [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }),
+  [string]$InboxRoot,
   [int]$TimeoutSeconds = 180,
   [string]$ResultPath,
   [switch]$StartCore,
@@ -17,7 +17,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+Set-WhisperXRuntimeEnvironment -RepoPath $repo
+if ([string]::IsNullOrWhiteSpace($BaseUrl)) { $BaseUrl = if ($env:WHISPERX_API_URL) { $env:WHISPERX_API_URL } else { "http://localhost:8080" } }
+if ([string]::IsNullOrWhiteSpace($TusUrl)) { $TusUrl = if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "http://localhost:1080" } }
+if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" } }
+if ([string]::IsNullOrWhiteSpace($Password)) { $Password = $env:BOOTSTRAP_ADMIN_PASSWORD }
+if ([string]::IsNullOrWhiteSpace($InboxRoot)) { $InboxRoot = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" } }
 if ([string]::IsNullOrWhiteSpace($Password)) { throw "Set BOOTSTRAP_ADMIN_PASSWORD before running e2e-core.ps1" }
+Add-Type -AssemblyName System.Net.Http
 $BaseUrl = $BaseUrl.TrimEnd("/")
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $runId = [guid]::NewGuid().ToString("N")
@@ -63,6 +72,91 @@ function Wait-Job([string]$MeetingId) {
     Start-Sleep -Seconds 2
   } while ((Get-Date) -lt $deadline)
   throw "Job did not finish within $TimeoutSeconds seconds"
+}
+
+function Upload-TusResumable([string]$Location, [string]$FilePath, [int64]$Length) {
+  $chunkSize = 16MB
+  $maxRetries = 5
+  $offset = 0L
+  $client = [System.Net.Http.HttpClient]::new()
+  try {
+    while ($offset -lt $Length) {
+      $head = Invoke-WebRequest -Uri $Location -Method Head -Headers @{ "Tus-Resumable" = "1.0.0" } -WebSession $session
+      $headerOffset = [int64]$head.Headers["Upload-Offset"]
+      if ($headerOffset -lt 0 -or $headerOffset -gt $Length) { throw "TUS_INVALID_OFFSET: $headerOffset" }
+      $offset = $headerOffset
+      if ($offset -ge $Length) { break }
+
+      $remaining = $Length - $offset
+      $count = [int][Math]::Min($chunkSize, $remaining)
+      $buffer = New-Object byte[] $count
+      $stream = [System.IO.File]::OpenRead($FilePath)
+      try {
+        $stream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $read = 0
+        while ($read -lt $count) {
+          $n = $stream.Read($buffer, $read, $count - $read)
+          if ($n -le 0) { throw "TUS_FILE_READ_FAILED: offset=$offset" }
+          $read += $n
+        }
+      }
+      finally { $stream.Dispose() }
+
+      $attempt = 0
+      $sent = $false
+      while (-not $sent) {
+        $request = $null
+        $content = $null
+        $response = $null
+        try {
+          $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new("PATCH"), [Uri]$Location)
+          $request.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0") | Out-Null
+          $request.Headers.TryAddWithoutValidation("Upload-Offset", [string]$offset) | Out-Null
+          $content = [System.Net.Http.ByteArrayContent]::new($buffer)
+          $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("application/offset+octet-stream")
+          $request.Content = $content
+          $response = $client.SendAsync($request).GetAwaiter().GetResult()
+          if (-not $response.IsSuccessStatusCode) { throw "HTTP $([int]$response.StatusCode)" }
+          $responseOffset = $offset + $count
+          try {
+            $responseHeaderOffset = $response.Headers.GetValues("Upload-Offset") | Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace([string]$responseHeaderOffset)) {
+              $responseOffset = [int64]$responseHeaderOffset
+            }
+          }
+          catch { }
+          if ($responseOffset -le $offset -or $responseOffset -gt $Length) {
+            throw "TUS_INVALID_RESPONSE_OFFSET: $responseOffset"
+          }
+          $sent = $true
+          $offset = $responseOffset
+          Write-Host ("tus chunk uploaded: {0}/{1} MiB" -f [Math]::Floor($offset / 1MB), [Math]::Ceiling($Length / 1MB))
+        }
+        catch {
+          try {
+            $headAfterFailure = Invoke-WebRequest -Uri $Location -Method Head -Headers @{ "Tus-Resumable" = "1.0.0" } -WebSession $session
+            $serverOffsetAfterFailure = [int64]$headAfterFailure.Headers["Upload-Offset"]
+            if ($serverOffsetAfterFailure -gt $offset -and $serverOffsetAfterFailure -le $Length) {
+              $offset = $serverOffsetAfterFailure
+              $sent = $true
+              Write-Host ("tus chunk already accepted: {0}/{1} MiB" -f [Math]::Floor($offset / 1MB), [Math]::Ceiling($Length / 1MB))
+              continue
+            }
+          }
+          catch { }
+          $attempt++
+          if ($attempt -gt $maxRetries) { throw "TUS_UPLOAD_FAILED: offset=$offset; $($_.Exception.Message)" }
+          Start-Sleep -Seconds ([Math]::Min(30, [Math]::Pow(2, $attempt)))
+        }
+        finally {
+          if ($request) { $request.Dispose() }
+          if ($content) { $content.Dispose() }
+          if ($response) { $response.Dispose() }
+        }
+      }
+    }
+  }
+  finally { $client.Dispose() }
 }
 
 function Restart-ProcessingWorkers {
@@ -118,9 +212,7 @@ if ($AudioPath) {
   $location = $created.Headers["Location"]
   if ([string]::IsNullOrWhiteSpace($location)) { throw "tusd did not return Location" }
   if ($location -notmatch '^https?://') { $location = "$TusUrl$location" }
-  $curlArgs = @("--fail-with-body", "--silent", "--show-error", "--request", "PATCH", $location, "--header", "Tus-Resumable: 1.0.0", "--header", "Upload-Offset: 0", "--header", "Content-Type: application/offset+octet-stream", "--data-binary", "@$($file.FullName)")
-  & curl.exe @curlArgs | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "tus PATCH failed for $($file.Name)" }
+  Upload-TusResumable -Location $location -FilePath $file.FullName -Length $file.Length
   Write-Host "tus upload completed: $($file.Name)"
   Restart-ProcessingWorkers
   $job = Wait-Job $meeting.id
@@ -160,14 +252,21 @@ if ($meeting -and $WaitForGpu) {
 if ($meeting -and $ResultPath) {
   $media = @(Invoke-Api GET "/api/meetings/$($meeting.id)/media")
   $jobs = @(Invoke-Api GET "/api/meetings/$($meeting.id)/jobs")
-  $result = [ordered]@{
+  $traceJob = $jobs | Where-Object {
+    $_.PSObject.Properties.Name -contains "traceId" -and -not [string]::IsNullOrWhiteSpace([string]$_.traceId)
+  } | Select-Object -First 1
+    $result = [ordered]@{
     runId = $runId
     startedAtUtc = $runStartedAt.ToString("o")
     completedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     meetingId = [string]$meeting.id
     mediaAssetIds = @($media | ForEach-Object { [string]$_.id })
     jobIds = @($jobs | ForEach-Object { [string]$_.id })
+    transcriptId = if ($transcript) { [string]$transcript.id } else { $null }
+    traceId = if ($traceJob) { [string]$traceJob.traceId } else { $null }
     transcriptStatus = if ($transcript) { [string]$transcript.status } else { $null }
+    qualityScore = if ($transcript) { $transcript.qualityScore } else { $null }
+    qualityWarnings = if ($transcript) { @($transcript.qualityWarnings) } else { @() }
     transcriptSegmentCount = if ($transcript) { @($transcript.segments).Count } else { 0 }
   }
   $parent = Split-Path -Parent $ResultPath
