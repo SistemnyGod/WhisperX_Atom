@@ -58,9 +58,9 @@ public sealed partial class RecordingPage : Page
         _updatingSelections = true;
         try
         {
-            MicrophoneCombo.SelectedItem = ViewModel.Microphones.FirstOrDefault(x => string.Equals(x.Id, ViewModel.SelectedMicrophoneId ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            MicrophoneSelector.SelectedItem = ViewModel.Microphones.FirstOrDefault(x => string.Equals(x.Id, ViewModel.SelectedMicrophoneId ?? string.Empty, StringComparison.OrdinalIgnoreCase))
                 ?? ViewModel.Microphones.FirstOrDefault();
-            SystemAudioCombo.SelectedItem = ViewModel.SystemAudioDevices.FirstOrDefault(x => string.Equals(x.Id, ViewModel.SelectedSystemAudioId ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            SystemAudioSelector.SelectedItem = ViewModel.SystemAudioDevices.FirstOrDefault(x => string.Equals(x.Id, ViewModel.SelectedSystemAudioId ?? string.Empty, StringComparison.OrdinalIgnoreCase))
                 ?? ViewModel.SystemAudioDevices.FirstOrDefault();
         }
         finally { _updatingSelections = false; }
@@ -116,14 +116,14 @@ public sealed partial class RecordingPage : Page
 
     private async void MicrophoneCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingSelections || ViewModel is null || MicrophoneCombo.SelectedItem is not AudioDeviceOption option) return;
+        if (_updatingSelections || ViewModel is null || MicrophoneSelector.SelectedItem is not AudioDeviceOption option) return;
         await ViewModel.SetMicrophoneAsync(option.Id);
         UpdateError();
     }
 
     private async void SystemAudioCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingSelections || ViewModel is null || SystemAudioCombo.SelectedItem is not AudioDeviceOption option) return;
+        if (_updatingSelections || ViewModel is null || SystemAudioSelector.SelectedItem is not AudioDeviceOption option) return;
         await ViewModel.SetSystemAudioAsync(option.Id);
         UpdateError();
     }

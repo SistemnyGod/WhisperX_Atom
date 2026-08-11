@@ -82,7 +82,21 @@ public sealed class RecordingViewModel : ObservableObject
     public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
     public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
     public int ProcessingProgress { get => _processingProgress; private set => SetProperty(ref _processingProgress, value); }
-    public string ProcessingStatus { get => _processingStatus; private set => SetProperty(ref _processingStatus, value); }
+    public string ProcessingStatus
+    {
+        get => _processingStatus;
+        private set
+        {
+            if (!SetProperty(ref _processingStatus, value)) return;
+            OnPropertyChanged(nameof(ProcessingStageIndex));
+        }
+    }
+    public IReadOnlyList<string> ProcessingSteps { get; } = ["ASR", "Выравнивание", "Диаризация", "Стенограмма"];
+    public int ProcessingStageIndex => ProcessingStatus.Contains("стенограм", StringComparison.OrdinalIgnoreCase) ? 3
+        : ProcessingStatus.Contains("диариз", StringComparison.OrdinalIgnoreCase) ? 2
+        : ProcessingStatus.Contains("выравн", StringComparison.OrdinalIgnoreCase) ? 1
+        : ProcessingStatus.Contains("ASR", StringComparison.OrdinalIgnoreCase) ? 0
+        : -1;
     public string TranscriptStatus { get => _transcriptStatus; private set => SetProperty(ref _transcriptStatus, value); }
     public string ProcessingError { get => _processingError; private set => SetProperty(ref _processingError, value); }
     public bool HasTranscript => TranscriptSegments.Count > 0;

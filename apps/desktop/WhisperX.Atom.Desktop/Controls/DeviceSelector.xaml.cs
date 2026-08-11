@@ -51,4 +51,10 @@ public sealed partial class DeviceSelector : UserControl
 
     public static readonly DependencyProperty HelperTextProperty = DependencyProperty.Register(
         nameof(HelperText), typeof(string), typeof(DeviceSelector), new PropertyMetadata(string.Empty));
+
+    public event SelectionChangedEventHandler SelectionChanged
+    {
+        add => Selector.SelectionChanged += value;
+        remove => Selector.SelectionChanged -= value;
+    }
 }
