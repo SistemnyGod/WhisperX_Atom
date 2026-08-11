@@ -12,7 +12,7 @@ public sealed class BackendService : IBackendService
     }
 
     public string ApiUrl => _client.BaseAddress.ToString().TrimEnd('/');
-    public bool HasSession => !string.IsNullOrWhiteSpace(SessionCookie);
+    public bool HasSession => AuthState != DesktopAuthState.LoginRequired && !string.IsNullOrWhiteSpace(SessionCookie);
     public string? SessionCookie => _client.GetSessionCookie();
     public DesktopAuthState AuthState => _client.AuthState;
     public DateTimeOffset? SessionExpiresAtUtc => _client.SessionExpiresAtUtc;

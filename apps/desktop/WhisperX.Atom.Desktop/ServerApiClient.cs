@@ -110,8 +110,8 @@ public sealed class ServerApiClient : IDisposable
 
     public string? GetSessionCookie()
     {
-        var cookies = _cookies.GetCookies(BaseAddress).Cast<Cookie>().Select(cookie => $"{cookie.Name}={cookie.Value}");
-        return string.Join("; ", cookies);
+        var cookieHeader = _cookies.GetCookieHeader(BaseAddress);
+        return string.IsNullOrWhiteSpace(cookieHeader) ? null : cookieHeader;
     }
 
     public void RestoreSession(string? cookieHeader) => RestoreSession(cookieHeader, null);
@@ -119,18 +119,18 @@ public sealed class ServerApiClient : IDisposable
     public void RestoreSession(string? cookieHeader, DateTimeOffset? expiresAtUtc)
     {
         if (string.IsNullOrWhiteSpace(cookieHeader)) return;
-        foreach (var pair in cookieHeader.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        try
         {
-            var separator = pair.IndexOf('=');
-            if (separator <= 0) continue;
-            try { _cookies.Add(BaseAddress, new Cookie(pair[..separator].Trim(), pair[(separator + 1)..].Trim(), "/")); }
-            catch (CookieException) { }
-        }
-        if (!string.IsNullOrWhiteSpace(cookieHeader))
-        {
+            _cookies.SetCookies(BaseAddress, cookieHeader);
             _authState = DesktopAuthState.Unknown;
             SessionExpiresAtUtc = expiresAtUtc;
             Interlocked.Increment(ref _authVersion);
+        }
+        catch (CookieException)
+        {
+            ClearCookies();
+            _authState = DesktopAuthState.LoginRequired;
+            SessionExpiresAtUtc = null;
         }
     }
 
@@ -178,6 +178,7 @@ public sealed class ServerApiClient : IDisposable
 
     public async Task<bool> EnsureAuthenticatedAsync(CancellationToken cancellationToken = default)
     {
+        if (AuthState == DesktopAuthState.LoginRequired) return false;
         if (AuthState == DesktopAuthState.Authenticated && SessionExpiresAtUtc > DateTimeOffset.UtcNow.AddSeconds(30)) return true;
         var currentUser = await GetCurrentUserAsync(cancellationToken);
         return currentUser is not null;

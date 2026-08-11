@@ -143,12 +143,15 @@ public sealed partial class MainWindow : Window
 
         var backendAvailable = await backendTask;
         var recorderAvailable = (await recorderTask).Ok;
-        if (backendAvailable && recorderAvailable)
+        var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
+        if (authenticated && recorderAvailable)
             await RecoverAgentIfNeededAsync(cancellationToken);
         SetSystemStatus(
+            backendAvailable && !authenticated ? "Требуется вход" :
             backendAvailable && recorderAvailable ? "Система готова" :
             backendAvailable || recorderAvailable ? "Частично доступна" :
             "Сервисы недоступны",
+            backendAvailable && !authenticated ? "WarningBrush" :
             backendAvailable && recorderAvailable ? "SuccessBrush" :
             backendAvailable || recorderAvailable ? "WarningBrush" :
             "DangerBrush");

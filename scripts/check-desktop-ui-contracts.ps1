@@ -36,6 +36,13 @@ Assert-Contains $mapper "PARTIAL_READY" "partial transcript status"
 Assert-Contains $mapper "UiErrorFormatter" "localized error formatter"
 Assert-Contains $mapper "HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized }" "localized HTTP 401 formatter"
 
+$apiClient = Join-Path $desktop "ServerApiClient.cs"
+Assert-Contains $apiClient "GetCookieHeader(BaseAddress)" "lossless session cookie persistence"
+Assert-Contains $apiClient "SetCookies(BaseAddress, cookieHeader)" "lossless session cookie restoration"
+
+$launcher = Join-Path $PSScriptRoot "launch-desktop.ps1"
+Assert-Contains $launcher "Published Desktop is stale" "stale Desktop artifact detection"
+
 $activeCode = Get-ChildItem (Join-Path $desktop "Pages"), (Join-Path $desktop "ViewModels") -Recurse -Filter *.cs |
     Where-Object { $_.FullName -notmatch "\\Legacy\\" } |
     ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 }
