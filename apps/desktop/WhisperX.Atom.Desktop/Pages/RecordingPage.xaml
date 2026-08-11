@@ -117,6 +117,9 @@
                             <TextBlock Text="Локальный архив" Style="{StaticResource SectionTitleStyle}" />
                             <TextBlock Text="Постоянная копия записи не удаляется после отправки." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="{Binding LocalFinalizeStatusLabel}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding DeliveryStatusLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <Button Content="Открыть локальный архив" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanOpenLocalArchive}" Click="OpenArchiveButton_Click" />
                             <Button Content="Выбрать папку архива" Style="{StaticResource CardButtonStyle}" Click="SelectArchiveButton_Click" />
                         </StackPanel>
                     </Border>

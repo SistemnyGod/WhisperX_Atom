@@ -79,4 +79,18 @@ public sealed record RecordingSessionStatus(
     int ConfirmedChunkCount,
     int PendingChunkCount,
     string? Error,
-    Guid? ServerSessionId = null);
+    Guid? ServerSessionId = null,
+    string LocalFinalizeState = "PENDING",
+    string? ArchivePath = null,
+    string? ErrorCode = null,
+    bool Retryable = true,
+    DateTimeOffset? NextRetryAtUtc = null);
+
+public sealed record FinalizationResult(
+    bool Success,
+    string Stage,
+    string? ErrorCode = null,
+    bool Retryable = true,
+    string? ArchivePath = null,
+    Guid? ServerSessionId = null,
+    IReadOnlyList<int>? MissingChunks = null);

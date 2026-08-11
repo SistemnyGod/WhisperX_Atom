@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -138,6 +139,13 @@ public sealed partial class RecordingPage : Page
         if (folder is null) return;
         await ViewModel.SetArchiveRootAsync(folder.Path);
         UpdateError();
+    }
+
+    private void OpenArchiveButton_Click(object sender, RoutedEventArgs e)
+    {
+        var path = ViewModel?.ArchivePath;
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
     private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)

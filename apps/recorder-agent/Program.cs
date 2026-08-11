@@ -206,34 +206,73 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
     private async Task<bool> UploadAndFinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(localSessionId)) return false;
-        await archive.CreateAsync(localSessionId, cancellationToken);
+        string? archivePath = null;
+        try
+        {
+            archivePath = await archive.CreateAsync(localSessionId, cancellationToken);
+            await spool.SetFinalizationStateAsync(localSessionId,
+                localFinalizeState: "LOCAL_READY",
+                archivePath: archivePath,
+                errorCode: null,
+                errorDetail: null,
+                retryCount: 0,
+                nextRetryAtUtc: null,
+                cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            await PersistFinalizationFailureAsync(localSessionId, "LOCAL_ARCHIVE", ClassifyLocalArchiveError(ex), false, null, ex.Message, cancellationToken);
+            try { await archive.SetUploadStateAsync(localSessionId, "ERROR", ex.Message, cancellationToken); } catch (Exception stateError) { logger.LogDebug(stateError, "Could not persist local archive error. Session={SessionId}", localSessionId); }
+            logger.LogWarning(ex, "Local archive finalization failed; source chunks remain available. Session={SessionId}", localSessionId);
+            return false;
+        }
         if (!api.IsConfigured)
         {
             await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_API", "API is not configured", cancellationToken);
+            await spool.SetFinalizationStateAsync(localSessionId, localFinalizeState: "LOCAL_READY", deliveryState: "WAITING_FOR_API", archivePath: archivePath, errorCode: "SERVER_UNAVAILABLE", errorDetail: "API is not configured", retryCount: 1, nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(15), cancellationToken: cancellationToken);
             return false;
         }
         try
         {
             await archive.SetUploadStateAsync(localSessionId, "UPLOADING", null, cancellationToken);
+            await spool.SetFinalizationStateAsync(localSessionId, localFinalizeState: "LOCAL_READY", deliveryState: "UPLOADING", archivePath: archivePath, cancellationToken: cancellationToken);
             await api.UploadPendingChunksAsync(spool, cancellationToken);
+            await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
             var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
             if (serverSessionId is not Guid server)
             {
-                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "Server session is not bound", cancellationToken);
-                return false;
+                await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "BINDING", cancellationToken: cancellationToken);
+                var meetingId = await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
+                var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
+                if (tracks.Count == 0)
+                {
+                    await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "No recording tracks are ready", cancellationToken);
+                    await PersistFinalizationFailureAsync(localSessionId, "LOCAL_ARCHIVE", "LOCAL_CHUNK_MISSING", false, archivePath, "No recording tracks are ready", cancellationToken);
+                    return false;
+                }
+                server = await api.BindSessionAsync(localSessionId, meetingId, await spool.GetTitleAsync(localSessionId, cancellationToken), tracks, spool, cancellationToken);
             }
+            await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", cancellationToken: cancellationToken);
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (finalized)
             {
                 await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
+                await spool.SetFinalizationStateAsync(localSessionId, localFinalizeState: "LOCAL_READY", deliveryState: "CONFIRMED", archivePath: archivePath, errorCode: null, errorDetail: null, retryCount: 0, nextRetryAtUtc: null, cancellationToken: cancellationToken);
                 await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
             }
-            else await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", "Server did not confirm the session", cancellationToken);
+            else
+            {
+                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", "Server did not confirm the session", cancellationToken);
+                await PersistFinalizationFailureAsync(localSessionId, "SERVER_FINALIZE", "SERVER_FINALIZE_REJECTED", true, archivePath, "Server did not confirm the session", cancellationToken);
+            }
             return finalized;
         }
         catch (Exception ex)
         {
-            try { await archive.SetUploadStateAsync(localSessionId, "ERROR", ex.Message, cancellationToken); } catch (Exception stateError) { logger.LogDebug(stateError, "Could not persist archive upload error. Session={SessionId}", localSessionId); }
+            var code = ClassifyDeliveryError(ex);
+            var retryable = IsRetryableDeliveryError(ex);
+            try { await archive.SetUploadStateAsync(localSessionId, "DELIVERY_ERROR", ex.Message, cancellationToken); } catch (Exception stateError) { logger.LogDebug(stateError, "Could not persist archive upload error. Session={SessionId}", localSessionId); }
+            await PersistFinalizationFailureAsync(localSessionId, "DELIVERY", code, retryable, archivePath, ex.Message, cancellationToken);
             logger.LogWarning(ex, "Server finalize failed; chunks remain in the local spool. Session={SessionId}", localSessionId);
             return false;
         }
@@ -247,22 +286,6 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
             if (string.Equals(localSessionId, recorder.SessionId, StringComparison.Ordinal)) continue;
             try
             {
-                await archive.CreateAsync(localSessionId, cancellationToken);
-                var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-                if (serverSessionId is null)
-                {
-                    var meetingId = await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
-                    var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
-                    if (tracks.Count == 0)
-                    {
-                        logger.LogInformation("Offline session {SessionId} remains local until a meeting and tracks are available.", localSessionId);
-                        completed = false;
-                        continue;
-                    }
-                    // BindSessionAsync creates the server meeting when the offline
-                    // session still has meeting_id=NULL and persists the real id.
-                    serverSessionId = await api.BindSessionAsync(localSessionId, meetingId, await spool.GetTitleAsync(localSessionId, cancellationToken), tracks, spool, cancellationToken);
-                }
                 await spool.SetSessionStateAsync(localSessionId, "FINALIZING", cancellationToken);
                 await spool.AddEventAsync(localSessionId, "RECOVERED_AFTER_RESTART", cancellationToken: cancellationToken);
                 if (!await UploadAndFinalizeAsync(localSessionId, cancellationToken))
@@ -274,11 +297,58 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
             catch (Exception ex)
             {
                 completed = false;
+                await PersistFinalizationFailureAsync(localSessionId, "DELIVERY", ClassifyDeliveryError(ex), IsRetryableDeliveryError(ex), null, ex.Message, cancellationToken);
                 logger.LogWarning(ex, "Failed to recover recording session {SessionId}; local spool remains authoritative.", localSessionId);
             }
         }
         return completed;
     }
+
+    private async Task PersistFinalizationFailureAsync(string sessionId, string stage, string code, bool retryable, string? archivePath, string detail, CancellationToken cancellationToken)
+    {
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken);
+        var retryCount = retryable ? (info?.RetryCount ?? 0) + 1 : info?.RetryCount ?? 0;
+        DateTimeOffset? nextRetry = retryable ? DateTimeOffset.UtcNow.Add(GetRetryDelay(retryCount)) : null;
+        await spool.SetFinalizationStateAsync(sessionId,
+            localFinalizeState: stage == "LOCAL_ARCHIVE" ? "LOCAL_FAILED" : "LOCAL_READY",
+            deliveryState: stage == "LOCAL_ARCHIVE" ? "NOT_STARTED" : "DELIVERY_ERROR",
+            archivePath: archivePath,
+            errorCode: code,
+            errorDetail: detail,
+            retryCount: retryCount,
+            nextRetryAtUtc: nextRetry,
+            cancellationToken: cancellationToken);
+        if (stage == "LOCAL_ARCHIVE") await spool.SetSessionStateAsync(sessionId, "FAILED", cancellationToken);
+    }
+
+    private static TimeSpan GetRetryDelay(int retryCount) => retryCount switch
+    {
+        <= 1 => TimeSpan.FromSeconds(15),
+        2 => TimeSpan.FromSeconds(30),
+        3 => TimeSpan.FromMinutes(1),
+        4 => TimeSpan.FromMinutes(2),
+        _ => TimeSpan.FromMinutes(5)
+    };
+
+    private static bool IsLocalArchiveError(Exception ex)
+    {
+        var message = ex.ToString();
+        return message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("audio_output", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("recording_chunk", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ClassifyLocalArchiveError(Exception ex)
+    {
+        var message = ex.ToString();
+        if (message.Contains("missing", StringComparison.OrdinalIgnoreCase) || message.Contains("sequence_gap", StringComparison.OrdinalIgnoreCase) || message.Contains("checksum", StringComparison.OrdinalIgnoreCase) || message.Contains("mismatch", StringComparison.OrdinalIgnoreCase)) return "LOCAL_CHUNK_INVALID";
+        if (message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) || message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)) return "LOCAL_ARCHIVE_FAILED";
+        return "LOCAL_ENCODING_FAILED";
+    }
+
+    private static bool IsRetryableDeliveryError(Exception ex) => !ex.ToString().Contains("401", StringComparison.OrdinalIgnoreCase) && !ex.ToString().Contains("403", StringComparison.OrdinalIgnoreCase);
+    private static string ClassifyDeliveryError(Exception ex) => ex.ToString().Contains("401", StringComparison.OrdinalIgnoreCase) || ex.ToString().Contains("403", StringComparison.OrdinalIgnoreCase) ? "AGENT_AUTH_REJECTED" : "SERVER_UNAVAILABLE";
 
     private async Task<long> FlushPendingCommandResultsAsync(long cursor, CancellationToken cancellationToken)
     {

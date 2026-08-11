@@ -23,6 +23,7 @@ public sealed class LocalArchiveWriter(
     private readonly ConcurrentDictionary<string, object> _manifestGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private readonly string _ffprobePath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFPROBE_PATH") ?? "ffprobe";
 
     public Task<string> CreateAsync(string sessionId, CancellationToken cancellationToken = default)
     {
@@ -152,30 +153,52 @@ public sealed class LocalArchiveWriter(
     private async Task ConcatTrackAsync(IReadOnlyList<RecordingArchiveChunk> chunks, string output, CancellationToken cancellationToken)
     {
         var listPath = output + ".concat.txt";
+        var outputPart = output + ".part";
         var lines = chunks.Select(chunk => $"file '{EscapeConcatPath(chunk.LocalPath)}'");
-        await File.WriteAllTextAsync(listPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, Encoding.UTF8, cancellationToken);
+        DeleteIfExists(listPath);
+        DeleteIfExists(outputPart);
+        // FFmpeg's concat demuxer does not accept a UTF-8 BOM before the first
+        // `file` directive. Encoding.UTF8 includes EF BB BF on this runtime.
+        await File.WriteAllTextAsync(listPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false), cancellationToken);
         try
         {
-            await RunFfmpegAsync(["-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", output], cancellationToken);
+            await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", outputPart], cancellationToken);
+            await ValidateAudioFileAsync(outputPart, cancellationToken);
+            File.Move(outputPart, output, true);
         }
         finally
         {
-            try { File.Delete(listPath); } catch (IOException) { }
+            DeleteIfExists(listPath);
+            DeleteIfExists(outputPart);
         }
     }
 
     private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, CancellationToken cancellationToken)
     {
+        var outputPart = output + ".part";
+        DeleteIfExists(outputPart);
         if (tracks.Count == 1)
         {
-            await RunFfmpegAsync(["-i", tracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", output], cancellationToken);
+            try
+            {
+                await RunFfmpegAsync(["-y", "-i", tracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", outputPart], cancellationToken);
+                await ValidateAudioFileAsync(outputPart, cancellationToken);
+                File.Move(outputPart, output, true);
+            }
+            finally { DeleteIfExists(outputPart); }
             return;
         }
 
         var arguments = new List<string>();
         foreach (var track in tracks) arguments.AddRange(["-i", track]);
-        arguments.AddRange(["-filter_complex", $"amix=inputs={tracks.Count}:duration=longest:normalize=0,aresample=48000", "-ac", "1", "-c:a", "flac", output]);
-        await RunFfmpegAsync(arguments, cancellationToken);
+        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={tracks.Count}:duration=longest:normalize=0,aresample=48000", "-ac", "1", "-c:a", "flac", outputPart]);
+        try
+        {
+            await RunFfmpegAsync(arguments, cancellationToken);
+            await ValidateAudioFileAsync(outputPart, cancellationToken);
+            File.Move(outputPart, output, true);
+        }
+        finally { DeleteIfExists(outputPart); }
     }
 
     private async Task RunFfmpegAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
@@ -202,6 +225,39 @@ public sealed class LocalArchiveWriter(
         catch (Win32Exception ex)
         {
             throw new InvalidOperationException($"ffmpeg_not_found:{_ffmpegPath}", ex);
+        }
+    }
+
+    private async Task ValidateAudioFileAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
+            throw new InvalidOperationException("local_audio_output_empty");
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = _ffprobePath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path })
+            process.StartInfo.ArgumentList.Add(argument);
+        try
+        {
+            if (!process.Start()) throw new InvalidOperationException("ffprobe_start_failed");
+            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var error = await process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            if (process.ExitCode != 0 || !double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration) || duration <= 0)
+                throw new InvalidOperationException($"ffprobe_invalid_audio:{error.Trim()}");
+        }
+        catch (Win32Exception ex)
+        {
+            throw new InvalidOperationException($"ffprobe_not_found:{_ffprobePath}", ex);
         }
     }
 
@@ -248,6 +304,12 @@ public sealed class LocalArchiveWriter(
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (IOException) { }
     }
 
     private static string EscapeConcatPath(string path) => path.Replace("\\", "/", StringComparison.Ordinal).Replace("'", "'\\''", StringComparison.Ordinal);

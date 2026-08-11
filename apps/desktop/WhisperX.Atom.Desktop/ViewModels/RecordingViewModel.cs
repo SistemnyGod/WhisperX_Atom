@@ -40,6 +40,11 @@ public sealed class RecordingViewModel : ObservableObject
     private string _processingError = string.Empty;
     private string _warningMessage = string.Empty;
     private AgentIpcResponse? _lastAgentResponse;
+    private string? _archivePath;
+    private string _localFinalizeState = "PENDING";
+    private string _deliveryState = "NOT_STARTED";
+    private string? _sessionErrorCode;
+    private bool _sessionRetryable;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -71,6 +76,18 @@ public sealed class RecordingViewModel : ObservableObject
     public string WarningMessage { get => _warningMessage; private set { if (SetProperty(ref _warningMessage, value)) OnPropertyChanged(nameof(HasWarning)); } }
     public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
+    public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) OnPropertyChanged(nameof(CanOpenLocalArchive)); } }
+    public string LocalFinalizeState { get => _localFinalizeState; private set { if (SetProperty(ref _localFinalizeState, value)) OnPropertyChanged(nameof(LocalFinalizeStatusLabel)); } }
+    public string DeliveryState { get => _deliveryState; private set { if (SetProperty(ref _deliveryState, value)) OnPropertyChanged(nameof(DeliveryStatusLabel)); } }
+    public string LocalFinalizeStatusLabel => _localFinalizeState.ToUpperInvariant() switch
+    {
+        "FINALIZING_LOCAL" => "Локальный master собирается",
+        "LOCAL_READY" => "Локальный master сохранён",
+        "LOCAL_FAILED" => "Локальная сборка не завершена",
+        _ => "Локальное сохранение ожидает"
+    };
+    public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
+    public bool CanOpenLocalArchive => !string.IsNullOrWhiteSpace(ArchivePath) && Directory.Exists(ArchivePath);
     public string? SelectedMicrophoneId => _microphoneDeviceId;
     public string? SelectedSystemAudioId => _systemAudioDeviceId;
     public string PendingUploadsLabel => _pendingUploads == 0 ? "Нет ожидающих отправки" : $"В очереди отправки: {_pendingUploads}";
@@ -126,7 +143,7 @@ public sealed class RecordingViewModel : ObservableObject
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
     public bool CanStop => State is RecordingState.Recording or RecordingState.Paused;
-    public bool CanRetryUpload => State == RecordingState.Error && !string.IsNullOrWhiteSpace(SessionId);
+    public bool CanRetryUpload => _sessionRetryable && !string.IsNullOrWhiteSpace(SessionId) && State is (RecordingState.Idle or RecordingState.Error or RecordingState.Finalizing);
     // Local capture has already stopped in Finalizing; encoding and delivery run in the
     // background and must not prevent configuring the next recording.
     public bool CanSelectDevices => State is not RecordingState.Recording and not RecordingState.Paused;
@@ -187,6 +204,11 @@ public sealed class RecordingViewModel : ObservableObject
         if (!CanStart) return false;
         ErrorMessage = string.Empty;
         WarningMessage = string.Empty;
+        ArchivePath = null;
+        LocalFinalizeState = "PENDING";
+        DeliveryState = "NOT_STARTED";
+        _sessionErrorCode = null;
+        _sessionRetryable = false;
         ProcessingError = string.Empty;
         TranscriptStatus = "Стенограмма ещё не запущена.";
         TranscriptSegments.Clear();
@@ -204,10 +226,10 @@ public sealed class RecordingViewModel : ObservableObject
             {
                 State = RecordingState.Error;
                 ErrorMessage = preflight.Preflight is { Errors.Count: > 0 }
-                    ? string.Join("; ", preflight.Preflight.Errors)
-                    : preflight.Error ?? "Проверка перед записью не пройдена.";
+                    ? string.Join("; ", preflight.Preflight.Errors.Select(MapRecordingError))
+                    : MapRecordingError(preflight.Error ?? "Проверка перед записью не пройдена.");
                 WarningMessage = preflight.Preflight is { Warnings.Count: > 0 }
-                    ? string.Join("; ", preflight.Preflight.Warnings)
+                    ? string.Join("; ", preflight.Preflight.Warnings.Select(MapRecordingError))
                     : string.Empty;
                 return false;
             }
@@ -237,7 +259,7 @@ public sealed class RecordingViewModel : ObservableObject
             _serverProcessingExpected = serverMeetingId is not null;
             var response = await _services.Recorder.StartAsync(title, serverMeetingId);
             ApplyResponse(response);
-            if (!response.Ok) ErrorMessage = response.Error ?? "Recorder Agent не запустил запись.";
+            if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
             if (serverMeetingId is Guid createdMeetingId && MeetingId is null) MeetingId = createdMeetingId;
             if (response.Ok && response.MeetingId is Guid agentMeetingId)
             {
@@ -274,13 +296,13 @@ public sealed class RecordingViewModel : ObservableObject
             if (!response.Ok)
             {
                 State = RecordingState.Error;
-                ErrorMessage = response.Error ?? "Не удалось завершить запись.";
+                ErrorMessage = MapRecordingError(response.Error ?? "Не удалось завершить запись.");
                 return false;
             }
             ApplyResponse(response);
             if (_serverProcessingExpected && MeetingId is Guid meetingId)
                 await StartProcessingPollingAsync(meetingId);
-            else if (!string.IsNullOrWhiteSpace(SessionId))
+            if (!string.IsNullOrWhiteSpace(SessionId))
                 StartSessionTracking(SessionId);
             return true;
         }
@@ -298,11 +320,12 @@ public sealed class RecordingViewModel : ObservableObject
         try
         {
             var response = await _services.Recorder.RetryUploadAsync(SessionId);
-            ErrorMessage = response.Ok ? string.Empty : response.Error ?? "Повторная отправка ещё не завершена.";
-            WarningMessage = response.Ok ? string.Empty : "Серверная доставка ещё не подтверждена. Agent продолжит повторные попытки.";
-            await RefreshAsync();
+            ApplyResponse(response);
+            if (!response.Ok && response.SessionStatus is null)
+                ErrorMessage = MapRecordingError(response.Error);
             if (response.Ok && _serverProcessingExpected && MeetingId is Guid meetingId)
                 await StartProcessingPollingAsync(meetingId);
+            if (!response.Ok && !string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
             return response.Ok;
         }
         catch (Exception ex) { ErrorMessage = SafeError(ex); return false; }
@@ -330,7 +353,7 @@ public sealed class RecordingViewModel : ObservableObject
         Directory.CreateDirectory(fullPath);
         ArchiveRoot = fullPath;
         SaveSettings();
-        try { var response = await _services.Recorder.SetArchiveRootAsync(fullPath); ErrorMessage = response.Ok ? string.Empty : response.Error ?? "Agent не подтвердил путь архива."; }
+        try { var response = await _services.Recorder.SetArchiveRootAsync(fullPath); ErrorMessage = response.Ok ? string.Empty : MapRecordingError(response.Error ?? "Agent не подтвердил путь архива."); }
         catch (Exception ex) { ErrorMessage = $"Путь сохранён в Desktop, но Agent не синхронизирован: {SafeError(ex)}"; }
     }
 
@@ -340,7 +363,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             var response = await command(CancellationToken.None);
             ApplyResponse(response);
-            if (!response.Ok) ErrorMessage = response.Error ?? "Команда Recorder Agent не выполнена.";
+            if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Команда Recorder Agent не выполнена.");
             return response.Ok;
         }
         catch (Exception ex) { ErrorMessage = SafeError(ex); State = RecordingState.Error; return false; }
@@ -356,7 +379,7 @@ public sealed class RecordingViewModel : ObservableObject
     private async Task SaveAndSyncDevicesAsync()
     {
         SaveSettings();
-        try { var response = await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId); ErrorMessage = response.Ok ? string.Empty : response.Error ?? "Agent не подтвердил устройства."; await RefreshAsync(); }
+        try { var response = await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId); ErrorMessage = response.Ok ? string.Empty : MapRecordingError(response.Error ?? "Agent не подтвердил устройства."); await RefreshAsync(); }
         catch (Exception ex) { ErrorMessage = SafeError(ex); }
     }
 
@@ -402,6 +425,8 @@ public sealed class RecordingViewModel : ObservableObject
                 var response = await _services.Recorder.GetSessionStatusAsync(sessionId, cancellationToken);
                 if (!response.Ok || response.SessionStatus is null) continue;
                 var session = response.SessionStatus;
+                ApplySessionStatus(session);
+                if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)) return;
                 if (session.MeetingId is Guid meetingId)
                 {
                     MeetingId = meetingId;
@@ -410,8 +435,6 @@ public sealed class RecordingViewModel : ObservableObject
                     await StartProcessingPollingAsync(meetingId);
                     return;
                 }
-                ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
-                if (!string.IsNullOrWhiteSpace(session.Error)) WarningMessage = session.Error;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -427,9 +450,55 @@ public sealed class RecordingViewModel : ObservableObject
         "BINDING" => "привязка к совещанию",
         "SYNCING" => "синхронизация чанков",
         "WAITING_SERVER_ASSEMBLY" => "сборка на сервере",
+        "WAITING_SERVER" => "ожидание обработки на сервере",
+        "FINALIZING_SERVER" => "завершение на сервере",
+        "RECONCILING" => "проверка чанков",
         "COMPLETED" => "доставлено",
-        _ => state
+        "DELIVERY_ERROR" => "ошибка доставки",
+        "NOT_STARTED" => "ожидание отправки",
+        _ => "ожидание восстановления"
     };
+
+    private void ApplySessionStatus(RecordingSessionStatus session)
+    {
+        SessionId = session.SessionId;
+        MeetingId = session.MeetingId ?? MeetingId;
+        LocalFinalizeState = session.LocalFinalizeState;
+        DeliveryState = session.DeliveryState;
+        ArchivePath = session.ArchivePath;
+        _sessionErrorCode = session.ErrorCode;
+        _sessionRetryable = session.Retryable;
+        if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase))
+        {
+            State = RecordingState.Error;
+            ErrorMessage = MapRecordingError(session.ErrorCode ?? session.Error);
+            WarningMessage = "Исходные аудиочанки сохранены. Исправьте Agent и повторите отправку.";
+            StatusMessage = "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.";
+        }
+        else if (string.Equals(session.DeliveryState, "DELIVERY_ERROR", StringComparison.OrdinalIgnoreCase))
+        {
+            State = RecordingState.Error;
+            ErrorMessage = string.Empty;
+            WarningMessage = MapRecordingError(session.ErrorCode ?? session.Error);
+            StatusMessage = "Запись сохранена локально. Сервер пока не подтвердил получение.";
+        }
+        else if (string.Equals(session.LocalFinalizeState, "LOCAL_READY", StringComparison.OrdinalIgnoreCase))
+        {
+            if (State is RecordingState.Finalizing or RecordingState.Error) State = RecordingState.Idle;
+            ErrorMessage = string.Empty;
+            WarningMessage = session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                ? string.Empty
+                : "Локальный master сохранён. Agent продолжает доставку на сервер.";
+            ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
+            StatusMessage = session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                ? "Аудио сохранено и подтверждено сервером."
+                : "Локальная запись сохранена; серверная доставка продолжится автоматически.";
+        }
+        OnPropertyChanged(nameof(CanRetryUpload));
+        OnPropertyChanged(nameof(CanOpenLocalArchive));
+        OnPropertyChanged(nameof(StateTitle));
+        OnPropertyChanged(nameof(AgentStatus));
+    }
 
     private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
     {
@@ -585,9 +654,11 @@ public sealed class RecordingViewModel : ObservableObject
         _lastAgentResponse = response;
         var parsedState = response.Ok ? ParseState(response.State) : RecordingState.Error;
         ErrorMessage = !response.Ok || parsedState == RecordingState.Error
-            ? response.Error ?? "Recorder Agent сообщил об ошибке."
+            ? MapRecordingError(response.Error)
             : string.Empty;
-        WarningMessage = response.Ok && parsedState != RecordingState.Error ? response.Error ?? string.Empty : string.Empty;
+        WarningMessage = response.Ok && parsedState != RecordingState.Error && !string.IsNullOrWhiteSpace(response.Error)
+            ? MapRecordingError(response.Error)
+            : string.Empty;
         State = response.Ok ? parsedState : RecordingState.Error;
         SessionId = response.SessionId ?? SessionId;
         MeetingId = response.MeetingId ?? MeetingId;
@@ -624,10 +695,12 @@ public sealed class RecordingViewModel : ObservableObject
             RecordingState.Paused => "Запись приостановлена. Можно продолжить или завершить.",
             RecordingState.Finalizing => "Локальная копия сохраняется, затем Agent повторит отправку.",
             RecordingState.Error when !string.IsNullOrWhiteSpace(WarningMessage) => "Локальная запись сохранена, серверную доставку можно повторить.",
+            RecordingState.Error when string.Equals(_sessionErrorCode, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase) => "Запись сохранена локально; серверная доставка будет повторена автоматически.",
             RecordingState.Error => "Проверьте сообщение об ошибке и повторите действие.",
             RecordingState.Unavailable => "Подключите Recorder Agent и повторите проверку.",
             _ => "Устройства готовы. Можно начать новую запись."
         };
+        if (response.SessionStatus is { } sessionStatus) ApplySessionStatus(sessionStatus);
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(AgentStatus));
@@ -651,6 +724,28 @@ public sealed class RecordingViewModel : ObservableObject
         "ERROR" => RecordingState.Error,
         _ => RecordingState.Idle
     };
+
+    private static string MapRecordingError(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "Recorder Agent сообщил об ошибке.";
+        var code = value.Trim().ToUpperInvariant();
+        return code switch
+        {
+            "LOCAL_ENCODING_FAILED" => "Не удалось завершить кодирование локального аудио.",
+            "LOCAL_ARCHIVE_FAILED" or "RECORDING_FINALIZE_FAILED" => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
+            "LOCAL_CHUNK_MISSING" => "В локальном архиве отсутствует аудиочанк. Исходные файлы сохранены для диагностики.",
+            "LOCAL_CHUNK_INVALID" => "Локальный аудиочанк повреждён или не прошёл проверку контрольной суммы.",
+            "SERVER_BINDING_FAILED" or "SERVER_FINALIZE_REJECTED" => "Сервер не подтвердил привязку или завершение записи. Повторная отправка будет выполнена автоматически.",
+            "CHUNK_UPLOAD_FAILED" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_PENDING" or "SERVER_FINALIZE_FAILED" or "UPLOAD_PENDING" => "Запись сохранена локально. Сервер пока не подтвердил получение; повторная отправка выполняется автоматически.",
+            "AGENT_AUTH_REJECTED" => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
+            "RECORDING_ARCHIVE_ACCESS_DENIED" => "Нет доступа к папке локального архива.",
+            "FFMPEG_UNAVAILABLE" => "Не найден FFmpeg для локальной сборки аудио.",
+            "SESSION_REQUIRED" => "Не найдена локальная сессия записи для повторной отправки.",
+            _ when code.Contains("401", StringComparison.OrdinalIgnoreCase) || code.Contains("403", StringComparison.OrdinalIgnoreCase) => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
+            _ when code.Contains("RECORDING_FINALIZE_FAILED", StringComparison.OrdinalIgnoreCase) => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
+            _ => "Recorder Agent не завершил операцию. Локальные данные сохранены; откройте диагностику Agent."
+        };
+    }
 
     private void NotifyCommands()
     {
