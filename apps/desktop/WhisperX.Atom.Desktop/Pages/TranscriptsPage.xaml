@@ -69,6 +69,11 @@
                         <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
                             <TextBlock Text="{Binding SelectedStatus}" FontWeight="SemiBold" />
                         </Border>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Качество стенограммы" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="{Binding SelectedQualityText}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding SelectedQualityWarningText}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
                         <StackPanel x:Name="TranscriptDetails" Spacing="10">
                             <TextBox x:Name="SegmentSearchBox" PlaceholderText="Поиск по тексту" Style="{StaticResource InputStyle}" TextChanged="SegmentSearchBox_TextChanged" />
                             <ListView x:Name="SegmentsList" ItemsSource="{Binding FilteredSegments}" SelectionMode="Single" MaxHeight="390" SelectionChanged="SegmentsList_SelectionChanged">

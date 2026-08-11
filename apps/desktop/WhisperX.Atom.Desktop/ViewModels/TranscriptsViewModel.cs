@@ -16,6 +16,8 @@ public sealed class TranscriptRegistryItem
 
     public DesktopMeeting Meeting { get; }
     public DesktopTranscript? Transcript { get; }
+    public string QualityText => QualityCategory(Transcript?.QualityScore);
+    public bool HasQualityWarning => Transcript?.IsPartial == true;
     public string MeetingTitle => string.IsNullOrWhiteSpace(Meeting.Title) ? "Без названия" : Meeting.Title;
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
     public string StatusText => Transcript?.Status ?? "Недоступна";
@@ -25,6 +27,14 @@ public sealed class TranscriptRegistryItem
         : FormatDuration(Transcript.Segments.Max(segment => segment.EndMs));
 
     private static string FormatDuration(long milliseconds) => TimeSpan.FromMilliseconds(milliseconds).ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
+
+    private static string QualityCategory(double? score) => score switch
+    {
+        >= 85 => "Высокое",
+        >= 65 => "Среднее",
+        >= 0 => "Требует проверки",
+        _ => "Качество не рассчитано"
+    };
 }
 
 public sealed class TranscriptsViewModel : ObservableObject
@@ -71,6 +81,8 @@ public sealed class TranscriptsViewModel : ObservableObject
             OnPropertyChanged(nameof(HasSelection));
             OnPropertyChanged(nameof(SelectedTitle));
             OnPropertyChanged(nameof(SelectedStatus));
+            OnPropertyChanged(nameof(SelectedQualityText));
+            OnPropertyChanged(nameof(SelectedQualityWarningText));
         }
     }
 
@@ -88,6 +100,10 @@ public sealed class TranscriptsViewModel : ObservableObject
     public bool HasSelection => SelectedItem is not null;
     public bool HasSegments => FilteredSegments.Count > 0;
     public bool HasSegmentSelection => SelectedSegment is not null;
+    public string SelectedQualityText => SelectedItem?.QualityText ?? "Качество не рассчитано";
+    public string SelectedQualityWarningText => SelectedItem?.HasQualityWarning == true
+        ? "Стенограмма получена с предупреждениями."
+        : string.Empty;
     public string SelectedTitle => SelectedItem?.MeetingTitle ?? "Совещание не выбрано";
     public string SelectedStatus => SelectedItem?.StatusText ?? "—";
 

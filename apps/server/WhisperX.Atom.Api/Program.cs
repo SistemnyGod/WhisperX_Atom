@@ -197,6 +197,75 @@ app.MapGet("/ready", async () =>
     }
 });
 
+app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration) =>
+{
+    var checkedAt = DateTimeOffset.UtcNow;
+    var postgres = true;
+    try { await db.PingAsync(); }
+    catch (Exception ex)
+    {
+        postgres = false;
+        app.Logger.LogWarning(ex, "System readiness PostgreSQL check failed");
+    }
+
+    var nats = false;
+    var natsUrl = configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
+    try
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        using var response = await http.GetAsync(natsUrl);
+        nats = response.IsSuccessStatusCode;
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogDebug(ex, "System readiness NATS check failed");
+    }
+
+    var workers = postgres ? await store.ListWorkerRuntimeAsync() : Array.Empty<WorkerRuntimeRow>();
+    var fresh = workers
+        .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastSeenAt).First(), StringComparer.OrdinalIgnoreCase);
+    var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" })
+    {
+        if (!fresh.TryGetValue(name, out var item) || checkedAt.UtcDateTime - item.LastSeenAt.ToUniversalTime() > TimeSpan.FromSeconds(60))
+        {
+            workerReady[name] = new { status = "UNAVAILABLE", lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
+            continue;
+        }
+        workerReady[name] = new { status = item.Status, lastSeenAt = item.LastSeenAt, version = item.Version, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = item.LastErrorCode };
+    }
+
+    var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker) && checkedAt.UtcDateTime - gpuWorker.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60);
+    var gpuCapabilities = gpuWorker?.Capabilities.RootElement;
+    var cuda = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("cudaAvailable", out var cudaValue) && cudaValue.ValueKind == JsonValueKind.True;
+    var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue)
+        ? diarizationValue.GetString() ?? "DEGRADED"
+        : "DEGRADED";
+    var requiredWorkersReady = new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" }.All(name =>
+        fresh.TryGetValue(name, out var worker) &&
+        checkedAt.UtcDateTime - worker.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60) &&
+        !string.Equals(worker.Status, "FAILED", StringComparison.OrdinalIgnoreCase));
+    var qwenEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+    var ready = postgres && nats && requiredWorkersReady && cuda;
+
+    return Results.Ok(new
+    {
+        ready,
+        checkedAt,
+        components = new
+        {
+            postgres = new { status = postgres ? "READY" : "UNAVAILABLE" },
+            nats = new { status = nats ? "READY" : "UNAVAILABLE" },
+            workers = workerReady,
+            cuda = new { status = cuda ? "READY" : "UNAVAILABLE" },
+            hfDiarization = new { status = hf },
+            recorder = new { status = "OPTIONAL" },
+            qwen = new { status = qwenEnabled ? "ENABLED" : "DISABLED" }
+        }
+    });
+});
+
 app.MapGet("/api/system/status", async () =>
 {
     try
@@ -849,7 +918,19 @@ app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, Ht
 app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, HttpContext context) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
-    return Results.Ok(await db.GetTranscriptAsync(id));
+    var transcript = await db.GetTranscriptAsync(id);
+    return Results.Ok(new
+    {
+        id = transcript.Id,
+        meetingId = transcript.MeetingId,
+        status = transcript.Status,
+        isPartial = transcript.IsPartial,
+        warnings = transcript.Warnings,
+        qualityWarnings = transcript.Warnings,
+        quality = transcript.Quality,
+        qualityScore = transcript.QualityScore,
+        segments = transcript.Segments
+    });
 });
 
 app.MapPatch("/api/meetings/{meetingId:guid}/speakers/{speakerId:guid}",
@@ -911,7 +992,7 @@ public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSes
 public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
-public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null);
+public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
 
 public static class StorageHelpers
 {
@@ -1567,9 +1648,10 @@ public sealed class Database(IConfiguration configuration)
         string status = "PENDING";
         JsonDocument? warnings = null;
         JsonDocument? quality = null;
+        double? qualityScore = null;
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT t.id,t.status,t.warnings,t.quality_metadata,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
+            "SELECT t.id,t.status,t.warnings,t.quality_metadata,t.quality_score,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -1578,10 +1660,11 @@ public sealed class Database(IConfiguration configuration)
             status = reader.GetString(1);
             warnings ??= reader.IsDBNull(2) ? null : reader.GetFieldValue<JsonDocument>(2);
             quality ??= reader.IsDBNull(3) ? null : reader.GetFieldValue<JsonDocument>(3);
-            if (!reader.IsDBNull(4))
-                segments.Add(new TranscriptSegmentRow(reader.GetGuid(4), reader.GetInt32(5), reader.GetInt64(6), reader.GetInt64(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetDouble(10), reader.IsDBNull(11) ? null : reader.GetFieldValue<JsonDocument>(11), reader.GetString(12), reader.GetBoolean(13)));
+            qualityScore ??= reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4));
+            if (!reader.IsDBNull(5))
+                segments.Add(new TranscriptSegmentRow(reader.GetGuid(5), reader.GetInt32(6), reader.GetInt64(7), reader.GetInt64(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetDouble(11), reader.IsDBNull(12) ? null : reader.GetFieldValue<JsonDocument>(12), reader.GetString(13), reader.GetBoolean(14)));
         }
-        return new TranscriptRow(transcriptId, meetingId, status, segments, string.Equals(status, "PARTIAL_READY", StringComparison.OrdinalIgnoreCase), warnings, quality);
+        return new TranscriptRow(transcriptId, meetingId, status, segments, string.Equals(status, "PARTIAL_READY", StringComparison.OrdinalIgnoreCase), warnings, quality, qualityScore);
     }
 
     public async Task<bool> RenameSpeakerAsync(Guid meetingId, Guid speakerId, string displayName)
