@@ -6,6 +6,7 @@ using Npgsql;
 public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt);
+public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
@@ -187,24 +188,78 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId); return (bool)(await command.ExecuteScalarAsync())!;
     }
 
-    public async Task<bool> RegisterChunkAsync(Guid agentId, Guid sessionId, Guid trackId, int sequence, string storageKey, long startSample, long sampleCount, long sizeBytes, string sha256)
+    public async Task<bool> StageChunkAsync(Guid agentId, Guid sessionId, Guid trackId, int sequence, string storageKey, long startSample, long sampleCount, long sizeBytes, string sha256)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO recording_chunks(id,session_id,track_id,sequence,storage_key,start_sample,sample_count,size_bytes,sha256,status,confirmed_at)
+            SELECT @id,@session,@track,@sequence,@key,@start,@count,@size,@sha,'STAGING',NULL
+            WHERE EXISTS(SELECT 1 FROM recording_sessions s JOIN recording_tracks t ON t.session_id=s.id WHERE s.id=@session AND s.agent_id=@agent AND t.id=@track)
+            ON CONFLICT(track_id,sequence) DO UPDATE SET storage_key=excluded.storage_key,start_sample=excluded.start_sample,sample_count=excluded.sample_count,size_bytes=excluded.size_bytes,sha256=excluded.sha256,status=CASE WHEN recording_chunks.status='CONFIRMED' THEN 'CONFIRMED' ELSE 'STAGING' END,confirmed_at=recording_chunks.confirmed_at WHERE recording_chunks.sha256=excluded.sha256
+            """, connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId); command.Parameters.AddWithValue("sequence", sequence); command.Parameters.AddWithValue("key", storageKey); command.Parameters.AddWithValue("start", startSample); command.Parameters.AddWithValue("count", sampleCount); command.Parameters.AddWithValue("size", sizeBytes); command.Parameters.AddWithValue("sha", sha256);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    public async Task<bool> ConfirmChunkAsync(Guid agentId, Guid sessionId, Guid trackId, int sequence, string storageKey, long startSample, long sampleCount, long sizeBytes, string sha256)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand("""
             INSERT INTO recording_chunks(id,session_id,track_id,sequence,storage_key,start_sample,sample_count,size_bytes,sha256,status,confirmed_at)
             SELECT @id,@session,@track,@sequence,@key,@start,@count,@size,@sha,'CONFIRMED',now()
             WHERE EXISTS(SELECT 1 FROM recording_sessions s JOIN recording_tracks t ON t.session_id=s.id WHERE s.id=@session AND s.agent_id=@agent AND t.id=@track)
-            ON CONFLICT(track_id,sequence) DO UPDATE SET storage_key=excluded.storage_key,start_sample=excluded.start_sample,sample_count=excluded.sample_count,size_bytes=excluded.size_bytes,sha256=excluded.sha256,status='CONFIRMED',confirmed_at=now() WHERE recording_chunks.sha256=excluded.sha256
+            ON CONFLICT(track_id,sequence) DO UPDATE SET storage_key=excluded.storage_key,start_sample=excluded.start_sample,sample_count=excluded.sample_count,size_bytes=excluded.size_bytes,status='CONFIRMED',confirmed_at=now() WHERE recording_chunks.sha256=excluded.sha256
             """, connection);
-        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId); command.Parameters.AddWithValue("sequence", sequence); command.Parameters.AddWithValue("key", storageKey); command.Parameters.AddWithValue("start", startSample); command.Parameters.AddWithValue("count", sampleCount); command.Parameters.AddWithValue("size", sizeBytes); command.Parameters.AddWithValue("sha", sha256); return await command.ExecuteNonQueryAsync() > 0;
+        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId); command.Parameters.AddWithValue("sequence", sequence); command.Parameters.AddWithValue("key", storageKey); command.Parameters.AddWithValue("start", startSample); command.Parameters.AddWithValue("count", sampleCount); command.Parameters.AddWithValue("size", sizeBytes); command.Parameters.AddWithValue("sha", sha256);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    // Compatibility wrapper for older callers. New upload paths must stage first and
+    // confirm only after the final file is atomically present.
+    public async Task<bool> RegisterChunkAsync(Guid agentId, Guid sessionId, Guid trackId, int sequence, string storageKey, long startSample, long sampleCount, long sizeBytes, string sha256)
+    {
+        if (!await StageChunkAsync(agentId, sessionId, trackId, sequence, storageKey, startSample, sampleCount, sizeBytes, sha256)) return false;
+        return await ConfirmChunkAsync(agentId, sessionId, trackId, sequence, storageKey, startSample, sampleCount, sizeBytes, sha256);
     }
 
     public async Task<IReadOnlyList<int>?> MissingChunksAsync(Guid agentId, Guid sessionId, Guid trackId, int expectedCount)
     {
         if (!await AgentOwnsTrackAsync(agentId, sessionId, trackId)) return null;
-        var result = new List<int>(); await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT sequence FROM recording_chunks WHERE session_id=@session AND track_id=@track", connection); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("track", trackId);
-        var present = new HashSet<int>(); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) present.Add(reader.GetInt32(0)); for (var i = 0; i < expectedCount; i++) if (!present.Contains(i)) result.Add(i); return result;
+        var result = new List<int>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT sequence,storage_key,size_bytes,sha256 FROM recording_chunks WHERE session_id=@session AND track_id=@track AND status='CONFIRMED'", connection);
+        command.Parameters.AddWithValue("session", sessionId);
+        command.Parameters.AddWithValue("track", trackId);
+
+        var confirmed = new List<(int Sequence, string StorageKey, long SizeBytes, string Sha256)>();
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+                confirmed.Add((reader.GetInt32(0), reader.GetString(1), reader.GetInt64(2), reader.GetString(3)));
+        }
+
+        // A database row is not sufficient proof that a chunk is deliverable.
+        // Only a present, complete and checksum-valid final file counts as
+        // CONFIRMED; a crash between storage and database updates must be
+        // repaired by the agent's normal resend path.
+        var present = new HashSet<int>();
+        foreach (var chunk in confirmed)
+        {
+            try
+            {
+                var path = StorageHelpers.StoragePath(chunk.StorageKey);
+                if (!File.Exists(path) || new FileInfo(path).Length != chunk.SizeBytes) continue;
+                if (string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
+                    present.Add(chunk.Sequence);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (InvalidOperationException) { }
+        }
+
+        for (var i = 0; i < expectedCount; i++)
+            if (!present.Contains(i)) result.Add(i);
+        return result;
     }
 
 
@@ -266,7 +321,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var expected = expectations
             .Where(item => item.Value.ExpectedChunkCount is not null)
             .ToDictionary(item => item.Key, item => item.Value.ExpectedChunkCount!.Value);
-        var missing = RecordingFinalizeSupport.FindMissing(tracks, expected);
+        var missing = await RecordingFinalizeSupport.FindMissingAsync(tracks, expected);
         if (missing.Count > 0)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, missing, "recording_chunks_incomplete");
 
@@ -347,6 +402,32 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return new FinalizeRecordingResult(true, true, meetingId, jobId, assetId, Array.Empty<MissingRecordingChunks>(), null);
     }
 
+
+    public async Task<RecordingSessionServerStatus?> GetRecordingSessionStatusAsync(Guid agentId, Guid sessionId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT rs.id,rs.meeting_id,rs.state,a.id,a.status,j.id,j.status,j.stage
+            FROM recording_sessions rs
+            LEFT JOIN media_assets a ON a.storage_key=@storage AND a.source_type='recorder_session'
+            LEFT JOIN jobs j ON j.media_asset_id=a.id AND j.type='TRANSCRIBE'
+            WHERE rs.id=@session AND rs.agent_id=@agent
+            ORDER BY j.created_at DESC NULLS LAST
+            LIMIT 1
+            """, connection);
+        command.Parameters.AddWithValue("session", sessionId);
+        command.Parameters.AddWithValue("agent", agentId);
+        command.Parameters.AddWithValue("storage", $"/data/recordings/{sessionId:N}");
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        return new RecordingSessionServerStatus(
+            reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetGuid(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetGuid(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7));
+    }
 
     public async Task<AssistantQueryRow?> CreateAssistantQueryAsync(Guid? meetingId, string query, Guid? userId)
     {

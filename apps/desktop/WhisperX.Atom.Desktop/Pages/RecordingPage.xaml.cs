@@ -88,6 +88,13 @@ public sealed partial class RecordingPage : Page
         UpdateError();
     }
 
+    private async void TestMicrophoneButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.TestMicrophoneAsync();
+        UpdateError();
+    }
+
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;

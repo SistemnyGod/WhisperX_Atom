@@ -9,7 +9,7 @@ from workers.nats_utils import fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 
 from .media_worker import prepare_media
-from .persistence import claim_message, job_state, mark_ready_for_asr_and_enqueue, release_message, reset_media_leases, renew_lease, update_asset, update_job
+from .persistence import claim_message, job_state, mark_ready_for_asr_and_enqueue, release_message, reset_media_leases, renew_lease, update_asset, update_job, update_recording_session_state
 from .recording_assembly import assemble_recording_session
 
 
@@ -62,12 +62,16 @@ async def run() -> None:
                         session_id = payload.get("session_id")
                         if not session_id:
                             raise ValueError("recording_session_id_required")
+                        await asyncio.to_thread(update_recording_session_state, str(session_id), "ASSEMBLING")
                         source = await asyncio.to_thread(assemble_recording_session, str(session_id), root / "assembled" / job_id)
+                        await asyncio.to_thread(update_recording_session_state, str(session_id), "ASSEMBLED")
                     else:
                         source = Path(payload["storage_key"])
                     derivatives = await asyncio.to_thread(prepare_media, source, root / "derived" / job_id)
                     update_job(job_id, "RUNNING", "NORMALIZING", 15)
                     update_asset(payload["media_asset_id"], derivatives.sha256, str(derivatives.archive_flac), str(derivatives.preview_opus), str(derivatives.asr_wav), derivatives.duration_ms)
+                    if source_type == "recorder_session":
+                        await asyncio.to_thread(update_recording_session_state, str(session_id), "MEDIA_READY")
                     next_message = dict(payload)
                     next_message["message_id"] = str(__import__("uuid").uuid4())
                     next_message.update({
@@ -77,11 +81,17 @@ async def run() -> None:
                         "preview_storage_key": str(derivatives.preview_opus),
                         "sha256": derivatives.sha256,
                         "duration_ms": derivatives.duration_ms,
+                        "audio_quality": derivatives.quality_report,
                     })
                     await asyncio.to_thread(mark_ready_for_asr_and_enqueue, job_id, next_message)
                     await message.ack()
             except Exception as exc:
                 release_message(message_id)
+                if payload.get("source_type") == "recorder_session" and payload.get("session_id"):
+                    try:
+                        await asyncio.to_thread(update_recording_session_state, str(payload["session_id"]), "MEDIA_FAILED")
+                    except Exception:
+                        pass
                 update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), "RECORDING_ASSEMBLY_FAILED" if payload.get("source_type") == "recorder_session" else "MEDIA_PROCESSING_FAILED")
                 await message.ack()
                 heartbeat.set_state("READY", "MEDIA_PROCESSING_FAILED")

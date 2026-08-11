@@ -7,6 +7,8 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 $runtimeRoot = Get-WhisperXRuntimeRoot -RepoPath $repo
 $artifactRoot = Join-Path $repo "artifacts\transcription-mvp"
+$runtimeManifestPath = Join-Path $repo "artifacts\release\runtime-manifest.json"
+& (Join-Path $PSScriptRoot "write-runtime-manifest.ps1") -RepoPath $repo *> $null
 $mode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" }
 
 $transcriptDoctor = Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1"
@@ -73,6 +75,7 @@ $state = [ordered]@{
     currentJobId = if ($gpuWorker) { $gpuWorker.currentJobId } else { $null }
     lastErrorCode = if ($gpuWorker) { $gpuWorker.lastErrorCode } else { $null }
     hostVersions = if ($hostCuda) { $hostCuda } else { $null }
+    runtimeManifest = $runtimeManifestPath
 }
 Write-WhisperXRuntimeState -RepoPath $repo -State $state
 $state | ConvertTo-Json -Depth 12

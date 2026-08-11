@@ -7,6 +7,9 @@ from typing import Any, Mapping
 
 SUMMARY_SCHEMA_VERSION = "summary-v2"
 SUMMARY_PROMPT_VERSION = "summary-v2"
+PROTOCOL_RU_SCHEMA_VERSION = "meeting-protocol-ru-v1"
+PROTOCOL_RU_PROMPT_VERSION = "meeting-protocol-ru-v1"
+MEETING_PROTOCOL_RU = "MEETING_PROTOCOL_RU"
 
 
 def _evidence_schema(max_items: int = 8) -> dict[str, Any]:
@@ -28,6 +31,20 @@ def _validation_schema() -> dict[str, Any]:
             "needs_review": {"type": "boolean"},
             "responsible_status": {"type": "string"},
             "deadline_status": {"type": "string"},
+            "review_reasons": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    }
+
+
+def _protocol_validation_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "evidence": {"type": "boolean"},
+            "deadline": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "needs_review": {"type": "boolean"},
             "review_reasons": {"type": "array", "items": {"type": "string"}},
         },
         "additionalProperties": False,
@@ -148,6 +165,59 @@ SUMMARY_SCHEMA_V2: dict[str, Any] = {
 }
 
 
+MEETING_PROTOCOL_RU_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["questions_and_decisions", "tasks"],
+    "properties": {
+        "questions_and_decisions": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+                "type": "object",
+                "required": ["topic", "context", "decision", "evidence_segment_ids"],
+                "properties": {
+                    "topic": {"type": "string", "maxLength": 180},
+                    "context": {"type": "string", "maxLength": 1200},
+                    "decision": {"type": "string", "maxLength": 1200},
+                    "evidence_segment_ids": _evidence_schema(12),
+                    "validation": _protocol_validation_schema(),
+                },
+                "additionalProperties": False,
+            },
+        },
+        "tasks": {
+            "type": "array",
+            "maxItems": 40,
+            "items": {
+                "type": "object",
+                "required": ["task", "deadline_text", "deadline_iso", "evidence_segment_ids"],
+                "properties": {
+                    "task": {"type": "string", "maxLength": 1000},
+                    "deadline_text": {"type": ["string", "null"], "maxLength": 160},
+                    "deadline_iso": {"type": ["string", "null"], "maxLength": 60},
+                    "evidence_segment_ids": _evidence_schema(12),
+                    "validation": _protocol_validation_schema(),
+                },
+                "additionalProperties": False,
+            },
+        },
+        "quality": {
+            "type": "object",
+            "required": ["status", "score", "review_items", "rejected_items"],
+            "properties": {
+                "status": {"type": "string", "enum": ["READY", "NEEDS_REVIEW", "FAILED"]},
+                "score": {"type": "number", "minimum": 0, "maximum": 1},
+                "review_items": {"type": "integer", "minimum": 0},
+                "rejected_items": {"type": "integer", "minimum": 0},
+                "truncated": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
+}
+
+
 @dataclass(frozen=True)
 class MeetingContext:
     """Evidence-backed context supplied to the summary prompt.
@@ -244,6 +314,13 @@ SUMMARY_PROFILES: dict[str, SummaryProfile] = {
         "Разбор инцидента с фокусом на факты, риски и следующие действия.",
         ("notable_facts", "risks", "decisions", "action_items"),
     ),
+    MEETING_PROTOCOL_RU: SummaryProfile(
+        MEETING_PROTOCOL_RU,
+        "Русский структурированный протокол производственного или оперативного совещания. "
+        "Формируй только подтверждённые вопросы с решениями и отдельные исполнимые задачи со сроками. "
+        "Не формируй ответственных и не придумывай решения, задачи или сроки.",
+        ("questions", "decisions", "tasks", "deadlines", "evidence", "deduplication"),
+    ),
 }
 
 
@@ -299,6 +376,40 @@ class SummaryResult:
         if self.block_count is not None:
             result["block_count"] = self.block_count
         return result
+
+
+@dataclass(frozen=True)
+class MeetingProtocolRuResult:
+    questions_and_decisions: tuple[dict[str, Any], ...]
+    tasks: tuple[dict[str, Any], ...]
+    source_hash: str | None = None
+    block_count: int | None = None
+    quality: Mapping[str, Any] = field(default_factory=dict)
+    prompt_version: str = PROTOCOL_RU_PROMPT_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        quality = {
+            key: self.quality[key]
+            for key in (
+                "status", "score", "question_count", "task_count", "supported_count",
+                "partial_count", "rejected_count", "review_items", "rejected_items",
+                "duplicate_topics_removed", "duplicate_tasks_removed",
+                "unsupported_deadlines_removed", "reasons",
+                "truncated",
+            )
+            if key in self.quality
+        }
+        return {
+            "schema_version": PROTOCOL_RU_SCHEMA_VERSION,
+            "prompt_version": self.prompt_version,
+            "profile": MEETING_PROTOCOL_RU,
+            "questions_and_decisions": [dict(item) for item in self.questions_and_decisions],
+            "tasks": [dict(item) for item in self.tasks],
+            "source_hash": self.source_hash,
+            "block_count": self.block_count,
+            "quality": quality,
+            "quality_score": quality.get("score"),
+        }
 
 
 def profile_for(value: str | None) -> SummaryProfile:

@@ -19,7 +19,7 @@ public sealed class LocalArchiveWriter(
     AgentStorageSettings storage,
     ILogger<LocalArchiveWriter> logger)
 {
-    private readonly ConcurrentDictionary<string, Task<string>> _writes = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<string>>> _writes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, object> _manifestGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -28,10 +28,16 @@ public sealed class LocalArchiveWriter(
     public Task<string> CreateAsync(string sessionId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(sessionId)) throw new ArgumentException("session_required", nameof(sessionId));
-        var task = _writes.GetOrAdd(sessionId, _ => CreateCoreAsync(sessionId, cancellationToken));
+        // ConcurrentDictionary may invoke a value factory more than once.
+        // Lazy<Task<...>> is required here: discarded factory tasks would still
+        // run and delete the same concat/.part files as the winning task.
+        var lazy = _writes.GetOrAdd(sessionId, _ => new Lazy<Task<string>>(
+            () => CreateCoreAsync(sessionId, cancellationToken),
+            LazyThreadSafetyMode.ExecutionAndPublication));
+        var task = lazy.Value;
         _ = task.ContinueWith(completed =>
         {
-            if ((completed.IsFaulted || completed.IsCanceled) && _writes.TryGetValue(sessionId, out var current) && ReferenceEquals(current, completed))
+            if ((completed.IsFaulted || completed.IsCanceled) && _writes.TryGetValue(sessionId, out var current) && ReferenceEquals(current, lazy))
                 _writes.TryRemove(sessionId, out _);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         return task;
@@ -130,8 +136,8 @@ public sealed class LocalArchiveWriter(
 
     private async Task<string?> LocateArchiveAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (_writes.TryGetValue(sessionId, out var pending) && pending.IsCompletedSuccessfully)
-            return await pending;
+        if (_writes.TryGetValue(sessionId, out var pending) && pending.IsValueCreated && pending.Value.IsCompletedSuccessfully)
+            return await pending.Value;
 
         var meetingsRoot = Path.Combine(storage.ArchiveRoot, "Meetings");
         if (!Directory.Exists(meetingsRoot)) return null;
@@ -143,17 +149,50 @@ public sealed class LocalArchiveWriter(
             try
             {
                 var manifest = JsonSerializer.Deserialize<ArchiveManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), _json);
-                if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)) return directory;
+                if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
+                    && manifest is not null
+                    && IsUsableManifest(directory, manifest))
+                    return directory;
             }
             catch (JsonException) { logger.LogWarning("Ignoring malformed archive manifest {ManifestPath}", manifestPath); }
         }
         return null;
     }
 
+    private static bool IsUsableManifest(string directory, ArchiveManifest manifest)
+    {
+        var files = manifest.Files;
+        if (files is null || files.Count == 0) return false;
+
+        // A preview is optional, but source tracks and the master are part of
+        // the durable archive contract.  Do not let a manifest created before
+        // a crash hide a partially written archive from recovery.
+        foreach (var file in files.Where(file =>
+                     !string.Equals(file.Kind, "preview", StringComparison.OrdinalIgnoreCase)
+                     && !string.Equals(file.Name, "preview", StringComparison.OrdinalIgnoreCase)))
+            if (!IsArchiveFileUsable(directory, file)) return false;
+
+        var master = files.FirstOrDefault(file =>
+            string.Equals(file.Kind, "export", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(file.Name, "master", StringComparison.OrdinalIgnoreCase));
+        return master is not null && IsArchiveFileUsable(directory, master);
+    }
+
+    private static bool IsArchiveFileUsable(string directory, ArchiveFileEntry file)
+    {
+        if (string.IsNullOrWhiteSpace(file.RelativePath)) return false;
+        var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(directory, file.RelativePath));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return false;
+        var info = new FileInfo(path);
+        return info.Exists && info.Length > 0 && (file.SizeBytes <= 0 || info.Length == file.SizeBytes);
+    }
+
     private async Task ConcatTrackAsync(IReadOnlyList<RecordingArchiveChunk> chunks, string output, CancellationToken cancellationToken)
     {
-        var listPath = output + ".concat.txt";
-        var outputPart = output + ".part";
+        var attempt = Guid.NewGuid().ToString("N");
+        var listPath = output + $".{attempt}.concat.txt";
+        var outputPart = output + $".{attempt}.part";
         var lines = chunks.Select(chunk => $"file '{EscapeConcatPath(chunk.LocalPath)}'");
         DeleteIfExists(listPath);
         DeleteIfExists(outputPart);
@@ -162,7 +201,9 @@ public sealed class LocalArchiveWriter(
         await File.WriteAllTextAsync(listPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false), cancellationToken);
         try
         {
-            await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", outputPart], cancellationToken);
+            // The atomic target intentionally ends in `.part`; ffmpeg cannot
+            // infer the muxer from that suffix on Windows.
+            await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
             await ValidateAudioFileAsync(outputPart, cancellationToken);
             File.Move(outputPart, output, true);
         }
@@ -175,13 +216,13 @@ public sealed class LocalArchiveWriter(
 
     private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, CancellationToken cancellationToken)
     {
-        var outputPart = output + ".part";
+        var outputPart = output + $".{Guid.NewGuid():N}.part";
         DeleteIfExists(outputPart);
         if (tracks.Count == 1)
         {
             try
             {
-                await RunFfmpegAsync(["-y", "-i", tracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", outputPart], cancellationToken);
+                await RunFfmpegAsync(["-y", "-i", tracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
                 await ValidateAudioFileAsync(outputPart, cancellationToken);
                 File.Move(outputPart, output, true);
             }
@@ -191,7 +232,7 @@ public sealed class LocalArchiveWriter(
 
         var arguments = new List<string>();
         foreach (var track in tracks) arguments.AddRange(["-i", track]);
-        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={tracks.Count}:duration=longest:normalize=0,aresample=48000", "-ac", "1", "-c:a", "flac", outputPart]);
+        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={tracks.Count}:duration=longest:normalize=0,aresample=48000", "-ac", "1", "-c:a", "flac", "-f", "flac", outputPart]);
         try
         {
             await RunFfmpegAsync(arguments, cancellationToken);

@@ -10,6 +10,17 @@ public static class AgentIpcProtocol
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload);
 
+public sealed record AudioSourceTestResult(
+    bool Success,
+    string? DeviceId,
+    string? FriendlyName,
+    bool SignalDetected,
+    double? AverageRmsDb,
+    double? PeakDb,
+    bool Clipping,
+    long DurationMs,
+    string? ErrorCode = null);
+
 public sealed record AgentIpcResponse(
     bool Ok,
     string State,
@@ -20,7 +31,8 @@ public sealed record AgentIpcResponse(
     long? MediaTimeMs = null,
     int ProtocolVersion = AgentIpcProtocol.Version,
     AgentPreflightResult? Preflight = null,
-    RecordingSessionStatus? SessionStatus = null);
+    RecordingSessionStatus? SessionStatus = null,
+    AudioSourceTestResult? AudioSourceTest = null);
 
 public sealed record AgentIpcHealth(
     bool Microphone,
@@ -49,7 +61,31 @@ public sealed record AgentIpcHealth(
     Guid? AgentId = null,
     string ServerConnectionState = "UNKNOWN",
     DateTimeOffset? LastHeartbeatAtUtc = null,
-    string? LastServerError = null);
+    string? LastServerError = null,
+    double? MicrophoneRms = null,
+    double? SystemAudioRms = null,
+    double? MicrophoneRmsDb = null,
+    double? SystemAudioRmsDb = null,
+    bool? MicrophoneClipping = null,
+    bool? SystemAudioClipping = null,
+    DateTimeOffset? MicrophoneLastAudioAtUtc = null,
+    DateTimeOffset? SystemAudioLastAudioAtUtc = null,
+    long? MicrophoneSilenceDurationMs = null,
+    long? SystemAudioSilenceDurationMs = null,
+    bool MicrophoneTelemetryStale = true,
+    bool SystemAudioTelemetryStale = true,
+    string RawBacklogHealth = "HEALTHY",
+    // Additive fields: older Desktop/Voice Host clients can still deserialize
+    // the v5 payload while newer clients can distinguish the live capture from
+    // sessions being delivered in the background.
+    string? ActiveSessionId = null,
+    int BackgroundPendingSessions = 0,
+    int BackgroundFailedSessions = 0,
+    int RawChunksReady = 0,
+    int RawChunksReadyForUpload = 0,
+    string StorageWatermarkState = "NORMAL",
+    double StorageFreePercent = 100,
+    string? StorageWatermarkReason = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
@@ -68,7 +104,10 @@ public sealed record AgentPreflightResult(
     long MinimumFreeBytes,
     string BackendConnectionState,
     IReadOnlyList<string> Warnings,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    string StorageWatermarkState = "NORMAL",
+    double StorageFreePercent = 100,
+    string? StorageWatermarkReason = null);
 
 public sealed record RecordingSessionStatus(
     string SessionId,
@@ -84,7 +123,15 @@ public sealed record RecordingSessionStatus(
     string? ArchivePath = null,
     string? ErrorCode = null,
     bool Retryable = true,
-    DateTimeOffset? NextRetryAtUtc = null);
+    DateTimeOffset? NextRetryAtUtc = null,
+    Guid? MediaAssetId = null,
+    Guid? ProcessingJobId = null,
+    string? TraceId = null,
+    int ChunksReady = 0,
+    int ChunksUploading = 0,
+    int ChunksFailed = 0,
+    long BytesPending = 0,
+    double? OldestPendingAgeSeconds = null);
 
 public sealed record FinalizationResult(
     bool Success,
@@ -93,4 +140,10 @@ public sealed record FinalizationResult(
     bool Retryable = true,
     string? ArchivePath = null,
     Guid? ServerSessionId = null,
-    IReadOnlyList<int>? MissingChunks = null);
+    IReadOnlyList<int>? MissingChunks = null,
+    string? ErrorMessage = null,
+    Guid? MeetingId = null,
+    Guid? MediaAssetId = null,
+    Guid? ProcessingJobId = null,
+    string? TraceId = null,
+    DateTimeOffset? NextRetryAtUtc = null);

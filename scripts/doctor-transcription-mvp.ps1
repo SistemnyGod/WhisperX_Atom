@@ -25,7 +25,36 @@ function Check([string]$name, [scriptblock]$action, [switch]$WarningOnly) {
     }
 }
 
-Check "docker" { docker info | Out-Null; "ready" }
+function Get-RunningWhisperXServiceNames {
+    $composeArgs = @(
+        "compose", "--env-file", (Join-Path $repo ".env"),
+        "-f", (Join-Path $repo "compose.dev.yml"),
+        "--profile", "core", "--profile", "gpu",
+        "ps", "--status", "running", "--services"
+    )
+
+    $composeNames = @(& docker @composeArgs)
+    if ($LASTEXITCODE -eq 0 -and $composeNames.Count -gt 0) {
+        return @($composeNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    # Docker Desktop may allow a read-only `docker ps` while denying the
+    # compose project pipe. The container names still provide enough
+    # evidence for a diagnostic check without mutating runtime state.
+    $containerNames = @(& docker ps --format "{{.Names}}")
+    if ($LASTEXITCODE -ne 0) { throw "Unable to inspect running Docker containers" }
+
+    $serviceNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($containerName in $containerNames) {
+        if ($containerName -match '^whisperx-atom-(?<service>.+)-\d+$') {
+            $serviceNames.Add($Matches.service)
+        }
+    }
+    if ($serviceNames.Count -eq 0) { throw "No running WhisperX containers found" }
+    return @($serviceNames | Sort-Object -Unique)
+}
+
+Check "docker" { docker ps --format "{{.ID}}" | Out-Null; if ($LASTEXITCODE -ne 0) { throw "Docker daemon is not accessible" }; "ready" }
 Check "compose" { docker compose version | Out-Null; "ready" }
 if (-not $SkipRegistry) { Check "registry" { docker manifest inspect nats:2.11-alpine | Out-Null; "ready" } -WarningOnly }
 Check "cuda" { nvidia-smi | Out-Null; "ready" } -WarningOnly
@@ -57,14 +86,14 @@ Check "systemReadiness" {
     "ready"
 }
 Check "services" {
-    $names = @(docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile core --profile gpu ps --status running --services)
+    $names = @(Get-RunningWhisperXServiceNames)
     $requiredServices = @("postgres","nats","api","tusd","outbox-relay","import-worker","media-worker")
     if ($gpuMode -eq "container") { $requiredServices += "gpu-worker" }
     foreach ($required in $requiredServices) { if ($names -notcontains $required) { throw "service $required absent" } }
     "ready"
 }
 Check "transcriptOnly" {
-    $running = @(docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile llm --profile llm-diagnostic ps --services --filter status=running)
+    $running = @(Get-RunningWhisperXServiceNames)
     foreach ($excluded in @("summary-worker", "llama-server")) { if ($running -contains $excluded) { throw "excluded service $excluded is running" } }
     "ready"
 }

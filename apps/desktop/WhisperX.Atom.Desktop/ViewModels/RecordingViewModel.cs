@@ -35,6 +35,15 @@ public sealed class RecordingViewModel : ObservableObject
     private long _rawChunksBytes;
     private double? _microphoneDb;
     private double? _systemAudioDb;
+    private double? _microphoneRmsDb;
+    private double? _systemAudioRmsDb;
+    private bool? _microphoneClipping;
+    private bool? _systemAudioClipping;
+    private bool _microphoneTelemetryStale = true;
+    private bool _systemAudioTelemetryStale = true;
+    private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
+    private IReadOnlyList<double> _systemAudioWaveform = Array.Empty<double>();
+    private string _microphoneTestStatus = "Микрофон ещё не проверен.";
     private string _processingStatus = "После остановки здесь появится статус WhisperX.";
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
@@ -45,6 +54,19 @@ public sealed class RecordingViewModel : ObservableObject
     private string _deliveryState = "NOT_STARTED";
     private string? _sessionErrorCode;
     private bool _sessionRetryable;
+    private int _chunksTotal;
+    private int _chunksConfirmed;
+    private int _chunksReady;
+    private int _chunksUploading;
+    private int _chunksFailed;
+    private long _bytesPending;
+    private double? _oldestPendingAgeSeconds;
+    private int _backgroundPendingSessions;
+    private int _backgroundFailedSessions;
+    private int _rawChunksReady;
+    private int _rawChunksReadyForUpload;
+    private string _storageWatermarkState = "NORMAL";
+    private double _storageFreePercent;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -57,7 +79,7 @@ public sealed class RecordingViewModel : ObservableObject
 
     public ObservableCollection<AudioDeviceOption> Microphones { get; } = [];
     public ObservableCollection<AudioDeviceOption> SystemAudioDevices { get; } = [];
-    public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) NotifyCommands(); } }
+    public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) { NotifyCommands(); OnPropertyChanged(nameof(CanTestAudio)); } } }
     public string Title { get => _title; set => SetProperty(ref _title, value); }
     public string? SessionId
     {
@@ -87,6 +109,24 @@ public sealed class RecordingViewModel : ObservableObject
         _ => "Локальное сохранение ожидает"
     };
     public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
+    public string ChunkSyncLabel => _chunksTotal == 0
+        ? "Чанки: пока не созданы"
+        : $"Чанки: {_chunksConfirmed} / {_chunksTotal} подтверждено · ожидают: {_chunksReady + _chunksUploading + _chunksFailed}";
+    public string PendingBytesLabel => _bytesPending <= 0
+        ? "Ожидающих данных: нет"
+        : $"Ожидают отправки: {FormatBytes(_bytesPending)}";
+    public string PendingAgeLabel => _oldestPendingAgeSeconds is not double age
+        ? "Возраст очереди: —"
+        : $"Старейший ожидающий чанк: {TimeSpan.FromSeconds(age):g}";
+    public string BackgroundDeliveryLabel => _backgroundPendingSessions == 0 && _backgroundFailedSessions == 0
+        ? "Фоновых сессий доставки нет"
+        : $"Фоновые сессии: {_backgroundPendingSessions} в доставке · {_backgroundFailedSessions} с ошибками";
+    public string RawReadyLabel => _rawChunksReadyForUpload == 0
+        ? "Закодированные чанки: нет ожидающих отправки"
+        : $"Закодированные чанки: {_rawChunksReadyForUpload} ожидают отправки";
+    public string RawEncoderReadyLabel => _rawChunksReady == 0
+        ? "Сырой PCM: очередь на кодирование пуста"
+        : $"Сырой PCM: {_rawChunksReady} чанков готовы к кодированию";
     public bool CanOpenLocalArchive => !string.IsNullOrWhiteSpace(ArchivePath) && Directory.Exists(ArchivePath);
     public string? SelectedMicrophoneId => _microphoneDeviceId;
     public string? SelectedSystemAudioId => _systemAudioDeviceId;
@@ -96,6 +136,13 @@ public sealed class RecordingViewModel : ObservableObject
         : _rawChunksFailed > 0
             ? $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · ошибок: {_rawChunksFailed}"
             : $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · {FormatBytes(_rawChunksBytes)}";
+    public string StorageWatermarkLabel => _storageWatermarkState switch
+    {
+        "BLOCK_RECORDING" => $"Хранилище: запись заблокирована · свободно {_storageFreePercent:F1}%",
+        "CRITICAL" => $"Хранилище: критический уровень · свободно {_storageFreePercent:F1}%",
+        "WARNING" => $"Хранилище: внимание · свободно {_storageFreePercent:F1}%",
+        _ => $"Хранилище: нормально · свободно {_storageFreePercent:F1}%"
+    };
     public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
     public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
     public int ProcessingProgress { get => _processingProgress; private set => SetProperty(ref _processingProgress, value); }
@@ -125,6 +172,14 @@ public sealed class RecordingViewModel : ObservableObject
     public double SystemAudioLevel => ToLevel(_systemAudioDb);
     public string MicrophoneDbLabel => FormatDb(_microphoneDb);
     public string SystemAudioDbLabel => FormatDb(_systemAudioDb);
+    public string MicrophoneTelemetryLabel => FormatTelemetry(_microphoneRmsDb, _microphoneClipping, _microphoneTelemetryStale);
+    public string SystemAudioTelemetryLabel => FormatTelemetry(_systemAudioRmsDb, _systemAudioClipping, _systemAudioTelemetryStale);
+    public IReadOnlyList<double> MicrophoneWaveform => _microphoneWaveform;
+    public IReadOnlyList<double> SystemAudioWaveform => _systemAudioWaveform;
+    public bool MicrophoneTelemetryStale => _microphoneTelemetryStale;
+    public bool SystemAudioTelemetryStale => _systemAudioTelemetryStale;
+    public string MicrophoneTestStatus { get => _microphoneTestStatus; private set => SetProperty(ref _microphoneTestStatus, value); }
+    public bool CanTestAudio => State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
     public string AgentStatus => _lastAgentResponse is { } response
         ? AgentStatusFormatter.Format(response)
         : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
@@ -158,14 +213,7 @@ public sealed class RecordingViewModel : ObservableObject
 
     public async Task StopPollingAsync()
     {
-        if (_sessionCts is not null)
-        {
-            _sessionCts.Cancel();
-            try { if (_sessionTask is not null) await _sessionTask; } catch (OperationCanceledException) { }
-            _sessionTask = null;
-            _sessionCts.Dispose();
-            _sessionCts = null;
-        }
+        await StopSessionTrackingAsync();
         if (_pollCts is not null)
         {
             _pollCts.Cancel();
@@ -175,6 +223,16 @@ public sealed class RecordingViewModel : ObservableObject
             _pollCts = null;
         }
         await StopProcessingPollingAsync();
+    }
+
+    private async Task StopSessionTrackingAsync()
+    {
+        if (_sessionCts is null) return;
+        _sessionCts.Cancel();
+        try { if (_sessionTask is not null) await _sessionTask; } catch (OperationCanceledException) { }
+        _sessionTask = null;
+        _sessionCts.Dispose();
+        _sessionCts = null;
     }
 
     private async Task PollLoopAsync(CancellationToken cancellationToken)
@@ -202,6 +260,12 @@ public sealed class RecordingViewModel : ObservableObject
     public async Task<bool> StartRecordingAsync()
     {
         if (!CanStart) return false;
+        // A new recording reuses this ViewModel. Stop observers for the
+        // previous session before clearing its UI state; the Agent continues
+        // delivering that session in the background, but its tracker must not
+        // overwrite the new recording's status or transcript.
+        await StopSessionTrackingAsync();
+        await StopProcessingPollingAsync();
         ErrorMessage = string.Empty;
         WarningMessage = string.Empty;
         ArchivePath = null;
@@ -300,8 +364,6 @@ public sealed class RecordingViewModel : ObservableObject
                 return false;
             }
             ApplyResponse(response);
-            if (_serverProcessingExpected && MeetingId is Guid meetingId)
-                await StartProcessingPollingAsync(meetingId);
             if (!string.IsNullOrWhiteSpace(SessionId))
                 StartSessionTracking(SessionId);
             return true;
@@ -323,9 +385,7 @@ public sealed class RecordingViewModel : ObservableObject
             ApplyResponse(response);
             if (!response.Ok && response.SessionStatus is null)
                 ErrorMessage = MapRecordingError(response.Error);
-            if (response.Ok && _serverProcessingExpected && MeetingId is Guid meetingId)
-                await StartProcessingPollingAsync(meetingId);
-            if (!response.Ok && !string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
+            if (!string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
             return response.Ok;
         }
         catch (Exception ex) { ErrorMessage = SafeError(ex); return false; }
@@ -345,6 +405,30 @@ public sealed class RecordingViewModel : ObservableObject
         _systemAudioDeviceId = NormalizeDeviceId(id);
         OnPropertyChanged(nameof(SelectedSystemAudioId));
         await SaveAndSyncDevicesAsync();
+    }
+
+    public async Task TestMicrophoneAsync()
+    {
+        if (!CanTestAudio) return;
+        MicrophoneTestStatus = "Проверяю микрофон…";
+        try
+        {
+            var response = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId);
+            var result = response.AudioSourceTest;
+            MicrophoneTestStatus = result is null
+                ? "Не удалось получить результат проверки."
+                : !result.Success
+                    ? "Устройство недоступно."
+                    : !result.SignalDetected
+                        ? "Сигнал не обнаружен."
+                        : result.Clipping
+                            ? $"Сигнал обнаружен, но есть clipping. Пик: {result.PeakDb:0} dB."
+                            : $"Микрофон работает. Средний уровень: {result.AverageRmsDb:0} dB, пик: {result.PeakDb:0} dB.";
+        }
+        catch (Exception ex)
+        {
+            MicrophoneTestStatus = $"Проверка не выполнена: {SafeError(ex)}";
+        }
     }
 
     public async Task SetArchiveRootAsync(string path)
@@ -385,6 +469,7 @@ public sealed class RecordingViewModel : ObservableObject
 
     private async Task StartProcessingPollingAsync(Guid meetingId)
     {
+        if (IsProcessing) return;
         await StopProcessingPollingAsync();
         ProcessingError = string.Empty;
         ProcessingProgress = 0;
@@ -431,10 +516,18 @@ public sealed class RecordingViewModel : ObservableObject
                 {
                     MeetingId = meetingId;
                     _serverProcessingExpected = true;
-                    StatusMessage = "Локальная запись привязана к совещанию. Ожидаю транскрибацию WhisperX…";
-                    await StartProcessingPollingAsync(meetingId);
-                    return;
+                    var processingReady = session.ProcessingJobId is Guid
+                        || session.DeliveryState is "WAITING_SERVER_ASSEMBLY" or "CONFIRMED" or "COMPLETED";
+                    if (processingReady && !IsProcessing)
+                    {
+                        StatusMessage = "Запись принята сервером. Ожидаю обработку WhisperX…";
+                        await StartProcessingPollingAsync(meetingId);
+                    }
                 }
+                // Delivery tracking is independent from processing tracking. A
+                // meeting id only proves binding; it does not prove upload or
+                // media assembly. Stop this loop only at a delivery terminal state.
+                if (session.DeliveryState is "COMPLETED" or "CONFIRMED") return;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -454,7 +547,7 @@ public sealed class RecordingViewModel : ObservableObject
         "FINALIZING_SERVER" => "завершение на сервере",
         "RECONCILING" => "проверка чанков",
         "COMPLETED" => "доставлено",
-        "DELIVERY_ERROR" => "ошибка доставки",
+        "DELIVERY_ERROR" or "DELIVERY_FAILED" => "ошибка доставки",
         "NOT_STARTED" => "ожидание отправки",
         _ => "ожидание восстановления"
     };
@@ -475,12 +568,19 @@ public sealed class RecordingViewModel : ObservableObject
             WarningMessage = "Исходные аудиочанки сохранены. Исправьте Agent и повторите отправку.";
             StatusMessage = "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.";
         }
-        else if (string.Equals(session.DeliveryState, "DELIVERY_ERROR", StringComparison.OrdinalIgnoreCase))
+        else if (session.DeliveryState is "DELIVERY_ERROR" or "DELIVERY_FAILED")
         {
-            State = RecordingState.Error;
+            State = RecordingState.Idle;
             ErrorMessage = string.Empty;
             WarningMessage = MapRecordingError(session.ErrorCode ?? session.Error);
             StatusMessage = "Запись сохранена локально. Сервер пока не подтвердил получение.";
+        }
+        else if (session.ErrorCode is "AUDIO_SOURCE_FAILED" or "STORAGE_WRITE_FAILED" or "ENCODER_FAILED")
+        {
+            State = RecordingState.Error;
+            ErrorMessage = MapRecordingError(session.ErrorCode);
+            WarningMessage = "Запись остановлена безопасно. Уже сохранённые аудиоданные останутся в локальном архиве и будут обработаны recovery-механизмом Agent.";
+            StatusMessage = "Запись остановлена из-за ошибки аудиопути.";
         }
         else if (string.Equals(session.LocalFinalizeState, "LOCAL_READY", StringComparison.OrdinalIgnoreCase))
         {
@@ -496,6 +596,16 @@ public sealed class RecordingViewModel : ObservableObject
         }
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(CanOpenLocalArchive));
+        _chunksTotal = session.LocalChunkCount;
+        _chunksConfirmed = session.ConfirmedChunkCount;
+        _chunksReady = session.ChunksReady;
+        _chunksUploading = session.ChunksUploading;
+        _chunksFailed = session.ChunksFailed;
+        _bytesPending = session.BytesPending;
+        _oldestPendingAgeSeconds = session.OldestPendingAgeSeconds;
+        OnPropertyChanged(nameof(ChunkSyncLabel));
+        OnPropertyChanged(nameof(PendingBytesLabel));
+        OnPropertyChanged(nameof(PendingAgeLabel));
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(AgentStatus));
     }
@@ -670,11 +780,29 @@ public sealed class RecordingViewModel : ObservableObject
             _rawChunksPending = health.RawChunksPending;
             _rawChunksFailed = health.RawChunksFailed;
             _rawChunksBytes = health.RawChunksBytes;
+            _backgroundPendingSessions = health.BackgroundPendingSessions;
+            _backgroundFailedSessions = health.BackgroundFailedSessions;
+            _rawChunksReady = health.RawChunksReady;
+            _rawChunksReadyForUpload = health.RawChunksReadyForUpload;
+            _storageWatermarkState = health.StorageWatermarkState;
+            _storageFreePercent = health.StorageFreePercent;
             _microphoneDb = health.MicrophoneDb;
             _systemAudioDb = health.SystemAudioDb;
+            _microphoneRmsDb = health.MicrophoneRmsDb;
+            _systemAudioRmsDb = health.SystemAudioRmsDb;
+            _microphoneClipping = health.MicrophoneClipping;
+            _systemAudioClipping = health.SystemAudioClipping;
+            _microphoneTelemetryStale = health.MicrophoneTelemetryStale;
+            _systemAudioTelemetryStale = health.SystemAudioTelemetryStale;
+            _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, health.MicrophonePeak);
+            _systemAudioWaveform = AppendWaveformSample(_systemAudioWaveform, health.SystemAudioPeak);
             OnPropertyChanged(nameof(CanStart));
             OnPropertyChanged(nameof(PendingUploadsLabel));
             OnPropertyChanged(nameof(EncoderBacklogLabel));
+            OnPropertyChanged(nameof(BackgroundDeliveryLabel));
+            OnPropertyChanged(nameof(RawReadyLabel));
+            OnPropertyChanged(nameof(RawEncoderReadyLabel));
+            OnPropertyChanged(nameof(StorageWatermarkLabel));
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
             _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
@@ -688,6 +816,12 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(SystemAudioLevel));
             OnPropertyChanged(nameof(MicrophoneDbLabel));
             OnPropertyChanged(nameof(SystemAudioDbLabel));
+            OnPropertyChanged(nameof(MicrophoneTelemetryLabel));
+            OnPropertyChanged(nameof(SystemAudioTelemetryLabel));
+            OnPropertyChanged(nameof(MicrophoneWaveform));
+            OnPropertyChanged(nameof(SystemAudioWaveform));
+            OnPropertyChanged(nameof(MicrophoneTelemetryStale));
+            OnPropertyChanged(nameof(SystemAudioTelemetryStale));
         }
         StatusMessage = State switch
         {
@@ -731,6 +865,9 @@ public sealed class RecordingViewModel : ObservableObject
         var code = value.Trim().ToUpperInvariant();
         return code switch
         {
+            "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
+            "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Проверьте свободное место и доступ к архиву.",
+            "ENCODER_FAILED" => "Не удалось закодировать аудиочанк. Локальные данные сохранены для восстановления.",
             "LOCAL_ENCODING_FAILED" => "Не удалось завершить кодирование локального аудио.",
             "LOCAL_ARCHIVE_FAILED" or "RECORDING_FINALIZE_FAILED" => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
             "LOCAL_CHUNK_MISSING" => "В локальном архиве отсутствует аудиочанк. Исходные файлы сохранены для диагностики.",
@@ -770,6 +907,18 @@ public sealed class RecordingViewModel : ObservableObject
     };
     private static double ToLevel(double? db) => db is double value ? Math.Clamp((value + 60d) / 60d * 100d, 0d, 100d) : 0d;
     private static string FormatDb(double? db) => db is double value ? $"{value:0} dB peak" : "Нет измерения";
+    private static string FormatTelemetry(double? rmsDb, bool? clipping, bool stale)
+    {
+        if (stale) return "Телеметрия устарела";
+        if (rmsDb is not double value) return "Сигнал не обнаружен";
+        return clipping == true ? $"RMS {value:0} dB · клиппинг" : $"RMS {value:0} dB · сигнал стабилен";
+    }
+    private static IReadOnlyList<double> AppendWaveformSample(IReadOnlyList<double> current, double? peak)
+    {
+        var updated = current.Count >= 64 ? current.Skip(1).ToList() : current.ToList();
+        updated.Add(peak is double value ? Math.Clamp(value, 0d, 1d) : 0d);
+        return updated;
+    }
     private static string? NormalizeDeviceId(string? id) => string.IsNullOrWhiteSpace(id) ? null : id.Trim();
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Recorder Agent не ответил. Проверьте локальный сервис.");
 }

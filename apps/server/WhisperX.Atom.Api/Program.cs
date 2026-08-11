@@ -3,12 +3,48 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
+if (builder.Environment.IsProduction())
+{
+    static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
+        || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
+        || value.StartsWith("replace-with", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("password", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("changeme", StringComparison.OrdinalIgnoreCase);
+    if (string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("PRODUCTION_COOKIE_SECURE_REQUIRED");
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET" })
+        if (IsUnsafeSecret(builder.Configuration[name])) throw new InvalidOperationException($"PRODUCTION_SECRET_INVALID:{name}");
+}
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        var route = path.StartsWith("/api/auth/login", StringComparison.OrdinalIgnoreCase) ? "login" :
+            path.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase) ? "refresh" :
+            path.StartsWith("/api/v1/agents/enroll", StringComparison.OrdinalIgnoreCase) ? "enrollment" :
+            path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) ? "summary-rebuild" :
+            path.StartsWith("/api/assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" : null;
+        if (route is null) return RateLimitPartition.GetNoLimiter("unlimited");
+        var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var limit = route is "login" or "refresh" or "enrollment" ? 20 : 30;
+        return RateLimitPartition.GetFixedWindowLimiter($"{route}:{ip}", _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = limit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+    });
+});
 var allowedOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
@@ -19,11 +55,15 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 
 var app = builder.Build();
 app.UseCors();
+app.UseRateLimiter();
 
 app.Use(async (context, next) =>
 {
     var started = Stopwatch.GetTimestamp();
-    var traceId = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
+    var suppliedTraceId = context.Request.Headers["X-Trace-Id"].ToString();
+    var traceId = suppliedTraceId.Length is > 0 and <= 128 && suppliedTraceId.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_')
+        ? suppliedTraceId
+        : Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
     context.Response.Headers["X-Trace-Id"] = traceId;
     try
     {
@@ -300,6 +340,43 @@ app.MapGet("/api/admin/audit", async (Guid? meetingId, string? eventType, int? l
         normalizedEventType,
         Math.Clamp(limit ?? 100, 1, 200),
         Math.Max(offset ?? 0, 0)));
+});
+app.MapGet("/api/admin/meetings/{id:guid}/diagnostics", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var meeting = await db.GetMeetingAsync(id, null, true);
+    if (meeting is null) return Results.NotFound();
+    var jobs = await db.ListJobsAsync(id);
+    var media = await db.ListMediaAsync(id);
+    var transcript = await db.GetTranscriptAsync(id);
+    var summary = await store.GetLatestSummaryAsync(id);
+    var traceId = context.Request.Headers["X-Trace-Id"].ToString();
+    return Results.Ok(new
+    {
+        meeting = new { meeting.Id, meeting.Status, meeting.CreatedAt },
+        media = media.Select(item => new { item.Id, item.Status, item.DurationMs, item.SizeBytes }),
+        jobs = jobs.Select(item => new { item.Id, item.Type, item.Status, item.Stage, item.Progress, item.Attempt, item.Error }),
+        transcript = transcript is null ? null : new
+        {
+            transcript.Id,
+            transcript.Status,
+            segmentCount = transcript.Segments.Count,
+            transcript.IsPartial,
+            transcript.QualityScore,
+            warnings = transcript.Warnings
+        },
+        summary = summary is null ? null : new { summary.Id, summary.Status, summary.Version, summary.ModelName, summary.PromptVersion, summary.CreatedAt },
+        correlation = new
+        {
+            meetingId = id,
+            mediaAssetIds = media.Select(item => item.Id),
+            processingJobIds = jobs.Select(item => item.Id),
+            transcriptId = transcript?.Id,
+            summaryId = summary?.Id,
+            traceId = string.IsNullOrWhiteSpace(traceId) ? null : traceId
+        },
+        timings = new { localFinalizeMs = (long?)null, uploadMs = (long?)null, assemblyMs = (long?)null, asrMs = (long?)null, summaryMs = (long?)null }
+    });
 });
 
 app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IConfiguration configuration) =>
@@ -638,7 +715,7 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
     if (sequence < 0) return Results.BadRequest(new { error = "chunk_sequence_invalid" });
     var key = $"/data/recordings/{sessionId:N}/{trackId:N}/{sequence:D8}.flac";
     var path = StorageHelpers.StoragePath(key);
-    var partPath = path + ".part";
+    var partPath = path + "." + Guid.NewGuid().ToString("N") + ".part";
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     try
     {
@@ -652,23 +729,31 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
             File.Delete(partPath);
             return Results.BadRequest(new { error = "chunk_checksum_mismatch" });
         }
+        var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
+        var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
         if (File.Exists(path))
         {
             var existingSha = await StorageHelpers.ComputeSha256Async(path);
             File.Delete(partPath);
-            return string.Equals(existingSha, sha, StringComparison.OrdinalIgnoreCase)
+            if (!string.Equals(existingSha, sha, StringComparison.OrdinalIgnoreCase))
+                return Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+            var repaired = await store.ConfirmChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, new FileInfo(path).Length, existingSha);
+            return repaired
                 ? Results.Ok(new { sequence, storageKey = key, sizeBytes = new FileInfo(path).Length, sha256 = existingSha, idempotent = true })
                 : Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
         }
-        var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
-        var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
-        var stored = await store.RegisterChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
-        if (!stored)
+        var staged = await store.StageChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        if (!staged)
         {
             File.Delete(partPath);
             return Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
         }
         File.Move(partPath, path, true);
+        var stored = await store.ConfirmChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        if (!stored)
+        {
+            return Results.Json(new { error = "chunk_confirmation_pending" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
         return Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha });
     }
     catch
@@ -691,7 +776,14 @@ app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid 
     var result = await store.FinalizeRecordingAsync(agentId, sessionId, request?.Manifest);
     if (!result.Found) return Results.NotFound(new { error = result.ErrorCode });
     if (!result.Accepted) return Results.Conflict(new { error = result.ErrorCode, missing = result.Missing });
-    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId });
+    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId, sessionId, state = "ASSEMBLY_QUEUED" });
+});
+
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/status", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var status = await store.GetRecordingSessionStatusAsync(agentId, sessionId);
+    return status is null ? Results.NotFound(new { error = "recording_session_not_found" }) : Results.Ok(status);
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
@@ -993,6 +1085,7 @@ public sealed record MeetingCancellationResult(Guid MeetingId, string Status, in
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
 public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
+public sealed record CorrelationContext(Guid? MeetingId = null, string? LocalSessionId = null, Guid? ServerSessionId = null, Guid? MediaAssetId = null, Guid? ProcessingJobId = null, Guid? TranscriptId = null, Guid? SummaryJobId = null, Guid? SummaryId = null, string? TraceId = null);
 
 public static class StorageHelpers
 {

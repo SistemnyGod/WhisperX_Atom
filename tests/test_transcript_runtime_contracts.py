@@ -73,6 +73,13 @@ def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     assert "-SkipRegistry" in e2e and "Set-WhisperXRuntimeEnvironment" in e2e
 
 
+def test_host_worker_doctor_accepts_exact_python_path_when_commandline_is_unavailable():
+    runtime = read("scripts/WhisperX.Runtime.ps1")
+    assert "$executablePath = \"\"" in runtime
+    assert "[IO.Path]::GetFullPath($executablePath)" in runtime
+    assert "executable path is a safe fallback identity check" in runtime
+
+
 def test_processing_pipeline_queues_are_created_only_by_async_start():
     processing = read("whisperx_atom/processing.py")
     assert "from app.transcription_pipeline import" in processing
@@ -103,3 +110,13 @@ def test_host_runtime_automation_and_resumable_tus_contracts_are_explicit():
     assert "hostGpuWorker" in doctor and "hfDiarization" in doctor and "qwen" in doctor
     assert "Upload-TusResumable" in e2e and "16MB" in e2e and "Upload-Offset" in e2e
     assert "Register-ScheduledTask" in startup
+
+
+def test_release_gate_blocks_without_complete_live_core_evidence():
+    gate = read("scripts/release-gate.ps1")
+    e2e = read("scripts/e2e-core.ps1")
+    assert "BLOCKED_BY_CORE_PIPELINE" in gate
+    assert "mvp-release-audit.json" in gate
+    assert "mvp-release-gate.json" in gate
+    for field in ("localArchiveReady", "deliveryConfirmed", "mediaReady", "summaryStatus"):
+        assert field in e2e

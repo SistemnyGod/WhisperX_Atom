@@ -8,6 +8,23 @@ using System.Text.Json;
 namespace WhisperX.Atom.Recorder;
 
 public sealed record AgentCommandEnvelope(Guid Id, string CommandType, JsonElement Payload, long Cursor, string Status);
+public sealed record ServerFinalizeReceipt(
+    bool Accepted,
+    Guid ServerSessionId,
+    Guid? MeetingId,
+    Guid? JobId,
+    Guid? MediaAssetId,
+    string? TraceId,
+    string? ErrorCode = null,
+    bool Retryable = true,
+    IReadOnlyList<int>? MissingChunks = null);
+public sealed record ServerMediaStatus(
+    bool Ready,
+    bool TerminalFailure,
+    string? MediaStatus,
+    string? JobStatus,
+    string? JobStage,
+    string? ErrorCode = null);
 
 public sealed class AgentApiClient : IDisposable
 {
@@ -23,6 +40,7 @@ public sealed class AgentApiClient : IDisposable
     private DateTimeOffset _nextHeartbeatAtUtc = DateTimeOffset.UtcNow;
     private readonly string _configPath;
     private readonly object _configurationGate = new();
+    private readonly SemaphoreSlim _bindingGate = new(1, 1);
     private readonly AgentStorageSettings _storage;
 
     public AgentApiClient(AgentStorageSettings storage)
@@ -205,19 +223,27 @@ public sealed class AgentApiClient : IDisposable
 
     public async Task<Guid> BindSessionAsync(string localSessionId, Guid? meetingId, string? title, IReadOnlyList<RecordingTrackInfo> tracks, SpoolStore spool, CancellationToken cancellationToken)
     {
-        if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
-        var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-        var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
-        var serverSessionId = created.Item1;
-        if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
-        foreach (var track in tracks)
+        await _bindingGate.WaitAsync(cancellationToken);
+        try
         {
-            var existingBinding = await spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken);
-            if (existingBinding is not null) continue;
-            var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, cancellationToken);
-            await spool.UpsertServerBindingAsync(new ServerBinding(localSessionId, track.TrackId, serverSessionId, serverTrackId), cancellationToken);
+            if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
+            var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
+            var serverSessionId = created.Item1;
+            if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
+            foreach (var track in tracks)
+            {
+                var existingBinding = await spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken);
+                if (existingBinding is not null) continue;
+                var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, cancellationToken);
+                await spool.UpsertServerBindingAsync(new ServerBinding(localSessionId, track.TrackId, serverSessionId, serverTrackId), cancellationToken);
+            }
+            return serverSessionId;
         }
-        return serverSessionId;
+        finally
+        {
+            _bindingGate.Release();
+        }
     }
 
     public async Task<int> UploadPendingChunksAsync(SpoolStore spool, CancellationToken cancellationToken)
@@ -228,20 +254,58 @@ public sealed class AgentApiClient : IDisposable
             ? parsedConcurrency
             : 3;
         using var gate = new SemaphoreSlim(Math.Clamp(configuredConcurrency, 1, 4));
+        var confirmed = 0;
         var uploads = pending.Select(async chunk =>
         {
             await gate.WaitAsync(cancellationToken);
+            var claimed = false;
             try
             {
                 var binding = await spool.GetServerBindingAsync(chunk.SessionId, chunk.TrackId, cancellationToken);
-                if (binding is null || !File.Exists(chunk.LocalPath)) return false;
-                await UploadChunkAsync(binding, chunk, cancellationToken);
-                await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
-                return true;
+                if (binding is null) return;
+                if (!File.Exists(chunk.LocalPath))
+                {
+                    await spool.MarkUploadFailedAsync(chunk, "LOCAL_CHUNK_MISSING", cancellationToken);
+                    return;
+                }
+                if (!await spool.TryBeginChunkUploadAsync(chunk, cancellationToken)) return;
+                claimed = true;
+                try
+                {
+                    await UploadChunkAsync(binding, chunk, cancellationToken);
+                    await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
+                    Interlocked.Increment(ref confirmed);
+                }
+                catch (Exception ex)
+                {
+                    await spool.MarkUploadFailedAsync(chunk, ClassifyChunkUploadError(ex), cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (claimed)
+                {
+                    try { await spool.MarkUploadFailedAsync(chunk, ClassifyChunkUploadError(ex), cancellationToken); }
+                    catch (Exception stateError) { _ = stateError; }
+                }
             }
             finally { gate.Release(); }
         });
-        return (await Task.WhenAll(uploads)).Count(uploaded => uploaded);
+        await Task.WhenAll(uploads);
+        return confirmed;
+    }
+
+    private static string ClassifyChunkUploadError(Exception exception)
+    {
+        if (exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
+            return "AGENT_AUTH_REJECTED";
+        if (exception is FileNotFoundException or DirectoryNotFoundException)
+            return "LOCAL_CHUNK_MISSING";
+        return "CHUNK_UPLOAD_FAILED";
     }
 
     public async Task<int> UploadPendingEventsAsync(SpoolStore spool, string localSessionId, CancellationToken cancellationToken)
@@ -269,16 +333,16 @@ public sealed class AgentApiClient : IDisposable
         await spool.MarkEventsSyncedAsync(events.Select(item => item.Id), cancellationToken);
         return events.Count;
     }
-    public async Task<bool> FinalizeServerSessionAsync(Guid serverSessionId, string localSessionId, SpoolStore spool, CancellationToken cancellationToken)
+    public async Task<ServerFinalizeReceipt> FinalizeServerSessionAsync(Guid serverSessionId, string localSessionId, SpoolStore spool, CancellationToken cancellationToken)
     {
-        if (!IsConfigured) return false;
+        if (!IsConfigured) return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, null, "SERVER_UNAVAILABLE");
         var manifest = await spool.BuildManifestAsync(localSessionId, cancellationToken);
-        if (manifest is null || manifest.ServerSessionId != serverSessionId) return false;
+        if (manifest is null || manifest.ServerSessionId != serverSessionId) return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, null, "LOCAL_MANIFEST_MISSING", false);
         foreach (var localTrack in await spool.GetTrackInfosAsync(localSessionId, cancellationToken))
             if (await spool.GetServerBindingAsync(localSessionId, localTrack.TrackId, cancellationToken) is null)
-                return false;
+                return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, null, "SERVER_BINDING_FAILED", true);
         if (!await ReconcileMissingChunksAsync(serverSessionId, localSessionId, manifest, spool, cancellationToken))
-            return false;
+            return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, null, "SERVER_CHUNKS_MISSING", true);
 
         using var response = await SendWithRetryAsync(async () =>
         {
@@ -303,8 +367,104 @@ public sealed class AgentApiClient : IDisposable
             });
             return await _http.SendAsync(request, cancellationToken);
         }, cancellationToken);
-        return response.IsSuccessStatusCode;
+        var traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues) ? traceValues.FirstOrDefault() : null;
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            string? error = null;
+            IReadOnlyList<int>? missing = null;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                if (document.RootElement.TryGetProperty("error", out var errorElement)) error = errorElement.GetString();
+                if (document.RootElement.TryGetProperty("missing", out var missingElement) && missingElement.ValueKind == JsonValueKind.Array)
+                    missing = missingElement.EnumerateArray().SelectMany(item =>
+                    {
+                        // The API uses camelCase `sequences`; accept the older
+                        // `missingSequences` spelling while rolling agents forward.
+                        if (!item.TryGetProperty("sequences", out var sequences)) item.TryGetProperty("missingSequences", out sequences);
+                        return sequences.ValueKind == JsonValueKind.Array
+                            ? sequences.EnumerateArray().Where(value => value.TryGetInt32(out _)).Select(value => value.GetInt32())
+                            : Enumerable.Empty<int>();
+                    }).Distinct().OrderBy(value => value).ToArray();
+            }
+            catch (JsonException) { }
+            var code = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden ? "AGENT_AUTH_REJECTED" : error ?? "SERVER_FINALIZE_REJECTED";
+            return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, traceId, code, IsRetryableFinalizeError(code, response.StatusCode), missing);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+            var meetingId = root.TryGetProperty("meetingId", out var meeting) && meeting.TryGetGuid(out var parsedMeetingId) ? parsedMeetingId : (Guid?)null;
+            var jobId = root.TryGetProperty("jobId", out var job) && job.TryGetGuid(out var parsedJobId) ? parsedJobId : (Guid?)null;
+            var mediaAssetId = root.TryGetProperty("mediaAssetId", out var asset) && asset.TryGetGuid(out var parsedAssetId) ? parsedAssetId : (Guid?)null;
+            await spool.SetServerReceiptAsync(localSessionId, meetingId, mediaAssetId, jobId, traceId, cancellationToken);
+            return new ServerFinalizeReceipt(true, serverSessionId, meetingId, jobId, mediaAssetId, traceId);
+        }
+        catch (JsonException)
+        {
+            return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, traceId, "SERVER_FINALIZE_REJECTED", true);
+        }
     }
+
+    public async Task<ServerMediaStatus> GetServerMediaStatusAsync(Guid serverSessionId, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return new ServerMediaStatus(false, false, null, null, null, "SERVER_UNAVAILABLE");
+        HttpResponseMessage response;
+        try
+        {
+            response = await SendWithRetryAsync(() =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/status"));
+                AddAuthentication(request);
+                return _http.SendAsync(request, cancellationToken);
+            }, cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return new ServerMediaStatus(false, false, null, null, null, "SERVER_UNAVAILABLE");
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                var terminal = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+                return new ServerMediaStatus(false, terminal, null, null, null, terminal ? "AGENT_AUTH_REJECTED" : "SERVER_UNAVAILABLE");
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+                var root = document.RootElement;
+                var mediaStatus = root.TryGetProperty("mediaStatus", out var media) && media.ValueKind == JsonValueKind.String ? media.GetString() : null;
+                var jobStatus = root.TryGetProperty("jobStatus", out var job) && job.ValueKind == JsonValueKind.String ? job.GetString() : null;
+                var jobStage = root.TryGetProperty("jobStage", out var stage) && stage.ValueKind == JsonValueKind.String ? stage.GetString() : null;
+                var terminal = string.Equals(mediaStatus, "FAILED", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(mediaStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(jobStatus, "FAILED", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(jobStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase);
+                return new ServerMediaStatus(
+                    string.Equals(mediaStatus, "READY", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(jobStatus, "FAILED", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(jobStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase),
+                    terminal,
+                    mediaStatus,
+                    jobStatus,
+                    jobStage,
+                    terminal ? "SERVER_ASSEMBLY_FAILED" : null);
+            }
+            catch (JsonException)
+            {
+                return new ServerMediaStatus(false, false, null, null, null, "SERVER_UNAVAILABLE");
+            }
+        }
+    }
+
+    public async Task<bool> IsServerMediaReadyAsync(Guid serverSessionId, CancellationToken cancellationToken)
+        => (await GetServerMediaStatusAsync(serverSessionId, cancellationToken)).Ready;
 
     private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, CancellationToken cancellationToken)
     {
@@ -321,7 +481,16 @@ public sealed class AgentApiClient : IDisposable
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/tracks"));
         AddAuthentication(request);
-        request.Content = JsonContent.Create(new { trackType = track.TrackType, deviceId = (string?)null, sampleRate = track.SampleRate, channels = track.Channels });
+        request.Content = JsonContent.Create(new
+        {
+            trackType = track.TrackType,
+            deviceId = track.EndpointId,
+            deviceName = track.DeviceFriendlyName,
+            selectionMode = track.SelectionMode,
+            profile = track.Profile,
+            sampleRate = track.SampleRate,
+            channels = track.Channels
+        });
         using var response = await _http.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -414,9 +583,17 @@ public sealed class AgentApiClient : IDisposable
     private static bool IsTransient(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
+    private static bool IsRetryableFinalizeError(string code, HttpStatusCode statusCode) =>
+        code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED"
+        || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
+
     private void AddAuthentication(HttpRequestMessage request)
     {
         request.Headers.Add("X-Agent-Id", _agentId.ToString());
+        // Keep transport correlation explicit without putting secrets or audio
+        // content into logs. Server responses return the authoritative trace id
+        // which is persisted in the local receipt for the whole recording chain.
+        request.Headers.TryAddWithoutValidation("X-Trace-Id", Guid.NewGuid().ToString("N"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
     }
 
@@ -457,5 +634,9 @@ public sealed class AgentApiClient : IDisposable
     private static Task PersistConfigurationAsync(string path, AgentConfiguration configuration, CancellationToken cancellationToken) =>
         File.WriteAllTextAsync(path, JsonSerializer.Serialize(configuration), cancellationToken);
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _bindingGate.Dispose();
+        _http.Dispose();
+    }
 }

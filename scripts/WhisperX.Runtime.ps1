@@ -120,11 +120,15 @@ function Get-WhisperXHostWorkerStatus {
     $workerId = $null
     $process = $null
     $commandLine = ""
+    $executablePath = ""
     if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
         try { $workerId = [int](Get-Content -LiteralPath $pidPath -Raw).Trim() } catch { $workerId = $null }
         if ($workerId) {
             $process = Get-Process -Id $workerId -ErrorAction SilentlyContinue
-            if ($process) { $commandLine = Get-WhisperXProcessCommandLine -ProcessId $workerId }
+            if ($process) {
+                $commandLine = Get-WhisperXProcessCommandLine -ProcessId $workerId
+                try { $executablePath = [string]$process.Path } catch { $executablePath = "" }
+            }
         }
     }
     $probe = Join-Path $RepoPath "scripts\probe_host_gpu_worker.py"
@@ -137,11 +141,25 @@ function Get-WhisperXHostWorkerStatus {
             try { $heartbeat = ($json -join "`n") | ConvertFrom-Json } catch { $heartbeat = $null }
         }
     }
+    $expectedPython = ""
+    try { $expectedPython = [IO.Path]::GetFullPath($PythonPath).ToLowerInvariant() } catch { }
+    $actualExecutable = ""
+    try { $actualExecutable = [IO.Path]::GetFullPath($executablePath).ToLowerInvariant() } catch { }
+    $commandMatchesPython = $false
+    if ($PythonPath -and $commandLine -and $commandLine.ToLowerInvariant().Contains((Split-Path $PythonPath -Leaf).ToLowerInvariant())) {
+        $commandMatchesPython = $true
+    } elseif ($expectedPython -and $actualExecutable -and $expectedPython -eq $actualExecutable) {
+        # Win32_Process.CommandLine can be unavailable for a service-owned
+        # process even when its executable path is readable. The exact Python
+        # executable path is a safe fallback identity check.
+        $commandMatchesPython = $true
+    }
     [pscustomobject]@{
         pid = $workerId
         processAlive = $null -ne $process
         commandLine = $commandLine
-        commandMatchesPython = $false -or ($PythonPath -and $commandLine -and $commandLine.ToLowerInvariant().Contains((Split-Path $PythonPath -Leaf).ToLowerInvariant()))
+        executablePath = $executablePath
+        commandMatchesPython = $commandMatchesPython
         heartbeatReady = ($probeExit -eq 0)
         heartbeat = $heartbeat
         pidPath = $pidPath

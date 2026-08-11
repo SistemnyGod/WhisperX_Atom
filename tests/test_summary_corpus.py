@@ -6,6 +6,7 @@ from workers.summary_worker.extraction import validate_extracted_facts
 from workers.summary_worker.reconciliation import reconcile_decisions
 from workers.summary_worker.resolvers import resolve_extracted_facts
 from workers.summary_worker.contracts import MeetingContext
+from workers.summary_worker.protocol import group_protocol_candidates, group_protocol_tasks, validate_protocol_candidates
 
 
 CORPUS_DIR = Path(__file__).parent / "summary-corpus"
@@ -47,6 +48,18 @@ class SummaryCorpusTests(unittest.TestCase):
         self.assertTrue(all(case["expected"]["reason"] in item.get("review_reasons", []) for item in reviewed))
         self.assertEqual("SUPERSEDED_CANDIDATE", reconciled[0]["resolution_status"])
         self.assertEqual("CURRENT_CANDIDATE", reconciled[1]["resolution_status"])
+
+    def test_meeting_protocol_fixture_groups_repeated_topics_without_merging_similar_topic(self):
+        case = self._load("meeting-protocol-ru")
+        segment_texts = {item["id"]: item["text"] for item in case["segments"]}
+        valid_ids = set(segment_texts)
+        supported, rejected = validate_protocol_candidates(case["candidates"], valid_ids, segment_texts)
+        groups = group_protocol_candidates(supported)
+        tasks = group_protocol_tasks(supported)
+        self.assertFalse(rejected)
+        self.assertEqual(case["expected"]["question_decision_groups"], len(groups))
+        self.assertEqual(case["expected"]["tasks"], len(tasks))
+        self.assertEqual(case["expected"]["merged_evidence"], groups[0]["evidence_segment_ids"])
 
 
 if __name__ == "__main__":

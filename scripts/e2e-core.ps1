@@ -13,7 +13,10 @@ param(
   [switch]$WithGpu,
   [switch]$WithLlm,
   [switch]$WaitForGpu,
-  [switch]$RestartWorkers
+  [switch]$RestartWorkers,
+  [string]$LocalArchivePath,
+  [switch]$DeliveryConfirmed,
+  [switch]$MediaReady
 )
 
 $ErrorActionPreference = "Stop"
@@ -255,6 +258,8 @@ if ($meeting -and $ResultPath) {
   $traceJob = $jobs | Where-Object {
     $_.PSObject.Properties.Name -contains "traceId" -and -not [string]::IsNullOrWhiteSpace([string]$_.traceId)
   } | Select-Object -First 1
+  $summary = $null
+  try { $summary = Invoke-Api GET "/api/meetings/$($meeting.id)/summary" } catch { }
     $result = [ordered]@{
     runId = $runId
     startedAtUtc = $runStartedAt.ToString("o")
@@ -268,6 +273,11 @@ if ($meeting -and $ResultPath) {
     qualityScore = if ($transcript) { $transcript.qualityScore } else { $null }
     qualityWarnings = if ($transcript) { @($transcript.qualityWarnings) } else { @() }
     transcriptSegmentCount = if ($transcript) { @($transcript.segments).Count } else { 0 }
+    summaryId = if ($summary) { [string]$summary.id } else { $null }
+    summaryStatus = if ($summary) { [string]$summary.status } else { $null }
+    localArchiveReady = if ($LocalArchivePath) { Test-Path -LiteralPath $LocalArchivePath -PathType Leaf } else { $false }
+    deliveryConfirmed = [bool]$DeliveryConfirmed
+    mediaReady = [bool]$MediaReady
   }
   $parent = Split-Path -Parent $ResultPath
   if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }

@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
 from .contracts import (
+    MEETING_PROTOCOL_RU,
+    MEETING_PROTOCOL_RU_SCHEMA,
+    PROTOCOL_RU_PROMPT_VERSION,
+    PROTOCOL_RU_SCHEMA_VERSION,
     SUMMARY_SCHEMA_V2,
     SUMMARY_SCHEMA_VERSION,
     MeetingContext,
@@ -17,9 +21,20 @@ from .contracts import (
 )
 from .extraction import (
     BLOCK_EXTRACTION_SCHEMA,
+    PROTOCOL_BLOCK_EXTRACTION_SCHEMA,
     facts_prompt,
     normalize_block_extraction,
+    normalize_protocol_block_extraction,
     validate_extracted_facts,
+)
+from .protocol import (
+    group_protocol_candidates,
+    group_protocol_tasks,
+    limit_protocol_items,
+    normalize_protocol_result,
+    protocol_candidates_prompt,
+    validate_protocol_candidates,
+    validate_protocol_result,
 )
 from .reconciliation import decision_conflict_facts, reconcile_decisions
 from .resolvers import resolve_extracted_facts, resolve_summary_action_items
@@ -272,6 +287,8 @@ class SummaryOrchestrator:
         blocks = build_blocks(segments, self._max_chars, self._overlap_segments)
         if not blocks:
             raise ValueError("transcript_has_no_text")
+        if self._profile.name == MEETING_PROTOCOL_RU:
+            return await self._summarize_protocol_ru(segments, blocks)
         return await self._summarize_with_extraction(segments, blocks)
         mapped: list[dict[str, Any]] = []
         system = (
@@ -332,6 +349,133 @@ class SummaryOrchestrator:
         result["source_hash"] = transcript_source_hash(segments)
         result["block_count"] = len(blocks)
         result["schema_version"] = SUMMARY_SCHEMA_VERSION
+        return result
+
+    async def _summarize_protocol_ru(
+        self,
+        segments: list[TranscriptSegment],
+        blocks: list[str],
+    ) -> dict[str, Any]:
+        valid_ids = {segment.id for segment in segments}
+        segment_texts = {segment.id: segment.text for segment in segments}
+        segment_times = {segment.id: (segment.start_ms, segment.end_ms) for segment in segments}
+        extraction_system = (
+            "Ты извлекаешь кандидатов для русского протокола совещания. "
+            "Работай только с текстом текущего блока и указывай только существующие SEG-ID. "
+            "Не формируй финальный протокол, не придумывай факты, решения, задачи или сроки. "
+            "Не извлекай и не создавай ответственных. "
+            "Тип discussion/decision используй для темы и принятого решения; task — только для отдельной исполнимой задачи. "
+            "deadline_text заполняй только если срок прямо сказан в цитируемых сегментах. Верни только JSON."
+        )
+        extracted: list[dict[str, Any]] = []
+        for index, block in enumerate(blocks, start=1):
+            await self._report_progress("EXTRACTING_FACTS", 10 + int(40 * (index - 1) / max(1, len(blocks))))
+            payload = await self._invoke_json(
+                [
+                    {"role": "system", "content": extraction_system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Извлеки кандидатов из блока {index}/{len(blocks)}. "
+                            "Для обсуждения укажи topic_hint, краткий context и decision только при наличии подтверждённого решения. "
+                            "Для задачи укажи text и deadline_text.\n\n"
+                            + block
+                        ),
+                    },
+                ],
+                PROTOCOL_BLOCK_EXTRACTION_SCHEMA,
+            )
+            extracted.extend(normalize_protocol_block_extraction(payload))
+
+        await self._report_progress("GROUPING_TOPICS", 55)
+        supported, rejected = validate_protocol_candidates(extracted, valid_ids, segment_texts)
+        supported = reconcile_decisions(supported, segment_times)
+        conflicts = decision_conflict_facts(supported)
+        groups = group_protocol_candidates(supported)
+        tasks = group_protocol_tasks(supported)
+        groups, groups_truncated = limit_protocol_items(groups)
+        tasks, tasks_truncated = limit_protocol_items(tasks)
+        truncated = groups_truncated or tasks_truncated
+        deadline_reviews = sum("UNSUPPORTED_DEADLINE" in item.get("review_reasons", []) for item in supported)
+        await self._report_progress("RESOLVING_DECISIONS", 62)
+        await self._report_progress("EXTRACTING_TASKS", 66)
+        await self._report_progress("RESOLVING_DEADLINES", 70)
+        reducer_system = (
+            "Сформируй русский структурированный протокол только из переданных validated candidates. "
+            "Не возвращайся к исходной стенограмме и не добавляй новые факты. "
+            "В questions_and_decisions включай только темы с подтверждённым решением: topic — короткая тема, "
+            "context — 1–3 предложения о ситуации, decision — конкретное подтверждённое действие. "
+            "tasks формируй отдельно и не копируй автоматически решение как задачу. "
+            "Сохраняй только переданные evidence_segment_ids. Не генерируй таймкоды. "
+            "Полностью исключи поля responsible, responsible_text, responsible_status и любые аналоги. "
+            "Если срок не подтверждён, deadline_text=null и deadline_iso=null. Верни только JSON по схеме."
+        )
+        await self._report_progress("VALIDATING_EVIDENCE", 76)
+        result_payload = await self._invoke_json(
+            [
+                {"role": "system", "content": reducer_system},
+                {"role": "user", "content": protocol_candidates_prompt(groups, tasks)},
+            ],
+            MEETING_PROTOCOL_RU_SCHEMA,
+        )
+        await self._report_progress("DEDUPLICATING", 88)
+        result = validate_protocol_result(
+            normalize_protocol_result(result_payload),
+            valid_ids,
+            segment_texts,
+            segment_times,
+            self._context.date,
+            self._context.timezone,
+        )
+        quality = result["quality"]
+        quality["extraction_candidates"] = len(extracted)
+        quality["decision_conflicts"] = len(conflicts)
+        quality["decision_conflict_groups"] = len({item["conflict_group"] for item in conflicts})
+        quality["review_items"] = int(quality.get("review_items", 0)) + deadline_reviews + len(conflicts)
+        quality["rejected_items"] = int(quality.get("rejected_items", 0)) + len(rejected)
+        quality["question_count"] = len(result["questions_and_decisions"])
+        quality["task_count"] = len(result["tasks"])
+        quality["supported_count"] = quality["question_count"] + quality["task_count"]
+        quality["partial_count"] = quality["review_items"]
+        quality["rejected_count"] = quality["rejected_items"]
+        quality["unsupported_deadlines_removed"] = deadline_reviews
+        topic_candidate_count = sum(
+            1 for item in supported
+            if item.get("type") in {"discussion", "decision", "fact"} and item.get("decision")
+        )
+        task_candidate_count = sum(1 for item in supported if item.get("type") == "task")
+        quality["duplicate_topics_removed"] = max(0, topic_candidate_count - len(groups))
+        quality["duplicate_tasks_removed"] = max(0, task_candidate_count - len(tasks))
+        quality["truncated"] = truncated
+        reasons = list(quality.get("reasons", []))
+        if conflicts and "CONFLICTING_STATEMENTS" not in reasons:
+            reasons.append("CONFLICTING_STATEMENTS")
+        if deadline_reviews and "UNSUPPORTED_DEADLINE" not in reasons:
+            reasons.append("UNSUPPORTED_DEADLINE")
+        if rejected and "UNSUPPORTED_ITEMS_REJECTED" not in reasons:
+            reasons.append("UNSUPPORTED_ITEMS_REJECTED")
+        if truncated and "PROTOCOL_LIMIT_TRUNCATED" not in reasons:
+            reasons.append("PROTOCOL_LIMIT_TRUNCATED")
+        quality["reasons"] = reasons
+        total_items = len(result["questions_and_decisions"]) + len(result["tasks"]) + quality["rejected_items"]
+        quality["score"] = round(
+            1.0 if total_items == 0 else max(0.0, min(1.0, 1.0 - (quality["rejected_items"] + quality["review_items"]) / total_items)),
+            3,
+        )
+        if quality["rejected_items"] and not result["questions_and_decisions"] and not result["tasks"]:
+            quality["status"] = "FAILED"
+        elif quality["rejected_items"] or quality["review_items"]:
+            quality["status"] = "NEEDS_REVIEW"
+        await self._report_progress("QUALITY_CHECK", 92)
+        result.update({
+            "schema_version": PROTOCOL_RU_SCHEMA_VERSION,
+            "prompt_version": PROTOCOL_RU_PROMPT_VERSION,
+            "profile": MEETING_PROTOCOL_RU,
+            "source_hash": transcript_source_hash(segments),
+            "block_count": len(blocks),
+            "quality_score": quality["score"],
+        })
+        await self._report_progress("PERSISTING", 95)
         return result
 
     async def _summarize_with_extraction(

@@ -247,7 +247,10 @@ def build_transcript_quality_report(
 def quality_gate(report: TranscriptQualityReport, thresholds: TranscriptQualityThresholds | None = None) -> dict[str, Any]:
     thresholds = thresholds or TranscriptQualityThresholds.from_env()
     fatal = not report.has_text or report.segment_count == 0 or report.invalid_timestamp_count > 0 or report.non_monotonic_segment_count > 0
-    retryable_reasons = {"TRANSCRIPT_EMPTY", "TRANSCRIPT_TOO_SHORT", "TRANSCRIPT_LOW_COVERAGE", "TRANSCRIPT_INCOMPLETE", "TRANSCRIPT_LARGE_INTERNAL_GAP", "WORD_TIMESTAMPS_MISSING", "TRANSCRIPT_LOW_CONFIDENCE", "TRANSCRIPT_REPETITION"}
+    # Missing word timestamps are an alignment-quality warning, not evidence
+    # that a second full ASR pass will improve the transcript. A pre-alignment
+    # retry is reserved for genuinely bad segment-level ASR output.
+    retryable_reasons = {"TRANSCRIPT_EMPTY", "TRANSCRIPT_TOO_SHORT", "TRANSCRIPT_LOW_COVERAGE", "TRANSCRIPT_INCOMPLETE", "TRANSCRIPT_LARGE_INTERNAL_GAP", "TRANSCRIPT_LOW_CONFIDENCE", "TRANSCRIPT_REPETITION"}
     retryable = bool(set(report.reasons) & retryable_reasons)
     warning_reasons = list(report.reasons)
     valid = not fatal and report.has_text and report.segment_count > 0

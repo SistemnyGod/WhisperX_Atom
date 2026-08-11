@@ -32,9 +32,9 @@ def test_agent_command_cursor_advances_only_after_acknowledgement():
 
 
 def test_chunks_are_purged_only_after_finalize_is_accepted():
-    agent = read(AGENT)
+    agent = read(AGENT) + read(Path("apps/recorder-agent/RecordingDeliveryCoordinator.cs"))
     client = read(AGENT_API)
-    assert "if (finalized)" in agent
+    assert "if (!finalized.Accepted)" in agent
     assert "PurgeFinalizedSessionAsync" in agent
     upload_method = client.split("public async Task<int> UploadPendingChunksAsync", 1)[1].split("public async Task<bool> FinalizeServerSessionAsync", 1)[0]
     assert "File.Delete" not in upload_method
@@ -56,16 +56,17 @@ def test_retry_republishes_the_original_pipeline_stage():
 
 def test_desktop_start_has_a_server_independent_title_path():
     desktop = read(Path("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs"))
+    view_model = read(Path("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs"))
     agent = read(Path("apps/recorder-agent/AgentPipeHost.cs"))
-    assert 'new { meetingId, title }' in desktop
+    assert "CreateMeetingAsync(title" in view_model
+    assert "StartAsync(title, serverMeetingId)" in view_model
     assert 'BindSessionAsync(sessionId, meetingId, title' in agent
     assert 'GetMeetingIdAsync(localSessionId' in agent
 
 def test_desktop_cancels_processing_and_hides_internal_errors():
-    desktop = read(Path("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs"))
-    assert "_processingPollCts?.Cancel();" in desktop
-    assert "LastErrorText.Text = SafeError(ex);" in desktop
-    assert "AdminStatusText.Text = SafeError(ex);" in desktop
+    view_model = read(Path("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs"))
+    assert "_processingCts.Cancel();" in view_model
+    assert "SafeError(ex)" in view_model
 
 
 def test_e2e_enumerates_json_arrays_for_job_polling():
@@ -160,3 +161,60 @@ def test_outbox_recovery_only_requeues_media_ingest_jobs():
     relay = read(Path("workers/outbox_relay/worker.py"))
     assert "j.type='TRANSCRIBE'" in relay
     assert "j.stage IN ('INGEST','UPLOADED','VALIDATING','NORMALIZING')" in relay
+
+
+def test_release_gate_requires_complete_correlation_and_explicit_live_evidence():
+    gate = read(Path("scripts/release-gate.ps1"))
+    assert "PIPELINE_CORRELATION_EVIDENCE_MISSING" in gate
+    assert "localArchiveReady" in gate and "deliveryConfirmed" in gate and "mediaReady" in gate
+    assert "BLOCKED_BY_CORE_PIPELINE" in gate
+
+
+def test_retention_is_conservative_and_produces_dry_run_report():
+    cleanup = read(Path("scripts/retention-cleanup.ps1"))
+    policy = read(Path("apps/recorder-agent/StorageWatermark.cs"))
+    assert "-DryRun" in cleanup and "wouldDeleteFiles" in cleanup
+    assert "protectedReasons" in cleanup and "media_confirmation_missing" in cleanup
+    assert "BLOCK_RECORDING" in policy and "WHISPERX_STORAGE_WARNING_PERCENT" in policy
+    assert "WHISPERX_RETENTION_TRANSPORT_GRACE_HOURS" in policy
+
+
+def test_runtime_manifest_does_not_download_models_and_doctor_records_it():
+    manifest = read(Path("scripts/write-runtime-manifest.ps1"))
+    doctor = read(Path("scripts/doctor-whisperx.ps1"))
+    assert "productionDownloads = \"DISABLED\"" in manifest
+    assert "runtime-manifest.json" in manifest and "runtimeManifest" in doctor
+    assert "Get-PackageVersion" in manifest
+
+
+def test_production_security_and_sensitive_route_rate_limits_are_declared():
+    api = read(API)
+    assert "PRODUCTION_COOKIE_SECURE_REQUIRED" in api
+    assert "PRODUCTION_SECRET_INVALID" in api
+    assert "PartitionedRateLimiter" in api
+    for route in ("/api/auth/login", "/api/auth/refresh", "/api/v1/agents/enroll", "/api/assistant"):
+        assert route in api
+
+
+def test_admin_diagnostics_is_safe_and_correlation_oriented():
+    api = read(API)
+    assert '"/api/admin/meetings/{id:guid}/diagnostics"' in api
+    assert "IsAdministrator(context)" in api
+    assert "processingJobIds" in api and "transcriptId" in api and "traceId" in api
+    assert "summary.Content" not in api.split('"/api/admin/meetings/{id:guid}/diagnostics"', 1)[1].split("app.Map", 1)[0]
+
+
+def test_agent_trace_and_diagnostics_export_are_redacted():
+    client = read(Path("apps/recorder-agent/AgentApiClient.cs"))
+    export = read(Path("scripts/export-diagnostics.ps1"))
+    assert "X-Trace-Id" in client
+    assert "raw audio" in export and ".env" in export and "summary content" in export
+    assert "Compress-Archive" in export
+
+
+def test_summary_and_assistant_workers_extend_long_job_leases():
+    worker = read(Path("workers/summary_worker/worker.py"))
+    assistant = read(Path("workers/summary_worker/assistant.py"))
+    assert "maintain_message" in worker
+    assert "renew_lease" in worker and "renew_lease" in assistant
+    assert "lease_expires_at=now()+interval '30 minutes'" in worker

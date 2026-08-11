@@ -12,8 +12,15 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
-from workers.nats_utils import fetch_available
-from .contracts import MeetingContext, SUMMARY_PROMPT_VERSION, SUMMARY_SCHEMA_VERSION
+from workers.nats_utils import fetch_available, maintain_message
+from .contracts import (
+    MEETING_PROTOCOL_RU,
+    PROTOCOL_RU_PROMPT_VERSION,
+    PROTOCOL_RU_SCHEMA_VERSION,
+    MeetingContext,
+    SUMMARY_PROMPT_VERSION,
+    SUMMARY_SCHEMA_VERSION,
+)
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
 from .llama_subprocess import LocalLlamaServer
 from .assistant import AssistantWorker
@@ -50,6 +57,18 @@ class SummaryRepository:
                 "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, socket.gethostname(), job_id),
             )
+
+    def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
+        with psycopg.connect(self.conninfo) as connection:
+            connection.execute(
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')",
+                (job_id,),
+            )
+            if message_id:
+                connection.execute(
+                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
+                    (socket.gethostname(), message_id),
+                )
 
     def mark_failed(self, job_id: str, meeting_id: str, error: str) -> None:
         with psycopg.connect(self.conninfo) as connection:
@@ -119,6 +138,9 @@ class SummaryRepository:
 
     def persist(self, job_id: str, meeting_id: str, transcript_id: str | None, result: dict[str, Any], model_name: str) -> bool:
         source_hash = str(result["source_hash"])
+        is_protocol = str(result.get("profile", "")).upper() == MEETING_PROTOCOL_RU
+        schema_version = str(result.get("schema_version") or (PROTOCOL_RU_SCHEMA_VERSION if is_protocol else SUMMARY_SCHEMA_VERSION))
+        prompt_version = str(result.get("prompt_version") or (PROTOCOL_RU_PROMPT_VERSION if is_protocol else SUMMARY_PROMPT_VERSION))
         with psycopg.connect(self.conninfo) as connection:
             # Serialize summary versions and decision/task inserts for this meeting.
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
@@ -149,8 +171,8 @@ class SummaryRepository:
                     transcript[0],
                     int(current) + 1,
                     model_name,
-                    str(result.get("prompt_version", SUMMARY_PROMPT_VERSION)),
-                    SUMMARY_SCHEMA_VERSION,
+                    prompt_version,
+                    schema_version,
                     source_hash,
                     result.get("quality_score"),
                     Jsonb(result),
@@ -161,8 +183,8 @@ class SummaryRepository:
                 (
                     summary_id,
                     model_name,
-                    str(result.get("prompt_version", SUMMARY_PROMPT_VERSION)),
-                    SUMMARY_SCHEMA_VERSION,
+                    prompt_version,
+                    schema_version,
                     source_hash,
                     result.get("block_count", 0),
                     result.get("input_tokens"),
@@ -172,14 +194,15 @@ class SummaryRepository:
                 ),
             )
             valid_segments = {str(row[0]): (int(row[1]), int(row[2])) for row in connection.execute("SELECT id,start_ms,end_ms FROM transcript_segments WHERE transcript_id=%s", (transcript[0],)).fetchall()}
-            for collection in ("decisions", "risks", "open_questions", "topics", "notable_facts"):
+            collections = ("questions_and_decisions", "tasks") if is_protocol else ("decisions", "risks", "open_questions", "topics", "notable_facts")
+            for collection in collections:
                 for index, item in enumerate(result.get(collection, [])):
                     evidence = [str(value) for value in item.get("evidence_segment_ids", []) if str(value) in valid_segments]
                     for segment_id in evidence:
                         start_ms, end_ms = valid_segments[segment_id]
                         connection.execute("INSERT INTO summary_evidence(id,summary_id,entity_type,entity_key,segment_id,start_ms,end_ms) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s)", (summary_id, collection, str(index), segment_id, start_ms, end_ms))
                     decision_text = item.get("decision", item.get("text"))
-                    if collection == "decisions" and decision_text:
+                    if collection in {"decisions", "questions_and_decisions"} and decision_text:
                         connection.execute("INSERT INTO decisions(id,meeting_id,summary_id,text,status) VALUES(gen_random_uuid(),%s,%s,%s,'DRAFT')", (meeting_id, summary_id, str(decision_text)))
             for index, item in enumerate(result.get("action_items", [])):
                 task_text = str(item.get("task", "")).strip()
@@ -191,11 +214,34 @@ class SummaryRepository:
                     "INSERT INTO action_items(id,meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s)",
                     (meeting_id, summary_id, task_text, item.get("responsible"), parse_deadline(item.get("deadline_iso", item.get("deadline"))), "NEEDS_REVIEW", evidence_id),
                 )
+            if is_protocol:
+                for index, item in enumerate(result.get("tasks", [])):
+                    task_text = str(item.get("task", "")).strip()
+                    if not task_text:
+                        continue
+                    evidence = [str(value) for value in item.get("evidence_segment_ids", []) if str(value) in valid_segments]
+                    evidence_id = evidence[0] if evidence else None
+                    connection.execute(
+                        "INSERT INTO action_items(id,meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s)",
+                        (meeting_id, summary_id, task_text, None, parse_deadline(item.get("deadline_iso")), "NEEDS_REVIEW", evidence_id),
+                    )
             validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
-            needs_review = bool(validation.get("rejected_facts") or validation.get("review_items") or validation.get("review_reasons"))
-            summary_status = "NEEDS_REVIEW" if needs_review else "READY"
+            quality = result.get("quality") if is_protocol and isinstance(result.get("quality"), dict) else {}
+            quality_status = str(quality.get("status", "READY"))
+            needs_review = (
+                quality_status != "READY"
+                if is_protocol
+                else bool(validation.get("rejected_facts") or validation.get("review_items") or validation.get("review_reasons"))
+            )
+            summary_status = (
+                quality_status if quality_status in {"READY", "NEEDS_REVIEW", "FAILED"}
+                else ("NEEDS_REVIEW" if needs_review else "READY")
+            )
             connection.execute("UPDATE summaries SET status=%s WHERE id=%s", (summary_status, summary_id))
-            connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+            if summary_status == "FAILED":
+                connection.execute("UPDATE jobs SET status='FAILED',stage='FAILED',progress=100,error_message=%s,error_code='SUMMARY_PROTOCOL_QUALITY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", ("Не удалось сформировать подтверждённый протокол", job_id))
+            else:
+                connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
             connection.execute("UPDATE meetings SET status='READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
             return True
 
@@ -249,7 +295,14 @@ class SummaryWorker:
                         context=MeetingContext.from_mapping(payload.get("meeting_context", payload.get("context"))),
                         progress=report_progress,
                     ).summarize(segments)
-                    result["prompt_version"] = str(payload.get("prompt_version") or SUMMARY_PROMPT_VERSION)
+                    profile_name = str(payload.get("summary_profile", payload.get("profile")) or "").upper()
+                    result["prompt_version"] = str(
+                        payload.get("prompt_version")
+                        or (PROTOCOL_RU_PROMPT_VERSION if profile_name == MEETING_PROTOCOL_RU else SUMMARY_PROMPT_VERSION)
+                    )
+                    if profile_name == MEETING_PROTOCOL_RU:
+                        result["profile"] = MEETING_PROTOCOL_RU
+                        result["schema_version"] = PROTOCOL_RU_SCHEMA_VERSION
                 finally:
                     await asyncio.to_thread(server.stop)
             LOGGER.info("job=%s released GPU lease", job_id)
@@ -283,7 +336,11 @@ async def run() -> None:
         while True:
             for message in await fetch_available(summary_subscription, nats.errors.TimeoutError, timeout=1):
                 try:
-                    await summary_worker.handle(json.loads(message.data))
+                    payload = json.loads(message.data)
+                    job_id = str(payload.get("job_id", ""))
+                    message_id = str(payload.get("message_id", ""))
+                    async with maintain_message(message, on_tick=lambda: asyncio.to_thread(summary_worker.repository.renew_lease, job_id, message_id)):
+                        await summary_worker.handle(payload)
                     await message.ack()
                 except Exception:
                     await message.nak()
@@ -292,7 +349,11 @@ async def run() -> None:
         while True:
             for message in await fetch_available(assistant_subscription, nats.errors.TimeoutError, timeout=1):
                 try:
-                    await assistant_worker.handle(json.loads(message.data))
+                    payload = json.loads(message.data)
+                    query_id = str(payload.get("query_id", ""))
+                    message_id = str(payload.get("message_id", ""))
+                    async with maintain_message(message, on_tick=lambda: asyncio.to_thread(assistant_worker.repository.renew_lease, query_id, message_id)):
+                        await assistant_worker.handle(payload)
                     await message.ack()
                 except Exception:
                     await message.nak()

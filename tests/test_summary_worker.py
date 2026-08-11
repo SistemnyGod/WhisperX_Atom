@@ -11,14 +11,22 @@ from workers.summary_worker.summarizer import (
     validate_evidence_v2,
 )
 from workers.summary_worker.contracts import (
+    MEETING_PROTOCOL_RU,
+    MEETING_PROTOCOL_RU_SCHEMA,
+    PROTOCOL_RU_PROMPT_VERSION,
+    PROTOCOL_RU_SCHEMA_VERSION,
     SUMMARY_SCHEMA_VERSION,
     MeetingContext,
+    MeetingProtocolRuResult,
     normalize_summary_payload,
+    profile_for,
 )
 from workers.summary_worker.extraction import (
     BLOCK_EXTRACTION_SCHEMA,
+    PROTOCOL_BLOCK_EXTRACTION_SCHEMA,
     deduplicate_facts,
     normalize_block_extraction,
+    normalize_protocol_block_extraction,
     validate_extracted_facts,
 )
 from workers.summary_worker.resolvers import (
@@ -26,9 +34,161 @@ from workers.summary_worker.resolvers import (
     resolve_responsible,
     resolve_extracted_facts,
 )
+from workers.summary_worker.protocol import (
+    group_protocol_candidates,
+    group_protocol_tasks,
+    validate_protocol_candidates,
+    validate_protocol_result,
+)
 
 
 class SummaryWorkerTests(unittest.TestCase):
+    def test_protocol_profile_is_versioned_and_has_no_responsible_field(self):
+        self.assertEqual(MEETING_PROTOCOL_RU, profile_for(MEETING_PROTOCOL_RU).name)
+        self.assertEqual("meeting-protocol-ru-v1", PROTOCOL_RU_SCHEMA_VERSION)
+        self.assertEqual(PROTOCOL_RU_SCHEMA_VERSION, PROTOCOL_RU_PROMPT_VERSION)
+        self.assertIn("questions_and_decisions", MEETING_PROTOCOL_RU_SCHEMA["required"])
+        self.assertIn("tasks", MEETING_PROTOCOL_RU_SCHEMA["required"])
+        self.assertNotIn("responsible", str(MEETING_PROTOCOL_RU_SCHEMA))
+        result = MeetingProtocolRuResult(({"topic": "Тема", "context": "Контекст", "decision": "Проверить", "evidence_segment_ids": ["1"]},), ())
+        self.assertNotIn("responsible", str(result.to_dict()))
+
+    def test_protocol_extraction_normalizer_does_not_copy_legacy_identity_fields(self):
+        candidates = normalize_protocol_block_extraction({
+            "candidates": [{
+                "type": "task",
+                "text": "Проверить насос",
+                "topic_hint": "Насос",
+                "deadline_text": "До проверки",
+                "responsible_text": "Петров",
+                "evidence_segment_ids": ["SEG-1"],
+            }],
+        })
+        self.assertEqual(1, len(candidates))
+        self.assertNotIn("responsible", candidates[0])
+        self.assertNotIn("responsible_text", candidates[0])
+        self.assertEqual(PROTOCOL_BLOCK_EXTRACTION_SCHEMA["required"], ["candidates"])
+
+    def test_protocol_groups_repeated_topic_and_keeps_evidence(self):
+        groups = group_protocol_candidates([
+            {"type": "decision", "topic_hint": "Маркировка ёмкостей", "context": "Нет маркировки", "decision": "Обновить маркировку", "evidence_segment_ids": ["1"]},
+            {"type": "decision", "topic_hint": "Маркировка ёмкостей", "context": "Часть табличек не читается", "decision": "Обновить маркировку", "evidence_segment_ids": ["2"]},
+        ])
+        self.assertEqual(1, len(groups))
+        self.assertEqual(["1", "2"], groups[0]["evidence_segment_ids"])
+
+    def test_protocol_unsupported_deadline_is_removed_without_dropping_task(self):
+        supported, rejected = validate_protocol_candidates([
+            {"type": "task", "text": "Проверить насос", "deadline_text": "В декабре", "evidence_segment_ids": ["1"]},
+        ], {"1"}, {"1": "Проверить насос до конца смены."})
+        self.assertEqual(1, len(supported))
+        self.assertFalse(rejected)
+        self.assertIsNone(supported[0]["deadline_text"])
+        self.assertIn("UNSUPPORTED_DEADLINE", supported[0]["review_reasons"])
+
+    def test_protocol_tasks_deduplicate_close_action_object_variants(self):
+        tasks = group_protocol_tasks([
+            {"type": "task", "text": "Убрать масло возле печи", "evidence_segment_ids": ["1"]},
+            {"type": "task", "text": "Убрать вёдра с маслом", "evidence_segment_ids": ["2"]},
+            {"type": "task", "text": "Проверить насос", "evidence_segment_ids": ["3"]},
+        ])
+        self.assertEqual(2, len(tasks))
+        self.assertEqual(["1", "2"], tasks[0]["evidence_segment_ids"])
+
+    def test_protocol_invalid_evidence_cannot_become_ready_item(self):
+        result = validate_protocol_result({
+            "questions_and_decisions": [{
+                "topic": "Насос",
+                "context": "Обнаружена проблема с насосом.",
+                "decision": "Проверить насос.",
+                "evidence_segment_ids": ["missing"],
+            }],
+            "tasks": [],
+        }, {"1"}, {"1": "Вопрос по фильтру."}, {"1": (0, 1000)}, "2026-08-10")
+        self.assertEqual([], result["questions_and_decisions"])
+        self.assertEqual(1, result["quality"]["rejected_items"])
+        self.assertEqual("FAILED", result["quality"]["status"])
+
+    def test_protocol_without_any_supported_item_is_failed(self):
+        result = validate_protocol_result({
+            "questions_and_decisions": [{
+                "topic": "Насос",
+                "context": "Насос требует проверки.",
+                "decision": "Проверить насос.",
+                "evidence_segment_ids": ["missing"],
+            }],
+            "tasks": [],
+        }, {"1"}, {"1": "Только вопрос по фильтру."}, {"1": (0, 1000)}, "2026-08-10")
+        self.assertEqual("FAILED", result["quality"]["status"])
+
+    def test_protocol_result_computes_source_range_and_keeps_deadline_text(self):
+        result = validate_protocol_result({
+            "questions_and_decisions": [{
+                "topic": "Маркировка ёмкостей",
+                "context": "На бочках отсутствуют обозначения.",
+                "decision": "Обновить маркировку ёмкостей.",
+                "evidence_segment_ids": ["SEG-1", "2"],
+            }],
+            "tasks": [{
+                "task": "Обновить маркировку ёмкостей.",
+                "deadline_text": "До проверки",
+                "evidence_segment_ids": ["1"],
+            }],
+        }, {"1", "2"}, {
+            "1": "На бочках отсутствуют обозначения. До проверки нужно обновить маркировку ёмкостей.",
+            "2": "Маркировка ёмкостей должна быть видимой.",
+        }, {"1": (1000, 2000), "2": (3000, 4000)}, "2026-08-10")
+        self.assertEqual("READY", result["quality"]["status"])
+        self.assertEqual((1000, 4000), (result["questions_and_decisions"][0]["source_start_ms"], result["questions_and_decisions"][0]["source_end_ms"]))
+        self.assertEqual("До проверки", result["tasks"][0]["deadline_text"])
+        self.assertIsNone(result["tasks"][0]["deadline_iso"])
+        self.assertNotIn("responsible", str(result))
+
+    def test_protocol_orchestrator_uses_fake_qwen_and_returns_two_tables(self):
+        calls = []
+        progress = []
+
+        async def fake_invoker(messages, schema):
+            calls.append(schema)
+            if schema is PROTOCOL_BLOCK_EXTRACTION_SCHEMA:
+                return {"candidates": [
+                    {"type": "decision", "text": "Маркировка ёмкостей", "topic_hint": "Маркировка ёмкостей", "context": "На бочках отсутствуют обозначения.", "decision": "Обновить маркировку ёмкостей.", "evidence_segment_ids": ["1"]},
+                    {"type": "task", "text": "Обновить маркировку ёмкостей.", "deadline_text": "До проверки", "evidence_segment_ids": ["1"]},
+                ]}
+            return {"questions_and_decisions": [{
+                "topic": "Маркировка ёмкостей",
+                "context": "На бочках отсутствуют обозначения.",
+                "decision": "Обновить маркировку ёмкостей.",
+                "evidence_segment_ids": ["1"],
+            }], "tasks": [{
+                "task": "Обновить маркировку ёмкостей.",
+                "deadline_text": "До проверки",
+                "deadline_iso": "2099-01-01",
+                "evidence_segment_ids": ["1"],
+            }]}
+
+        async def report(stage, value):
+            progress.append(stage)
+
+        result = asyncio.run(SummaryOrchestrator(
+            fake_invoker,
+            profile=MEETING_PROTOCOL_RU,
+            context=MeetingContext.from_mapping({"date": "2026-08-10"}),
+            progress=report,
+            max_chars=4000,
+        ).summarize([
+            TranscriptSegment("1", 0, 1000, "Спикер", "На бочках отсутствуют обозначения. До проверки нужно обновить маркировку ёмкостей."),
+        ]))
+        self.assertEqual(PROTOCOL_RU_SCHEMA_VERSION, result["schema_version"])
+        self.assertEqual(1, len(result["questions_and_decisions"]))
+        self.assertEqual(1, len(result["tasks"]))
+        self.assertIsNone(result["tasks"][0]["deadline_iso"])
+        self.assertNotIn("responsible", str(result))
+        self.assertIs(calls[0], PROTOCOL_BLOCK_EXTRACTION_SCHEMA)
+        self.assertIs(calls[-1], MEETING_PROTOCOL_RU_SCHEMA)
+        self.assertIn("GROUPING_TOPICS", progress)
+        self.assertIn("QUALITY_CHECK", progress)
+
     def test_blocks_preserve_segment_ids_and_timecodes(self):
         segments = [
             TranscriptSegment("a", 61_000, 62_000, "Speaker 1", "First statement"),

@@ -110,7 +110,7 @@ public static class RecordingFinalizeSupport
         return mismatches;
     }
 
-    public static IReadOnlyList<MissingRecordingChunks> FindMissing(Dictionary<Guid, RecordingTrackAssembly> tracks, Dictionary<Guid, int> expected)
+    public static async Task<IReadOnlyList<MissingRecordingChunks>> FindMissingAsync(Dictionary<Guid, RecordingTrackAssembly> tracks, Dictionary<Guid, int> expected)
     {
         var missing = new List<MissingRecordingChunks>();
         foreach (var track in tracks.Values)
@@ -125,6 +125,8 @@ public static class RecordingFinalizeSupport
             {
                 var path = StorageHelpers.StoragePath(chunk.StorageKey);
                 if (!File.Exists(path) || new FileInfo(path).Length != chunk.SizeBytes)
+                    missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
+                else if (!string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
                     missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
             }
         }

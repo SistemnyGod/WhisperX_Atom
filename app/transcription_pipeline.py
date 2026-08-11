@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -63,6 +63,12 @@ class PipelineContext:
     diar_df: Any = None
     speaker_embeddings: Optional[dict] = None
     error: Optional[str] = None
+    temp_paths: list[Path] = field(default_factory=list)
+
+    def register_temp(self, path: Optional[Path]) -> Optional[Path]:
+        if path is not None and path != self.audio_path and path not in self.temp_paths:
+            self.temp_paths.append(path)
+        return path
 
 
 @dataclass
@@ -133,8 +139,11 @@ class ModelCacheManager:
         self._align = {}
         self._diarizer = {}
 
-    def _asr_key(self, model: str, device: str, compute_type: str, backend: str, options: tuple) -> tuple:
-        return (backend, model, device, compute_type, options)
+    def _asr_key(self, model: str, device: str, compute_type: str, backend: str) -> tuple:
+        # Inference/VAD options must not be part of the weights cache key.
+        # Otherwise the controlled fallback creates a second large-v3 model in
+        # VRAM merely because it uses another onset/chunk setting.
+        return (backend, model, device, compute_type)
 
     def get_asr_model(
         self,
@@ -150,19 +159,7 @@ class ModelCacheManager:
         initial_prompt: str,
         hotwords: str,
     ):
-        asr_options = tuple(
-            sorted(
-                {
-                    "beam_size": beam_size,
-                    "language": language,
-                    "vad_onset": vad_onset,
-                    "chunk_size": chunk_size,
-                    "initial_prompt": initial_prompt or "",
-                    "hotwords": hotwords or "",
-                }.items()
-            )
-        )
-        key = self._asr_key(model, device, compute_type, backend, asr_options)
+        key = self._asr_key(model, device, compute_type, backend)
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
@@ -297,12 +294,12 @@ class TranscriptionPipeline:
                 asr_path = ctx.audio_path
                 if self.config.preprocess_asr or is_video:
                     asr_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=True)
-                ctx.asr_audio_path = asr_path
+                ctx.asr_audio_path = ctx.register_temp(asr_path)
 
                 diar_path = None
                 if self.config.enable_diarization:
                     diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)
-                ctx.diar_audio_path = diar_path
+                ctx.diar_audio_path = ctx.register_temp(diar_path)
                 await self.asr_queue.put(ctx)
             except Exception as exc:
                 await self._set_status(
@@ -409,8 +406,11 @@ class TranscriptionPipeline:
                 self.postprocess_queue.task_done()
 
     def _cleanup_ctx(self, ctx: PipelineContext) -> None:
-        for path in (ctx.asr_audio_path, ctx.diar_audio_path):
+        paths = list(ctx.temp_paths) + [ctx.asr_audio_path, ctx.diar_audio_path]
+        for path in dict.fromkeys(paths):
             if not path or not path.exists():
+                continue
+            if path == ctx.audio_path:
                 continue
             if not any(
                 path.name.endswith(suffix)
@@ -522,7 +522,9 @@ class TranscriptionPipeline:
         diarizer = self.cache.get_diarizer(self.config.device, self.config.hf_token)
         audio_path = str(ctx.diar_audio_path or ctx.audio_path)
         if profile != "diar":
-            audio_path = str(self._preprocess_audio_profile(ctx.audio_path, profile))
+            alternate_path = self._preprocess_audio_profile(ctx.audio_path, profile)
+            ctx.register_temp(alternate_path)
+            audio_path = str(alternate_path)
         diarize_df, speaker_embeddings = diarizer(
             audio_path,
             min_speakers=self.config.min_speakers,

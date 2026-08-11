@@ -106,3 +106,12 @@ def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key
             "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s AND EXISTS(SELECT 1 FROM jobs WHERE media_asset_id=media_assets.id AND status <> 'CANCELLED')",
             (sha256, archive_key, preview_key, asr_key, duration_ms, media_asset_id),
         )
+
+
+def update_recording_session_state(session_id: str, state: str) -> None:
+    """Expose media lifecycle independently from the transcription job."""
+    with psycopg.connect(_conninfo()) as connection:
+        connection.execute(
+            "UPDATE recording_sessions SET state=%s WHERE id=%s",
+            (state, session_id),
+        )

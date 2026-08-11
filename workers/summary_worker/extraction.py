@@ -68,6 +68,40 @@ BLOCK_EXTRACTION_SCHEMA: dict[str, Any] = {
 }
 
 
+PROTOCOL_FACT_TYPES = ("discussion", "decision", "task", "deadline", "fact")
+
+
+def _protocol_candidate_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["type", "text", "evidence_segment_ids"],
+        "properties": {
+            "type": {"type": "string", "enum": list(PROTOCOL_FACT_TYPES)},
+            "text": {"type": "string", "maxLength": 1200},
+            "topic_hint": {"type": ["string", "null"], "maxLength": 180},
+            "context": {"type": ["string", "null"], "maxLength": 1200},
+            "decision": {"type": ["string", "null"], "maxLength": 1200},
+            "deadline_text": {"type": ["string", "null"], "maxLength": 160},
+            "evidence_segment_ids": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string"},
+            },
+        },
+        "additionalProperties": False,
+    }
+
+
+PROTOCOL_BLOCK_EXTRACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["candidates"],
+    "properties": {
+        "candidates": {"type": "array", "maxItems": 100, "items": _protocol_candidate_schema()},
+    },
+    "additionalProperties": False,
+}
+
+
 def normalize_block_extraction(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Normalize native extraction output and tolerate legacy map fixtures."""
 
@@ -115,6 +149,40 @@ def normalize_block_extraction(payload: Mapping[str, Any]) -> list[dict[str, Any
                 if normalized:
                     facts.append(normalized)
     return deduplicate_facts(facts)
+
+
+def normalize_protocol_block_extraction(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Normalize protocol candidates without importing legacy responsible fields."""
+
+    values = payload.get("candidates", [])
+    if not isinstance(values, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            continue
+        fact_type = str(item.get("type", "fact")).strip().casefold()
+        if fact_type not in PROTOCOL_FACT_TYPES:
+            continue
+        text = str(item.get("text", "")).strip()
+        topic_hint = _nullable_text(item.get("topic_hint"))
+        context = _nullable_text(item.get("context"))
+        decision = _nullable_text(item.get("decision"))
+        if not text and not context and not decision:
+            continue
+        evidence = item.get("evidence_segment_ids", [])
+        if not isinstance(evidence, list):
+            evidence = []
+        result.append({
+            "type": fact_type,
+            "text": text[:1200],
+            "topic_hint": topic_hint[:180] if topic_hint else None,
+            "context": context[:1200] if context else None,
+            "decision": decision[:1200] if decision else None,
+            "deadline_text": _nullable_text(item.get("deadline_text")),
+            "evidence_segment_ids": [str(value) for value in evidence[:12]],
+        })
+    return result
 
 
 def deduplicate_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:

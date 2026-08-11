@@ -9,7 +9,14 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import psycopg
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - worker images install psycopg
+    # Heartbeats are deliberately best-effort.  Keeping this module importable
+    # without the optional client makes local contract/import tests useful and
+    # lets a worker report its real dependency failure through readiness/logs
+    # instead of failing during module collection.
+    psycopg = None  # type: ignore[assignment]
 
 
 def _conninfo() -> str:
@@ -32,6 +39,8 @@ def write_heartbeat(
     last_error_code: str | None = None,
 ) -> None:
     """Publish a best-effort worker heartbeat without affecting the worker loop."""
+    if psycopg is None:
+        return
     version = os.getenv("APP_VERSION", os.getenv("WHISPERX_VERSION", "dev"))
     payload = json.dumps(capabilities or {}, ensure_ascii=False)
     try:

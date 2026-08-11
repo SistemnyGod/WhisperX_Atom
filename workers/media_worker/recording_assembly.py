@@ -58,7 +58,9 @@ def _concat_track(track: Track, output: Path) -> None:
     if not track.chunks:
         raise ValueError(f"recording_track_empty:{track.track_id}")
     previous_end: int | None = None
-    list_path = output.with_suffix(".concat.txt")
+    attempt = os.urandom(8).hex()
+    list_path = output.with_name(f"{output.name}.{attempt}.concat.txt")
+    temporary = output.with_name(f"{output.name}.{attempt}.part")
     lines: list[str] = []
     for expected_sequence, chunk in enumerate(track.chunks):
         if chunk.sequence != expected_sequence:
@@ -76,9 +78,16 @@ def _concat_track(track: Track, output: Path) -> None:
 
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
-        _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "flac", str(output)])
+        # The atomic target intentionally ends in `.part`, so ffmpeg cannot
+        # infer the muxer from the filename on Windows.  Keep the target
+        # extension-independent and declare the output container explicitly.
+        _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "flac", "-f", "flac", str(temporary)])
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise ValueError(f"recording_track_output_empty:{track.track_id}")
+        temporary.replace(output)
     finally:
         list_path.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def _load_tracks(session_id: str) -> list[Track]:
@@ -114,6 +123,7 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         _concat_track(track, output)
         assembled.append(output)
 
+    track_types = {track.track_type.lower() for track in tracks}
     if len(assembled) == 1:
         source = assembled[0]
     else:
@@ -121,9 +131,19 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         inputs: list[str] = []
         for path in assembled:
             inputs.extend(["-i", str(path)])
-        filter_spec = f"amix=inputs={len(assembled)}:duration=longest:normalize=0,aresample=48000"
-        _run_ffmpeg([*inputs, "-filter_complex", filter_spec, "-ac", "1", "-c:a", "flac", str(source)])
-
-    with psycopg.connect(_conninfo()) as connection:
-        connection.execute("UPDATE recording_sessions SET state='INGESTED' WHERE id=%s", (session_id,))
+        # A room recording is intentionally microphone-only. When both tracks
+        # are present this is the explicit ONLINE profile: average the tracks,
+        # prevent clipping, and keep both originals beside the derived mix.
+        if "room-microphone" in track_types or "microphone" in track_types:
+            filter_spec = f"amix=inputs={len(assembled)}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000"
+        else:
+            filter_spec = f"amix=inputs={len(assembled)}:duration=longest:dropout_transition=2:normalize=1,aresample=48000"
+        temporary = source.with_name(f"{source.name}.{os.urandom(8).hex()}.part")
+        try:
+            _run_ffmpeg([*inputs, "-filter_complex", filter_spec, "-ac", "1", "-c:a", "flac", "-f", "flac", str(temporary)])
+            if not temporary.is_file() or temporary.stat().st_size == 0:
+                raise ValueError("recording_mix_output_empty")
+            temporary.replace(source)
+        finally:
+            temporary.unlink(missing_ok=True)
     return source

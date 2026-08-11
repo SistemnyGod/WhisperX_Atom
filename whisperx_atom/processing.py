@@ -44,8 +44,8 @@ class ProcessingService:
 
         try:
             report("NORMALIZING", 10)
-            ctx.asr_audio_path = pipeline._preprocess_audio(request.media_path, asr=True)
-            ctx.diar_audio_path = pipeline._preprocess_audio(request.media_path, asr=False)
+            ctx.asr_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=True))
+            ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
 
             report("TRANSCRIBING", 30)
             primary_result: dict[str, Any] = pipeline._run_asr(ctx) or {}

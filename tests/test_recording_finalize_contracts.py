@@ -11,9 +11,13 @@ def read(path: str) -> str:
 def test_local_archive_uses_bomless_concat_and_atomic_audio_outputs():
     archive = read("apps/recorder-agent/LocalArchiveWriter.cs")
     assert "new UTF8Encoding(false)" in archive
-    assert 'output + ".part"' in archive
+    assert ".part" in archive and ".concat.txt" in archive
     assert "ValidateAudioFileAsync" in archive
     assert "ffprobe" in archive
+    assert '"-f", "flac", outputPart' in archive
+    assert "IsUsableManifest" in archive
+    assert "IsArchiveFileUsable" in archive
+    assert "master.flac" in archive
     assert "File.Move(outputPart, output, true)" in archive
     assert "manifest.json" in archive
 
@@ -42,11 +46,37 @@ def test_desktop_maps_finalize_codes_and_never_displays_raw_finalize_error():
     assert "DeliveryStatusLabel" in page
 
 
+def test_new_recording_detaches_previous_session_trackers_before_resetting_ui():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1]
+    start = start.split("public Task<bool> PauseAsync", 1)[0]
+    assert "await StopSessionTrackingAsync();" in start
+    assert "await StopProcessingPollingAsync();" in start
+    assert "private async Task StopSessionTrackingAsync()" in view_model
+
+
 def test_recovery_has_bounded_backoff_and_skips_cancelled_sessions():
     spool = read("apps/recorder-agent/SpoolStore.cs")
-    worker = read("apps/recorder-agent/Program.cs")
+    worker = read("apps/recorder-agent/Program.cs") + read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
     assert "state NOT IN ('CANCELLED','FINALIZED')" in spool
     assert "'FINALIZED'" in spool
     assert "GetRetryDelay" in worker
-    assert "15" in worker and "30" in worker and "FromMinutes(5)" in worker
-    assert "PersistFinalizationFailureAsync" in worker
+    assert "<= 1 => 2" in worker and "2 => 5" in worker and "3 => 15" in worker and "4 => 30" in worker
+    assert "PersistFailureAsync" in worker
+
+
+def test_server_finalize_revalidates_confirmed_chunk_checksum():
+    support = read("apps/server/WhisperX.Atom.Api/RecordingFinalizeSupport.cs")
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    assert "FindMissingAsync" in support
+    assert "ComputeSha256Async(path)" in support
+    assert "await RecordingFinalizeSupport.FindMissingAsync" in store
+
+
+def test_missing_chunk_reconciliation_validates_confirmed_storage():
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    missing = store.split("public async Task<IReadOnlyList<int>?> MissingChunksAsync", 1)[1]
+    assert "status='CONFIRMED'" in missing
+    assert "StorageHelpers.StoragePath(chunk.StorageKey)" in missing
+    assert "new FileInfo(path).Length != chunk.SizeBytes" in missing
+    assert "ComputeSha256Async(path)" in missing

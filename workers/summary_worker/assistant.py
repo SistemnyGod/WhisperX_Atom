@@ -45,6 +45,18 @@ class AssistantRepository:
             ).fetchone()
             return row is not None
 
+    def renew_lease(self, query_id: str, message_id: str | None = None) -> None:
+        with psycopg.connect(self.conninfo) as connection:
+            connection.execute(
+                "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')",
+                (query_id,),
+            )
+            if message_id:
+                connection.execute(
+                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
+                    (socket.gethostname(), message_id),
+                )
+
     def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None] | None:
         with psycopg.connect(self.conninfo) as connection:
             row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()

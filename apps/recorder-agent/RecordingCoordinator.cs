@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -9,7 +10,23 @@ using NAudio.Wave;
 namespace WhisperX.Atom.Recorder;
 
 public sealed record RecordingStopHandle(string? SessionId, Task LocalFinalization);
-public sealed record AudioPeakSnapshot(double? MicrophonePeak, double? SystemAudioPeak, double? MicrophoneDb, double? SystemAudioDb);
+public sealed record AudioPeakSnapshot(
+    double? MicrophonePeak,
+    double? SystemAudioPeak,
+    double? MicrophoneDb,
+    double? SystemAudioDb,
+    double? MicrophoneRms = null,
+    double? SystemAudioRms = null,
+    double? MicrophoneRmsDb = null,
+    double? SystemAudioRmsDb = null,
+    bool? MicrophoneClipping = null,
+    bool? SystemAudioClipping = null,
+    DateTimeOffset? MicrophoneLastAudioAtUtc = null,
+    DateTimeOffset? SystemAudioLastAudioAtUtc = null,
+    long? MicrophoneSilenceDurationMs = null,
+    long? SystemAudioSilenceDurationMs = null,
+    bool MicrophoneTelemetryStale = true,
+    bool SystemAudioTelemetryStale = true);
 
 public sealed class RecordingCoordinator : IAsyncDisposable
 {
@@ -19,10 +36,12 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     private readonly ILogger<RecordingCoordinator> _logger;
     private readonly string _dataRoot;
     private readonly string _ffmpegPath;
+    private readonly string _recordingProfile;
     private readonly object _gate = new();
     private CaptureTrack? _microphone;
     private CaptureTrack? _systemAudio;
     private string? _sessionId;
+    private int _fatalCaptureFailureStarted;
 
     public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
     {
@@ -33,6 +52,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         _dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
         _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
+        _recordingProfile = ReadRecordingProfile();
     }
 
     public string? SessionId => _sessionId;
@@ -73,7 +93,19 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                     _microphone?.Peak,
                     _systemAudio?.Peak,
                     _microphone?.PeakDb,
-                    _systemAudio?.PeakDb);
+                    _systemAudio?.PeakDb,
+                    _microphone?.Rms,
+                    _systemAudio?.Rms,
+                    _microphone?.RmsDb,
+                    _systemAudio?.RmsDb,
+                    _microphone?.Clipping,
+                    _systemAudio?.Clipping,
+                    _microphone?.LastAudioAtUtc,
+                    _systemAudio?.LastAudioAtUtc,
+                    _microphone?.SilenceDurationMs,
+                    _systemAudio?.SilenceDurationMs,
+                    _microphone?.TelemetryStale ?? true,
+                    _systemAudio?.TelemetryStale ?? true);
             }
         }
     }
@@ -104,47 +136,65 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             string? microphoneWarning = null;
             string? systemWarning = null;
             using var deviceEnumerator = new MMDeviceEnumerator();
-            try
+            var profile = _recordingProfile;
+            if (profile is not ("ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY"))
+                throw new InvalidOperationException("recording_profile_invalid");
+            var captureMicrophone = profile is not "SYSTEM_ONLY";
+            var captureSystemAudio = profile is "ONLINE" or "SYSTEM_ONLY";
+            if (captureMicrophone)
             {
-                MMDevice? selectedDevice = null;
                 try
                 {
-                    selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Capture, _storage.MicrophoneDeviceId);
-                    var mic = selectedDevice is null ? new WasapiCapture() : new WasapiCapture(selectedDevice);
-                    microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger, sessionClock, selectedDevice);
-                    selectedDevice = null;
+                    MMDevice? selectedDevice = null;
+                    try
+                    {
+                        selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Capture, _storage.MicrophoneDeviceId);
+                        var mic = selectedDevice is null ? new WasapiCapture() : new WasapiCapture(selectedDevice);
+                        microphone = new CaptureTrack(sessionId, "room-microphone", mic, _spool, _dataRoot, _ffmpegPath, _logger, sessionClock, selectedDevice, HandleCaptureFailure, profile);
+                        selectedDevice = null;
+                        await _spool.UpsertTrackInfoAsync(microphone.Info, sessionId, cancellationToken);
+                        _microphone = microphone;
+                        microphone.Start();
+                    }
+                    finally { selectedDevice?.Dispose(); }
                 }
-                finally { selectedDevice?.Dispose(); }
-                microphone.Start();
+                catch (Exception ex)
+                {
+                    microphoneWarning = ex.Message;
+                    if (microphone is not null) await microphone.DisposeAsync();
+                    _microphone = null;
+                }
             }
-            catch (Exception ex)
+            if (captureSystemAudio)
             {
-                microphoneWarning = ex.Message;
-                if (microphone is not null) await microphone.DisposeAsync();
-            }
-            try
-            {
-                MMDevice? selectedDevice = null;
                 try
                 {
-                    selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Render, _storage.SystemAudioDeviceId);
-                    var loopback = selectedDevice is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(selectedDevice);
-                    systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger, sessionClock, selectedDevice);
-                    selectedDevice = null;
+                    MMDevice? selectedDevice = null;
+                    try
+                    {
+                        selectedDevice = ResolveSelectedDevice(deviceEnumerator, DataFlow.Render, _storage.SystemAudioDeviceId);
+                        var loopback = selectedDevice is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(selectedDevice);
+                        systemAudio = new CaptureTrack(sessionId, "system-audio", loopback, _spool, _dataRoot, _ffmpegPath, _logger, sessionClock, selectedDevice, HandleCaptureFailure, profile);
+                        selectedDevice = null;
+                        await _spool.UpsertTrackInfoAsync(systemAudio.Info, sessionId, cancellationToken);
+                        _systemAudio = systemAudio;
+                        systemAudio.Start();
+                    }
+                    finally { selectedDevice?.Dispose(); }
                 }
-                finally { selectedDevice?.Dispose(); }
-                systemAudio.Start();
-            }
-            catch (Exception ex)
-            {
-                systemWarning = ex.Message;
-                if (systemAudio is not null) await systemAudio.DisposeAsync();
+                catch (Exception ex)
+                {
+                    systemWarning = ex.Message;
+                    if (systemAudio is not null) await systemAudio.DisposeAsync();
+                    _systemAudio = null;
+                }
             }
             if (microphone is null && systemAudio is null)
                 throw new IOException($"no_audio_source_available; microphone={microphoneWarning}; system={systemWarning}");
             _microphone = microphone;
             _systemAudio = systemAudio;
             _sessionId = sessionId;
+            Interlocked.Exchange(ref _fatalCaptureFailureStarted, 0);
             if (microphoneWarning is not null || systemWarning is not null)
                 await _spool.AddEventAsync(sessionId, "AUDIO_SOURCE_WARNING", payloadJson: JsonSerializer.Serialize(new { microphone = microphoneWarning, systemAudio = systemWarning }), cancellationToken: cancellationToken);
             _logger.LogInformation("Recording started. Session={SessionId}, microphone={Microphone}, systemAudio={SystemAudio}", sessionId, microphone is not null, systemAudio is not null);
@@ -160,28 +210,106 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
     }
 
+    private static string ReadRecordingProfile()
+        => (Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE") ?? "ONLINE").Trim().ToUpperInvariant();
+
     private void EnsureStorageAvailable()
     {
-        var minimumText = Environment.GetEnvironmentVariable("ATOM_AGENT_MIN_FREE_BYTES");
-        var minimumBytes = long.TryParse(minimumText, out var configured) && configured > 0 ? configured : 512L * 1024 * 1024;
+        var policy = StorageRetentionPolicy.FromEnvironment();
         var root = Path.GetPathRoot(Path.GetFullPath(_dataRoot));
         if (string.IsNullOrWhiteSpace(root)) throw new IOException("recording_storage_root_unavailable");
         var drive = new DriveInfo(root);
-        if (!drive.IsReady || drive.AvailableFreeSpace < minimumBytes)
-            throw new IOException($"recording_storage_low:{drive.AvailableFreeSpace}:{minimumBytes}");
+        if (!drive.IsReady) throw new IOException("recording_storage_root_unavailable");
+        var dataWatermark = policy.Evaluate(drive.AvailableFreeSpace, drive.TotalSize);
+        if (!dataWatermark.AllowsRecording)
+            throw new IOException($"recording_storage_low:{dataWatermark.FreeBytes}:{dataWatermark.BlockFreeBytes}");
         var archiveRoot = Path.GetFullPath(_storage.ArchiveRoot);
         Directory.CreateDirectory(Path.Combine(archiveRoot, "Meetings"));
         var archiveDriveRoot = Path.GetPathRoot(archiveRoot);
         if (string.IsNullOrWhiteSpace(archiveDriveRoot)) throw new IOException("archive_storage_root_unavailable");
         var archiveDrive = new DriveInfo(archiveDriveRoot);
-        if (!archiveDrive.IsReady || archiveDrive.AvailableFreeSpace < minimumBytes)
-            throw new IOException($"archive_storage_low:{archiveDrive.AvailableFreeSpace}:{minimumBytes}");
+        if (!archiveDrive.IsReady) throw new IOException("archive_storage_root_unavailable");
+        var archiveWatermark = policy.Evaluate(archiveDrive.AvailableFreeSpace, archiveDrive.TotalSize);
+        if (!archiveWatermark.AllowsRecording)
+            throw new IOException($"archive_storage_low:{archiveWatermark.FreeBytes}:{archiveWatermark.BlockFreeBytes}");
     }
 
     public void ValidatePreflight()
     {
         EnsureStorageAvailable();
         EnsureFfmpegAvailable();
+    }
+
+    public async Task<AudioSourceTestResult> TestAudioSourceAsync(string? deviceId, bool systemAudio, CancellationToken cancellationToken = default)
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        MMDevice? selectedDevice = null;
+        IWaveIn? capture = null;
+        string? friendlyName = null;
+        var started = Stopwatch.GetTimestamp();
+        var samples = 0;
+        var rmsSum = 0d;
+        var peak = 0d;
+        var clipping = false;
+        try
+        {
+            try
+            {
+                selectedDevice = ResolveSelectedDevice(enumerator, systemAudio ? DataFlow.Render : DataFlow.Capture, deviceId);
+                friendlyName = selectedDevice?.FriendlyName;
+                capture = systemAudio
+                    ? selectedDevice is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(selectedDevice)
+                    : selectedDevice is null ? new WasapiCapture() : new WasapiCapture(selectedDevice);
+                selectedDevice = null;
+            }
+            finally { selectedDevice?.Dispose(); }
+
+            var format = capture.WaveFormat;
+            var gate = new object();
+            void OnData(object? _, WaveInEventArgs args)
+            {
+                var result = CaptureTrack.CalculateTelemetry(args.Buffer, args.BytesRecorded, format);
+                if (result is null) return;
+                lock (gate)
+                {
+                    rmsSum += result.Value.Rms;
+                    samples++;
+                    peak = Math.Max(peak, result.Value.Peak);
+                    clipping |= result.Value.Clipping;
+                }
+            }
+
+            capture.DataAvailable += OnData;
+            try
+            {
+                capture.StartRecording();
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+            }
+            finally
+            {
+                try { capture.StopRecording(); } catch (InvalidOperationException) { }
+                capture.DataAvailable -= OnData;
+            }
+
+            double averageRms;
+            lock (gate) averageRms = samples == 0 ? 0 : rmsSum / samples;
+            var averageDb = averageRms <= 0 ? -60d : Math.Clamp(20d * Math.Log10(averageRms), -60d, 0d);
+            var peakDb = peak <= 0 ? -60d : Math.Clamp(20d * Math.Log10(peak), -60d, 0d);
+            return new AudioSourceTestResult(true, deviceId, friendlyName, samples > 0 && averageRms >= 0.003d, averageDb, peakDb, clipping, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new AudioSourceTestResult(false, deviceId, null, false, null, null, false, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency), "AUDIO_TEST_CANCELLED");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Audio source test failed. SystemAudio={SystemAudio}", systemAudio);
+            return new AudioSourceTestResult(false, deviceId, null, false, null, null, false, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency), ex.Message.Contains("unavailable", StringComparison.OrdinalIgnoreCase) ? "AUDIO_SOURCE_UNAVAILABLE" : "AUDIO_TEST_FAILED");
+        }
+        finally
+        {
+            capture?.Dispose();
+        }
     }
 
     private static MMDevice? ResolveSelectedDevice(MMDeviceEnumerator enumerator, DataFlow flow, string? deviceId)
@@ -334,6 +462,64 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         if (system is not null) await system.DisposeAsync();
     }
 
+    private void HandleCaptureFailure(CaptureTrack failedTrack, string errorCode, Exception exception)
+    {
+        var sessionId = _sessionId;
+        if (string.IsNullOrWhiteSpace(sessionId)) return;
+
+        bool fatal;
+        lock (_gate)
+        {
+            var otherSourceAlive = (_microphone is not null && !ReferenceEquals(_microphone, failedTrack) && !_microphone.IsFailed)
+                || (_systemAudio is not null && !ReferenceEquals(_systemAudio, failedTrack) && !_systemAudio.IsFailed);
+            fatal = errorCode == "STORAGE_WRITE_FAILED" || !otherSourceAlive;
+        }
+
+        _ = PersistCaptureFailureAsync(sessionId, errorCode, exception, fatal);
+    }
+
+    private async Task PersistCaptureFailureAsync(string sessionId, string errorCode, Exception exception, bool fatal)
+    {
+        if (fatal && Interlocked.Exchange(ref _fatalCaptureFailureStarted, 1) != 0) return;
+        try
+        {
+            await _spool.AddEventAsync(sessionId, errorCode, payloadJson: JsonSerializer.Serialize(new { message = exception.Message }), cancellationToken: CancellationToken.None);
+            if (!fatal)
+            {
+                await _spool.SetFinalizationStateAsync(sessionId, errorCode: errorCode, errorDetail: exception.Message, cancellationToken: CancellationToken.None);
+                _logger.LogWarning(exception, "One audio source failed; the other source remains active. Code={ErrorCode}, Session={SessionId}", errorCode, sessionId);
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (_state.State is RecorderState.Recording or RecorderState.Paused)
+                    _state.TryTransition(RecorderState.Finalizing, "capture-failure");
+            }
+
+            try { await BeginStopTracks(); }
+            catch (Exception stopError) { _logger.LogError(stopError, "Failed to stop capture after audio failure. Session={SessionId}", sessionId); }
+
+            await _spool.SetFinalizationStateAsync(
+                sessionId,
+                localFinalizeState: "FINALIZING_LOCAL",
+                errorCode: errorCode,
+                errorDetail: exception.Message,
+                cancellationToken: CancellationToken.None);
+            await _spool.SetSessionStateAsync(sessionId, "FINALIZING");
+            lock (_gate)
+            {
+                _state.Restore(RecorderState.Error, "capture-failure");
+                _sessionId = sessionId;
+            }
+            _logger.LogError(exception, "Capture stopped because no safe audio path remains. Code={ErrorCode}, Session={SessionId}", errorCode, sessionId);
+        }
+        catch (Exception persistenceError)
+        {
+            _logger.LogCritical(persistenceError, "Could not persist capture failure. OriginalCode={ErrorCode}, Session={SessionId}", errorCode, sessionId);
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         try
@@ -361,19 +547,37 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private readonly ILogger _logger;
         private readonly RecordingTrackInfo _info;
         private readonly MMDevice? _device;
+        private readonly Action<CaptureTrack, string, Exception>? _failureHandler;
         private readonly object _peakGate = new();
         private int _started;
+        private int _failureReported;
         private double? _peak;
         private double? _peakDb;
+        private double? _rms;
+        private double? _rmsDb;
+        private bool _clipping;
+        private DateTimeOffset? _lastAudioAtUtc;
+        private DateTimeOffset? _silenceStartedAtUtc;
 
-        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null)
+        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null, Action<CaptureTrack, string, Exception>? failureHandler = null, string profile = "ONLINE")
         {
             _sessionId = sessionId;
             _capture = capture;
             _device = device;
             _logger = logger;
+            _failureHandler = failureHandler;
             var trackId = Guid.NewGuid().ToString("N");
-            _info = new RecordingTrackInfo(trackId, trackType, capture.WaveFormat.SampleRate, capture.WaveFormat.Channels);
+            _info = new RecordingTrackInfo(
+                trackId,
+                trackType,
+                capture.WaveFormat.SampleRate,
+                capture.WaveFormat.Channels,
+                device?.ID,
+                device?.FriendlyName,
+                device is null ? "DEFAULT" : "FIXED",
+                profile,
+                capture.WaveFormat.Encoding.ToString(),
+                capture.WaveFormat.BitsPerSample);
             var startSample = sessionClock.GetStartSample(capture.WaveFormat.SampleRate);
             _writer = new PcmFlacChunkWriter(sessionId, trackId, trackType, capture.WaveFormat, spool, dataRoot, ffmpegPath, logger, startSample);
             _capture.DataAvailable += OnDataAvailable;
@@ -382,8 +586,15 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
         public RecordingTrackInfo Info => _info;
         public long MediaTimeMs => _writer.MediaTimeMs;
-        public double? Peak { get { lock (_peakGate) return _peak; } }
-        public double? PeakDb { get { lock (_peakGate) return _peakDb; } }
+        public double? Peak { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _peak; } }
+        public double? PeakDb { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _peakDb; } }
+        public double? Rms { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _rms; } }
+        public double? RmsDb { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _rmsDb; } }
+        public bool? Clipping { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _clipping; } }
+        public DateTimeOffset? LastAudioAtUtc { get { lock (_peakGate) return _lastAudioAtUtc; } }
+        public long? SilenceDurationMs { get { lock (_peakGate) return TelemetryStaleUnsafe() || _silenceStartedAtUtc is null ? null : (long)Math.Max(0, (DateTimeOffset.UtcNow - _silenceStartedAtUtc.Value).TotalMilliseconds); } }
+        public bool TelemetryStale { get { lock (_peakGate) return TelemetryStaleUnsafe(); } }
+        public bool IsFailed => Volatile.Read(ref _failureReported) != 0;
 
         public void Start()
         {
@@ -403,47 +614,97 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
         private void OnDataAvailable(object? sender, WaveInEventArgs e)
         {
+            if (IsFailed) return;
             try
             {
                 UpdatePeak(e.Buffer, e.BytesRecorded);
                 _writer.Append(e.Buffer.AsSpan(0, e.BytesRecorded));
             }
-            catch (Exception ex) { _logger.LogError(ex, "Failed to spool audio chunk. Session={SessionId}", _sessionId); }
+            catch (Exception ex) { ReportFailure(ClassifyWriteFailure(ex), ex); }
         }
 
         private void UpdatePeak(byte[] buffer, int bytesRecorded)
         {
-            var peak = CalculatePeak(buffer, bytesRecorded, _capture.WaveFormat);
-            if (peak is null) return;
-            var db = peak <= 0 ? -60d : Math.Clamp(20d * Math.Log10(peak.Value), -60d, 0d);
+            var telemetry = CalculateTelemetry(buffer, bytesRecorded, _capture.WaveFormat);
+            if (telemetry is null) return;
+            var now = DateTimeOffset.UtcNow;
+            var peak = telemetry.Value.Peak;
+            var rms = telemetry.Value.Rms;
+            var db = peak <= 0 ? -60d : Math.Clamp(20d * Math.Log10(peak), -60d, 0d);
+            var rmsDb = rms <= 0 ? -60d : Math.Clamp(20d * Math.Log10(rms), -60d, 0d);
             lock (_peakGate)
             {
                 _peak = peak;
                 _peakDb = db;
+                _rms = rms;
+                _rmsDb = rmsDb;
+                _clipping = telemetry.Value.Clipping;
+                _lastAudioAtUtc = now;
+                if (rms < 0.01d)
+                    _silenceStartedAtUtc ??= now;
+                else
+                    _silenceStartedAtUtc = null;
             }
         }
 
-        private static double? CalculatePeak(byte[] buffer, int bytesRecorded, WaveFormat format)
+        private bool TelemetryStaleUnsafe()
+            => _lastAudioAtUtc is null || DateTimeOffset.UtcNow - _lastAudioAtUtc.Value > TimeSpan.FromMilliseconds(750);
+
+        internal static (double Peak, double Rms, bool Clipping)? CalculateTelemetry(byte[] buffer, int bytesRecorded, WaveFormat format)
         {
             if (bytesRecorded <= 0 || format.Channels <= 0) return null;
             var peak = 0d;
+            var sumSquares = 0d;
+            var samples = 0;
+            var clippedSamples = 0;
             if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
             {
                 for (var offset = 0; offset + 4 <= bytesRecorded; offset += 4)
-                    peak = Math.Max(peak, Math.Abs(BitConverter.ToSingle(buffer, offset)));
+                {
+                    var sample = Math.Abs(BitConverter.ToSingle(buffer, offset));
+                    peak = Math.Max(peak, sample);
+                    sumSquares += sample * sample;
+                    samples++;
+                    if (sample >= 0.995d) clippedSamples++;
+                }
             }
             else if (format.BitsPerSample == 16)
             {
                 for (var offset = 0; offset + 2 <= bytesRecorded; offset += 2)
-                    peak = Math.Max(peak, Math.Abs(BitConverter.ToInt16(buffer, offset) / 32768d));
+                {
+                    var sample = Math.Abs(BitConverter.ToInt16(buffer, offset) / 32768d);
+                    peak = Math.Max(peak, sample);
+                    sumSquares += sample * sample;
+                    samples++;
+                    if (sample >= 0.995d) clippedSamples++;
+                }
             }
             else return null;
-            return Math.Clamp(peak, 0d, 1d);
+            if (samples == 0) return null;
+            return (Math.Clamp(peak, 0d, 1d), Math.Sqrt(sumSquares / samples), clippedSamples / (double)samples >= 0.005d);
         }
 
         private void OnRecordingStopped(object? sender, StoppedEventArgs e)
         {
-            if (e.Exception is not null) _logger.LogError(e.Exception, "Audio capture stopped with an error. Session={SessionId}", _sessionId);
+            if (e.Exception is not null) ReportFailure("AUDIO_SOURCE_FAILED", e.Exception);
+        }
+
+        private void ReportFailure(string errorCode, Exception exception)
+        {
+            if (Interlocked.Exchange(ref _failureReported, 1) != 0) return;
+            try { _capture.StopRecording(); }
+            catch (Exception stopError) { _logger.LogDebug(stopError, "Capture stop after failure was already completed. Session={SessionId}", _sessionId); }
+            _failureHandler?.Invoke(this, errorCode, exception);
+        }
+
+        private static string ClassifyWriteFailure(Exception exception)
+        {
+            var message = exception.ToString();
+            return message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("encoder", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("queue", StringComparison.OrdinalIgnoreCase)
+                ? "ENCODER_FAILED"
+                : "STORAGE_WRITE_FAILED";
         }
 
         public async ValueTask DisposeAsync()
@@ -468,7 +729,16 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
 internal sealed class PcmFlacChunkWriter : IAsyncDisposable
 {
-    private sealed record PendingRawChunk(string Id, int Sequence, string RawPath, string OutputPart, string Output, long StartSample, long SampleCount);
+    private sealed record PendingRawChunk(
+        string Id,
+        int Sequence,
+        FileStream RawStream,
+        string RawPath,
+        string RawPartPath,
+        string OutputPart,
+        string Output,
+        long StartSample,
+        long SampleCount);
 
     private readonly string _sessionId;
     private readonly string _trackId;
@@ -479,7 +749,16 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private readonly string _ffmpegPath;
     private readonly ILogger _logger;
     private readonly object _gate = new();
-    private readonly Channel<PendingRawChunk> _pending = Channel.CreateUnbounded<PendingRawChunk>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    // The capture callback must never wait for the encoder. The bounded channel
+    // is the fast path; overflow descriptors are kept as durable work items
+    // until the single encoder loop catches up. The PCM itself is already on
+    // disk, so a slow encoder cannot cause audio loss or an unbounded PCM buffer.
+    private readonly Channel<PendingRawChunk> _pending;
+    private readonly ConcurrentQueue<PendingRawChunk> _overflow = new();
+    private readonly SemaphoreSlim _workSignal = new(0);
+    private readonly int _queueCapacity;
+    private int _queuedDescriptors;
+    private int _processedDescriptors;
     private readonly Task _encoderTask;
     private FileStream? _raw;
     private string? _rawPath;
@@ -490,6 +769,15 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private long _sampleCount;
     private bool _disposed;
     private Exception? _encoderFailure;
+
+    public RawChunkBacklog CurrentBacklog
+    {
+        get
+        {
+            var queued = Math.Max(0, Volatile.Read(ref _queuedDescriptors) - Volatile.Read(ref _processedDescriptors));
+            return new RawChunkBacklog(queued, 0, queued, _encoderFailure is null ? 0 : 1, 0, null, queued > 10 ? "CRITICAL" : queued > 3 ? "LAGGING" : "HEALTHY");
+        }
+    }
     public long MediaTimeMs
     {
         get
@@ -509,7 +797,22 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _ffmpegPath = ffmpegPath;
         _logger = logger;
         _startSample = Math.Max(0, startSample);
+        _queueCapacity = ReadQueueCapacity();
+        _pending = Channel.CreateBounded<PendingRawChunk>(new BoundedChannelOptions(_queueCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            // TryWrite returns false when full; the descriptor then goes to the
+            // disk-backed recovery/overflow path instead of being dropped.
+            FullMode = BoundedChannelFullMode.Wait
+        });
         _encoderTask = Task.Run(ProcessQueueAsync);
+    }
+
+    private static int ReadQueueCapacity()
+    {
+        var configured = Environment.GetEnvironmentVariable("ATOM_AGENT_ENCODER_QUEUE_CAPACITY");
+        return int.TryParse(configured, out var value) ? Math.Clamp(value, 4, 64) : 24;
     }
 
     public void Append(ReadOnlySpan<byte> pcm)
@@ -552,7 +855,6 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _rawPartPath = _rawPath + ".part";
         var output = Path.Combine(directory, $"{_sequence:D8}.flac");
         _rawId = Guid.NewGuid().ToString("N");
-        _spool.RegisterRawChunk(new RawRecordingChunk(_rawId, _sessionId, _trackId, _sequence, _rawPath, output, _startSample, 0, _format.SampleRate, _format.Channels, _trackType, _format.Encoding.ToString(), _format.BitsPerSample, "WRITING", 0, null, null));
         _raw = new FileStream(_rawPartPath, FileMode.Create, FileAccess.Write, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
         _sampleCount = 0;
     }
@@ -572,59 +874,105 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _rawPartPath = null;
         _rawId = null;
         _sampleCount = 0;
-        raw.Flush(true);
-        raw.Dispose();
         if (rawPartPath is null) throw new InvalidOperationException("raw_chunk_part_path_missing");
-        File.Move(rawPartPath, rawPath, true);
         if (rawId is null) throw new InvalidOperationException("raw_chunk_id_missing");
-        _spool.MarkRawChunkReady(_sessionId, _trackId, sequence, sampleCount, new FileInfo(rawPath).Length, FlacEncoder.ComputeSha256(rawPath));
         var directory = Path.GetDirectoryName(rawPath)!;
         var outputPart = Path.Combine(directory, $"{sequence:D8}.flac.part");
         var output = Path.Combine(directory, $"{sequence:D8}.flac");
-        if (!_pending.Writer.TryWrite(new PendingRawChunk(rawId, sequence, rawPath, outputPart, output, startSample, sampleCount)))
-            throw new InvalidOperationException("Audio encoder queue is closed.");
+        var descriptor = new PendingRawChunk(rawId, sequence, raw, rawPath, rawPartPath, outputPart, output, startSample, sampleCount);
+        // Never block the WASAPI callback when the encoder is behind. The raw
+        // stream remains owned by this descriptor and is finalized by the
+        // background loop.
+        if (!_pending.Writer.TryWrite(descriptor)) _overflow.Enqueue(descriptor);
+        Interlocked.Increment(ref _queuedDescriptors);
+        _workSignal.Release();
         _sequence++;
         _startSample += sampleCount;
     }
 
     private async Task ProcessQueueAsync()
     {
-        await foreach (var chunk in _pending.Reader.ReadAllAsync())
+        while (true)
         {
-            try
+            var signaled = await _workSignal.WaitAsync(TimeSpan.FromMilliseconds(250));
+            if (!signaled && !_disposed)
+                continue;
+
+            while (_pending.Reader.TryRead(out var chunk) || _overflow.TryDequeue(out chunk))
             {
-                await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODING");
-                FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, chunk.OutputPart, _format);
-                File.Move(chunk.OutputPart, chunk.Output, true);
-                var size = new FileInfo(chunk.Output).Length;
-                var sha = FlacEncoder.ComputeSha256(chunk.Output);
-                await _spool.UpsertChunkAsync(new RecordingChunk(chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.Output, chunk.StartSample, chunk.SampleCount, _format.SampleRate, _format.Channels, _trackType, size, sha, "READY", 0));
-                await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "READY", size, sha);
-                File.Delete(chunk.RawPath);
-                _logger.LogInformation("Audio chunk ready. Session={SessionId}, Track={TrackType}, Sequence={Sequence}, Samples={Samples}", _sessionId, _trackType, chunk.Sequence, chunk.SampleCount);
+                try
+                {
+                    await ProcessChunkAsync(chunk);
+                }
+                finally
+                {
+                    Interlocked.Increment(ref _processedDescriptors);
+                }
             }
-            catch (Exception ex)
-            {
-                _encoderFailure ??= ex;
-                _logger.LogError(ex, "Failed to encode audio chunk. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", _sessionId, _trackType, chunk.Sequence);
-                try { if (File.Exists(chunk.OutputPart)) File.Delete(chunk.OutputPart); } catch (IOException) { }
-                try { await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODE_FAILED", error: ex.Message); } catch (Exception stateError) { _logger.LogDebug(stateError, "Could not persist encoder failure. Session={SessionId}, Sequence={Sequence}", _sessionId, chunk.Sequence); }
-            }
+
+            if (_disposed && Volatile.Read(ref _processedDescriptors) >= Volatile.Read(ref _queuedDescriptors)) break;
+        }
+    }
+
+    private async Task ProcessChunkAsync(PendingRawChunk chunk)
+    {
+        try
+        {
+            // All expensive durability and persistence work is deliberately
+            // outside the realtime callback.
+            _spool.RegisterRawChunk(new RawRecordingChunk(
+                chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.RawPath,
+                chunk.Output, chunk.StartSample, chunk.SampleCount,
+                _format.SampleRate, _format.Channels, _trackType,
+                _format.Encoding.ToString(), _format.BitsPerSample, "WRITING", 0, null, null));
+            await chunk.RawStream.FlushAsync(CancellationToken.None);
+            chunk.RawStream.Flush(true);
+            chunk.RawStream.Dispose();
+            File.Move(chunk.RawPartPath, chunk.RawPath, true);
+            var rawSize = new FileInfo(chunk.RawPath).Length;
+            var rawSha = FlacEncoder.ComputeSha256(chunk.RawPath);
+            _spool.MarkRawChunkReady(_sessionId, _trackId, chunk.Sequence, chunk.SampleCount, rawSize, rawSha);
+            await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODING");
+            FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, chunk.OutputPart, _format);
+            File.Move(chunk.OutputPart, chunk.Output, true);
+            var size = new FileInfo(chunk.Output).Length;
+            var sha = FlacEncoder.ComputeSha256(chunk.Output);
+            await _spool.UpsertChunkAsync(new RecordingChunk(chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.Output, chunk.StartSample, chunk.SampleCount, _format.SampleRate, _format.Channels, _trackType, size, sha, "READY", 0));
+            await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "READY", size, sha);
+            File.Delete(chunk.RawPath);
+            _logger.LogInformation("Audio chunk ready. Session={SessionId}, Track={TrackType}, Sequence={Sequence}, Samples={Samples}", _sessionId, _trackType, chunk.Sequence, chunk.SampleCount);
+        }
+        catch (Exception ex)
+        {
+            _encoderFailure ??= ex;
+            _logger.LogError(ex, "Failed to encode audio chunk. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", _sessionId, _trackType, chunk.Sequence);
+            try { chunk.RawStream.Dispose(); } catch (Exception disposeError) { _logger.LogDebug(disposeError, "Could not close raw chunk stream."); }
+            try { if (File.Exists(chunk.OutputPart)) File.Delete(chunk.OutputPart); } catch (IOException) { }
+            try { await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODE_FAILED", error: ex.Message); } catch (Exception stateError) { _logger.LogDebug(stateError, "Could not persist encoder failure. Session={SessionId}, Sequence={Sequence}", _sessionId, chunk.Sequence); }
         }
     }
 
     public async ValueTask DisposeAsync()
     {
+        string? emptyRawPart = null;
         lock (_gate)
         {
             if (_disposed) return;
             if (_raw is not null && _sampleCount > 0) QueueCurrentChunk();
             _disposed = true;
+            if (_raw is not null && _sampleCount == 0) emptyRawPart = _rawPartPath;
             _raw?.Dispose();
             _raw = null;
             _pending.Writer.TryComplete();
+            _workSignal.Release();
+        }
+        if (emptyRawPart is not null)
+        {
+            try { if (File.Exists(emptyRawPart)) File.Delete(emptyRawPart); }
+            catch (IOException) { _logger.LogDebug("Could not remove empty raw chunk part {Path}.", emptyRawPart); }
         }
         await _encoderTask;
+        _workSignal.Dispose();
         if (_encoderFailure is not null) throw new InvalidOperationException("One or more audio chunks failed to encode.", _encoderFailure);
     }
 }
