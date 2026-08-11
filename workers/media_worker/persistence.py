@@ -87,6 +87,19 @@ def update_job(job_id: str, status: str, stage: str, progress: int, error: str |
         )
 
 
+def renew_lease(job_id: str, message_id: str | None = None) -> None:
+    with psycopg.connect(_conninfo()) as connection:
+        connection.execute(
+            "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='RUNNING'",
+            (job_id,),
+        )
+        if message_id:
+            connection.execute(
+                "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
+                (socket.gethostname(), message_id),
+            )
+
+
 def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key: str, asr_key: str, duration_ms: int) -> None:
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(

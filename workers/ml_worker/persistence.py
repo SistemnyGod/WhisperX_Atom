@@ -7,6 +7,7 @@ from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
+from diarization_quality import normalize_speaker_label
 
 
 class JobRepository:
@@ -55,6 +56,18 @@ class JobRepository:
                 (status, stage, progress, error, error_code, socket.gethostname(), job_id),
             )
 
+    def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
+        with psycopg.connect(self.conninfo) as connection:
+            connection.execute(
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='RUNNING'",
+                (job_id,),
+            )
+            if message_id:
+                connection.execute(
+                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
+                    (socket.gethostname(), message_id),
+                )
+
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
         with psycopg.connect(self.conninfo) as connection:
             # Serialize transcript versions and summary-job creation per meeting.
@@ -70,12 +83,12 @@ class JobRepository:
             warnings = result.get("warnings", [])
             quality = result.get("quality", {})
             transcript_id = connection.execute(
-                "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb) RETURNING id",
-                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality)),
+                "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s) RETURNING id",
+                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass")),
             ).fetchone()[0]
             speakers: dict[str, str] = {}
             for segment in result.get("segments", []):
-                label = segment.get("speaker")
+                label = normalize_speaker_label(segment.get("speaker"))
                 if not label or label in speakers:
                     continue
                 speaker_id = connection.execute(
@@ -89,10 +102,10 @@ class JobRepository:
             ).fetchall()
             technical_events = [(str(event_type).upper(), int(media_time_ms)) for event_type, media_time_ms in technical_events]
             for ordinal, segment in enumerate(result.get("segments", [])):
-                label = segment.get("speaker")
+                label = normalize_speaker_label(segment.get("speaker"))
                 connection.execute(
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
-                    (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label, str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
+                    (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
                 )
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"}:
                 summary_job = connection.execute(

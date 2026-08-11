@@ -8,6 +8,7 @@ param(
   [string]$InboxPath,
   [string]$InboxRoot = $(if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }),
   [int]$TimeoutSeconds = 180,
+  [string]$ResultPath,
   [switch]$StartCore,
   [switch]$WithGpu,
   [switch]$WithLlm,
@@ -19,6 +20,8 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($Password)) { throw "Set BOOTSTRAP_ADMIN_PASSWORD before running e2e-core.ps1" }
 $BaseUrl = $BaseUrl.TrimEnd("/")
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$runId = [guid]::NewGuid().ToString("N")
+$runStartedAt = [DateTimeOffset]::UtcNow
 
 function Invoke-Api([string]$Method, [string]$Path, $Body = $null) {
   $params = @{ Uri = "$BaseUrl$Path"; Method = $Method; WebSession = $session; ErrorAction = "Stop" }
@@ -94,7 +97,7 @@ $null = Invoke-Api POST "/api/auth/login" @{ username = $Username; password = $P
 $meeting = $null
 
 if ($AudioPath) {
-  $meeting = Invoke-Api POST "/api/meetings" @{ title = "E2E $(Get-Date -Format s)"; description = "automated core smoke" }
+  $meeting = Invoke-Api POST "/api/meetings" @{ title = "E2E $runId"; description = "automated transcript acceptance run $runId" }
   Write-Host "meeting: $($meeting.id)"
   $file = Get-Item -LiteralPath $AudioPath
   if (-not $file.Exists) { throw "Audio file not found: $AudioPath" }
@@ -122,12 +125,16 @@ if ($InboxPath) {
   $inbox = Get-Item -LiteralPath $InboxPath
   if (-not $inbox.Exists) { throw "Inbox file not found: $InboxPath" }
   New-Item -ItemType Directory -Force -Path $InboxRoot | Out-Null
-  $target = Join-Path $InboxRoot $inbox.Name
+  $targetName = "{0}-{1}{2}" -f $inbox.BaseName, $runId, $inbox.Extension
+  $target = Join-Path $InboxRoot $targetName
   Copy-Item -LiteralPath $inbox.FullName -Destination $target -Force
   Write-Host "copied to hot-folder: $target"
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
-    $meeting = @(Invoke-Api GET "/api/meetings?limit=200") | Where-Object { $_.title -eq [IO.Path]::GetFileNameWithoutExtension($inbox.Name) } | Select-Object -First 1
+    $meeting = @(Invoke-Api GET "/api/meetings?limit=200") | Where-Object {
+      $_.title -eq [IO.Path]::GetFileNameWithoutExtension($targetName) -and
+      ([DateTimeOffset]$_.createdAt) -ge $runStartedAt
+    } | Select-Object -First 1
     if ($meeting) { break }
     Start-Sleep -Seconds 2
   } while ((Get-Date) -lt $deadline)
@@ -142,5 +149,23 @@ if ($meeting -and $WaitForGpu) {
   $transcript = Invoke-Api GET "/api/meetings/$($meeting.id)/transcript"
   Write-Host ("transcript status: {0}; segments: {1}" -f $transcript.status, @($transcript.segments).Count)
   if ($transcript.status -notin @("READY", "PARTIAL_READY") -or @($transcript.segments).Count -eq 0) { throw "GPU E2E produced no ready transcript" }
+}
+
+if ($meeting -and $ResultPath) {
+  $media = @(Invoke-Api GET "/api/meetings/$($meeting.id)/media")
+  $jobs = @(Invoke-Api GET "/api/meetings/$($meeting.id)/jobs")
+  $result = [ordered]@{
+    runId = $runId
+    startedAtUtc = $runStartedAt.ToString("o")
+    completedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+    meetingId = [string]$meeting.id
+    mediaAssetIds = @($media | ForEach-Object { [string]$_.id })
+    jobIds = @($jobs | ForEach-Object { [string]$_.id })
+    transcriptStatus = if ($transcript) { [string]$transcript.status } else { $null }
+    transcriptSegmentCount = if ($transcript) { @($transcript.segments).Count } else { 0 }
+  }
+  $parent = Split-Path -Parent $ResultPath
+  if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  $result | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 -LiteralPath $ResultPath
 }
 Write-Host "E2E smoke completed."

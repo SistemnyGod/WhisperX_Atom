@@ -16,6 +16,7 @@ public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Ro
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, DateTimeOffset CheckedAt);
+public sealed record WorkerRuntimeRow(string WorkerName, string InstanceId, string Status, DateTime LastSeenAt, Guid? CurrentJobId, string Version, JsonDocument Capabilities, string? LastErrorCode);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
 public enum ActionItemUpdateResult { NotFound, InvalidTransition, Updated }
 
@@ -670,6 +671,29 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
         var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");
         return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, DateTimeOffset.UtcNow);
+    }
+
+    public async Task<IReadOnlyList<WorkerRuntimeRow>> ListWorkerRuntimeAsync()
+    {
+        var result = new List<WorkerRuntimeRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT worker_name,instance_id,status,last_seen_at,current_job_id,version,capabilities,last_error_code FROM worker_instances ORDER BY worker_name,instance_id",
+            connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new WorkerRuntimeRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3),
+                reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                reader.GetString(5),
+                reader.GetFieldValue<JsonDocument>(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+        return result;
     }
 
     public async Task<IReadOnlyList<AuditEventRow>> ListAuditEventsAsync(Guid? meetingId, string? eventType, int limit, int offset)

@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES
 from workers.media_worker.media_worker import probe_audio
+from workers.runtime_heartbeat import start_sync_heartbeat
 
 LOG = logging.getLogger("whisperx-atom.import-worker")
 SAFE_CHARS = re.compile(r"[^\w.()\- ]+", re.UNICODE)
@@ -179,9 +180,16 @@ class HotFolderImporter:
 def run() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     importer = HotFolderImporter()
-    while True:
-        importer.scan_once()
-        time.sleep(importer.interval)
+    heartbeat_stop, _ = start_sync_heartbeat(
+        "import-worker",
+        capabilities=lambda: {"inbox": str(importer.inbox), "importPipeline": "ready"},
+    )
+    try:
+        while True:
+            importer.scan_once()
+            time.sleep(importer.interval)
+    finally:
+        heartbeat_stop.set()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import json
 import os
 
 import psycopg
+from workers.runtime_heartbeat import AsyncHeartbeat
 
 
 async def recover_expired(connection) -> None:
@@ -27,6 +28,9 @@ async def run() -> None:
 
     conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
+    heartbeat = AsyncHeartbeat("outbox-relay", capabilities=lambda: {"natsConnected": True, "outboxRelay": "ready"})
+    await heartbeat.start()
+    heartbeat.set_state("READY")
     jetstream = client.jetstream()
     subjects = ["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"]
     # Existing development streams may have been created before a new subject

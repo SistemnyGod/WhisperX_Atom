@@ -7,10 +7,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from workers.nats_utils import fetch_available
+from workers.nats_utils import fetch_available, maintain_message
 from whisperx_atom.contracts import ProcessingRequest
 from whisperx_atom.processing import ProcessingService
 from workers.gpu_lease import PostgresGpuLease
+from workers.runtime_heartbeat import AsyncHeartbeat
 from .persistence import JobRepository
 
 class ResidentLlmConflict(RuntimeError):
@@ -55,15 +56,19 @@ def error_code_for(exc: Exception) -> str:
 
 
 class GpuWorker:
-    def __init__(self) -> None:
+    def __init__(self, heartbeat: AsyncHeartbeat | None = None) -> None:
         self._semaphore = asyncio.Semaphore(1)
         self._service = ProcessingService()
         self._repository = JobRepository()
         self._gpu_lease = PostgresGpuLease(self._repository.conninfo)
+        self._heartbeat = heartbeat
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         async with self._semaphore:
             job_id = str(message["job_id"])
+            if self._heartbeat:
+                self._heartbeat.set_job(job_id)
+                self._heartbeat.set_state("BUSY")
             LOGGER.info("received job=%s message=%s stage=%s", job_id, message.get("message_id"), message.get("stage"))
             if not self._repository.claim_message(str(message.get("message_id", "")), job_id):
                 state = self._repository.job_state(job_id)
@@ -100,12 +105,20 @@ class GpuWorker:
                 LOGGER.warning("job=%s waiting: %s", job_id, exc)
                 self._repository.release_message(str(message.get("message_id", "")))
                 self._repository.update_job(job_id, "QUEUED", "WAITING_FOR_GPU", 0, str(exc), "GPU_RESIDENT_LLM_CONFLICT")
+                if self._heartbeat:
+                    self._heartbeat.set_state("READY", "GPU_RESIDENT_LLM_CONFLICT")
                 raise
             except Exception as exc:
                 LOGGER.exception("job=%s failed", job_id)
                 self._repository.release_message(str(message.get("message_id", "")))
                 self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), error_code_for(exc))
+                if self._heartbeat:
+                    self._heartbeat.set_state("READY", error_code_for(exc))
                 raise
+            finally:
+                if self._heartbeat:
+                    self._heartbeat.set_job(None)
+                    self._heartbeat.set_state("READY")
 
 
 async def run() -> None:
@@ -114,8 +127,24 @@ async def run() -> None:
     except ImportError as exc:
         raise RuntimeError("Install workers/ml_worker/requirements.txt") from exc
 
-    worker = GpuWorker()
+    def gpu_capabilities() -> dict[str, Any]:
+        capabilities: dict[str, Any] = {"cudaAvailable": False, "hfConfigured": bool(os.getenv("HF_TOKEN"))}
+        try:
+            import torch
+
+            capabilities["cudaAvailable"] = bool(torch.cuda.is_available())
+            if capabilities["cudaAvailable"]:
+                capabilities["cudaDevice"] = torch.cuda.get_device_name(0)
+        except Exception as exc:
+            capabilities["cudaError"] = type(exc).__name__
+        capabilities["diarization"] = "DEGRADED" if not capabilities["hfConfigured"] else "READY"
+        return capabilities
+
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
+    heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: {**gpu_capabilities(), "natsConnected": True})
+    await heartbeat.start()
+    heartbeat.set_state("READY")
+    worker = GpuWorker(heartbeat)
     jetstream = client.jetstream()
     try:
         await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
@@ -125,7 +154,11 @@ async def run() -> None:
     while True:
         for message in await fetch_available(subscription, nats.errors.TimeoutError):
             try:
-                await worker.handle(json.loads(message.data))
+                payload = json.loads(message.data)
+                job_id = str(payload.get("job_id", ""))
+                message_id = str(payload.get("message_id", ""))
+                async with maintain_message(message, on_tick=lambda: asyncio.to_thread(worker._repository.renew_lease, job_id, message_id)):
+                    await worker.handle(payload)
                 await message.ack()
             except Exception:
                 await message.nak()

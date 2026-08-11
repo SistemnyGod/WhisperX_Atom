@@ -1,15 +1,20 @@
 [
   {
-    "name": "transcript-mvp-75s",
-    "path": "artifacts/transcription-mvp/fixtures/transcript-mvp-75s.wav",
-    "sha256": "f3b7d792f6cba1dd8086b5a3692c753091b64ef68b5d798f14b18803f1d6adbc",
-    "durationSeconds": 75,
-    "format": "wav",
+    "name": "summit-business-center-instructions",
+    "path": "C:\\Users\\AI_server\\Downloads\\SUMMIT_ бизнес-центр инструктажи.m4a",
+    "sha256": "29fa011349d30e81bf04cc0dbf00460ccf5d45b45121cbd20b683343ead07a2f",
+    "durationSeconds": 2210.794667,
+    "format": "m4a/aac",
+    "channels": 1,
+    "sampleRate": 48000,
+    "audioNotCommitted": true,
     "minimum": {
-      "durationSeconds": 60,
-      "segments": 1,
-      "textCharacters": 1
+      "durationSeconds": 2000,
+      "segments": 5,
+      "textCharacters": 100,
+      "qualityScore": 65,
+      "allowedStatuses": ["READY", "PARTIAL_READY"]
     },
-    "notes": "Локальный анонимизированный fixture; аудио находится в artifacts и не коммитится. Перед ASR acceptance заменить на утверждённую речевую запись с тем же manifest-контрактом."
+    "notes": "Локальный regression-файл. Не копировать в Git, artifacts или внешние сервисы. Использовать через параметр AudioPath."
   }
 ]

@@ -19,7 +19,7 @@ if ($LASTEXITCODE -ne 0) { throw "Doctor не прошёл" }
 
 for ($i=1; $i -le $Runs; $i++) {
     $log = Join-Path $runRoot "logs\run-$i.log"
-    $params = @{ TimeoutSeconds=$TimeoutSeconds; StartCore=$false; WithGpu=$true; WithLlm=$false; WaitForGpu=$true; RestartWorkers=$false }
+    $params = @{ TimeoutSeconds=$TimeoutSeconds; StartCore=$false; WithGpu=$true; WithLlm=$false; WaitForGpu=$true; RestartWorkers=$false; ResultPath=(Join-Path $runRoot "runs\run-$i.json") }
     if ($InboxPath) { $params.InboxPath = $InboxPath } else { $params.AudioPath = $AudioPath }
     & (Join-Path $PSScriptRoot "e2e-core.ps1") @params *>&1 | Tee-Object -FilePath $log
     if ($LASTEXITCODE -ne 0) { throw "E2E запуск $i завершился ошибкой" }
