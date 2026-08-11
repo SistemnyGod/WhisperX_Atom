@@ -32,6 +32,7 @@ $dataRoot = if ($env:WHISPERX_DATA_HOST) { $env:WHISPERX_DATA_HOST } else { "C:\
 $inboxRoot = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }
 $archiveRoot = if ($env:WHISPERX_ARCHIVE_HOST) { $env:WHISPERX_ARCHIVE_HOST } else { "C:\WhisperXAtom\Archive" }
 $apiBase = if ($env:WHISPERX_API_URL) { $env:WHISPERX_API_URL.TrimEnd('/') } else { "http://localhost:8080" }
+$gpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" }
 $envFile = Join-Path $repo ".env"
 if ([string]::IsNullOrWhiteSpace($Password) -and (Test-Path -LiteralPath $envFile)) {
     $line = Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^BOOTSTRAP_ADMIN_PASSWORD=(.*)$' } | Select-Object -First 1
@@ -58,7 +59,9 @@ Check "systemReadiness" {
 }
 Check "services" {
     $names = @(docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile core --profile gpu ps --status running --services)
-    foreach ($required in @("postgres","nats","api","tusd","outbox-relay","import-worker","media-worker","gpu-worker")) { if ($names -notcontains $required) { throw "service $required absent" } }
+    $requiredServices = @("postgres","nats","api","tusd","outbox-relay","import-worker","media-worker")
+    if ($gpuMode -eq "container") { $requiredServices += "gpu-worker" }
+    foreach ($required in $requiredServices) { if ($names -notcontains $required) { throw "service $required absent" } }
     "ready"
 }
 Check "transcriptOnly" {

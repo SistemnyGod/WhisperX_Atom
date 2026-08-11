@@ -12,16 +12,37 @@ $env:DIARIZATION_MODE = "preferred"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $runRoot = Join-Path $repo "artifacts\transcription-mvp\$(Get-Date -Format yyyyMMdd-HHmmss)"
 New-Item -ItemType Directory -Force -Path (Join-Path $runRoot "logs") | Out-Null
-if (-not $InboxPath -and -not (Test-Path -LiteralPath $AudioPath)) { throw "Audio не найден: $AudioPath" }
+if (-not $InboxPath -and -not (Test-Path -LiteralPath $AudioPath)) {
+    throw "Audio file was not found: $AudioPath"
+}
 
-& (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") | Set-Content -Encoding utf8 -LiteralPath (Join-Path $runRoot "doctor-output.json")
-if ($LASTEXITCODE -ne 0) { throw "Doctor не прошёл" }
+$envFile = Join-Path $repo ".env"
+if (Test-Path -LiteralPath $envFile) {
+    foreach ($line in Get-Content -LiteralPath $envFile) {
+        if ($line -match '^\s*#' -or $line -notmatch '=') { continue }
+        $name, $value = $line -split '=', 2
+        [Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), "Process")
+    }
+}
+
+& (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") -SkipRegistry |
+    Set-Content -Encoding utf8 -LiteralPath (Join-Path $runRoot "doctor-output.json")
+if ($LASTEXITCODE -ne 0) { throw "Doctor check failed." }
 
 for ($i=1; $i -le $Runs; $i++) {
     $log = Join-Path $runRoot "logs\run-$i.log"
-    $params = @{ TimeoutSeconds=$TimeoutSeconds; StartCore=$false; WithGpu=$true; WithLlm=$false; WaitForGpu=$true; RestartWorkers=$false; ResultPath=(Join-Path $runRoot "runs\run-$i.json") }
+    $params = @{
+        TimeoutSeconds = $TimeoutSeconds
+        StartCore = $false
+        WithGpu = $true
+        WithLlm = $false
+        WaitForGpu = $true
+        RestartWorkers = $false
+        ResultPath = (Join-Path $runRoot "runs\run-$i.json")
+    }
     if ($InboxPath) { $params.InboxPath = $InboxPath } else { $params.AudioPath = $AudioPath }
     & (Join-Path $PSScriptRoot "e2e-core.ps1") @params *>&1 | Tee-Object -FilePath $log
-    if ($LASTEXITCODE -ne 0) { throw "E2E запуск $i завершился ошибкой" }
+    if ($LASTEXITCODE -ne 0) { throw "E2E run $i failed." }
 }
-Write-Host "Transcript E2E пройден: $Runs запусков. Артефакты: $runRoot" -ForegroundColor Green
+
+Write-Host "Transcript E2E passed: $Runs run(s). Artifacts: $runRoot" -ForegroundColor Green

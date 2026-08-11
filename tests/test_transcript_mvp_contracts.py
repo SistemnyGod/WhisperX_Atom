@@ -17,7 +17,9 @@ def test_transcript_only_runtime_contract_is_explicit():
     e2e = read("scripts/e2e-transcript.ps1")
     assert "AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}" in compose
     assert "DIARIZATION_MODE: ${DIARIZATION_MODE:-preferred}" in compose
-    assert '"core", "--profile", "gpu"' in start
+    assert 'ValidateSet("host", "container")' in start
+    assert 'if ($GpuMode -eq "container")' in start
+    assert 'start-host-gpu-worker.ps1' in start
     assert '"up", "-d", "--build"' in start
     assert "stop summary-worker llama-server" in start
     assert "doctor.json" in doctor

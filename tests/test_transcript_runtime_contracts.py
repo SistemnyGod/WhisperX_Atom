@@ -47,3 +47,40 @@ def test_unknown_speakers_are_not_persisted_as_registry_members():
     assert "normalize_speaker_label" in persistence
     assert "if not label" in persistence
     assert "return None" in quality
+
+
+def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
+    compose = read("compose.dev.yml")
+    worker = read("workers/ml_worker/worker.py")
+    start = read("scripts/start-host-gpu-worker.ps1")
+    stop = read("scripts/stop-host-gpu-worker.ps1")
+    doctor = read("scripts/doctor-host-gpu-worker.ps1")
+    probe = read("scripts/probe_host_gpu_worker.py")
+    transcript_start = read("scripts/start-transcription-mvp.ps1")
+    e2e = read("scripts/e2e-transcript.ps1")
+
+    assert "POSTGRES_HOST_PORT" in compose and "NATS_HOST_PORT" in compose
+    assert "WHISPERX_DATA_HOST" in worker and "resolve_storage_path" in worker
+    assert "torch.cuda.is_available" in start and "workers.ml_worker.worker" in start
+    assert "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" in start
+    assert 'LLM_HEALTH_PORT = "18080"' in start
+    assert "taskkill.exe" in stop and "/T" in stop
+    assert "cudaAvailable" in doctor and "gpu-worker" in doctor
+    assert "worker_instances" in probe and "last_seen_at" in probe
+    assert 'ValidateSet("host", "container")' in transcript_start
+    assert "-SkipRegistry" in e2e and 'Join-Path $repo ".env"' in e2e
+
+
+def test_processing_pipeline_queues_are_created_only_by_async_start():
+    processing = read("whisperx_atom/processing.py")
+    assert "from app.transcription_pipeline import" in processing
+    assert "def process" in processing
+    pipeline = read("app/transcription_pipeline.py")
+    assert "created lazily by start()" in pipeline
+    assert "self.audio_queue = asyncio.Queue()" in pipeline
+
+
+def test_pre_alignment_quality_warnings_are_not_persisted_after_repair():
+    processing = read("whisperx_atom/processing.py")
+    assert "warnings: list[str] = []" in processing
+    assert "for reason in final_report.reasons" in processing

@@ -216,11 +216,14 @@ class TranscriptionPipeline:
         self.config = config or PipelineConfig.from_env()
         self.project_root = Path(__file__).resolve().parent.parent
         self.cache = ModelCacheManager()
-        self.audio_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.asr_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.alignment_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.diar_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.postprocess_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
+        # The synchronous server adapter can construct this class in a worker
+        # thread, where Python 3.9 has no implicit event loop. Queues belong to
+        # the legacy async runtime and are therefore created lazily by start().
+        self.audio_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.asr_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.alignment_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.diar_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.postprocess_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
         self._workers: list[asyncio.Task[None]] = []
         self._running = False
 
@@ -231,6 +234,11 @@ class TranscriptionPipeline:
     async def start(self) -> None:
         if self._running:
             return
+        self.audio_queue = asyncio.Queue()
+        self.asr_queue = asyncio.Queue()
+        self.alignment_queue = asyncio.Queue()
+        self.diar_queue = asyncio.Queue()
+        self.postprocess_queue = asyncio.Queue()
         self._running = True
         self._workers = [
             asyncio.create_task(self.worker_audio(), name="worker_audio"),
@@ -245,11 +253,14 @@ class TranscriptionPipeline:
             return
         self._running = False
         for q in (self.audio_queue, self.asr_queue, self.alignment_queue, self.diar_queue, self.postprocess_queue):
-            await q.put(None)
+            if q is not None:
+                await q.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
     async def submit(self, job_id: str) -> None:
+        if not self._running or self.audio_queue is None:
+            raise RuntimeError("transcription_pipeline_not_started")
         data = read_job_json(job_id)
         ctx = PipelineContext(job_id=job_id, audio_path=Path(data["audio_path"]))
         await self._set_status(job_id, "queued", error=None)

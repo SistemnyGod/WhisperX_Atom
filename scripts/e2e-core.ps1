@@ -70,8 +70,14 @@ function Restart-ProcessingWorkers {
   $composeArgs = @("compose", "-f", "compose.dev.yml", "--profile", "core")
   $services = @("media-worker")
   if ($WaitForGpu) {
-    $composeArgs += @("--profile", "gpu")
-    $services += "gpu-worker"
+    if ($env:GPU_WORKER_MODE -eq "host") {
+      & (Join-Path $PSScriptRoot "stop-host-gpu-worker.ps1")
+      & (Join-Path $PSScriptRoot "start-host-gpu-worker.ps1") -PythonPath $env:WHISPERX_HOST_PYTHON
+      if ($LASTEXITCODE -ne 0) { throw "Unable to restart host GPU worker" }
+    } else {
+      $composeArgs += @("--profile", "gpu")
+      $services += "gpu-worker"
+    }
   }
   if ($WithLlm) {
     $composeArgs += @("--profile", "llm")

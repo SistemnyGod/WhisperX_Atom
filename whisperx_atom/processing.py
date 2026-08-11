@@ -79,7 +79,10 @@ class ProcessingService:
                 raise ValueError(selected_report.reasons[0] if selected_report.reasons else "TRANSCRIPT_EMPTY")
             ctx.asr_result = result
             asr_recovery_result = copy.deepcopy(result)
-            warnings: list[str] = list(selected_report.reasons)
+            # ASR reasons drive fallback selection, but alignment can legitimately
+            # repair span and word-timestamp warnings. Persist final quality
+            # reasons below instead of leaking stale pre-alignment warnings.
+            warnings: list[str] = []
             stage_outcomes: dict[str, str] = {"ASR": "SUCCEEDED"}
 
             report("ALIGNING", 55)

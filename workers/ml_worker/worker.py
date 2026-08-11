@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from workers.nats_utils import fetch_available, maintain_message
@@ -29,6 +29,21 @@ async def resident_llm_detected() -> bool:
     except (OSError, asyncio.TimeoutError):
         return False
 LOGGER = logging.getLogger("whisperx.gpu-worker")
+
+
+def resolve_storage_path(storage_key: str) -> Path:
+    """Translate Docker `/data/...` keys when the GPU worker runs on Windows."""
+    value = str(storage_key or "").strip()
+    host_root = os.getenv("WHISPERX_DATA_HOST", "").strip()
+    if os.name == "nt" and host_root:
+        posix_path = PurePosixPath(value.replace("\\", "/"))
+        try:
+            relative = posix_path.relative_to("/data")
+        except ValueError:
+            pass
+        else:
+            return Path(host_root).joinpath(*relative.parts)
+    return Path(value)
 
 
 def error_code_for(exc: Exception) -> str:
@@ -80,7 +95,7 @@ class GpuWorker:
                 LOGGER.info("skip terminal job=%s status=%s", job_id, state[0])
                 return None
             self._repository.update_job(job_id, "RUNNING", "TRANSCRIBING", 20)
-            request = ProcessingRequest(job_id=job_id, media_path=Path(message["storage_key"]), language=message.get("language", "ru"), profile=message.get("profile", "meeting"), min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
+            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=message.get("profile", "meeting"), min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
 
             def progress(stage: str, value: int) -> None:
                 LOGGER.info("job=%s stage=%s progress=%s", job_id, stage, value)
@@ -122,13 +137,21 @@ class GpuWorker:
 
 
 async def run() -> None:
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     try:
         import nats
     except ImportError as exc:
         raise RuntimeError("Install workers/ml_worker/requirements.txt") from exc
 
     def gpu_capabilities() -> dict[str, Any]:
-        capabilities: dict[str, Any] = {"cudaAvailable": False, "hfConfigured": bool(os.getenv("HF_TOKEN"))}
+        capabilities: dict[str, Any] = {
+            "cudaAvailable": False,
+            "hfConfigured": bool(os.getenv("HF_TOKEN")),
+            "runtime": os.getenv("GPU_WORKER_RUNTIME", "container"),
+        }
         try:
             import torch
 

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipDesktop,
-    [switch]$SkipRecorder
+    [switch]$SkipRecorder,
+    [ValidateSet("host", "container")][string]$GpuMode = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,10 @@ try {
     # was previously used for the Qwen/summary cycle.
     $env:AUTO_SUMMARY_ENABLED = "false"
     $env:DIARIZATION_MODE = "preferred"
+    if ([string]::IsNullOrWhiteSpace($GpuMode)) {
+        $GpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" }
+    }
+    $env:GPU_WORKER_MODE = $GpuMode
 
     foreach ($required in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN")) {
         if ([string]::IsNullOrWhiteSpace((Get-Item -Path "Env:$required" -ErrorAction SilentlyContinue).Value)) {
@@ -48,9 +53,16 @@ try {
         --profile llm --profile llm-diagnostic `
         stop summary-worker llama-server | Out-Null
 
-    $compose = @("compose", "--env-file", $envFile, "-f", "compose.dev.yml", "--profile", "core", "--profile", "gpu", "up", "-d", "--build")
+    $compose = @("compose", "--env-file", $envFile, "-f", "compose.dev.yml", "--profile", "core")
+    if ($GpuMode -eq "container") { $compose += @("--profile", "gpu") }
+    $compose += @("up", "-d", "--build")
     & docker @compose
     if ($LASTEXITCODE -ne 0) { throw "Не удалось запустить transcript-only Compose" }
+
+    if ($GpuMode -eq "host") {
+        & (Join-Path $PSScriptRoot "start-host-gpu-worker.ps1") -PythonPath $env:WHISPERX_HOST_PYTHON
+        if ($LASTEXITCODE -ne 0) { throw "Host GPU worker failed to start" }
+    }
 
     & (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") -SkipRegistry
     if ($LASTEXITCODE -ne 0) { throw "Transcript MVP не прошёл диагностику" }
@@ -64,6 +76,6 @@ try {
     if (-not $SkipDesktop) {
         & (Join-Path $PSScriptRoot "launch-desktop.ps1")
     }
-    Write-Host "Transcript MVP запущен: API, media/GPU pipeline и локальный Recorder готовы." -ForegroundColor Green
+    Write-Host "Transcript MVP запущен: API, media/GPU pipeline и локальный Recorder готовы. GPU mode: $GpuMode." -ForegroundColor Green
 }
 finally { Pop-Location }

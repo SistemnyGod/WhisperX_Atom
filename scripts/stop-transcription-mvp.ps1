@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repo
 try {
+    & (Join-Path $PSScriptRoot "stop-host-gpu-worker.ps1")
     & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile core --profile gpu stop
     & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml `
         --profile llm --profile llm-diagnostic `
