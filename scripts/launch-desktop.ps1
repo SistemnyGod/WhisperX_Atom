@@ -78,6 +78,13 @@ if ([string]::IsNullOrWhiteSpace($desktopExe)) {
 
 $desktopExe = (Resolve-Path -LiteralPath $desktopExe).Path
 $workingDirectory = Split-Path -Parent $desktopExe
+$desktopName = Split-Path -Leaf $desktopExe
+$existingDesktop = @(Get-CimInstance Win32_Process -Filter "Name='$desktopName'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($desktopExe)) })
+if ($existingDesktop.Count -gt 0) {
+    Write-Host "WhisperX Atom Desktop is already running."
+    return
+}
 $process = Start-Process -FilePath $desktopExe -WorkingDirectory $workingDirectory -PassThru
 Write-Host "WhisperX Atom Desktop started. PID=$($process.Id)"
 Write-Host "Executable: $desktopExe"

@@ -1,12 +1,16 @@
 [CmdletBinding()]
 param(
     [switch]$SkipRegistry,
-    [string]$Username = $(if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" }),
-    [string]$Password = $(if ($env:BOOTSTRAP_ADMIN_PASSWORD) { $env:BOOTSTRAP_ADMIN_PASSWORD } else { "" })
+    [string]$Username,
+    [string]$Password
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+Set-WhisperXRuntimeEnvironment -RepoPath $repo
+if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" } }
+if ([string]::IsNullOrWhiteSpace($Password)) { $Password = $env:BOOTSTRAP_ADMIN_PASSWORD }
 $artifactRoot = Join-Path $repo "artifacts\transcription-mvp"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 $checks = [ordered]@{}
@@ -33,11 +37,6 @@ $inboxRoot = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "
 $archiveRoot = if ($env:WHISPERX_ARCHIVE_HOST) { $env:WHISPERX_ARCHIVE_HOST } else { "C:\WhisperXAtom\Archive" }
 $apiBase = if ($env:WHISPERX_API_URL) { $env:WHISPERX_API_URL.TrimEnd('/') } else { "http://localhost:8080" }
 $gpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" }
-$envFile = Join-Path $repo ".env"
-if ([string]::IsNullOrWhiteSpace($Password) -and (Test-Path -LiteralPath $envFile)) {
-    $line = Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^BOOTSTRAP_ADMIN_PASSWORD=(.*)$' } | Select-Object -First 1
-    if ($line) { $Password = $Matches[1].Trim() }
-}
 foreach ($pair in @(@("data",$dataRoot), @("inbox",$inboxRoot), @("archive",$archiveRoot))) {
     $name = $pair[0]; $path = $pair[1]
     Check $name { New-Item -ItemType Directory -Force -Path $path | Out-Null; "ready" }

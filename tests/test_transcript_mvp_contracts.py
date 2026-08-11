@@ -20,7 +20,8 @@ def test_transcript_only_runtime_contract_is_explicit():
     assert 'ValidateSet("host", "container")' in start
     assert 'if ($GpuMode -eq "container")' in start
     assert 'start-host-gpu-worker.ps1' in start
-    assert '"up", "-d", "--build"' in start
+    assert '"up", "-d", "--pull", "never"' in start
+    assert "Rebuild" in start
     assert "stop summary-worker llama-server" in start
     assert "doctor.json" in doctor
     assert "Runs = 5" in e2e
