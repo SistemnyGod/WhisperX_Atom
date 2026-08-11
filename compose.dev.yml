@@ -76,7 +76,9 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8080:8080"
+      # LAN clients use the host's IPv4 address (for example
+      # http://192.168.2.194:8080). Keep the database, NATS and tusd private.
+      - "${WHISPERX_API_BIND_ADDRESS:-0.0.0.0}:8080:8080"
     volumes: *media-volumes
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]

@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+Set-WhisperXRuntimeEnvironment -RepoPath $repoRoot
 if (-not $SkipRecorder) {
     $recorderService = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
     if ($null -eq $recorderService) {

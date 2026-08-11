@@ -13,6 +13,7 @@ public sealed record DesktopSettings(
     string? SystemAudioDeviceId = null,
     DateTimeOffset? SessionExpiresAtUtc = null)
 {
+    private const string FallbackLanApiUrl = "http://192.168.2.194:8080";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public static string FilePath => Path.Combine(
@@ -23,13 +24,16 @@ public sealed record DesktopSettings(
     {
         try
         {
-            if (!File.Exists(FilePath)) return new("http://localhost:8080", "admin", null, DefaultArchiveRoot());
-            return JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(FilePath), JsonOptions)
-                ?? new("http://localhost:8080", "admin", null, DefaultArchiveRoot());
+            if (!File.Exists(FilePath)) return CreateDefault();
+            var loaded = JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(FilePath), JsonOptions)
+                ?? CreateDefault();
+            return MigrateApiUrl(loaded);
         }
-        catch (IOException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
-        catch (JsonException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
+        catch (IOException) { return CreateDefault(); }
+        catch (JsonException) { return CreateDefault(); }
     }
+
+    public static string DefaultApiUrl() => ReadHttpUrlEnvironment("WHISPERX_API_URL") ?? FallbackLanApiUrl;
 
     public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null)
     {
@@ -67,6 +71,51 @@ public sealed record DesktopSettings(
     }
 
     private static string? NormalizeDeviceId(string? deviceId) => string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
+
+    private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
+
+    private static DesktopSettings MigrateApiUrl(DesktopSettings settings)
+    {
+        var configuredUrl = settings.ApiUrl?.TrimEnd('/');
+        var defaultUrl = DefaultApiUrl();
+        if (string.IsNullOrWhiteSpace(configuredUrl) || IsLoopbackUrl(configuredUrl))
+        {
+            configuredUrl = defaultUrl;
+        }
+
+        if (string.Equals(settings.ApiUrl, configuredUrl, StringComparison.Ordinal)) return settings;
+
+        var migrated = settings with { ApiUrl = configuredUrl };
+        try
+        {
+            var sessionCookie = migrated.UnprotectSessionCookie();
+            // Do not overwrite a protected session that cannot be decrypted in
+            // the current Windows user context.
+            if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
+            {
+                Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc);
+            }
+        }
+        catch
+        {
+            // The in-memory migration is still useful; persistence will retry
+            // after the next successful login or settings save.
+        }
+        return migrated;
+    }
+
+    private static string? ReadHttpUrlEnvironment(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name)?.Trim();
+        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            ? uri.ToString().TrimEnd('/')
+            : null;
+    }
+
+    private static bool IsLoopbackUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback;
 
     private static string Protect(string value)
     {

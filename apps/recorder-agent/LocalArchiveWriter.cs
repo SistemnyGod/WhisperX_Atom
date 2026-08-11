@@ -83,7 +83,8 @@ public sealed class LocalArchiveWriter(
         var startedAt = info.StartedAt ?? DateTimeOffset.UtcNow;
         var title = string.IsNullOrWhiteSpace(info.Title) ? "Запись" : info.Title.Trim();
         var folderName = $"{startedAt.ToLocalTime():yyyy-MM-dd_HH-mm-ss}_{Sanitize(title)}_{sessionId[..Math.Min(8, sessionId.Length)]}";
-        var directory = Path.Combine(storage.ArchiveRoot, "Meetings", folderName);
+        var archiveRoot = SelectWritableArchiveRoot(sessionId);
+        var directory = Path.Combine(archiveRoot, "Meetings", folderName);
         var sourceDirectory = Path.Combine(directory, "source");
         var exportDirectory = Path.Combine(directory, "export");
         try
@@ -185,6 +186,40 @@ public sealed class LocalArchiveWriter(
     private static string FallbackArchiveRoot() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "WhisperXAtom", "Archive");
+
+    private string SelectWritableArchiveRoot(string sessionId)
+    {
+        try
+        {
+            VerifyAtomicWrite(storage.ArchiveRoot);
+            return storage.ArchiveRoot;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or DirectoryNotFoundException or IOException)
+        {
+            var fallbackRoot = FallbackArchiveRoot();
+            logger.LogWarning(exception, "Configured archive root cannot atomically write files; using fallback archive root. Session={SessionId}, ArchiveRoot={ArchiveRoot}", sessionId, fallbackRoot);
+            VerifyAtomicWrite(fallbackRoot);
+            return fallbackRoot;
+        }
+    }
+
+    private static void VerifyAtomicWrite(string archiveRoot)
+    {
+        var probeDirectory = Path.Combine(archiveRoot, "Meetings");
+        Directory.CreateDirectory(probeDirectory);
+        var probePath = Path.Combine(probeDirectory, $".write-probe-{Guid.NewGuid():N}");
+        var partPath = probePath + ".part";
+        try
+        {
+            File.WriteAllText(partPath, "ok", new UTF8Encoding(false));
+            File.Move(partPath, probePath);
+        }
+        finally
+        {
+            DeleteIfExists(partPath);
+            DeleteIfExists(probePath);
+        }
+    }
 
     private static bool IsUsableManifest(string directory, ArchiveManifest manifest)
     {

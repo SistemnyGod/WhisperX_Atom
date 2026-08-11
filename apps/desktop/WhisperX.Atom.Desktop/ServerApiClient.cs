@@ -89,12 +89,12 @@ public sealed class ServerApiClient : IDisposable
 
     public event Action? SessionChanged;
 
-    public ServerApiClient(string baseUrl = "http://localhost:8080")
+    public ServerApiClient(string? baseUrl = null)
     {
         var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies };
-        _http = new HttpClient(handler) { BaseAddress = new Uri(NormalizeBaseUrl(baseUrl)) };
+        _http = new HttpClient(handler) { BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())) };
         _uploadHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        TusBaseAddress = new Uri(Environment.GetEnvironmentVariable("WHISPERX_TUS_URL") ?? "http://localhost:1080");
+        TusBaseAddress = new Uri(NormalizeBaseUrl(Environment.GetEnvironmentVariable("WHISPERX_TUS_URL") ?? "http://localhost:1080"));
     }
 
     public Uri BaseAddress => _http.BaseAddress!;

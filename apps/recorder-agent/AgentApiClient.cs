@@ -28,6 +28,7 @@ public sealed record ServerMediaStatus(
 
 public sealed class AgentApiClient : IDisposable
 {
+    private const string FallbackLanServerUrl = "http://192.168.2.194:8080";
     private readonly HttpClient _http = new();
     private Uri _baseUri;
     private Guid _agentId;
@@ -58,12 +59,14 @@ public sealed class AgentApiClient : IDisposable
         _storage.SetAudioDevices(
             Environment.GetEnvironmentVariable("ATOM_AGENT_MICROPHONE_DEVICE_ID") ?? config?.MicrophoneDeviceId,
             Environment.GetEnvironmentVariable("ATOM_AGENT_SYSTEM_AUDIO_DEVICE_ID") ?? config?.SystemAudioDeviceId);
-        var baseUrl = (Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL") ?? config?.ServerUrl ?? "http://localhost:8080").TrimEnd('/') + "/";
+        var baseUrl = ResolveServerUrl(config);
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_INSTALLATION_ID") ?? config?.InstallationId.ToString(), out _installationId);
         if (_installationId == Guid.Empty) _installationId = Guid.NewGuid();
         _token = Environment.GetEnvironmentVariable("ATOM_AGENT_TOKEN") ?? config?.Token ?? string.Empty;
+        if (config is not null && !string.Equals(config.ServerUrl.TrimEnd('/'), _baseUri.ToString().TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+            TryPersistMigratedConfiguration(config, _baseUri);
         _serverConnectionState = IsConfigured ? "UNKNOWN" : "NOT_CONFIGURED";
     }
 
@@ -586,6 +589,49 @@ public sealed class AgentApiClient : IDisposable
     private static bool IsRetryableFinalizeError(string code, HttpStatusCode statusCode) =>
         code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED"
         || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
+
+    private static string ResolveServerUrl(AgentConfiguration? config)
+    {
+        var explicitUrl = Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL")?.Trim();
+        if (IsHttpUrl(explicitUrl)) return explicitUrl!.TrimEnd('/') + "/";
+
+        var configuredUrl = config?.ServerUrl?.Trim();
+        if (IsHttpUrl(configuredUrl) && !IsLoopbackUrl(configuredUrl)) return configuredUrl!.TrimEnd('/') + "/";
+
+        var runtimeUrl = Environment.GetEnvironmentVariable("WHISPERX_API_URL")?.Trim();
+        if (IsHttpUrl(runtimeUrl)) return runtimeUrl!.TrimEnd('/') + "/";
+
+        return FallbackLanServerUrl + "/";
+    }
+
+    private void TryPersistMigratedConfiguration(AgentConfiguration config, Uri serverUri)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_configPath)!;
+            Directory.CreateDirectory(directory);
+            var temporary = _configPath + ".part";
+            var migrated = config with
+            {
+                ServerUrl = serverUri.ToString().TrimEnd('/'),
+                Token = ProtectToken(config.Token),
+                Encrypted = true
+            };
+            File.WriteAllText(temporary, JsonSerializer.Serialize(migrated));
+            File.Move(temporary, _configPath, true);
+        }
+        catch
+        {
+            // A failed migration must not prevent the Agent from reconnecting.
+        }
+    }
+
+    private static bool IsHttpUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+
+    private static bool IsLoopbackUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback;
 
     private void AddAuthentication(HttpRequestMessage request)
     {

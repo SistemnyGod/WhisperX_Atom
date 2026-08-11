@@ -87,12 +87,18 @@ class GpuWorker:
             LOGGER.info("received job=%s message=%s stage=%s", job_id, message.get("message_id"), message.get("stage"))
             if not self._repository.claim_message(str(message.get("message_id", "")), job_id):
                 state = self._repository.job_state(job_id)
+                if self._heartbeat:
+                    self._heartbeat.set_job(None)
+                    self._heartbeat.set_state("READY")
                 if state is not None and state[0] not in ("READY", "FAILED", "CANCELLED"):
                     raise RuntimeError("message_claimed_by_active_worker")
                 return None
             state = self._repository.job_state(job_id)
             if state is not None and state[0] in ("READY", "FAILED", "CANCELLED"):
                 LOGGER.info("skip terminal job=%s status=%s", job_id, state[0])
+                if self._heartbeat:
+                    self._heartbeat.set_job(None)
+                    self._heartbeat.set_state("READY")
                 return None
             self._repository.update_job(job_id, "RUNNING", "TRANSCRIBING", 20)
             request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=message.get("profile", "meeting"), min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))

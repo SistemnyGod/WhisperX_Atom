@@ -29,6 +29,13 @@ public sealed class BackendService : IBackendService
     private void PersistSession()
     {
         var current = new DesktopSettingsStore().Load();
+        // An expired/invalid session or a temporary API outage must not erase
+        // the last protected cookie. SettingsViewModel.LogoutAsync explicitly
+        // clears it after the user confirms a real logout.
+        if (_client.AuthState == DesktopAuthState.LoginRequired
+            && string.IsNullOrWhiteSpace(SessionCookie)
+            && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
+            return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc);
     }
