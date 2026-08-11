@@ -1,20 +1,17 @@
 [CmdletBinding()]
-param([string]$PythonPath = $env:WHISPERX_HOST_PYTHON)
+param([string]$PythonPath)
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$runtimeModule = Join-Path $PSScriptRoot "WhisperX.Runtime.ps1"
+. $runtimeModule
+Set-WhisperXRuntimeEnvironment -RepoPath $repo
 $envFile = Join-Path $repo ".env"
 $artifactRoot = Join-Path $repo "artifacts\transcription-mvp"
 $pidPath = Join-Path $repo "artifacts\runtime\host-gpu-worker.pid"
 $checks = [ordered]@{}
 $details = [ordered]@{}
 
-foreach ($line in Get-Content -LiteralPath $envFile -ErrorAction SilentlyContinue) {
-    if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
-        $key = $Matches[1]; $value = $Matches[2].Trim().Trim('"')
-        if ([string]::IsNullOrWhiteSpace((Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value)) { Set-Item -Path "Env:$key" -Value $value }
-    }
-}
 if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = $env:WHISPERX_HOST_PYTHON }
 
 $checks.python = if ($PythonPath -and (Test-Path -LiteralPath $PythonPath)) { "READY" } else { "UNAVAILABLE" }

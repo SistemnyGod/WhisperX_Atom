@@ -53,6 +53,7 @@ def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     compose = read("compose.dev.yml")
     worker = read("workers/ml_worker/worker.py")
     start = read("scripts/start-host-gpu-worker.ps1")
+    common = read("scripts/WhisperX.Runtime.ps1")
     stop = read("scripts/stop-host-gpu-worker.ps1")
     doctor = read("scripts/doctor-host-gpu-worker.ps1")
     probe = read("scripts/probe_host_gpu_worker.py")
@@ -62,13 +63,14 @@ def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     assert "POSTGRES_HOST_PORT" in compose and "NATS_HOST_PORT" in compose
     assert "WHISPERX_DATA_HOST" in worker and "resolve_storage_path" in worker
     assert "torch.cuda.is_available" in start and "workers.ml_worker.worker" in start
-    assert "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" in start
-    assert 'LLM_HEALTH_PORT = "18080"' in start
-    assert "taskkill.exe" in stop and "/T" in stop
+    assert "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" in common
+    assert 'LLM_HEALTH_PORT = "18080"' in common
+    assert "Stop-WhisperXProcessTree" in stop and "taskkill.exe" in common
     assert "cudaAvailable" in doctor and "gpu-worker" in doctor
     assert "worker_instances" in probe and "last_seen_at" in probe
+    assert "Get-WhisperXHostWorkerCandidates" in common and "HOST_WORKER_DUPLICATE" in start
     assert 'ValidateSet("host", "container")' in transcript_start
-    assert "-SkipRegistry" in e2e and 'Join-Path $repo ".env"' in e2e
+    assert "-SkipRegistry" in e2e and "Set-WhisperXRuntimeEnvironment" in e2e
 
 
 def test_processing_pipeline_queues_are_created_only_by_async_start():
@@ -84,3 +86,20 @@ def test_pre_alignment_quality_warnings_are_not_persisted_after_repair():
     processing = read("whisperx_atom/processing.py")
     assert "warnings: list[str] = []" in processing
     assert "for reason in final_report.reasons" in processing
+
+
+def test_host_runtime_automation_and_resumable_tus_contracts_are_explicit():
+    common = read("scripts/WhisperX.Runtime.ps1")
+    run = read("scripts/run-whisperx.ps1")
+    start = read("scripts/start-transcription-mvp.ps1")
+    watchdog = read("scripts/watch-host-gpu-worker.ps1")
+    doctor = read("scripts/doctor-whisperx.ps1")
+    e2e = read("scripts/e2e-core.ps1")
+    startup = read("scripts/install-whisperx-startup-task.ps1")
+
+    assert "Import-WhisperXDotEnv" in common and "Write-WhisperXRuntimeState" in common
+    assert "StartWatchdog" in run and '"--pull", "never"' in start
+    assert "WORKER_RESTART_LIMIT" in watchdog and "MaxRestarts" in watchdog
+    assert "hostGpuWorker" in doctor and "hfDiarization" in doctor and "qwen" in doctor
+    assert "Upload-TusResumable" in e2e and "16MB" in e2e and "Upload-Offset" in e2e
+    assert "Register-ScheduledTask" in startup
