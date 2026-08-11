@@ -505,11 +505,13 @@ class TranscriptionPipeline:
                 result["word_segments"] = aligned["word_segments"]
         return result
 
-    def _apply_diarization(self, ctx: PipelineContext, result: dict) -> dict:
+    def _apply_diarization(self, ctx: PipelineContext, result: dict, profile: str = "diar") -> dict:
         if not self.config.hf_token:
             raise RuntimeError("HF_TOKEN is required for diarization")
         diarizer = self.cache.get_diarizer(self.config.device, self.config.hf_token)
         audio_path = str(ctx.diar_audio_path or ctx.audio_path)
+        if profile != "diar":
+            audio_path = str(self._preprocess_audio_profile(ctx.audio_path, profile))
         diarize_df, speaker_embeddings = diarizer(
             audio_path,
             min_speakers=self.config.min_speakers,
@@ -635,6 +637,9 @@ class TranscriptionPipeline:
 
     def _preprocess_audio(self, input_path: Path, asr: bool) -> Path:
         profile = "asr_soft" if asr else "diar"
+        return self._preprocess_audio_profile(input_path, profile)
+
+    def _preprocess_audio_profile(self, input_path: Path, profile: str) -> Path:
         output_path = preprocess_output_path(input_path, profile)
         command = [
             str(require_binary("ffmpeg", extra_roots=[self.project_root])),
