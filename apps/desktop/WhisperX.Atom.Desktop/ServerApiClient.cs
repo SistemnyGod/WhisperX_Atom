@@ -404,6 +404,83 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Delete, $"api/meetings/{meetingId}?force=false", null, cancellationToken);
         return response.IsSuccessStatusCode;
     }
+    public async Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/assistant/conversations?includeArchived={includeArchived.ToString().ToLowerInvariant()}", null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopAssistantConversation>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/conversations", new { title, scopeType, meetingId }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopAssistantConversation>(_json, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<DesktopAssistantMessage>> GetAssistantMessagesAsync(Guid conversationId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/assistant/conversations/{conversationId}/messages", null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopAssistantMessage>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/assistant/conversations/{conversationId}/messages", new { content, retryOf }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopAssistantMessageCreateResult>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopAssistantMessage?> WaitForAssistantMessageAsync(Guid conversationId, Guid messageId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/assistant/conversations/{conversationId}/messages/{messageId}/events", null, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var reader = new StreamReader(stream);
+            DesktopAssistantMessage? latest = null;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line is null) break;
+                if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) continue;
+                try { latest = JsonSerializer.Deserialize<DesktopAssistantMessage>(line[5..].Trim(), _json); }
+                catch (JsonException) { continue; }
+                if (latest is not null && IsTerminalAssistantStatus(latest.Status)) return latest;
+            }
+            return latest;
+        }
+        catch (HttpRequestException)
+        {
+            for (var attempt = 0; attempt < 20 && !cancellationToken.IsCancellationRequested; attempt++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(8, 1 + attempt / 3)), cancellationToken);
+                var messages = await GetAssistantMessagesAsync(conversationId, cancellationToken);
+                var message = messages.FirstOrDefault(item => item.Id.Equals(messageId.ToString(), StringComparison.OrdinalIgnoreCase));
+                if (message is not null && IsTerminalAssistantStatus(message.Status)) return message;
+            }
+            return null;
+        }
+    }
+
+    public async Task<bool> UpdateAssistantConversationAsync(Guid conversationId, string? title = null, bool? archived = null, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Patch, $"api/assistant/conversations/{conversationId}", new { title, archived }, cancellationToken);
+        return response.IsSuccessStatusCode;
+    }
+
+    public async Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Delete, $"api/assistant/conversations/{conversationId}", null, cancellationToken);
+        return response.IsSuccessStatusCode;
+    }
+
+    private static bool IsTerminalAssistantStatus(string status) => status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase);
+
     public async Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/queries", new { query, meetingId }, cancellationToken);

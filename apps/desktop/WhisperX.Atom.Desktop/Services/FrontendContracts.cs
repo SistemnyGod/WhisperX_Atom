@@ -1,3 +1,4 @@
+using System.Text.Json;
 using WhisperX.Atom.Desktop;
 using WhisperX.Atom.Recorder;
 
@@ -52,6 +53,13 @@ public interface IBackendService : IDisposable
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default);
     Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopAssistantMessage>> GetAssistantMessagesAsync(Guid conversationId, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantMessage?> WaitForAssistantMessageAsync(Guid conversationId, Guid messageId, CancellationToken cancellationToken = default);
+    Task<bool> UpdateAssistantConversationAsync(Guid conversationId, string? title = null, bool? archived = null, CancellationToken cancellationToken = default);
+    Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
@@ -86,6 +94,16 @@ public sealed record AssistantEvidenceItem(
     string? Timecode,
     string? Speaker,
     string? Text);
+public sealed record DesktopAssistantConversation(string Id, string Title, string ScopeType, string? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt)
+{
+    public string ContextLabel => ScopeType.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase) ? "Вся история" : "Совещание";
+}
+public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt)
+{
+    public bool IsUser => Role.Equals("USER", StringComparison.OrdinalIgnoreCase);
+    public string StatusText => UiStatusMapper.Text(Status);
+}
+public sealed record DesktopAssistantMessageCreateResult(DesktopAssistantMessage UserMessage, DesktopAssistantMessage AssistantMessage, string QueryId);
 
 public sealed record MeetingNavigationTarget(string MeetingId, string? SegmentId = null, long? StartMs = null);
 public sealed record MeetingNavigationRequest(FrontendServices Services, MeetingNavigationTarget Target);

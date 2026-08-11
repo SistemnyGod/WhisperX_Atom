@@ -11,6 +11,9 @@ public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt);
+public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, DateTimeOffset CheckedAt);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
@@ -352,10 +355,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var tx = await connection.BeginTransactionAsync();
         if (meetingId is Guid selected)
         {
-            await using var ready = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@meeting", connection, tx);
-            ready.Parameters.AddWithValue("meeting", selected);
-            var status = await ready.ExecuteScalarAsync();
-            if (status is not string text || text != "READY") return null;
+            if (!await HasUsableTranscriptAsync(connection, tx, selected)) return null;
         }
         var id = Guid.NewGuid();
         await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,query,status,evidence) VALUES(@id,@user,@meeting,@query,'QUEUED','[]'::jsonb)", connection, tx);
@@ -368,6 +368,217 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await tx.CommitAsync();
         return new AssistantQueryRow(id, meetingId, query, "QUEUED", null, null, JsonDocument.Parse("[]"), null, DateTime.UtcNow, null);
     }
+
+    public async Task<IReadOnlyList<AssistantConversationRow>> ListAssistantConversationsAsync(Guid userId, bool includeArchived = false)
+    {
+        var result = new List<AssistantConversationRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT id,user_id,title,scope_type,meeting_id,archived_at IS NOT NULL,created_at,updated_at
+            FROM assistant_conversations
+            WHERE user_id=@user AND deleted_at IS NULL AND (@include_archived OR archived_at IS NULL)
+            ORDER BY updated_at DESC,id DESC
+            """, connection);
+        command.Parameters.AddWithValue("user", userId);
+        command.Parameters.AddWithValue("include_archived", includeArchived);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadConversation(reader));
+        return result;
+    }
+
+    public async Task<AssistantConversationRow?> GetAssistantConversationAsync(Guid id, Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT id,user_id,title,scope_type,meeting_id,archived_at IS NOT NULL,created_at,updated_at
+            FROM assistant_conversations
+            WHERE id=@id AND user_id=@user AND deleted_at IS NULL
+            """, connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("user", userId);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadConversation(reader) : null;
+    }
+
+    public async Task<AssistantConversationRow?> CreateAssistantConversationAsync(Guid userId, string? title, string scopeType, Guid? meetingId)
+    {
+        scopeType = scopeType.Trim().ToUpperInvariant();
+        if (scopeType is not ("MEETING" or "GLOBAL")) return null;
+        if (scopeType == "MEETING" && meetingId is null) return null;
+        if (scopeType == "GLOBAL" && meetingId is not null) return null;
+        if (meetingId is Guid selected && !await HasUsableTranscriptAsync(selected)) return null;
+        if (scopeType == "GLOBAL" && !await HasAnyUsableTranscriptAsync()) return null;
+        var id = Guid.NewGuid();
+        var normalizedTitle = string.IsNullOrWhiteSpace(title) ? "Новый чат" : title.Trim();
+        if (normalizedTitle.Length > 120) normalizedTitle = normalizedTitle[..120];
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO assistant_conversations(id,user_id,title,scope_type,meeting_id)
+            VALUES(@id,@user,@title,@scope,@meeting)
+            RETURNING id,user_id,title,scope_type,meeting_id,archived_at IS NOT NULL,created_at,updated_at
+            """, connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("user", userId);
+        command.Parameters.AddWithValue("title", normalizedTitle);
+        command.Parameters.AddWithValue("scope", scopeType);
+        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadConversation(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<AssistantMessageRow>> ListAssistantMessagesAsync(Guid conversationId, Guid userId)
+    {
+        var result = new List<AssistantMessageRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT m.id,m.conversation_id,m.role,m.content,m.status,m.voice_answer,m.evidence,m.error_code,
+                   q.id,m.created_at,m.completed_at
+            FROM assistant_messages m
+            JOIN assistant_conversations c ON c.id=m.conversation_id
+            LEFT JOIN assistant_queries q ON q.user_message_id=m.id OR q.assistant_message_id=m.id
+            WHERE m.conversation_id=@conversation AND c.user_id=@user AND c.deleted_at IS NULL
+            ORDER BY m.created_at,m.id
+            """, connection);
+        command.Parameters.AddWithValue("conversation", conversationId);
+        command.Parameters.AddWithValue("user", userId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadMessage(reader));
+        return result;
+    }
+
+    public async Task<AssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, Guid userId, string query, Guid? retryOf = null)
+    {
+        query = query.Trim();
+        if (query.Length is 0 or > 2000) return null;
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var conversation = new NpgsqlCommand("""
+            SELECT title,scope_type,meeting_id FROM assistant_conversations
+            WHERE id=@id AND user_id=@user AND deleted_at IS NULL
+            FOR UPDATE
+            """, connection, transaction);
+        conversation.Parameters.AddWithValue("id", conversationId);
+        conversation.Parameters.AddWithValue("user", userId);
+        await using var contextReader = await conversation.ExecuteReaderAsync();
+        if (!await contextReader.ReadAsync()) return null;
+        var title = contextReader.GetString(0);
+        var scopeType = contextReader.GetString(1);
+        var meetingId = contextReader.IsDBNull(2) ? (Guid?)null : contextReader.GetGuid(2);
+        await contextReader.CloseAsync();
+        if (meetingId is Guid selected && !await HasUsableTranscriptAsync(connection, transaction, selected)) return null;
+        if (scopeType == "GLOBAL" && !await HasAnyUsableTranscriptAsync(connection, transaction)) return null;
+
+        var userMessageId = Guid.NewGuid();
+        var assistantMessageId = Guid.NewGuid();
+        var queryId = Guid.NewGuid();
+        await using (var insertUser = new NpgsqlCommand("INSERT INTO assistant_messages(id,conversation_id,role,content,status,evidence,retry_of) VALUES(@id,@conversation,'USER',@content,'READY','[]'::jsonb,@retry)", connection, transaction))
+        {
+            insertUser.Parameters.AddWithValue("id", userMessageId);
+            insertUser.Parameters.AddWithValue("conversation", conversationId);
+            insertUser.Parameters.AddWithValue("content", query);
+            insertUser.Parameters.AddWithValue("retry", (object?)retryOf ?? DBNull.Value);
+            await insertUser.ExecuteNonQueryAsync();
+        }
+        await using (var insertAssistant = new NpgsqlCommand("INSERT INTO assistant_messages(id,conversation_id,role,content,status,evidence) VALUES(@id,@conversation,'ASSISTANT','', 'QUEUED','[]'::jsonb)", connection, transaction))
+        {
+            insertAssistant.Parameters.AddWithValue("id", assistantMessageId);
+            insertAssistant.Parameters.AddWithValue("conversation", conversationId);
+            await insertAssistant.ExecuteNonQueryAsync();
+        }
+        await using (var insertQuery = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,conversation_id,user_message_id,assistant_message_id,query,status,evidence) VALUES(@id,@user,@meeting,@conversation,@user_message,@assistant_message,@query,'QUEUED','[]'::jsonb)", connection, transaction))
+        {
+            insertQuery.Parameters.AddWithValue("id", queryId);
+            insertQuery.Parameters.AddWithValue("user", userId);
+            insertQuery.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+            insertQuery.Parameters.AddWithValue("conversation", conversationId);
+            insertQuery.Parameters.AddWithValue("user_message", userMessageId);
+            insertQuery.Parameters.AddWithValue("assistant_message", assistantMessageId);
+            insertQuery.Parameters.AddWithValue("query", query);
+            await insertQuery.ExecuteNonQueryAsync();
+        }
+        var payload = JsonSerializer.Serialize(new
+        {
+            message_id = Guid.NewGuid(), query_id = queryId, conversation_id = conversationId,
+            user_message_id = userMessageId, assistant_message_id = assistantMessageId,
+            meeting_id = meetingId, query, kind = "assistant"
+        });
+        await using (var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.assistant',@payload::jsonb)", connection, transaction))
+        {
+            outbox.Parameters.AddWithValue("id", Guid.NewGuid());
+            outbox.Parameters.AddWithValue("payload", payload);
+            await outbox.ExecuteNonQueryAsync();
+        }
+        if (title == "Новый чат")
+        {
+            var generatedTitle = query.Length > 80 ? query[..80].TrimEnd() + "…" : query;
+            await using var updateTitle = new NpgsqlCommand("UPDATE assistant_conversations SET title=@title,updated_at=now() WHERE id=@id", connection, transaction);
+            updateTitle.Parameters.AddWithValue("title", generatedTitle);
+            updateTitle.Parameters.AddWithValue("id", conversationId);
+            await updateTitle.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        var now = DateTime.UtcNow;
+        var userRow = new AssistantMessageRow(userMessageId, conversationId, "USER", query, "READY", null, JsonDocument.Parse("[]"), null, queryId, now, now);
+        var assistantRow = new AssistantMessageRow(assistantMessageId, conversationId, "ASSISTANT", string.Empty, "QUEUED", null, JsonDocument.Parse("[]"), null, queryId, now, null);
+        return new AssistantMessageCreateResult(userRow, assistantRow, queryId);
+    }
+
+    public async Task<bool> UpdateAssistantConversationAsync(Guid id, Guid userId, string? title, bool? archived)
+    {
+        var normalizedTitle = title?.Trim();
+        if (normalizedTitle is not null && (normalizedTitle.Length is 0 or > 120)) return false;
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            UPDATE assistant_conversations
+            SET title=COALESCE(@title,title), archived_at=CASE WHEN @archived IS NULL THEN archived_at WHEN @archived THEN COALESCE(archived_at,now()) ELSE NULL END, updated_at=now()
+            WHERE id=@id AND user_id=@user AND deleted_at IS NULL
+            """, connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("user", userId);
+        command.Parameters.AddWithValue("title", (object?)normalizedTitle ?? DBNull.Value);
+        command.Parameters.AddWithValue("archived", (object?)archived ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    public async Task<bool> DeleteAssistantConversationAsync(Guid id, Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE assistant_conversations SET deleted_at=now(),updated_at=now() WHERE id=@id AND user_id=@user AND deleted_at IS NULL", connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("user", userId);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    private async Task<bool> HasUsableTranscriptAsync(Guid meetingId)
+    {
+        await using var connection = await OpenAsync();
+        return await HasUsableTranscriptAsync(connection, null, meetingId);
+    }
+
+    private static async Task<bool> HasUsableTranscriptAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, Guid meetingId)
+    {
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY'))", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    private async Task<bool> HasAnyUsableTranscriptAsync()
+    {
+        await using var connection = await OpenAsync();
+        return await HasAnyUsableTranscriptAsync(connection, null);
+    }
+
+    private static async Task<bool> HasAnyUsableTranscriptAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction)
+    {
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM transcripts WHERE status IN ('READY','PARTIAL_READY'))", connection, transaction);
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static AssistantConversationRow ReadConversation(NpgsqlDataReader reader) =>
+        new(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetGuid(4), reader.GetBoolean(5), reader.GetDateTime(6), reader.GetDateTime(7));
+
+    private static AssistantMessageRow ReadMessage(NpgsqlDataReader reader) =>
+        new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10));
 
     public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)
     {

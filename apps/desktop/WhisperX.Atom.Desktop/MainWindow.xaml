@@ -126,6 +126,13 @@
                         <FontIcon Glyph="&#xE9D2;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem x:Name="AssistantNavItem" Content="ИИ-помощник" Tag="assistant">
+                    <ToolTipService.ToolTip>Чат с локальной нейросетью по стенограммам</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>ИИ-помощник</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE99A;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItemHeader Content="СИСТЕМА" Style="{StaticResource NavigationHeaderStyle}" />
                 <NavigationViewItem x:Name="AgentsNavItem" Content="Агенты" Tag="agents">
                     <ToolTipService.ToolTip>Состояние Recorder Agent</ToolTipService.ToolTip>

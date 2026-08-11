@@ -38,6 +38,7 @@ public sealed partial class MainWindow : Window
         TasksNavItem.Content = "Задачи";
         SearchNavItem.Content = "Поиск";
         AnalyticsNavItem.Content = "Аналитика";
+        AssistantNavItem.Content = "ИИ-помощник";
         AgentsNavItem.Content = "Агенты";
         AdministrationNavItem.Content = "Администрирование";
         SettingsNavItem.Content = "Настройки";
@@ -87,6 +88,7 @@ public sealed partial class MainWindow : Window
             "recording" => typeof(RecordingPage),
             "meetings" => typeof(MeetingsPage),
             "series" or "search" or "analytics" or "administration" => typeof(ComingSoonPage),
+            "assistant" => typeof(AssistantPage),
             "transcripts" => typeof(TranscriptsPage),
             "speakers" => typeof(SpeakersPage),
             "summaries" => typeof(SummariesPage),

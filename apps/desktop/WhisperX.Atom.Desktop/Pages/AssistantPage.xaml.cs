@@ -13,10 +13,7 @@ public sealed partial class AssistantPage : Page
     private AssistantViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
 
-    public AssistantPage()
-    {
-        InitializeComponent();
-    }
+    public AssistantPage() => InitializeComponent();
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -27,14 +24,9 @@ public sealed partial class AssistantPage : Page
         _viewModel = new AssistantViewModel(_services);
         DataContext = _viewModel;
         _viewModel.PropertyChanged += ViewModel_PropertyChanged;
-        try
-        {
-            await _viewModel.LoadAsync(_pageCts.Token);
-            ContextBox.SelectedItem = _viewModel.SelectedContext;
-            UpdateState();
-        }
+        try { await _viewModel.LoadAsync(_pageCts.Token); ContextBox.SelectedItem = _viewModel.SelectedContext; UpdateState(); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить контекст помощника.")); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить ИИ-помощника.")); }
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -48,15 +40,82 @@ public sealed partial class AssistantPage : Page
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(AssistantViewModel.IsLoading) or nameof(AssistantViewModel.IsAsking) or nameof(AssistantViewModel.StatusText) or nameof(AssistantViewModel.ErrorText) or nameof(AssistantViewModel.HasAnswer) or nameof(AssistantViewModel.HasEvidence) or nameof(AssistantViewModel.HasAnswerWithoutEvidence))
+        if (e.PropertyName is nameof(AssistantViewModel.IsLoading) or nameof(AssistantViewModel.IsAsking) or nameof(AssistantViewModel.StatusText) or nameof(AssistantViewModel.ErrorText) or nameof(AssistantViewModel.HasAnswer) or nameof(AssistantViewModel.HasEvidence) or nameof(AssistantViewModel.HasMessages) or nameof(AssistantViewModel.CanAsk))
             UpdateState();
-        if (e.PropertyName is nameof(AssistantViewModel.AnswerText) or nameof(AssistantViewModel.VoiceAnswerText)) UpdateAnswer();
+        if (e.PropertyName is nameof(AssistantViewModel.SelectedConversation)) UpdateContextText();
+    }
+
+    private async void ConversationsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is null || _pageCts is null) return;
+        try { await _viewModel.SelectConversationAsync(ConversationsList.SelectedItem as DesktopAssistantConversation, _pageCts.Token); UpdateState(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось открыть чат.")); }
     }
 
     private void ContextBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_viewModel is not null) _viewModel.SelectedContext = ContextBox.SelectedItem as AssistantContextOption;
+    }
+
+    private void MessagesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        _viewModel.SelectedMessage = MessagesList.SelectedItem as DesktopAssistantMessage;
         UpdateState();
+    }
+
+    private async void NewChatButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || _pageCts is null) return;
+        try { await _viewModel.CreateConversationAsync(_pageCts.Token); UpdateState(); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось создать чат.")); }
+    }
+
+    private async void AskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || _pageCts is null) return;
+        try { await _viewModel.AskAsync(_pageCts.Token); UpdateState(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Помощник не выполнил запрос.")); }
+    }
+
+    private void ConversationMenuButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || _pageCts is null || sender is not Button { Tag: DesktopAssistantConversation conversation }) return;
+        var menu = new MenuFlyout();
+        var rename = new MenuFlyoutItem { Text = "Переименовать" };
+        rename.Click += async (_, _) => await RenameConversationAsync(conversation);
+        var archive = new MenuFlyoutItem { Text = "Архивировать" };
+        archive.Click += async (_, _) => await ChangeConversationAsync(() => _viewModel.ArchiveConversationAsync(conversation, _pageCts.Token));
+        var delete = new MenuFlyoutItem { Text = "Удалить" };
+        delete.Click += async (_, _) => await ChangeConversationAsync(() => _viewModel.DeleteConversationAsync(conversation, _pageCts.Token));
+        menu.Items.Add(rename);
+        menu.Items.Add(archive);
+        menu.Items.Add(delete);
+        menu.ShowAt((FrameworkElement)sender);
+    }
+
+    private async Task RenameConversationAsync(DesktopAssistantConversation conversation)
+    {
+        if (_viewModel is null || _pageCts is null) return;
+        var titleBox = new TextBox { Text = conversation.Title, MaxLength = 120, PlaceholderText = "Название чата" };
+        var dialog = new ContentDialog
+        {
+            Title = "Переименовать чат",
+            Content = titleBox,
+            PrimaryButtonText = "Сохранить",
+            CloseButtonText = "Отмена",
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        await ChangeConversationAsync(() => _viewModel.RenameConversationAsync(conversation, titleBox.Text, _pageCts.Token));
+    }
+
+    private async Task ChangeConversationAsync(Func<Task> action)
+    {
+        try { await action(); UpdateState(); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось изменить чат.")); }
     }
 
     private void QuestionBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -64,22 +123,10 @@ public sealed partial class AssistantPage : Page
         if (_viewModel is not null) _viewModel.Question = QuestionBox.Text;
     }
 
-    private async void AskButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || _pageCts is null) return;
-        try { await _viewModel.AskAsync(_pageCts.Token); UpdateState(); UpdateAnswer(); }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Помощник не выполнил запрос.")); }
-    }
-
     private void OpenEvidenceButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: AssistantEvidenceItem evidence }) return;
-        if (string.IsNullOrWhiteSpace(evidence.MeetingId))
-        {
-            ShowError("У этого источника нет meetingId. Он отображён, но переход к встрече заблокирован.");
-            return;
-        }
+        if (string.IsNullOrWhiteSpace(evidence.MeetingId)) { ShowError("У этого источника нет данных о совещании."); return; }
         App.MainWindow.NavigateTo("meetings", new MeetingNavigationTarget(evidence.MeetingId, evidence.SegmentId, evidence.StartMs));
     }
 
@@ -87,34 +134,28 @@ public sealed partial class AssistantPage : Page
     {
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading || _viewModel.IsAsking;
-        AskButton.IsEnabled = !_viewModel.IsLoading && !_viewModel.IsAsking && _viewModel.Contexts.Count > 0;
+        AskButton.IsEnabled = _viewModel.CanAsk;
+        NewChatButton.IsEnabled = !_viewModel.IsLoading && !_viewModel.IsAsking;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
         ErrorInfoBar.Message = _viewModel.ErrorText;
+        ChatEmptyText.Visibility = _viewModel.HasMessages ? Visibility.Collapsed : Visibility.Visible;
         EvidenceList.Visibility = _viewModel.HasEvidence ? Visibility.Visible : Visibility.Collapsed;
         EvidenceEmptyText.Visibility = _viewModel.HasEvidence ? Visibility.Collapsed : Visibility.Visible;
-        NoEvidenceText.Visibility = _viewModel.HasAnswerWithoutEvidence ? Visibility.Visible : Visibility.Collapsed;
-        GlobalHintText.Visibility = _viewModel.IsGlobalAllowed ? Visibility.Collapsed : Visibility.Visible;
+        StatusText.Text = _viewModel.StatusText;
+        UpdateContextText();
     }
 
-    private void UpdateAnswer()
-    {
-        if (_viewModel is null) return;
-        AnswerText.Text = string.IsNullOrWhiteSpace(_viewModel.AnswerText) ? "Ответ появится после обработки запроса." : _viewModel.AnswerText;
-        VoiceAnswerText.Text = string.IsNullOrWhiteSpace(_viewModel.VoiceAnswerText) ? string.Empty : $"Краткий ответ: {_viewModel.VoiceAnswerText}";
-    }
+    private void UpdateContextText() => ContextText.Text = _viewModel?.SelectedConversation is { } conversation
+        ? $"{conversation.ContextLabel} · {conversation.Title}"
+        : "Выберите или создайте чат";
 
-    private void AssistantContentGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    private void AssistantShell_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
-        AssistantContentGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
-        AssistantContentGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(360);
-        AssistantContentGrid.RowDefinitions[0].Height = compact ? new GridLength(300) : new GridLength(1, GridUnitType.Star);
-        AssistantContentGrid.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-        Grid.SetColumn(AnswerCard, 0);
-        Grid.SetRow(AnswerCard, 0);
-        Grid.SetColumn(EvidenceCard, compact ? 0 : 1);
-        Grid.SetRow(EvidenceCard, compact ? 1 : 0);
-        EvidenceCard.Visibility = Visibility.Visible;
+        var compact = e.NewSize.Width < 1100;
+        AssistantShell.ColumnDefinitions[0].Width = compact ? new GridLength(220) : new GridLength(260);
+        AssistantShell.ColumnDefinitions[2].Width = compact ? new GridLength(0) : new GridLength(340);
+        EvidenceCard.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        Grid.SetColumn(ChatCard, 1);
     }
 
     private void ShowError(string message)

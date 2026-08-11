@@ -45,20 +45,23 @@ class AssistantRepository:
             ).fetchone()
             return row is not None
 
-    def query(self, query_id: str) -> tuple[str, str | None, str] | None:
+    def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None] | None:
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute("SELECT query,meeting_id,status FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
-            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2])) if row else None
+            row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
+            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None) if row else None
 
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute(
-                "UPDATE assistant_queries SET status=%s,error_code=%s WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW') RETURNING id",
-                (status, error, query_id),
-            ).fetchone()
+            row = connection.execute("""
+                UPDATE assistant_queries SET status=%s,error_code=%s
+                WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')
+                RETURNING id,assistant_message_id
+                """, (status, error, query_id)).fetchone()
+            if row and row[1]:
+                connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
 
-    def context(self, meeting_id: str | None) -> tuple[str, dict[str, tuple[str, int, int]]]:
+    def context(self, meeting_id: str | None, query: str = "") -> tuple[str, dict[str, tuple[str, int, int]]]:
         with psycopg.connect(self.conninfo) as connection:
             if meeting_id:
                 rows = connection.execute(
@@ -67,7 +70,7 @@ class AssistantRepository:
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
-                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND m.status='READY' AND COALESCE(s.is_hidden,false)=false
+                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND COALESCE(s.is_hidden,false)=false
                     ORDER BY s.ordinal LIMIT 1200
                     """,
                     (meeting_id,),
@@ -79,10 +82,26 @@ class AssistantRepository:
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
-                    WHERE t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND m.status='READY' AND m.created_at >= now()-interval '90 days' AND COALESCE(s.is_hidden,false)=false
+                    WHERE t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND m.created_at >= now()-interval '90 days' AND COALESCE(s.is_hidden,false)=false
                     ORDER BY m.created_at DESC,s.ordinal LIMIT 2400
                     """
                 ).fetchall()
+        max_chars = max(4000, int(os.getenv("ASSISTANT_MAX_CONTEXT_CHARS", "36000")))
+        if rows:
+            full_text = "\n".join(f"[SEG-{row[0]} {int(row[2]) // 1000}s {row[4]}] {str(row[5]).strip()}" for row in rows)
+            if len(full_text) > max_chars:
+                tokens = {token.lower() for token in re.findall(r"[\wА-Яа-яЁё]{3,}", query)}
+                scored = []
+                for index, row in enumerate(rows):
+                    text_tokens = {token.lower() for token in re.findall(r"[\wА-Яа-яЁё]{3,}", str(row[5]))}
+                    scored.append((len(tokens & text_tokens), index, row))
+                selected_indexes: set[int] = set()
+                for score, index, _ in sorted(scored, key=lambda item: (item[0], item[1]), reverse=True)[:80]:
+                    if score == 0 and selected_indexes:
+                        break
+                    selected_indexes.update(range(max(0, index - 1), min(len(rows), index + 2)))
+                rows = [row for index, row in enumerate(rows) if index in selected_indexes]
+
         valid: dict[str, tuple[str, int, int]] = {}
         lines: list[str] = []
         for segment_id, meeting_id_value, start_ms, end_ms, speaker, text in rows:
@@ -90,6 +109,30 @@ class AssistantRepository:
             valid[key] = (str(meeting_id_value), int(start_ms), int(end_ms))
             lines.append(f"[SEG-{key} {int(start_ms)//1000}s {speaker}] {str(text).strip()}")
         return "\n".join(lines), valid
+
+    def history(self, conversation_id: str | None, current_user_message_id: str | None) -> list[dict[str, str]]:
+        if not conversation_id:
+            return []
+        max_messages = max(2, int(os.getenv("ASSISTANT_MAX_HISTORY_MESSAGES", "12")))
+        max_chars = max(1000, int(os.getenv("ASSISTANT_MAX_HISTORY_CHARS", "12000")))
+        with psycopg.connect(self.conninfo) as connection:
+            rows = connection.execute(
+                """
+                SELECT role,content FROM assistant_messages
+                WHERE conversation_id=%s AND id<>%s AND content<>''
+                ORDER BY created_at DESC,id DESC LIMIT %s
+                """,
+                (conversation_id, current_user_message_id or "00000000-0000-0000-0000-000000000000", max_messages),
+            ).fetchall()
+        result: list[dict[str, str]] = []
+        used = 0
+        for role, content in reversed(rows):
+            value = str(content).strip()
+            if not value or used + len(value) > max_chars:
+                continue
+            result.append({"role": "user" if role == "USER" else "assistant", "content": value})
+            used += len(value)
+        return result
 
     def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int]]) -> None:
         evidence_ids = [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
@@ -101,10 +144,17 @@ class AssistantRepository:
         status = "READY" if evidence_ids else "NEEDS_REVIEW"
         evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
         with psycopg.connect(self.conninfo) as connection:
-            connection.execute(
-                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')",
+            row = connection.execute(
+                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW') RETURNING assistant_message_id,conversation_id",
                 (status, answer, voice, Jsonb(evidence), query_id),
-            )
+            ).fetchone()
+            if row and row[0]:
+                connection.execute(
+                    "UPDATE assistant_messages SET status=%s,content=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s",
+                    (status, answer, voice, Jsonb(evidence), row[0]),
+                )
+            if row and row[1]:
+                connection.execute("UPDATE assistant_conversations SET updated_at=now() WHERE id=%s", (row[1],))
 
 
 class AssistantWorker:
@@ -121,15 +171,17 @@ class AssistantWorker:
         row = self.repository.query(query_id)
         if row is None or row[2] in {"READY", "FAILED", "NEEDS_REVIEW"}:
             return
-        query, meeting_id, _ = row
+        query, meeting_id, _, conversation_id, user_message_id, _ = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
         try:
-            context, valid = await asyncio.to_thread(self.repository.context, meeting_id)
+            context, valid = await asyncio.to_thread(self.repository.context, meeting_id, query)
             if not context:
                 raise RuntimeError("assistant_context_empty")
+            history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
             messages = [
                 {"role": "system", "content": "Отвечай по-русски. Используй только приведённые сегменты. Не выдумывай факты. Верни только JSON с answer, voice_answer и evidence_segment_ids."},
+                *history,
                 {"role": "user", "content": f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"},
             ]
             async with self.lease:

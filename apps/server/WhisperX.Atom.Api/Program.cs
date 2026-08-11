@@ -448,8 +448,9 @@ static bool RoleAllows(string role, string method, PathString path)
     if (HttpMethods.IsGet(method) || HttpMethods.IsHead(method)) return true;
     if (!string.Equals(role, "Editor", StringComparison.OrdinalIgnoreCase)) return false;
     if (HttpMethods.IsPatch(method)) return true;
+    if (HttpMethods.IsDelete(method) && path.StartsWithSegments("/api/assistant/conversations")) return true;
     return HttpMethods.IsPost(method) &&
-        (path.StartsWithSegments("/api/assistant/queries") ||
+        (path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/conversations") ||
          path.Value?.Contains("/speakers/merge", StringComparison.OrdinalIgnoreCase) == true ||
          path.Value?.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) == true);
 }
@@ -683,6 +684,74 @@ app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, 
         _ => Results.NotFound()
     };
 });
+app.MapGet("/api/assistant/conversations", async (HttpContext context, UnifiedProductStore store, bool? includeArchived) =>
+{
+    var userId = CurrentUserId(context);
+    return userId is null
+        ? Results.Unauthorized()
+        : Results.Ok(await store.ListAssistantConversationsAsync(userId.Value, includeArchived == true));
+});
+app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var scope = request.ScopeType?.Trim().ToUpperInvariant();
+    if (scope == "GLOBAL" && !IsPrivileged(context)) return Results.Forbid();
+    if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
+    if (scope is not ("MEETING" or "GLOBAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
+    var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId);
+    return conversation is null ? Results.BadRequest(new { error = "assistant_context_not_ready" }) : Results.Created($"/api/assistant/conversations/{conversation.Id}", conversation);
+});
+app.MapGet("/api/assistant/conversations/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    var conversation = userId is null ? null : await store.GetAssistantConversationAsync(id, userId.Value);
+    return conversation is null ? Results.NotFound() : Results.Ok(conversation);
+});
+app.MapPatch("/api/assistant/conversations/{id:guid}", async (Guid id, AssistantConversationUpdateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    return await store.UpdateAssistantConversationAsync(id, userId.Value, request.Title, request.Archived) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapDelete("/api/assistant/conversations/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    return await store.DeleteAssistantConversationAsync(id, userId.Value) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapGet("/api/assistant/conversations/{id:guid}/messages", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    if (await store.GetAssistantConversationAsync(id, userId.Value) is null) return Results.NotFound();
+    return Results.Ok(await store.ListAssistantMessagesAsync(id, userId.Value));
+});
+app.MapPost("/api/assistant/conversations/{id:guid}/messages", async (Guid id, AssistantMessageCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var result = await store.CreateAssistantMessageAsync(id, userId.Value, request.Content ?? string.Empty, request.RetryOf);
+    return result is null ? Results.BadRequest(new { error = "assistant_conversation_not_ready" }) : Results.Accepted($"/api/assistant/conversations/{id}/messages/{result.AssistantMessage.Id}/events", result);
+});
+app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{messageId:guid}/events", async (Guid conversationId, Guid messageId, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+    var userId = CurrentUserId(context);
+    if (userId is null) { response.StatusCode = StatusCodes.Status401Unauthorized; return; }
+    if (await store.GetAssistantConversationAsync(conversationId, userId.Value) is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
+    for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+    {
+        var messages = await store.ListAssistantMessagesAsync(conversationId, userId.Value);
+        var message = messages.FirstOrDefault(item => item.Id == messageId);
+        if (message is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
+        await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(message)}\n\n", cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
+        if (message.Status is "READY" or "FAILED" or "NEEDS_REVIEW") return;
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+});
 app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (request.MeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
@@ -810,6 +879,9 @@ public record CreateTrackRequest(string TrackType, string? DeviceId, int SampleR
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId);
+public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId);
+public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
+public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
