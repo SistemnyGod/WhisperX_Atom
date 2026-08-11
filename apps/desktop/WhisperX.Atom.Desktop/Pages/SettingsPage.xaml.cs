@@ -46,7 +46,7 @@ public sealed partial class SettingsPage : Page
             StatusInfoBar.Message = ready ? "Локальный API доступен." : "Локальный API не отвечает.";
             StatusInfoBar.IsOpen = true;
         }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось проверить подключение к API.")); }
     }
 
     private async void ReconnectAgentButton_Click(object sender, RoutedEventArgs e)
@@ -79,7 +79,7 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{ViewModel.ArchiveRoot}\"") { UseShellExecute = true }); }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось открыть папку архива.")); }
     }
 
     private void UpdateStatus()

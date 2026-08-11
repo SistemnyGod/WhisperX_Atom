@@ -64,6 +64,8 @@ public static class UiErrorFormatter
         DesktopApiException { ErrorCode: "MODEL_ACCESS_ERROR" } => "WhisperX не получил доступ к модели.",
         DesktopApiException { ErrorCode: "CUDA_UNAVAILABLE" } => "GPU недоступен. Проверьте CUDA или дождитесь CPU-обработки.",
         DesktopApiException { ErrorCode: "TRANSCRIPT_EMPTY" } => "Стенограмма не содержит распознанной речи.",
+        HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized } => "Сеанс API истёк. Войдите повторно.",
+        HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden } => "Недостаточно прав для выполнения операции.",
         HttpRequestException => "Не удалось подключиться к API. Проверьте backend и соединение.",
         TimeoutException => "Сервис не ответил вовремя. Повторите попытку.",
         OperationCanceledException => "Операция отменена.",

@@ -34,6 +34,14 @@ $mapper = Join-Path $desktop "Services/UiStatusMapper.cs"
 Assert-Contains $mapper "public static class UiStatusMapper" "central status mapper"
 Assert-Contains $mapper "PARTIAL_READY" "partial transcript status"
 Assert-Contains $mapper "UiErrorFormatter" "localized error formatter"
+Assert-Contains $mapper "HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized }" "localized HTTP 401 formatter"
+
+$activeCode = Get-ChildItem (Join-Path $desktop "Pages"), (Join-Path $desktop "ViewModels") -Recurse -Filter *.cs |
+    Where-Object { $_.FullName -notmatch "\\Legacy\\" } |
+    ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 }
+if ($activeCode -match "ex\.Message|ErrorInfoBar\.Message\s*=\s*ex\.Message|ShowError\(ex\.Message") {
+    throw "Active Desktop code exposes a raw exception message"
+}
 
 $mainWindow = Join-Path $desktop "MainWindow.xaml"
 foreach ($route in @("home", "recording", "meetings", "transcripts", "settings")) {

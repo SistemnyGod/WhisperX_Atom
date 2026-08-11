@@ -162,5 +162,5 @@ public sealed class SettingsViewModel : ObservableObject
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc);
     }
 
-    private static string SafeError(Exception ex) => string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось выполнить операцию с настройками.");
 }

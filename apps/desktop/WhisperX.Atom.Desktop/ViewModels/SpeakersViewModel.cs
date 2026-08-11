@@ -167,7 +167,5 @@ public sealed class SpeakersViewModel : ObservableObject
         OnPropertyChanged(nameof(MeetingCountText));
     }
 
-    private static string SafeError(Exception ex, string fallback) => ex is HttpRequestException
-        ? "Не удалось подключиться к API. Проверьте backend и вход в API."
-        : string.IsNullOrWhiteSpace(ex.Message) ? fallback : ex.Message;
+    private static string SafeError(Exception ex, string fallback) => UiErrorFormatter.Format(ex, fallback);
 }

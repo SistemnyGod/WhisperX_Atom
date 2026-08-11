@@ -38,7 +38,7 @@ public sealed partial class TasksPage : Page
             UpdateState();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось выполнить операцию с поручением.")); }
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -94,7 +94,7 @@ public sealed partial class TasksPage : Page
             UpdateState();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось обновить поручение.")); }
     }
 
     private void TaskEditor_TextChanged(object sender, TextChangedEventArgs e) { if (!_updatingEditor && _viewModel is not null) _viewModel.EditTaskText = TaskEditor.Text; }
@@ -129,7 +129,7 @@ public sealed partial class TasksPage : Page
             UpdateState();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить свидетельство.")); }
     }
 
     private void EvidenceButton_Click(object sender, RoutedEventArgs e)

@@ -34,7 +34,7 @@ public sealed partial class AssistantPage : Page
             UpdateState();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить контекст помощника.")); }
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -69,7 +69,7 @@ public sealed partial class AssistantPage : Page
         if (_viewModel is null || _pageCts is null) return;
         try { await _viewModel.AskAsync(_pageCts.Token); UpdateState(); UpdateAnswer(); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Помощник не выполнил запрос.")); }
     }
 
     private void OpenEvidenceButton_Click(object sender, RoutedEventArgs e)

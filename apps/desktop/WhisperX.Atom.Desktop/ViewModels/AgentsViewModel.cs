@@ -184,5 +184,5 @@ public sealed class AgentsViewModel : ObservableObject
         _ => $"{bytes / 1024d / 1024d / 1024d:N1} ГБ"
     };
 
-    private static string SafeError(Exception ex, string fallback) => string.IsNullOrWhiteSpace(ex.Message) ? fallback : ex.Message;
+    private static string SafeError(Exception ex, string fallback) => UiErrorFormatter.Format(ex, fallback);
 }

@@ -35,7 +35,7 @@ public sealed partial class SummariesPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось загрузить саммари.");
             ErrorInfoBar.IsOpen = true;
         }
     }
@@ -68,7 +68,7 @@ public sealed partial class SummariesPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось пересобрать саммари.");
             ErrorInfoBar.IsOpen = true;
         }
     }
@@ -96,7 +96,7 @@ public sealed partial class SummariesPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось открыть саммари.");
             ErrorInfoBar.IsOpen = true;
         }
     }

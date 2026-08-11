@@ -198,5 +198,5 @@ public sealed class TranscriptsViewModel : ObservableObject
         OnPropertyChanged(nameof(HasSegments));
     }
 
-    private static string SafeError(Exception ex, string fallback) => string.IsNullOrWhiteSpace(ex.Message) ? fallback : ex.Message;
+    private static string SafeError(Exception ex, string fallback) => UiErrorFormatter.Format(ex, fallback);
 }

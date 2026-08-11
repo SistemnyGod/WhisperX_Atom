@@ -35,7 +35,7 @@ public sealed partial class SpeakersPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось загрузить спикеров.");
             ErrorInfoBar.IsOpen = true;
         }
     }
@@ -67,7 +67,7 @@ public sealed partial class SpeakersPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось обновить спикеров.");
             ErrorInfoBar.IsOpen = true;
         }
     }

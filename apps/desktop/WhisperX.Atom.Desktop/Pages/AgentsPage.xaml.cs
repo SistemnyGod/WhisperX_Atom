@@ -37,7 +37,7 @@ public sealed partial class AgentsPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось загрузить реестр агентов.");
             ErrorInfoBar.IsOpen = true;
         }
     }
@@ -69,7 +69,7 @@ public sealed partial class AgentsPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось обновить реестр агентов.");
             ErrorInfoBar.IsOpen = true;
         }
     }

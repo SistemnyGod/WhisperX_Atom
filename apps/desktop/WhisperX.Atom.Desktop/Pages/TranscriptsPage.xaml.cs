@@ -35,7 +35,7 @@ public sealed partial class TranscriptsPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось загрузить стенограммы.");
             ErrorInfoBar.IsOpen = true;
         }
     }
@@ -68,7 +68,7 @@ public sealed partial class TranscriptsPage : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            ErrorInfoBar.Message = ex.Message;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось открыть стенограмму.");
             ErrorInfoBar.IsOpen = true;
         }
     }

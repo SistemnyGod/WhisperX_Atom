@@ -328,7 +328,5 @@ public sealed class TasksViewModel : ObservableObject
         _ => true,
     };
 
-    private static string SafeError(Exception ex) => ex is HttpRequestException
-        ? "Не удалось подключиться к API. Проверьте backend и вход в API."
-        : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось выполнить операцию с поручением.");
 }
