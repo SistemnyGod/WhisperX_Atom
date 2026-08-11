@@ -272,6 +272,88 @@ public sealed partial class MeetingsPage : Page
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
+    private async void CancelProcessingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace?.Meeting is not { } meeting || _services is null || _pageCts is null || !Guid.TryParse(meeting.Id, out var meetingId)) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Отменить обработку?",
+            Content = "Новые этапы обработки и сообщения очереди будут отменены. Уже готовые результаты останутся в реестре.",
+            PrimaryButtonText = "Отменить обработку",
+            CloseButtonText = "Не отменять",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            if (await _services.Backend.CancelMeetingAsync(meetingId, _pageCts.Token) is null)
+            {
+                ShowError("Не удалось отменить обработку. Сначала завершите активную запись.");
+                return;
+            }
+            await ReloadMeetingAfterChangeAsync(meetingId);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
+    }
+
+    private async void DeleteMeetingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace?.Meeting is not { } meeting || _services is null || _pageCts is null || !Guid.TryParse(meeting.Id, out var meetingId)) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Удалить совещание?",
+            Content = "Будут удалены запись совещания, связанные результаты и серверные медиафайлы. Локальный архив Recorder Agent не удаляется.",
+            PrimaryButtonText = "Удалить навсегда",
+            CloseButtonText = "Отмена",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            if (!await _services.Backend.DeleteMeetingAsync(meetingId, _pageCts.Token))
+            {
+                ShowError("Не удалось удалить совещание. Сначала завершите активную запись.");
+                return;
+            }
+            _workspaceCts?.Cancel();
+            _workspace.ClearSelection();
+            _workspaceExpanded = false;
+            PreviewPlayer.Source = null;
+            _suppressMeetingSelection = true;
+            MeetingsList.SelectedItem = null;
+            _suppressMeetingSelection = false;
+            await _viewModel!.RefreshAsync(_pageCts.Token);
+            UpdateListState();
+            UpdateWorkspaceState();
+            UpdateWorkspaceText();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
+    }
+
+    private async Task ReloadMeetingAfterChangeAsync(Guid meetingId)
+    {
+        if (_viewModel is null || _workspace is null || _pageCts is null) return;
+        await _viewModel.RefreshAsync(_pageCts.Token);
+        UpdateListState();
+        var updated = _viewModel.FilteredMeetings.FirstOrDefault(item => string.Equals(item.Id, meetingId.ToString(), StringComparison.OrdinalIgnoreCase));
+        if (updated is null)
+        {
+            _workspace.ClearSelection();
+            _workspaceExpanded = false;
+            UpdateWorkspaceState();
+            UpdateWorkspaceText();
+            return;
+        }
+        _suppressMeetingSelection = true;
+        MeetingsList.SelectedItem = updated;
+        _suppressMeetingSelection = false;
+        await LoadSelectedMeetingAsync(updated);
+    }
+
     private async void RebuildSummaryButton_Click(object sender, RoutedEventArgs e)
     {
         if (_workspace is null || _pageCts is null) return;
@@ -393,10 +475,14 @@ public sealed partial class MeetingsPage : Page
         OpenWorkspaceButton.Content = _workspaceExpanded ? "Свернуть" : "Открыть совещание";
         RefreshWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         RetryButton.IsEnabled = _workspace.CanRetryLatestJob && !_workspace.IsLoading;
+        CancelProcessingButton.IsEnabled = CanCancelProcessing(_workspace.Meeting) && !_workspace.IsLoading;
+        DeleteMeetingButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_workspace.ErrorText);
         ErrorInfoBar.Message = _workspace.ErrorText;
         UpdateEmptyStates();
     }
+
+    private static bool CanCancelProcessing(DesktopMeeting? meeting) => meeting is not null && meeting.Status is not ("READY" or "PARTIAL_READY" or "FAILED" or "CANCELLED");
 
     private void UpdateWorkspaceText()
     {

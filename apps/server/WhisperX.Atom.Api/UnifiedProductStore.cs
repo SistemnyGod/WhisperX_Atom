@@ -144,6 +144,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         var resolvedMeetingId = meetingId ?? Guid.NewGuid();
+        if (meetingId is Guid existingMeetingId)
+        {
+            await using var existingMeeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@id FOR UPDATE", connection, transaction);
+            existingMeeting.Parameters.AddWithValue("id", existingMeetingId);
+            if (string.Equals(await existingMeeting.ExecuteScalarAsync() as string, "CANCELLED", StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
         var resolvedTitle = string.IsNullOrWhiteSpace(title) ? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}" : title.Trim();
         await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,title,status) VALUES(@id,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
         {

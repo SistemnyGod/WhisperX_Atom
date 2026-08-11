@@ -47,18 +47,18 @@ class SummaryRepository:
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None) -> None:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
-                "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s",
+                "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, socket.gethostname(), job_id),
             )
 
     def mark_failed(self, job_id: str, meeting_id: str, error: str) -> None:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
-                "UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,error_message=%s,error_code='SUMMARY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s",
+                "UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,error_message=%s,error_code='SUMMARY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (error, job_id),
             )
             # The transcript remains usable even when the optional summary failed.
-            connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'READY'", (meeting_id,))
+            connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status NOT IN ('READY','CANCELLED')", (meeting_id,))
     def load_segments(self, meeting_id: str, transcript_id: str | None = None) -> list[TranscriptSegment]:
         with psycopg.connect(self.conninfo) as connection:
             if transcript_id:
@@ -117,18 +117,22 @@ class SummaryRepository:
             for row in rows
         ]
 
-    def persist(self, job_id: str, meeting_id: str, transcript_id: str | None, result: dict[str, Any], model_name: str) -> None:
+    def persist(self, job_id: str, meeting_id: str, transcript_id: str | None, result: dict[str, Any], model_name: str) -> bool:
         source_hash = str(result["source_hash"])
         with psycopg.connect(self.conninfo) as connection:
             # Serialize summary versions and decision/task inserts for this meeting.
-            if connection.execute("SELECT id FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone() is None:
-                raise RuntimeError("meeting_not_found")
+            meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
+            if meeting is None or str(meeting[0]) == "CANCELLED":
+                return False
+            job = connection.execute("SELECT status FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            if job is None or str(job[0]) == "CANCELLED":
+                return False
             existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
             if existing_summary is not None:
                 if str(existing_summary[1]) == "READY":
-                    connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s", (job_id,))
-                    connection.execute("UPDATE meetings SET status='READY' WHERE id=%s", (meeting_id,))
-                    return
+                    connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    connection.execute("UPDATE meetings SET status='READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+                    return True
                 raise RuntimeError("summary_persist_incomplete")
             if transcript_id:
                 transcript = connection.execute("SELECT id FROM transcripts WHERE id=%s AND meeting_id=%s", (transcript_id, meeting_id)).fetchone()
@@ -191,8 +195,9 @@ class SummaryRepository:
             needs_review = bool(validation.get("rejected_facts") or validation.get("review_items") or validation.get("review_reasons"))
             summary_status = "NEEDS_REVIEW" if needs_review else "READY"
             connection.execute("UPDATE summaries SET status=%s WHERE id=%s", (summary_status, summary_id))
-            connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s", (job_id,))
-            connection.execute("UPDATE meetings SET status='READY' WHERE id=%s", (meeting_id,))
+            connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+            connection.execute("UPDATE meetings SET status='READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+            return True
 
 def parse_deadline(value: Any) -> datetime | None:
     if not value or not isinstance(value, str):
@@ -250,7 +255,9 @@ class SummaryWorker:
             LOGGER.info("job=%s released GPU lease", job_id)
             self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
             self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
-            await asyncio.to_thread(self.repository.persist, job_id, meeting_id, transcript_id, result, self.model_alias)
+            persisted = await asyncio.to_thread(self.repository.persist, job_id, meeting_id, transcript_id, result, self.model_alias)
+            if not persisted:
+                LOGGER.info("summary job=%s result discarded because the meeting was cancelled or deleted", job_id)
         except Exception as exc:
             self.repository.mark_failed(job_id, meeting_id, type(exc).__name__ + ": " + str(exc))
             raise

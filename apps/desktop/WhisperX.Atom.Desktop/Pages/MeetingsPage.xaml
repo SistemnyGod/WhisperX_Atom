@@ -60,7 +60,7 @@
 
             <Border x:Name="WorkspaceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid RowDefinitions="Auto,Auto,*">
-                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
                         <StackPanel Spacing="3">
                             <TextBlock x:Name="WorkspaceEyebrow" Text="ВЫБРАННОЕ СОВЕЩАНИЕ" Style="{StaticResource EyebrowStyle}" />
                             <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
@@ -69,7 +69,9 @@
                         </StackPanel>
                         <Button x:Name="OpenWorkspaceButton" Grid.Column="1" Content="Открыть совещание" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" />
                         <Button x:Name="RetryButton" Grid.Column="2" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
-                        <Button x:Name="RefreshWorkspaceButton" Grid.Column="3" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
+                        <Button x:Name="CancelProcessingButton" Grid.Column="3" Content="Отменить обработку" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="CancelProcessingButton_Click" />
+                        <Button x:Name="DeleteMeetingButton" Grid.Column="4" Content="Удалить" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="DeleteMeetingButton_Click" />
+                        <Button x:Name="RefreshWorkspaceButton" Grid.Column="5" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
                     </Grid>
 
                     <Grid Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="20,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="22">

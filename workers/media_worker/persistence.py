@@ -63,23 +63,26 @@ def release_message(message_id: str | None) -> None:
         connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
 
-def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> None:
+def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
     """Atomically publish the READY_FOR_ASR state and its durable outbox event."""
     with psycopg.connect(_conninfo()) as connection:
-        connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s",
+        updated = connection.execute(
+            "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
             (socket.gethostname(), job_id),
         )
+        if updated.rowcount != 1:
+            return False
         connection.execute(
             "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),'ml.transcribe',%s::jsonb)",
             (json.dumps(payload),),
         )
+        return True
 
 
 def update_job(job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
-            "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
             (status, stage, progress, error, error_code, socket.gethostname(), job_id),
         )
 
@@ -87,6 +90,6 @@ def update_job(job_id: str, status: str, stage: str, progress: int, error: str |
 def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key: str, asr_key: str, duration_ms: int) -> None:
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
-            "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s",
+            "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s AND EXISTS(SELECT 1 FROM jobs WHERE media_asset_id=media_assets.id AND status <> 'CANCELLED')",
             (sha256, archive_key, preview_key, asr_key, duration_ms, media_asset_id),
         )

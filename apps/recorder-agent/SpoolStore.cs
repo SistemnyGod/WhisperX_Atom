@@ -507,6 +507,153 @@ public sealed class SpoolStore
         command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state IN ('FINALIZING','FAILED')";
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
+
+    public async Task<(int Sessions, int Chunks)> CancelServerSessionAsync(Guid serverSessionId, bool discardTransport, CancellationToken cancellationToken = default)
+    {
+        var localSessionIds = new List<string>();
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using (var sessions = connection.CreateCommand())
+        {
+            sessions.CommandText = "SELECT DISTINCT local_session_id FROM server_bindings WHERE server_session_id=$server";
+            sessions.Parameters.AddWithValue("$server", serverSessionId.ToString());
+            await using var reader = await sessions.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) localSessionIds.Add(reader.GetString(0));
+        }
+        if (localSessionIds.Count == 0) return (0, 0);
+
+        var paths = new List<string>();
+        var chunks = 0;
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        foreach (var localSessionId in localSessionIds)
+        {
+            if (discardTransport)
+            {
+                await using var files = connection.CreateCommand();
+                files.Transaction = transaction;
+                files.CommandText = "SELECT local_path FROM recording_chunks WHERE session_id=$session UNION ALL SELECT raw_path FROM recording_raw_chunks WHERE session_id=$session UNION ALL SELECT output_path FROM recording_raw_chunks WHERE session_id=$session";
+                files.Parameters.AddWithValue("$session", localSessionId);
+                await using var reader = await files.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken)) paths.Add(reader.GetString(0));
+            }
+
+            await using var cancel = connection.CreateCommand();
+            cancel.Transaction = transaction;
+            cancel.CommandText = "UPDATE recording_sessions SET state='CANCELLED', finished_at=COALESCE(finished_at,$finished) WHERE id=$session";
+            cancel.Parameters.AddWithValue("$session", localSessionId);
+            cancel.Parameters.AddWithValue("$finished", DateTimeOffset.UtcNow.ToString("O"));
+            await cancel.ExecuteNonQueryAsync(cancellationToken);
+
+            if (discardTransport)
+            {
+                await using var count = connection.CreateCommand();
+                count.Transaction = transaction;
+                count.CommandText = "SELECT COUNT(*) FROM recording_chunks WHERE session_id=$session";
+                count.Parameters.AddWithValue("$session", localSessionId);
+                chunks += Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken));
+                foreach (var sql in new[]
+                {
+                    "DELETE FROM recording_events WHERE session_id=$session",
+                    "DELETE FROM recording_raw_chunks WHERE session_id=$session",
+                    "DELETE FROM recording_chunks WHERE session_id=$session",
+                    "DELETE FROM server_bindings WHERE local_session_id=$session",
+                })
+                {
+                    await using var cleanup = connection.CreateCommand();
+                    cleanup.Transaction = transaction;
+                    cleanup.CommandText = sql;
+                    cleanup.Parameters.AddWithValue("$session", localSessionId);
+                    await cleanup.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            else
+            {
+                await using var cancelChunks = connection.CreateCommand();
+                cancelChunks.Transaction = transaction;
+                cancelChunks.CommandText = "UPDATE recording_chunks SET status='CANCELLED' WHERE session_id=$session AND status<>'CONFIRMED'";
+                cancelChunks.Parameters.AddWithValue("$session", localSessionId);
+                chunks += await cancelChunks.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        await transaction.CommitAsync(cancellationToken);
+
+        if (discardTransport)
+            foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+                try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
+        return (localSessionIds.Count, chunks);
+    }
+
+    public async Task<(int Sessions, int Chunks)> CancelLocalSessionAsync(string localSessionId, bool discardTransport, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(localSessionId)) return (0, 0);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        var paths = new List<string>();
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE id=$session";
+            exists.Parameters.AddWithValue("$session", localSessionId);
+            if (Convert.ToInt32(await exists.ExecuteScalarAsync(cancellationToken)) == 0) return (0, 0);
+        }
+        var chunks = 0;
+        if (discardTransport)
+        {
+            await using var files = connection.CreateCommand();
+            files.Transaction = transaction;
+            files.CommandText = "SELECT local_path FROM recording_chunks WHERE session_id=$session UNION ALL SELECT raw_path FROM recording_raw_chunks WHERE session_id=$session UNION ALL SELECT output_path FROM recording_raw_chunks WHERE session_id=$session";
+            files.Parameters.AddWithValue("$session", localSessionId);
+            await using var reader = await files.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) paths.Add(reader.GetString(0));
+        }
+        await using (var cancel = connection.CreateCommand())
+        {
+            cancel.Transaction = transaction;
+            cancel.CommandText = "UPDATE recording_sessions SET state='CANCELLED', finished_at=COALESCE(finished_at,$finished) WHERE id=$session";
+            cancel.Parameters.AddWithValue("$session", localSessionId);
+            cancel.Parameters.AddWithValue("$finished", DateTimeOffset.UtcNow.ToString("O"));
+            await cancel.ExecuteNonQueryAsync(cancellationToken);
+        }
+        if (discardTransport)
+        {
+            await using (var count = connection.CreateCommand())
+            {
+                count.Transaction = transaction;
+                count.CommandText = "SELECT COUNT(*) FROM recording_chunks WHERE session_id=$session";
+                count.Parameters.AddWithValue("$session", localSessionId);
+                chunks = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken));
+            }
+            foreach (var sql in new[]
+            {
+                "DELETE FROM recording_events WHERE session_id=$session",
+                "DELETE FROM recording_raw_chunks WHERE session_id=$session",
+                "DELETE FROM recording_chunks WHERE session_id=$session",
+                "DELETE FROM server_bindings WHERE local_session_id=$session",
+            })
+            {
+                await using var cleanup = connection.CreateCommand();
+                cleanup.Transaction = transaction;
+                cleanup.CommandText = sql;
+                cleanup.Parameters.AddWithValue("$session", localSessionId);
+                await cleanup.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        else
+        {
+            await using var cancelChunks = connection.CreateCommand();
+            cancelChunks.Transaction = transaction;
+            cancelChunks.CommandText = "UPDATE recording_chunks SET status='CANCELLED' WHERE session_id=$session AND status<>'CONFIRMED'";
+            cancelChunks.Parameters.AddWithValue("$session", localSessionId);
+            chunks = await cancelChunks.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        if (discardTransport)
+            foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+                try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
+        return (1, chunks);
+    }
+
     public async Task UpsertChunkAsync(RecordingChunk chunk, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
@@ -526,7 +673,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,session_id,track_id,sequence,local_path,start_sample,sample_count,sample_rate,channels,track_type,size_bytes,sha256,status,attempts FROM recording_chunks WHERE status <> 'CONFIRMED' ORDER BY session_id,track_id,sequence LIMIT $limit";
+        command.CommandText = "SELECT c.id,c.session_id,c.track_id,c.sequence,c.local_path,c.start_sample,c.sample_count,c.sample_rate,c.channels,c.track_type,c.size_bytes,c.sha256,c.status,c.attempts FROM recording_chunks c JOIN recording_sessions s ON s.id=c.session_id WHERE c.status NOT IN ('CONFIRMED','CANCELLED') AND s.state<>'CANCELLED' ORDER BY c.session_id,c.track_id,c.sequence LIMIT $limit";
         command.Parameters.AddWithValue("$limit", limit);
         var result = new List<RecordingChunk>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

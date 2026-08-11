@@ -90,7 +90,10 @@ class GpuWorker:
                     result = await asyncio.to_thread(self._service.process, request, progress)
                 LOGGER.info("job=%s released GPU lease", job_id)
                 payload = result.to_dict()
-                await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)
+                persisted = await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)
+                if not persisted:
+                    LOGGER.info("job=%s result discarded because the meeting was cancelled or deleted", job_id)
+                    return None
                 LOGGER.info("job=%s persisted segments=%s words=%s", job_id, len(payload.get("segments", [])), len(payload.get("word_segments", [])))
                 return payload
             except ResidentLlmConflict as exc:

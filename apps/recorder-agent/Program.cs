@@ -161,6 +161,19 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                     return await ExecuteEventAsync("DECISION", command.Payload, cancellationToken);
                 case "ACTION_ITEM":
                     return await ExecuteEventAsync("ACTION_ITEM", command.Payload, cancellationToken);
+                case "CANCEL_SERVER_SESSION":
+                    var serverSessionId = ReadServerSessionId(command.Payload);
+                    if (serverSessionId is null)
+                        return ("REJECTED", new { ok = false, error = "server_session_id_required" });
+                    var discardTransport = ReadBoolean(command.Payload, "discardTransport");
+                    var discarded = await spool.CancelServerSessionAsync(serverSessionId.Value, discardTransport, cancellationToken);
+                    return ("COMPLETED", new { ok = true, serverSessionId, discardTransport, localSessions = discarded.Sessions, transportChunks = discarded.Chunks });
+                case "CANCEL_LOCAL_SESSION":
+                    var localSessionId = ReadString(command.Payload, "localSessionId");
+                    if (string.IsNullOrWhiteSpace(localSessionId))
+                        return ("REJECTED", new { ok = false, error = "local_session_id_required" });
+                    var localDiscard = await spool.CancelLocalSessionAsync(localSessionId, ReadBoolean(command.Payload, "discardTransport"), cancellationToken);
+                    return ("COMPLETED", new { ok = true, localSessionId, localSessions = localDiscard.Sessions, transportChunks = localDiscard.Chunks });
                 case "VOICE_EVENT":
                     return await ExecuteEventAsync(ReadString(command.Payload, "eventType") ?? "VOICE_COMMAND", command.Payload, cancellationToken);                case "STATUS":
                 case "GET_STATUS":
@@ -183,6 +196,12 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         await spool.AddEventAsync(sessionId, eventType, mediaTimeMs, JsonSerializer.Serialize(payload), cancellationToken);
         return ("COMPLETED", new { ok = true, eventType, mediaTimeMs, sessionId });
     }
+
+    private static Guid? ReadServerSessionId(JsonElement payload)
+        => payload.TryGetProperty("serverSessionId", out var value) && Guid.TryParse(value.GetString(), out var id) ? id : null;
+
+    private static bool ReadBoolean(JsonElement payload, string property)
+        => payload.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False && value.GetBoolean();
 
     private async Task<bool> UploadAndFinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
     {

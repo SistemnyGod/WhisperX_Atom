@@ -86,6 +86,22 @@ void DeleteAuthCookies(HttpContext http)
     http.Response.Cookies.Delete("wa_refresh");
 }
 
+async Task<int> QueueRecorderCancellationAsync(UnifiedProductStore store, IReadOnlyList<AgentSessionCancellationTarget> sessions, bool discardTransport)
+{
+    var queued = 0;
+    foreach (var session in sessions.Distinct())
+    {
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            serverSessionId = session.ServerSessionId,
+            discardTransport,
+        }));
+        await store.CreateCommandAsync(session.AgentId, "CANCEL_SERVER_SESSION", payload);
+        queued++;
+    }
+    return queued;
+}
+
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api/v1/agents/enroll"))
@@ -309,6 +325,27 @@ app.MapGet("/api/meetings/{id:guid}", async (Guid id, HttpContext context) =>
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     var meeting = await db.GetMeetingAsync(id, CurrentUserId(context), IsPrivileged(context));
     return meeting is null ? Results.NotFound() : Results.Ok(meeting);
+});
+
+app.MapPost("/api/meetings/{id:guid}/cancel", async (Guid id, MeetingCancelRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    var result = await db.CancelMeetingAsync(id, request?.Force == true);
+    if (result is null) return Results.NotFound();
+    if (result.RecordingMustStop) return Results.Conflict(new { error = "recording_must_stop_before_cancellation" });
+    var commands = await QueueRecorderCancellationAsync(store, result.AgentSessions, discardTransport: false);
+    return Results.Ok(new { result.MeetingId, result.Status, result.CancelledJobs, agentCommandsQueued = commands });
+});
+
+app.MapDelete("/api/meetings/{id:guid}", async (Guid id, bool? force, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    var result = await db.DeleteMeetingAsync(id, force == true);
+    if (result is null) return Results.NotFound();
+    if (result.RecordingMustStop) return Results.Conflict(new { error = "recording_must_stop_before_deletion" });
+    var commands = await QueueRecorderCancellationAsync(store, result.AgentSessions, discardTransport: true);
+    var cleanup = MeetingStorageCleanup.Delete(result.StorageKeys, app.Logger);
+    return Results.Ok(new { result.MeetingId, result.CancelledJobs, agentCommandsQueued = commands, filesDeleted = cleanup.FilesDeleted, fileDeleteFailures = cleanup.Failures });
 });
 
 app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservationRequest request, HttpContext context) =>
@@ -734,7 +771,7 @@ app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, Ht
 
         await response.WriteAsync("event: progress\ndata: " + JsonSerializer.Serialize(job) + "\n\n", cancellationToken);
         await response.Body.FlushAsync(cancellationToken);
-        if (job.Status is "READY" or "FAILED")
+        if (job.Status is "READY" or "FAILED" or "CANCELLED")
             return;
         await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
     }
@@ -779,6 +816,7 @@ public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Ev
 
 public record LoginRequest(string Username, string Password);
 public record MeetingCreateRequest(string Title, string? Description);
+public record MeetingCancelRequest(bool Force = false);
 public record UploadReservationRequest(string FileName, long SizeBytes);
 public record UploadCompleteRequest(Guid UploadId, string StorageKey, string Sha256, long SizeBytes, long DurationMs);
 public record ImportRequest(
@@ -797,6 +835,9 @@ public sealed record UserRow(Guid Id, string Username, string PasswordHash, stri
 public sealed record RefreshRotation(UserRow User, string RefreshToken);
 public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
 public sealed record JobRow(Guid Id, Guid MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
+public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
+public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
+public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
 public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null);
 
@@ -823,6 +864,31 @@ public static class MediaPolicy
     public const long MaxUploadBytes = 8L * 1024 * 1024 * 1024;
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
     public static bool IsAllowedExtension(string name) => Extensions.Contains(Path.GetExtension(name));
+}
+
+public static class MeetingStorageCleanup
+{
+    public static (int FilesDeleted, IReadOnlyList<string> Failures) Delete(IReadOnlyList<string> storageKeys, ILogger logger)
+    {
+        var deleted = 0;
+        var failures = new List<string>();
+        foreach (var key in storageKeys.Distinct(StringComparer.Ordinal))
+        {
+            try
+            {
+                var path = StorageHelpers.StoragePath(key);
+                if (!File.Exists(path)) continue;
+                File.Delete(path);
+                deleted++;
+            }
+            catch (Exception exception)
+            {
+                failures.Add(key);
+                logger.LogWarning(exception, "Unable to delete meeting storage object {StorageKey}", key);
+            }
+        }
+        return (deleted, failures);
+    }
 }
 public sealed class PasswordService
 {
@@ -1267,6 +1333,126 @@ public sealed class Database(IConfiguration configuration)
         command.Parameters.AddWithValue("id", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadJob(reader));
+        return result;
+    }
+
+    public async Task<MeetingCancellationResult?> CancelMeetingAsync(Guid meetingId, bool force)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var meeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@meeting FOR UPDATE", connection, transaction);
+        meeting.Parameters.AddWithValue("meeting", meetingId);
+        var status = await meeting.ExecuteScalarAsync() as string;
+        if (status is null) return null;
+        if (status == "RECORDING" && !force)
+            return new MeetingCancellationResult(meetingId, status, 0, [], RecordingMustStop: true);
+
+        var agentSessions = await GetAgentSessionCancellationTargetsAsync(connection, transaction, meetingId);
+
+        await using (var cancelJobs = new NpgsqlCommand(
+            "UPDATE jobs SET status='CANCELLED',stage='CANCELLED',error_message='cancelled_by_user',error_code='CANCELLED_BY_USER',worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE meeting_id=@meeting AND status NOT IN ('READY','FAILED','CANCELLED')", connection, transaction))
+        {
+            cancelJobs.Parameters.AddWithValue("meeting", meetingId);
+            var cancelled = await cancelJobs.ExecuteNonQueryAsync();
+            await using var removeInbox = new NpgsqlCommand("DELETE FROM inbox_messages WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)", connection, transaction);
+            removeInbox.Parameters.AddWithValue("meeting", meetingId);
+            await removeInbox.ExecuteNonQueryAsync();
+            await using var removeOutbox = new NpgsqlCommand("DELETE FROM outbox_messages WHERE published_at IS NULL AND payload->>'meeting_id'=CAST(@meeting AS text)", connection, transaction);
+            removeOutbox.Parameters.AddWithValue("meeting", meetingId);
+            await removeOutbox.ExecuteNonQueryAsync();
+            await using var updateMeeting = new NpgsqlCommand("UPDATE meetings SET status='CANCELLED',finished_at=COALESCE(finished_at,now()) WHERE id=@meeting", connection, transaction);
+            updateMeeting.Parameters.AddWithValue("meeting", meetingId);
+            await updateMeeting.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return new MeetingCancellationResult(meetingId, "CANCELLED", cancelled, agentSessions);
+        }
+    }
+
+    public async Task<MeetingDeletionResult?> DeleteMeetingAsync(Guid meetingId, bool force)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var meeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@meeting FOR UPDATE", connection, transaction);
+        meeting.Parameters.AddWithValue("meeting", meetingId);
+        var status = await meeting.ExecuteScalarAsync() as string;
+        if (status is null) return null;
+        if (status == "RECORDING" && !force)
+            return new MeetingDeletionResult(meetingId, 0, [], [], RecordingMustStop: true);
+
+        var agentSessions = await GetAgentSessionCancellationTargetsAsync(connection, transaction, meetingId);
+
+        var storageKeys = new HashSet<string>(StringComparer.Ordinal);
+        await using (var assets = new NpgsqlCommand("SELECT storage_key,archive_storage_key,preview_storage_key,asr_storage_key FROM media_assets WHERE meeting_id=@meeting", connection, transaction))
+        {
+            assets.Parameters.AddWithValue("meeting", meetingId);
+            await using var reader = await assets.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                for (var index = 0; index < reader.FieldCount; index++)
+                    if (!reader.IsDBNull(index) && !string.IsNullOrWhiteSpace(reader.GetString(index))) storageKeys.Add(reader.GetString(index));
+        }
+        await using (var chunks = new NpgsqlCommand("SELECT c.storage_key FROM recording_chunks c JOIN recording_sessions s ON s.id=c.session_id WHERE s.meeting_id=@meeting", connection, transaction))
+        {
+            chunks.Parameters.AddWithValue("meeting", meetingId);
+            await using var reader = await chunks.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) storageKeys.Add(reader.GetString(0));
+        }
+
+        var unsharedKeys = new List<string>();
+        foreach (var key in storageKeys)
+        {
+            await using var shared = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM media_assets WHERE meeting_id<>@meeting AND (storage_key=@key OR archive_storage_key=@key OR preview_storage_key=@key OR asr_storage_key=@key))", connection, transaction);
+            shared.Parameters.AddWithValue("meeting", meetingId);
+            shared.Parameters.AddWithValue("key", key);
+            if ((bool)(await shared.ExecuteScalarAsync())!) unsharedKeys.Add(key);
+        }
+        var keysToDelete = storageKeys.Except(unsharedKeys, StringComparer.Ordinal).ToArray();
+
+        await using var cancelJobs = new NpgsqlCommand("UPDATE jobs SET status='CANCELLED',stage='CANCELLED',error_message='deleted_by_user',error_code='CANCELLED_BY_USER',worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE meeting_id=@meeting AND status NOT IN ('READY','FAILED','CANCELLED')", connection, transaction);
+        cancelJobs.Parameters.AddWithValue("meeting", meetingId);
+        var cancelledJobs = await cancelJobs.ExecuteNonQueryAsync();
+
+        foreach (var sql in new[]
+        {
+            "DELETE FROM outbox_messages WHERE payload->>'meeting_id'=CAST(@meeting AS text)",
+            "DELETE FROM inbox_messages WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)",
+            "DELETE FROM action_items WHERE meeting_id=@meeting",
+            "DELETE FROM decisions WHERE meeting_id=@meeting",
+            "DELETE FROM summary_evidence WHERE summary_id IN (SELECT id FROM summaries WHERE meeting_id=@meeting)",
+            "DELETE FROM summary_runs WHERE summary_id IN (SELECT id FROM summaries WHERE meeting_id=@meeting)",
+            "DELETE FROM summaries WHERE meeting_id=@meeting",
+            "DELETE FROM assistant_queries WHERE meeting_id=@meeting",
+            "DELETE FROM audit_events WHERE meeting_id=@meeting",
+            "DELETE FROM transcript_segments WHERE transcript_id IN (SELECT id FROM transcripts WHERE meeting_id=@meeting)",
+            "DELETE FROM meeting_speakers WHERE meeting_id=@meeting",
+            "DELETE FROM transcripts WHERE meeting_id=@meeting",
+            "DELETE FROM recording_events WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_chunks WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_tracks WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_sessions WHERE meeting_id=@meeting",
+            "DELETE FROM job_attempts WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)",
+            "DELETE FROM jobs WHERE meeting_id=@meeting",
+            "UPDATE media_assets SET duplicate_of=NULL WHERE meeting_id<>@meeting AND duplicate_of IN (SELECT id FROM media_assets WHERE meeting_id=@meeting)",
+            "DELETE FROM media_assets WHERE meeting_id=@meeting",
+            "DELETE FROM meetings WHERE id=@meeting",
+        })
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.Parameters.AddWithValue("meeting", meetingId);
+            await command.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        return new MeetingDeletionResult(meetingId, cancelledJobs, keysToDelete, agentSessions);
+    }
+
+    private static async Task<IReadOnlyList<AgentSessionCancellationTarget>> GetAgentSessionCancellationTargetsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid meetingId)
+    {
+        var result = new List<AgentSessionCancellationTarget>();
+        await using var command = new NpgsqlCommand(
+            "SELECT agent_id,id FROM recording_sessions WHERE meeting_id=@meeting AND agent_id IS NOT NULL", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AgentSessionCancellationTarget(reader.GetGuid(0), reader.GetGuid(1)));
         return result;
     }
 

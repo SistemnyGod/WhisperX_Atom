@@ -18,6 +18,7 @@ public sealed record DesktopMeeting(string Id, string Title, string? Description
     [JsonIgnore]
     public string CreatedAtText => CreatedAt.LocalDateTime.ToString("dd.MM.yyyy HH:mm");
 }
+public sealed record DesktopMeetingCancellation(string MeetingId, string Status, int CancelledJobs);
 public sealed record DesktopCurrentUser(Guid Id, string Username, string Role)
 {
     public bool IsPrivileged => string.Equals(Role, "Administrator", StringComparison.OrdinalIgnoreCase)
@@ -379,7 +380,7 @@ public sealed class ServerApiClient : IDisposable
             if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) continue;
             try { latest = JsonSerializer.Deserialize<DesktopJob>(line[5..].Trim(), _json); }
             catch (JsonException) { continue; }
-            if (latest is { Status: "READY" or "FAILED" }) break;
+            if (latest is { Status: "READY" or "FAILED" or "CANCELLED" }) break;
         }
         return latest;
     }
@@ -389,6 +390,19 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/jobs/{jobId}/retry", null, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meetingId}/cancel", new { force = false }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopMeetingCancellation>(_json, cancellationToken);
+    }
+
+    public async Task<bool> DeleteMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Delete, $"api/meetings/{meetingId}?force=false", null, cancellationToken);
+        return response.IsSuccessStatusCode;
     }
     public async Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default)
     {
