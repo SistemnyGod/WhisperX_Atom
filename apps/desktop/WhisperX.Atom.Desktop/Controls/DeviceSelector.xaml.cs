@@ -52,6 +52,19 @@ public sealed partial class DeviceSelector : UserControl
     public static readonly DependencyProperty HelperTextProperty = DependencyProperty.Register(
         nameof(HelperText), typeof(string), typeof(DeviceSelector), new PropertyMetadata(string.Empty));
 
+    /// <summary>
+    /// Keeps the device picker interactive independently of the informational card that contains it.
+    /// Device changes are unsafe only while audio capture itself is active.
+    /// </summary>
+    public bool IsSelectionEnabled
+    {
+        get => (bool)GetValue(IsSelectionEnabledProperty);
+        set => SetValue(IsSelectionEnabledProperty, value);
+    }
+
+    public static readonly DependencyProperty IsSelectionEnabledProperty = DependencyProperty.Register(
+        nameof(IsSelectionEnabled), typeof(bool), typeof(DeviceSelector), new PropertyMetadata(true));
+
     public event SelectionChangedEventHandler SelectionChanged
     {
         add => Selector.SelectionChanged += value;

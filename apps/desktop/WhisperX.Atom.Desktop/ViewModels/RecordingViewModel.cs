@@ -127,7 +127,9 @@ public sealed class RecordingViewModel : ObservableObject
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
     public bool CanStop => State is RecordingState.Recording or RecordingState.Paused;
     public bool CanRetryUpload => State == RecordingState.Error && !string.IsNullOrWhiteSpace(SessionId);
-    public bool CanSelectDevices => State is RecordingState.Idle or RecordingState.Checking or RecordingState.Error;
+    // Local capture has already stopped in Finalizing; encoding and delivery run in the
+    // background and must not prevent configuring the next recording.
+    public bool CanSelectDevices => State is not RecordingState.Recording and not RecordingState.Paused;
 
     public async Task StartPollingAsync()
     {

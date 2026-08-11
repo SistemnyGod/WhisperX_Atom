@@ -107,8 +107,8 @@
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="10">
                             <TextBlock Text="Источники записи" Style="{StaticResource SectionTitleStyle}" />
-                            <controls:DeviceSelector x:Name="MicrophoneSelector" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectDevices}" Label="Микрофон" HelperText="Выбор недоступен во время активной записи." SelectionChanged="MicrophoneCombo_SelectionChanged" />
-                            <controls:DeviceSelector x:Name="SystemAudioSelector" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectDevices}" Label="Системный звук" HelperText="Можно продолжить только с микрофоном, если системный звук недоступен." SelectionChanged="SystemAudioCombo_SelectionChanged" />
+                            <controls:DeviceSelector x:Name="MicrophoneSelector" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Микрофон" HelperText="Выбор недоступен только во время записи или паузы." SelectionChanged="MicrophoneCombo_SelectionChanged" />
+                            <controls:DeviceSelector x:Name="SystemAudioSelector" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Системный звук" HelperText="Выберите источник системного звука. Во время записи смена заблокирована." SelectionChanged="SystemAudioCombo_SelectionChanged" />
                         </StackPanel>
                     </Border>
 
