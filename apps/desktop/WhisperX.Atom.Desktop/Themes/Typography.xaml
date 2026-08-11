@@ -8,5 +8,8 @@
     <x:Double x:Key="SectionTitleSize">18</x:Double>
     <x:Double x:Key="BodyTextSize">14</x:Double>
     <x:Double x:Key="CaptionTextSize">12</x:Double>
+    <x:Double x:Key="OverlineTextSize">11</x:Double>
+    <x:Double x:Key="TableTextSize">13</x:Double>
+    <x:Double x:Key="ToolbarTextSize">13</x:Double>
     <FontFamily x:Key="AppFontFamily">Segoe UI</FontFamily>
 </ResourceDictionary>

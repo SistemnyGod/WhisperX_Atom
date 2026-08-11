@@ -155,6 +155,24 @@
         <Setter Property="FocusVisualPrimaryThickness" Value="2" />
         <Setter Property="FocusVisualSecondaryThickness" Value="1" />
     </Style>
+    <Style x:Key="GhostButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="MinHeight" Value="36" />
+    </Style>
+    <Style x:Key="ToolbarButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}">
+        <Setter Property="FontSize" Value="{StaticResource ToolbarTextSize}" />
+        <Setter Property="Padding" Value="12,7" />
+        <Setter Property="MinHeight" Value="36" />
+    </Style>
+    <Style x:Key="IconButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+        <Setter Property="Width" Value="36" />
+        <Setter Property="Height" Value="36" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
     <Style x:Key="InputStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
@@ -163,6 +181,11 @@
         <Setter Property="CornerRadius" Value="8" />
         <Setter Property="Padding" Value="12,8" />
         <Setter Property="MinHeight" Value="40" />
+    </Style>
+    <Style x:Key="SearchInputStyle" TargetType="TextBox" BasedOn="{StaticResource InputStyle}">
+        <Setter Property="FontSize" Value="{StaticResource BodyTextSize}" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Padding" Value="12,6" />
     </Style>
     <Style x:Key="PasswordInputStyle" TargetType="PasswordBox">
         <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
@@ -213,6 +236,22 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="12" />
         <Setter Property="Padding" Value="20" />
+    </Style>
+    <Style x:Key="InspectorPanelStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
+        <Setter Property="Padding" Value="18" />
+        <Setter Property="MinWidth" Value="{StaticResource InspectorWidth}" />
+    </Style>
+    <Style x:Key="TableHeaderStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource CaptionTextSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+    <Style x:Key="TableCellStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TableTextSize}" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
     <Style x:Key="StatusBadgeStyle" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SurfaceBlueBrush}" />

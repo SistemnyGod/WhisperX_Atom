@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="WhisperX_Atom_Desktop.Controls.DeviceSelector"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Spacing="5">
+        <TextBlock Text="{x:Bind Label, Mode=OneWay}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+        <ComboBox x:Name="Selector" ItemsSource="{x:Bind ItemsSource, Mode=OneWay}" SelectedItem="{x:Bind SelectedItem, Mode=TwoWay}" DisplayMemberPath="{x:Bind DisplayMemberPath, Mode=OneWay}" Style="{StaticResource FormComboBoxStyle}" />
+        <TextBlock Text="{x:Bind HelperText, Mode=OneWay}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+    </StackPanel>
+</UserControl>

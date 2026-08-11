@@ -8,6 +8,12 @@
     <x:Double x:Key="PageGap">16</x:Double>
     <x:Double x:Key="CardGap">12</x:Double>
     <x:Double x:Key="ControlGap">8</x:Double>
+    <x:Double x:Key="SectionGap">20</x:Double>
+    <x:Double x:Key="TableRowHeight">46</x:Double>
+    <x:Double x:Key="CompactControlHeight">36</x:Double>
+    <x:Double x:Key="DefaultControlHeight">40</x:Double>
+    <x:Double x:Key="LargeControlHeight">44</x:Double>
+    <x:Double x:Key="InspectorWidth">320</x:Double>
     <x:Double x:Key="CompactBreakpoint">920</x:Double>
     <x:Double x:Key="WideBreakpoint">1200</x:Double>
 </ResourceDictionary>
