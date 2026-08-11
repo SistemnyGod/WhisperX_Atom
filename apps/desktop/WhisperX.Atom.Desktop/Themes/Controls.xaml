@@ -275,4 +275,10 @@
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
     </Style>
+    <Style x:Key="NavigationHeaderStyle" TargetType="NavigationViewItemHeader">
+        <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+        <Setter Property="FontSize" Value="{StaticResource OverlineTextSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Margin" Value="12,14,0,4" />
+    </Style>
 </ResourceDictionary>

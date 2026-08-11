@@ -42,6 +42,9 @@
             x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Auto"
+            OpenPaneLength="232"
+            CompactPaneLength="48"
+            SelectionFollowsFocus="Enabled"
             Background="{StaticResource PageBackgroundBrush}"
             IsBackButtonVisible="Collapsed"
             IsPaneToggleButtonVisible="False"
@@ -52,69 +55,95 @@
                     Content="Главная"
                     IsSelected="True"
                     Tag="home">
+                    <ToolTipService.ToolTip>Рабочий стол</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Главная</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE80F;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItemHeader Content="РАБОТА" />
+                <NavigationViewItemHeader Content="РАБОТА" Style="{StaticResource NavigationHeaderStyle}" />
                 <NavigationViewItem x:Name="RecordingNavItem" Content="Запись" Tag="recording">
+                    <ToolTipService.ToolTip>Начать и управлять записью</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Запись</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE720;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="MeetingsNavItem" Content="Совещания" Tag="meetings">
+                    <ToolTipService.ToolTip>Журнал и результаты совещаний</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Совещания</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE787;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="SeriesNavItem" Content="Серии оперативок" Tag="series">
+                    <ToolTipService.ToolTip>Повторяющиеся оперативки</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Серии оперативок</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE8A5;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="TranscriptsNavItem" Content="Стенограммы" Tag="transcripts">
+                    <ToolTipService.ToolTip>Реестр стенограмм</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Стенограммы</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE8A1;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="SpeakersNavItem" Content="Спикеры" Tag="speakers">
+                    <ToolTipService.ToolTip>Голосовые профили и спикеры</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Спикеры</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE716;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="SummariesNavItem" Content="Саммари" Tag="summaries">
+                    <ToolTipService.ToolTip>Итоги и доказательства</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Саммари</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE8A5;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="TasksNavItem" Content="Задачи" Tag="tasks">
+                    <ToolTipService.ToolTip>Поручения и статусы</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Задачи</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE73E;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItemHeader Content="АНАЛИЗ" />
+                <NavigationViewItemHeader Content="АНАЛИЗ" Style="{StaticResource NavigationHeaderStyle}" />
                 <NavigationViewItem x:Name="SearchNavItem" Content="Поиск" Tag="search">
+                    <ToolTipService.ToolTip>Поиск по рабочим данным</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Поиск</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE721;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="AnalyticsNavItem" Content="Аналитика" Tag="analytics">
+                    <ToolTipService.ToolTip>Показатели обработки</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Аналитика</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE9D2;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItemHeader Content="СИСТЕМА" />
+                <NavigationViewItemHeader Content="СИСТЕМА" Style="{StaticResource NavigationHeaderStyle}" />
                 <NavigationViewItem x:Name="AgentsNavItem" Content="Агенты" Tag="agents">
+                    <ToolTipService.ToolTip>Состояние Recorder Agent</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Агенты</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE716;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="AdministrationNavItem" Content="Администрирование" Tag="administration">
+                    <ToolTipService.ToolTip>Пользователи и политики</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Администрирование</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE7EF;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="SettingsNavItem" Content="Настройки" Tag="settings">
+                    <ToolTipService.ToolTip>Подключение и локальный архив</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Настройки</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE713;" />
                     </NavigationViewItem.Icon>
@@ -129,7 +158,6 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Text="WhisperX Atom Desktop" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1" Text="Локальная обработка" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
         </Grid>
     </Grid>
 </Window>
