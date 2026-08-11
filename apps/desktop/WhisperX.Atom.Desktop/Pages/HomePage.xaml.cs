@@ -53,14 +53,16 @@ public sealed partial class HomePage : Page
     private void UpdateEmptyState()
     {
         if (ViewModel is null) return;
-        MeetingsEmptyState.Visibility = ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
-        MeetingsList.Visibility = ViewModel.HasMeetings ? Visibility.Visible : Visibility.Collapsed;
+        HomeLoadingState.Visibility = ViewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
+        MeetingsEmptyState.Visibility = ViewModel.IsLoading || ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
+        MeetingsList.Visibility = ViewModel.IsLoading || !ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
         RefreshButton.IsEnabled = !ViewModel.IsLoading;
         var statusBrush = (Brush)Application.Current.Resources[ViewModel.AgentAvailable ? "SuccessBrush" : "NeutralStatusBrush"];
         AgentIndicator.Fill = statusBrush;
         AgentRailIndicator.Fill = statusBrush;
         UpdateRecordingBadge();
-        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText);
+        OfflineInfoBar.IsOpen = !ViewModel.IsLoading && !ViewModel.ApiAvailable;
+        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText) && ViewModel.ApiAvailable;
         ErrorInfoBar.Message = ViewModel.ErrorText;
     }
 

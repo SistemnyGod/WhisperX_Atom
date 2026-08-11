@@ -3,18 +3,17 @@
     x:Class="WhisperX_Atom_Desktop.Pages.HomePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <Grid ColumnDefinitions="*,Auto">
-                <StackPanel>
-                    <TextBlock Text="Главная" Style="{StaticResource PageTitleStyle}" />
-                    <TextBlock Text="Операционный центр записи и локального архива" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
-                </StackPanel>
-                <Button x:Name="RefreshButton" Grid.Column="1" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
-            </Grid>
+            <controls:PageHeader Title="Главная" Subtitle="Операционный центр записи и локального архива">
+                <controls:PageHeader.Actions>
+                    <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" />
+                </controls:PageHeader.Actions>
+            </controls:PageHeader>
 
             <Grid x:Name="HomeContentGrid" ColumnDefinitions="*,320" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
                 <StackPanel x:Name="HomeMainColumn" Spacing="{StaticResource PageGap}">
@@ -104,20 +103,24 @@
                                 <Button Grid.Column="1" Content="Открыть совещания →" Style="{StaticResource CardButtonStyle}" Click="OpenMeetingsButton_Click" />
                             </Grid>
                             <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="100,*,110">
-                                <TextBlock Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                                <TextBlock Grid.Column="1" Text="Название" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                                <TextBlock Grid.Column="2" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
+                                <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
+                                <TextBlock Grid.Column="2" Text="Статус" Style="{StaticResource TableHeaderStyle}" />
                             </Grid>
+                            <StackPanel x:Name="HomeLoadingState" Visibility="Collapsed" HorizontalAlignment="Center" Spacing="7" Padding="20,24">
+                                <ProgressRing IsActive="True" Width="24" Height="24" HorizontalAlignment="Center" />
+                                <TextBlock Text="Загрузка совещаний…" Foreground="{StaticResource MutedTextBrush}" />
+                            </StackPanel>
                             <ListView x:Name="MeetingsList" ItemsSource="{Binding RecentMeetings}" BorderThickness="0" SelectionMode="None" MinHeight="120" MaxHeight="310">
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
-                                        <Grid Padding="20,12" ColumnDefinitions="100,*,110">
-                                            <TextBlock Text="{Binding CreatedAt}" Foreground="{StaticResource MutedTextBrush}" />
+                                        <Grid Padding="20,10" MinHeight="46" ColumnDefinitions="100,*,130">
+                                            <TextBlock Text="{Binding CreatedAtText}" Style="{StaticResource TableCellStyle}" Foreground="{StaticResource MutedTextBrush}" />
                                             <StackPanel Grid.Column="1" Spacing="2">
-                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Title}" />
                                                 <TextBlock Text="{Binding Description}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextTrimming="CharacterEllipsis" />
                                             </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
+                                            <controls:StatusBadge Grid.Column="2" Text="{Binding StatusText}" Status="{Binding Status}" VerticalAlignment="Center" />
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
@@ -131,6 +134,7 @@
                         </StackPanel>
                     </Border>
 
+                    <InfoBar x:Name="OfflineInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" Message="API недоступен. Локальная запись продолжает работать." />
                     <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
                 </StackPanel>
 

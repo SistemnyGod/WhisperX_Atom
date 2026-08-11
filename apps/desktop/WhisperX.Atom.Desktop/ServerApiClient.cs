@@ -6,10 +6,18 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX.Atom.Desktop;
 
-public sealed record DesktopMeeting(string Id, string Title, string? Description, string Status, DateTimeOffset CreatedAt);
+public sealed record DesktopMeeting(string Id, string Title, string? Description, string Status, DateTimeOffset CreatedAt)
+{
+    [JsonIgnore]
+    public string StatusText => UiStatusMapper.Text(Status);
+
+    [JsonIgnore]
+    public string CreatedAtText => CreatedAt.LocalDateTime.ToString("dd.MM.yyyy HH:mm");
+}
 public sealed record DesktopCurrentUser(Guid Id, string Username, string Role)
 {
     public bool IsPrivileged => string.Equals(Role, "Administrator", StringComparison.OrdinalIgnoreCase)
