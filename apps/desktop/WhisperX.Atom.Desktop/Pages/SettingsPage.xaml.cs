@@ -49,11 +49,17 @@ public sealed partial class SettingsPage : Page
         catch (Exception ex) { ShowError(ex.Message); }
     }
 
-    private async void RegisterAgentButton_Click(object sender, RoutedEventArgs e)
+    private async void ReconnectAgentButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        await ViewModel.RegisterAgentAsync(EnrollmentSecretBox.Password);
-        EnrollmentSecretBox.Password = string.Empty;
+        await ViewModel.ReconnectAgentAsync();
+        UpdateStatus();
+    }
+
+    private async void LogoutButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.LogoutAsync();
         UpdateStatus();
     }
 

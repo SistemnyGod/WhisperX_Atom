@@ -5,7 +5,7 @@ namespace WhisperX.Atom.Recorder;
 public static class AgentIpcProtocol
 {
     public const string PipeName = "WhisperXAtomAgent";
-    public const int Version = 3;
+    public const int Version = 5;
 }
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload);
@@ -18,7 +18,9 @@ public sealed record AgentIpcResponse(
     AgentIpcHealth? Health,
     Guid? MeetingId = null,
     long? MediaTimeMs = null,
-    int ProtocolVersion = AgentIpcProtocol.Version);
+    int ProtocolVersion = AgentIpcProtocol.Version,
+    AgentPreflightResult? Preflight = null,
+    RecordingSessionStatus? SessionStatus = null);
 
 public sealed record AgentIpcHealth(
     bool Microphone,
@@ -42,10 +44,39 @@ public sealed record AgentIpcHealth(
     double? MicrophonePeak = null,
     double? SystemAudioPeak = null,
     double? MicrophoneDb = null,
-    double? SystemAudioDb = null);
+    double? SystemAudioDb = null,
+    Guid? InstallationId = null,
+    Guid? AgentId = null,
+    string ServerConnectionState = "UNKNOWN",
+    DateTimeOffset? LastHeartbeatAtUtc = null,
+    string? LastServerError = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
     string Name,
     bool IsDefault,
     string State = "Active");
+
+public sealed record AgentPreflightResult(
+    bool Ready,
+    bool Microphone,
+    bool SystemAudio,
+    bool Ffmpeg,
+    bool Spool,
+    bool Archive,
+    long FreeBytes,
+    long MinimumFreeBytes,
+    string BackendConnectionState,
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<string> Errors);
+
+public sealed record RecordingSessionStatus(
+    string SessionId,
+    Guid? MeetingId,
+    string CaptureState,
+    string DeliveryState,
+    int LocalChunkCount,
+    int ConfirmedChunkCount,
+    int PendingChunkCount,
+    string? Error,
+    Guid? ServerSessionId = null);

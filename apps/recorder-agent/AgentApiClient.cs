@@ -14,7 +14,13 @@ public sealed class AgentApiClient : IDisposable
     private readonly HttpClient _http = new();
     private Uri _baseUri;
     private Guid _agentId;
+    private Guid _installationId;
     private string _token;
+    private string _serverConnectionState = "NOT_CONFIGURED";
+    private DateTimeOffset? _lastHeartbeatAtUtc;
+    private string? _lastServerError;
+    private int _heartbeatFailures;
+    private DateTimeOffset _nextHeartbeatAtUtc = DateTimeOffset.UtcNow;
     private readonly string _configPath;
     private readonly object _configurationGate = new();
     private readonly AgentStorageSettings _storage;
@@ -37,10 +43,19 @@ public sealed class AgentApiClient : IDisposable
         var baseUrl = (Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL") ?? config?.ServerUrl ?? "http://localhost:8080").TrimEnd('/') + "/";
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
+        Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_INSTALLATION_ID") ?? config?.InstallationId.ToString(), out _installationId);
+        if (_installationId == Guid.Empty) _installationId = Guid.NewGuid();
         _token = Environment.GetEnvironmentVariable("ATOM_AGENT_TOKEN") ?? config?.Token ?? string.Empty;
+        _serverConnectionState = IsConfigured ? "UNKNOWN" : "NOT_CONFIGURED";
     }
 
     public bool IsConfigured => _agentId != Guid.Empty && !string.IsNullOrWhiteSpace(_token);
+    public Guid InstallationId => _installationId;
+    public Guid? AgentId => _agentId == Guid.Empty ? null : _agentId;
+    public string ServerConnectionState => _serverConnectionState;
+    public DateTimeOffset? LastHeartbeatAtUtc => _lastHeartbeatAtUtc;
+    public string? LastServerError => _lastServerError;
+    public DateTimeOffset NextHeartbeatAtUtc => _nextHeartbeatAtUtc;
 
     public async Task ConfigureAsync(string serverUrl, Guid agentId, string token, CancellationToken cancellationToken = default)
     {
@@ -51,11 +66,15 @@ public sealed class AgentApiClient : IDisposable
             _baseUri = uri;
             _agentId = agentId;
             _token = token;
+            _serverConnectionState = "UNKNOWN";
+            _lastServerError = null;
+            _nextHeartbeatAtUtc = DateTimeOffset.UtcNow;
         }
         var directory = Path.GetDirectoryName(_configPath)!;
         Directory.CreateDirectory(directory);
         var temporary = _configPath + ".part";
         await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true,
+            _installationId,
             _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId), cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -70,6 +89,7 @@ public sealed class AgentApiClient : IDisposable
             _agentId.ToString(),
             ProtectToken(_token),
             true,
+            _installationId,
             normalized,
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId);
@@ -87,6 +107,7 @@ public sealed class AgentApiClient : IDisposable
             _agentId.ToString(),
             ProtectToken(_token),
             true,
+            _installationId,
             _storage.ArchiveRoot,
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId);
@@ -117,7 +138,11 @@ public sealed class AgentApiClient : IDisposable
 
     public async Task<bool> HeartbeatAsync(DeviceHealthSnapshot health, CancellationToken cancellationToken)
     {
-        if (!IsConfigured) return false;
+        if (!IsConfigured)
+        {
+            _serverConnectionState = "NOT_CONFIGURED";
+            return false;
+        }
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/agents/{_agentId}/heartbeat"));
         AddAuthentication(request);
         var version = Environment.GetEnvironmentVariable("ATOM_AGENT_VERSION") ?? "0.1.0";
@@ -134,8 +159,39 @@ public sealed class AgentApiClient : IDisposable
                 deviceHealth = health
             }
         });
-        using var response = await _http.SendAsync(request, cancellationToken);
-        return response.IsSuccessStatusCode;
+        try
+        {
+            using var response = await _http.SendAsync(request, cancellationToken);
+            if (response.IsSuccessStatusCode)
+            {
+                _serverConnectionState = "CONNECTED";
+                _lastHeartbeatAtUtc = DateTimeOffset.UtcNow;
+                _lastServerError = null;
+                _heartbeatFailures = 0;
+                _nextHeartbeatAtUtc = DateTimeOffset.UtcNow.AddSeconds(30);
+                return true;
+            }
+
+            _lastServerError = response.StatusCode == HttpStatusCode.Unauthorized ? "agent_authentication_required" : $"http_{(int)response.StatusCode}";
+            _serverConnectionState = response.StatusCode == HttpStatusCode.Unauthorized ? "AUTH_REJECTED" : "SERVER_ERROR";
+            ScheduleHeartbeatRetry();
+            return false;
+        }
+        catch (HttpRequestException ex)
+        {
+            _lastServerError = ex.GetType().Name;
+            _serverConnectionState = "SERVER_UNAVAILABLE";
+            ScheduleHeartbeatRetry();
+            return false;
+        }
+    }
+
+    private void ScheduleHeartbeatRetry()
+    {
+        _heartbeatFailures = Math.Min(_heartbeatFailures + 1, 8);
+        var baseSeconds = Math.Min(300, 30 * Math.Pow(2, _heartbeatFailures - 1));
+        var jitter = Random.Shared.NextDouble() * Math.Max(1, baseSeconds * 0.2);
+        _nextHeartbeatAtUtc = DateTimeOffset.UtcNow.AddSeconds(baseSeconds + jitter);
     }
     public async Task<bool> CompleteCommandAsync(Guid commandId, string status, object result, CancellationToken cancellationToken)
     {
@@ -388,6 +444,7 @@ public sealed class AgentApiClient : IDisposable
         string AgentId,
         string Token,
         bool Encrypted = false,
+        Guid InstallationId = default,
         string? ArchiveRoot = null,
         string? MicrophoneDeviceId = null,
         string? SystemAudioDeviceId = null);

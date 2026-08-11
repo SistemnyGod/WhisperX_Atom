@@ -10,7 +10,8 @@ public sealed record DesktopSettings(
     string? ProtectedSessionCookie,
     string? ArchiveRoot = null,
     string? MicrophoneDeviceId = null,
-    string? SystemAudioDeviceId = null)
+    string? SystemAudioDeviceId = null,
+    DateTimeOffset? SessionExpiresAtUtc = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
@@ -30,7 +31,7 @@ public sealed record DesktopSettings(
         catch (JsonException) { return new("http://localhost:8080", "admin", null, DefaultArchiveRoot()); }
     }
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -38,7 +39,8 @@ public sealed record DesktopSettings(
             string.IsNullOrWhiteSpace(sessionCookie) ? null : Protect(sessionCookie),
             string.IsNullOrWhiteSpace(archiveRoot) ? DefaultArchiveRoot() : Path.GetFullPath(archiveRoot.Trim()),
             NormalizeDeviceId(microphoneDeviceId),
-            NormalizeDeviceId(systemAudioDeviceId));
+            NormalizeDeviceId(systemAudioDeviceId),
+            sessionExpiresAtUtc);
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);

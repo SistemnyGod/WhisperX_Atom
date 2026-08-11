@@ -25,6 +25,8 @@ public sealed record RecordingSnapshot(
 public interface IRecorderService
 {
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
@@ -41,6 +43,8 @@ public interface IBackendService : IDisposable
     string ApiUrl { get; }
     bool HasSession { get; }
     string? SessionCookie { get; }
+    DesktopAuthState AuthState { get; }
+    DateTimeOffset? SessionExpiresAtUtc { get; }
     void ApplySettings(DesktopSettings settings);
     Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);
@@ -51,10 +55,15 @@ public interface IBackendService : IDisposable
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
+    Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
+    Task<bool> EnsureAuthenticatedAsync(CancellationToken cancellationToken = default);
+    Task LogoutAsync(CancellationToken cancellationToken = default);
+    Task<DesktopAgentEnrollment> LinkLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopSpeaker>> GetSpeakersAsync(Guid meetingId, CancellationToken cancellationToken = default);
@@ -88,6 +97,24 @@ public interface ISettingsStore
 {
     DesktopSettings Load();
     void Save(DesktopSettings settings);
+}
+
+public static class AgentStatusFormatter
+{
+    public static string Format(AgentIpcResponse response)
+    {
+        if (!response.Ok) return "Recorder Agent: локальный сервис сообщил об ошибке";
+        if (response.Health is null) return "Recorder Agent: локальный сервис недоступен";
+        return response.Health.ServerConnectionState switch
+        {
+            "CONNECTED" => "Recorder Agent подключён к серверу",
+            "AUTH_REJECTED" => "Recorder Agent: сервер отклонил токен, выполняется восстановление",
+            "SERVER_UNAVAILABLE" => "Recorder Agent: сервер недоступен, запись сохраняется локально",
+            "NOT_CONFIGURED" => "Recorder Agent не настроен",
+            "SERVER_ERROR" => "Recorder Agent: ошибка сервера, повторная попытка позже",
+            _ => "Recorder Agent: проверка подключения"
+        };
+    }
 }
 
 public sealed record AudioDeviceOption(string Id, string Name, bool IsDefault, string State)

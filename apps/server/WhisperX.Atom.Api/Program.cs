@@ -50,6 +50,42 @@ var db = app.Services.GetRequiredService<Database>();
 var unified = app.Services.GetRequiredService<UnifiedProductStore>();
 await db.InitializeAsync();
 
+async Task IssueAuthCookiesAsync(HttpContext http, IConfiguration configuration, UserRow user)
+{
+    var accessToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+    await db.CreateSessionAsync(user.Id, accessToken);
+    await db.CreateRefreshSessionAsync(user.Id, refreshToken, Guid.NewGuid());
+    AppendAuthCookies(http, configuration, accessToken, refreshToken);
+}
+
+void AppendAuthCookies(HttpContext http, IConfiguration configuration, string accessToken, string refreshToken)
+{
+    var secure = !string.Equals(configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase);
+    http.Response.Cookies.Append("wa_session", accessToken, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = secure,
+        SameSite = SameSiteMode.Lax,
+        IsEssential = true,
+        MaxAge = TimeSpan.FromHours(12),
+    });
+    http.Response.Cookies.Append("wa_refresh", refreshToken, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = secure,
+        SameSite = SameSiteMode.Lax,
+        IsEssential = true,
+        MaxAge = TimeSpan.FromDays(30),
+    });
+}
+
+void DeleteAuthCookies(HttpContext http)
+{
+    http.Response.Cookies.Delete("wa_session");
+    http.Response.Cookies.Delete("wa_refresh");
+}
+
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api/v1/agents/enroll"))
@@ -104,6 +140,8 @@ app.Use(async (context, next) =>
     if (context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
         context.Request.Path.StartsWithSegments("/api/auth/login") ||
+        context.Request.Path.StartsWithSegments("/api/auth/refresh") ||
+        context.Request.Path.StartsWithSegments("/api/auth/logout") ||
         context.Request.Path.StartsWithSegments("/api/uploads/complete") ||
         context.Request.Path.StartsWithSegments("/api/internal/tusd/hooks") ||
         context.Request.Path.StartsWithSegments("/api/internal/imports"))
@@ -185,24 +223,37 @@ app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IC
     if (user is null || !PasswordService.Verify(request.Password, user.PasswordHash))
         return Results.Unauthorized();
 
-    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-    await db.CreateSessionAsync(user.Id, token);
-    http.Response.Cookies.Append("wa_session", token, new CookieOptions
-    {
-        HttpOnly = true,
-        Secure = !string.Equals(configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase),
-        SameSite = SameSiteMode.Lax,
-        IsEssential = true,
-        MaxAge = TimeSpan.FromHours(12),
-    });
+    await IssueAuthCookiesAsync(http, configuration, user);
     return Results.Ok(new { user = new { id = user.Id, username = user.Username, role = user.Role } });
+});
+
+app.MapPost("/api/auth/refresh", async (HttpContext http, IConfiguration configuration) =>
+{
+    if (!http.Request.Cookies.TryGetValue("wa_refresh", out var currentRefresh) || string.IsNullOrWhiteSpace(currentRefresh))
+        return Results.Unauthorized();
+
+    var accessToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+    var rotated = await db.RotateRefreshSessionAsync(currentRefresh, refreshToken);
+    if (rotated is null)
+    {
+        DeleteAuthCookies(http);
+        return Results.Unauthorized();
+    }
+
+    await db.CreateSessionAsync(rotated.User.Id, accessToken);
+    AppendAuthCookies(http, configuration, accessToken, refreshToken);
+    return Results.Ok(new { user = new { id = rotated.User.Id, username = rotated.User.Username, role = rotated.User.Role } });
 });
 
 app.MapPost("/api/auth/logout", async (HttpContext http) =>
 {
     if (http.Request.Cookies.TryGetValue("wa_session", out var token))
         await db.RevokeSessionAsync(token);
+    if (http.Request.Cookies.TryGetValue("wa_refresh", out var refreshToken))
+        await db.RevokeRefreshSessionAsync(refreshToken);
     http.Response.Cookies.Delete("wa_session");
+    http.Response.Cookies.Delete("wa_refresh");
     return Results.Ok(new { ok = true });
 });
 
@@ -344,6 +395,9 @@ static Guid? CurrentUserId(HttpContext context) => context.Items.TryGetValue("us
 static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
     (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase));
 
+static bool IsAdministrator(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
+    string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase);
+
 async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
 {
     if (IsPrivileged(context) || context.Items.ContainsKey("voice_host")) return true;
@@ -436,6 +490,24 @@ app.MapPost("/api/v1/agents/{agentId:guid}/commands/{commandId:guid}/result", as
 });
 
 app.MapGet("/api/agents", async (UnifiedProductStore store) => Results.Ok(await store.ListAgentsAsync()));
+
+app.MapPost("/api/agents/link-local", async (AgentLinkLocalRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    if (request.InstallationId == Guid.Empty) return Results.BadRequest(new { error = "installation_id_required" });
+    if (string.IsNullOrWhiteSpace(request.Name)) return Results.BadRequest(new { error = "agent_name_required" });
+
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var agent = await store.LinkLocalAgentAsync(
+        request.InstallationId,
+        request.AgentId,
+        request.Name,
+        request.RoomId,
+        token,
+        request.Version ?? "0.1.0",
+        request.Capabilities ?? JsonDocument.Parse("{}"));
+    return Results.Ok(new { agentId = agent.Id, agent, token });
+});
 
 app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -693,6 +765,7 @@ app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
 app.Run();
 
 public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
+public record AgentLinkLocalRequest(Guid InstallationId, Guid? AgentId, string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
 public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt);
@@ -721,10 +794,11 @@ public record SpeakerRenameRequest(string DisplayName);
 public record SpeakerMergeRequest(Guid SourceSpeakerId, Guid TargetSpeakerId);
 
 public sealed record UserRow(Guid Id, string Username, string PasswordHash, string Role);
+public sealed record RefreshRotation(UserRow User, string RefreshToken);
 public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
 public sealed record JobRow(Guid Id, Guid MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
 public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
-public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments);
+public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null);
 
 public static class StorageHelpers
 {
@@ -859,7 +933,7 @@ public sealed class Database(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT u.id, u.username, u.password_hash, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=@hash AND s.expires_at > now() AND s.revoked_at IS NULL", connection);
+            "SELECT u.id, u.username, u.password_hash, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=@hash AND s.expires_at > now() AND s.revoked_at IS NULL AND u.is_active", connection);
         command.Parameters.AddWithValue("hash", SessionHash(token));
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null :
@@ -875,6 +949,87 @@ public sealed class Database(IConfiguration configuration)
             "INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(@id,@uid,@hash,now()+interval '12 hours')", connection);
         command.Parameters.AddWithValue("id", Guid.NewGuid());
         command.Parameters.AddWithValue("uid", userId);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task CreateRefreshSessionAsync(Guid userId, string token, Guid familyId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO refresh_sessions(id,user_id,family_id,token_hash,expires_at) VALUES(@id,@uid,@family,@hash,now()+interval '30 days')", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("uid", userId);
+        command.Parameters.AddWithValue("family", familyId);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<RefreshRotation?> RotateRefreshSessionAsync(string token, string replacementToken)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var select = new NpgsqlCommand(
+            "SELECT r.id,r.user_id,r.family_id,r.expires_at,r.revoked_at,r.replaced_by,u.id,u.username,u.password_hash,u.role FROM refresh_sessions r JOIN users u ON u.id=r.user_id WHERE r.token_hash=@hash FOR UPDATE", connection, transaction);
+        select.Parameters.AddWithValue("hash", SessionHash(token));
+        await using var reader = await select.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        var id = reader.GetGuid(0);
+        var user = new UserRow(reader.GetGuid(6), reader.GetString(7), reader.GetString(8), reader.GetString(9));
+        var familyId = reader.GetGuid(2);
+        var expired = reader.GetDateTime(3) <= DateTime.UtcNow;
+        var revoked = !reader.IsDBNull(4);
+        var replaced = !reader.IsDBNull(5);
+        await reader.CloseAsync();
+
+        if (expired || !await UserIsActiveAsync(user.Id, connection, transaction))
+        {
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        if (revoked || replaced)
+        {
+            await using var revokeFamily = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE family_id=@family AND revoked_at IS NULL", connection, transaction);
+            revokeFamily.Parameters.AddWithValue("family", familyId);
+            await revokeFamily.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        var replacementId = Guid.NewGuid();
+        await using var insert = new NpgsqlCommand(
+            "INSERT INTO refresh_sessions(id,user_id,family_id,token_hash,expires_at) VALUES(@id,@uid,@family,@hash,now()+interval '30 days')", connection, transaction);
+        insert.Parameters.AddWithValue("id", replacementId);
+        insert.Parameters.AddWithValue("uid", user.Id);
+        insert.Parameters.AddWithValue("family", familyId);
+        insert.Parameters.AddWithValue("hash", SessionHash(replacementToken));
+        await insert.ExecuteNonQueryAsync();
+
+        await using var replace = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now(),last_used_at=now(),replaced_by=@replacement WHERE id=@id", connection, transaction);
+        replace.Parameters.AddWithValue("replacement", replacementId);
+        replace.Parameters.AddWithValue("id", id);
+        await replace.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return new RefreshRotation(user, replacementToken);
+    }
+
+    private static async Task<bool> UserIsActiveAsync(Guid userId, NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        await using var command = new NpgsqlCommand("SELECT is_active FROM users WHERE id=@id", connection, transaction);
+        command.Parameters.AddWithValue("id", userId);
+        return (bool?)await command.ExecuteScalarAsync() == true;
+    }
+
+    public async Task RevokeRefreshSessionAsync(string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE token_hash=@hash", connection);
         command.Parameters.AddWithValue("hash", SessionHash(token));
         await command.ExecuteNonQueryAsync();
     }
@@ -1152,19 +1307,23 @@ public sealed class Database(IConfiguration configuration)
         var segments = new List<TranscriptSegmentRow>();
         Guid transcriptId = Guid.Empty;
         string status = "PENDING";
+        JsonDocument? warnings = null;
+        JsonDocument? quality = null;
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT t.id,t.status,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
+            "SELECT t.id,t.status,t.warnings,t.quality_metadata,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
             transcriptId = reader.GetGuid(0);
             status = reader.GetString(1);
-            if (!reader.IsDBNull(2))
-                segments.Add(new TranscriptSegmentRow(reader.GetGuid(2), reader.GetInt32(3), reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetDouble(8), reader.IsDBNull(9) ? null : reader.GetFieldValue<JsonDocument>(9), reader.GetString(10), reader.GetBoolean(11)));
+            warnings ??= reader.IsDBNull(2) ? null : reader.GetFieldValue<JsonDocument>(2);
+            quality ??= reader.IsDBNull(3) ? null : reader.GetFieldValue<JsonDocument>(3);
+            if (!reader.IsDBNull(4))
+                segments.Add(new TranscriptSegmentRow(reader.GetGuid(4), reader.GetInt32(5), reader.GetInt64(6), reader.GetInt64(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetDouble(10), reader.IsDBNull(11) ? null : reader.GetFieldValue<JsonDocument>(11), reader.GetString(12), reader.GetBoolean(13)));
         }
-        return new TranscriptRow(transcriptId, meetingId, status, segments);
+        return new TranscriptRow(transcriptId, meetingId, status, segments, string.Equals(status, "PARTIAL_READY", StringComparison.OrdinalIgnoreCase), warnings, quality);
     }
 
     public async Task<bool> RenameSpeakerAsync(Guid meetingId, Guid speakerId, string displayName)

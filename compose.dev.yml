@@ -171,6 +171,8 @@ services:
       GPU_ENFORCE_NO_RESIDENT_LLM: "true"
       LLM_HEALTH_HOST: llama-server
       LLM_HEALTH_PORT: "8080"
+      AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
+      DIARIZATION_MODE: ${DIARIZATION_MODE:-preferred}
       TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
     depends_on:
       nats:

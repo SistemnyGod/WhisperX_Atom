@@ -60,6 +60,12 @@ public sealed class AgentPipeHost(
                     return Status();
                 case "HEALTH":
                     return await StatusAsync(cancellationToken);
+                case "PREFLIGHT":
+                    return await PreflightAsync(cancellationToken);
+                case "GET_SESSION_STATUS":
+                    var statusSessionId = ReadString(request.Payload, "sessionId");
+                    if (string.IsNullOrWhiteSpace(statusSessionId)) return Error("session_required");
+                    return await SessionStatusAsync(statusSessionId, cancellationToken);
                 case "CONFIGURE":
                     var serverUrl = ReadString(request.Payload, "serverUrl");
                     var agentToken = ReadString(request.Payload, "token");
@@ -183,8 +189,14 @@ public sealed class AgentPipeHost(
             var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
             if (serverSessionId is not Guid server)
             {
-                await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "Server session is not bound", cancellationToken);
-                return false;
+                var meetingId = await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
+                var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
+                if (tracks.Count == 0)
+                {
+                    await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_BINDING", "No recording tracks are ready", cancellationToken);
+                    return false;
+                }
+                server = await api.BindSessionAsync(localSessionId, meetingId, await spool.GetTitleAsync(localSessionId, cancellationToken), tracks, spool, cancellationToken);
             }
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (finalized)
@@ -225,7 +237,55 @@ public sealed class AgentPipeHost(
             storage.ArchiveRoot, pendingUploadSessions, health.CaptureDevices, health.RenderDevices,
             storage.MicrophoneDeviceId, storage.SystemAudioDeviceId,
             rawBacklog.Pending, rawBacklog.Writing, rawBacklog.Encoding, rawBacklog.Failed, rawBacklog.Bytes,
-            peaks.MicrophonePeak, peaks.SystemAudioPeak, peaks.MicrophoneDb, peaks.SystemAudioDb), null, recorder.CurrentMediaTimeMs);
+            peaks.MicrophonePeak, peaks.SystemAudioPeak, peaks.MicrophoneDb, peaks.SystemAudioDb,
+            api.InstallationId, api.AgentId, api.ServerConnectionState, api.LastHeartbeatAtUtc, api.LastServerError), null, recorder.CurrentMediaTimeMs);
+    }
+
+    private async Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken)
+    {
+        var health = DeviceHealthSnapshot.Collect(DataRoot(), storage);
+        var warnings = new List<string>();
+        var errors = new List<string>();
+        var ffmpeg = true;
+        var archive = true;
+        var spoolReady = true;
+        try { recorder.ValidatePreflight(); }
+        catch (Exception ex)
+        {
+            ffmpeg = !ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase);
+            archive = !ex.Message.Contains("archive", StringComparison.OrdinalIgnoreCase);
+            errors.Add(ex.Message);
+        }
+        try { _ = await spool.PendingUploadSessionCountAsync(cancellationToken); }
+        catch (Exception ex) { spoolReady = false; errors.Add("spool_unavailable"); logger.LogDebug(ex, "Recorder spool preflight failed."); }
+        if (!health.Microphone && !health.SystemAudio) errors.Add("no_audio_source_available");
+        if (!string.IsNullOrWhiteSpace(health.Error)) warnings.Add(health.Error);
+        if (!api.IsConfigured) warnings.Add("backend_not_configured_recording_can_start_offline");
+        var minimumText = Environment.GetEnvironmentVariable("ATOM_AGENT_MIN_FREE_BYTES");
+        var minimumBytes = long.TryParse(minimumText, out var configured) && configured > 0 ? configured : 512L * 1024 * 1024;
+        var ready = (health.Microphone || health.SystemAudio) && ffmpeg && archive && spoolReady && health.FreeBytes >= minimumBytes;
+        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, null, null, recorder.CurrentMediaTimeMs,
+            AgentIpcProtocol.Version, new AgentPreflightResult(ready, health.Microphone, health.SystemAudio, ffmpeg, spoolReady, archive,
+                health.FreeBytes, minimumBytes, api.ServerConnectionState, warnings, errors));
+    }
+
+    private async Task<AgentIpcResponse> SessionStatusAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken);
+        if (info is null) return Error("session_not_found");
+        var counts = await spool.GetChunkCountsAsync(sessionId, cancellationToken);
+        var serverSessionId = await spool.GetServerSessionIdAsync(sessionId, cancellationToken);
+        var capture = string.Equals(recorder.SessionId, sessionId, StringComparison.Ordinal)
+            ? state.State.ToString().ToUpperInvariant()
+            : (info.State is "FINALIZING" or "FAILED" ? "FINALIZING_LOCAL" : info.State);
+        var delivery = serverSessionId is null
+            ? (api.IsConfigured ? "BINDING" : "WAITING_FOR_API")
+            : counts.Pending > 0 ? "SYNCING"
+            : info.State == "FINALIZED" ? "COMPLETED" : "WAITING_SERVER_ASSEMBLY";
+        var error = _finalizationErrors.TryGetValue(sessionId, out var finalizationError) ? finalizationError : null;
+        return new AgentIpcResponse(true, capture, sessionId, error, null, info.MeetingId, recorder.CurrentMediaTimeMs,
+            AgentIpcProtocol.Version, null, new RecordingSessionStatus(sessionId, info.MeetingId, capture, delivery,
+                counts.Total, counts.Confirmed, counts.Pending, error, serverSessionId));
     }
 
     private (RecorderState State, string? SessionId, string? Error) VisibleStatus()

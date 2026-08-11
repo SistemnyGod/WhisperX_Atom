@@ -10,6 +10,12 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("HEALTH", cancellationToken: cancellationToken);
 
+    public Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default) =>
+        _client.SendAsync("PREFLIGHT", cancellationToken: cancellationToken);
+
+    public Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("GET_SESSION_STATUS", new { sessionId }, cancellationToken);
+
     public Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, CancellationToken cancellationToken = default) =>
         _client.SendAsync("START", new { title, meetingId }, cancellationToken);
 

@@ -61,7 +61,6 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var persistedCursor = await spool.GetCursorAsync(stoppingToken);
         var configuredCursor = long.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_COMMAND_CURSOR"), out var initialCursor) ? initialCursor : 0;
         var cursor = Math.Max(persistedCursor, configuredCursor);
-        var lastHeartbeat = DateTimeOffset.MinValue;
         var lastRecovery = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -82,11 +81,11 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                     recoveryCompleted = await RecoverPendingSessionsAsync(stoppingToken);
                     lastRecovery = DateTimeOffset.UtcNow;
                 }
-                if (DateTimeOffset.UtcNow - lastHeartbeat >= TimeSpan.FromSeconds(30))
+                if (DateTimeOffset.UtcNow >= api.NextHeartbeatAtUtc)
                 {
                     var health = DeviceHealthSnapshot.Collect(Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
                         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent"), storage);
-                    if (await api.HeartbeatAsync(health, stoppingToken)) lastHeartbeat = DateTimeOffset.UtcNow;
+                    await api.HeartbeatAsync(health, stoppingToken);
                     logger.LogDebug("Device health: microphone={Microphone}, captureDevices={CaptureDevices}, systemAudio={SystemAudio}, renderDevices={RenderDevices}, freeBytes={FreeBytes}, error={Error}",
                         health.Microphone, health.CaptureDeviceCount, health.SystemAudio, health.RenderDeviceCount, health.FreeBytes, health.Error);
                 }
@@ -235,13 +234,15 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                 {
                     var meetingId = await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
                     var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
-                    if (meetingId is not Guid meeting || tracks.Count == 0)
+                    if (tracks.Count == 0)
                     {
                         logger.LogInformation("Offline session {SessionId} remains local until a meeting and tracks are available.", localSessionId);
                         completed = false;
                         continue;
                     }
-                    serverSessionId = await api.BindSessionAsync(localSessionId, meeting, await spool.GetTitleAsync(localSessionId, cancellationToken), tracks, spool, cancellationToken);
+                    // BindSessionAsync creates the server meeting when the offline
+                    // session still has meeting_id=NULL and persists the real id.
+                    serverSessionId = await api.BindSessionAsync(localSessionId, meetingId, await spool.GetTitleAsync(localSessionId, cancellationToken), tracks, spool, cancellationToken);
                 }
                 await spool.SetSessionStateAsync(localSessionId, "FINALIZING", cancellationToken);
                 await spool.AddEventAsync(localSessionId, "RECOVERED_AFTER_RESTART", cancellationToken: cancellationToken);

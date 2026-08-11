@@ -33,13 +33,13 @@
                 <Border x:Name="AgentSettingsCard" Grid.Column="1" Style="{StaticResource CardStyle}">
                     <StackPanel Spacing="10">
                         <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="Регистрация нужна один раз после входа в локальный API." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="После входа Agent привязывается автоматически и сохраняет защищённый токен." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                         <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
-                        <TextBlock Text="Enrollment secret" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                        <PasswordBox x:Name="EnrollmentSecretBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Значение из .env" />
-                        <Button Content="Зарегистрировать Agent" Style="{StaticResource PrimaryButtonStyle}" Click="RegisterAgentButton_Click" IsEnabled="{Binding IsLoggedIn}" />
+                        <Button Content="Подключить или восстановить Agent" Style="{StaticResource PrimaryButtonStyle}" Click="ReconnectAgentButton_Click" IsEnabled="{Binding IsLoggedIn}" />
+                        <Button Content="Выйти из API" Style="{StaticResource SecondaryButtonStyle}" Click="LogoutButton_Click" />
                         <TextBlock Text="{Binding LoginStatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Text="{Binding SessionExpiryText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                     </StackPanel>
                 </Border>
             </Grid>

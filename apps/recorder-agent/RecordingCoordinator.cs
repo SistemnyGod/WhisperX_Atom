@@ -93,7 +93,9 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         var sessionId = Guid.NewGuid().ToString("N");
         try
         {
-            await _spool.CreateSessionAsync(sessionId, meetingId ?? Guid.NewGuid(), title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", cancellationToken);
+            // Offline sessions deliberately keep meeting_id NULL. The server meeting is
+            // created later by BindSessionAsync and persisted back into the spool.
+            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", cancellationToken);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
 
             CaptureTrack? microphone = null;
@@ -174,6 +176,12 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         var archiveDrive = new DriveInfo(archiveDriveRoot);
         if (!archiveDrive.IsReady || archiveDrive.AvailableFreeSpace < minimumBytes)
             throw new IOException($"archive_storage_low:{archiveDrive.AvailableFreeSpace}:{minimumBytes}");
+    }
+
+    public void ValidatePreflight()
+    {
+        EnsureStorageAvailable();
+        EnsureFfmpegAvailable();
     }
 
     private static MMDevice? ResolveSelectedDevice(MMDeviceEnumerator enumerator, DataFlow flow, string? deviceId)

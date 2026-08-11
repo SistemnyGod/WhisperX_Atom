@@ -24,6 +24,8 @@ public sealed class RecordingViewModel : ObservableObject
     private string? _systemAudioDeviceId;
     private CancellationTokenSource? _processingCts;
     private Task? _processingTask;
+    private CancellationTokenSource? _sessionCts;
+    private Task? _sessionTask;
     private bool _serverProcessingExpected;
     private bool _hasAudioSource;
     private bool _isProcessing;
@@ -37,6 +39,7 @@ public sealed class RecordingViewModel : ObservableObject
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
     private string _warningMessage = string.Empty;
+    private AgentIpcResponse? _lastAgentResponse;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -91,7 +94,9 @@ public sealed class RecordingViewModel : ObservableObject
     public double SystemAudioLevel => ToLevel(_systemAudioDb);
     public string MicrophoneDbLabel => FormatDb(_microphoneDb);
     public string SystemAudioDbLabel => FormatDb(_systemAudioDb);
-    public string AgentStatus => State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Recorder Agent подключён";
+    public string AgentStatus => _lastAgentResponse is { } response
+        ? AgentStatusFormatter.Format(response)
+        : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
     public string StateTitle => State switch
     {
         RecordingState.Checking => "Проверка устройств",
@@ -120,6 +125,14 @@ public sealed class RecordingViewModel : ObservableObject
 
     public async Task StopPollingAsync()
     {
+        if (_sessionCts is not null)
+        {
+            _sessionCts.Cancel();
+            try { if (_sessionTask is not null) await _sessionTask; } catch (OperationCanceledException) { }
+            _sessionTask = null;
+            _sessionCts.Dispose();
+            _sessionCts = null;
+        }
         if (_pollCts is not null)
         {
             _pollCts.Cancel();
@@ -170,6 +183,18 @@ public sealed class RecordingViewModel : ObservableObject
         {
             await SyncConfigurationAsync();
             await RefreshAsync();
+            var preflight = await _services.Recorder.PreflightAsync();
+            if (!preflight.Ok || preflight.Preflight is null || !preflight.Preflight.Ready)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = preflight.Preflight is { Errors.Count: > 0 }
+                    ? string.Join("; ", preflight.Preflight.Errors)
+                    : preflight.Error ?? "Проверка перед записью не пройдена.";
+                WarningMessage = preflight.Preflight is { Warnings.Count: > 0 }
+                    ? string.Join("; ", preflight.Preflight.Warnings)
+                    : string.Empty;
+                return false;
+            }
             if (!_hasAudioSource)
             {
                 State = RecordingState.Error;
@@ -239,6 +264,8 @@ public sealed class RecordingViewModel : ObservableObject
             ApplyResponse(response);
             if (_serverProcessingExpected && MeetingId is Guid meetingId)
                 await StartProcessingPollingAsync(meetingId);
+            else if (!string.IsNullOrWhiteSpace(SessionId))
+                StartSessionTracking(SessionId);
             return true;
         }
         catch (Exception ex)
@@ -340,6 +367,54 @@ public sealed class RecordingViewModel : ObservableObject
         IsProcessing = false;
     }
 
+    private void StartSessionTracking(string sessionId)
+    {
+        _sessionCts?.Cancel();
+        _sessionCts?.Dispose();
+        _sessionCts = new CancellationTokenSource();
+        _sessionTask = TrackSessionAsync(sessionId, _sessionCts.Token);
+    }
+
+    private async Task TrackSessionAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddHours(24);
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+            while (DateTimeOffset.UtcNow < deadline && await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                var response = await _services.Recorder.GetSessionStatusAsync(sessionId, cancellationToken);
+                if (!response.Ok || response.SessionStatus is null) continue;
+                var session = response.SessionStatus;
+                if (session.MeetingId is Guid meetingId)
+                {
+                    MeetingId = meetingId;
+                    _serverProcessingExpected = true;
+                    StatusMessage = "Локальная запись привязана к совещанию. Ожидаю транскрибацию WhisperX…";
+                    await StartProcessingPollingAsync(meetingId);
+                    return;
+                }
+                ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
+                if (!string.IsNullOrWhiteSpace(session.Error)) WarningMessage = session.Error;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            WarningMessage = $"Локальная запись сохранена, доставка продолжится автоматически: {SafeError(ex)}";
+        }
+    }
+
+    private static string DisplayDeliveryState(string state) => state.ToUpperInvariant() switch
+    {
+        "WAITING_FOR_API" => "ожидание API",
+        "BINDING" => "привязка к совещанию",
+        "SYNCING" => "синхронизация чанков",
+        "WAITING_SERVER_ASSEMBLY" => "сборка на сервере",
+        "COMPLETED" => "доставлено",
+        _ => state
+    };
+
     private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow.AddMinutes(45);
@@ -348,6 +423,16 @@ public sealed class RecordingViewModel : ObservableObject
             while (!cancellationToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
             {
                 if (await RefreshProcessingAsync(meetingId, cancellationToken)) return;
+                try
+                {
+                    var jobs = await _services.Backend.GetJobsAsync(meetingId, cancellationToken);
+                    var job = jobs.Where(item => string.Equals(item.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault();
+                    if (job is not null && !string.Equals(job.Status, "READY", StringComparison.OrdinalIgnoreCase) && !string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
+                        await _services.Backend.WaitForJobEventsAsync(Guid.Parse(job.Id), cancellationToken);
+                }
+                catch (DesktopApiException) { /* polling below is the SSE fallback */ }
+                catch (HttpRequestException) { /* polling below is the SSE fallback */ }
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
 
@@ -392,7 +477,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
             ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
-            if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = job.Error;
+            if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = MapProcessingError(job.Error);
             if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase)) return true;
         }
         else
@@ -403,15 +488,17 @@ public sealed class RecordingViewModel : ObservableObject
         if (transcript is not null)
         {
             TranscriptStatus = DisplayTranscriptStatus(transcript.Status);
+            if (transcript.Warnings is { } warningDocument && warningDocument.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                WarningMessage = string.Join("; ", warningDocument.RootElement.EnumerateArray().Select(item => MapProcessingError(item.GetString() ?? string.Empty)));
             TranscriptSegments.Clear();
             foreach (var segment in transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
             OnPropertyChanged(nameof(HasTranscript));
             OnPropertyChanged(nameof(TranscriptPreview));
             OnPropertyChanged(nameof(CanOpenTranscript));
-            if (string.Equals(transcript.Status, "READY", StringComparison.OrdinalIgnoreCase) && HasTranscript)
+            if ((transcript.Status is "READY" or "PARTIAL_READY") && HasTranscript)
             {
                 ProcessingProgress = 100;
-                ProcessingStatus = "Стенограмма готова";
+                ProcessingStatus = transcript.IsPartial ? "Стенограмма готова частично" : "Стенограмма готова";
                 return true;
             }
         }
@@ -452,6 +539,25 @@ public sealed class RecordingViewModel : ObservableObject
         _ => status
     };
 
+    private static string MapProcessingError(string value)
+    {
+        var code = value.ToUpperInvariant();
+        return code switch
+        {
+            "UPLOAD_CONNECTION_LOST" => "Соединение с сервером загрузки потеряно. Загрузка продолжится с последнего подтверждённого блока.",
+            "MEDIA_NO_AUDIO" => "В файле не найден аудиосигнал.",
+            "MODEL_ACCESS_ERROR" => "Модель WhisperX недоступна. Проверьте HF-токен и права доступа к модели.",
+            "CUDA_UNAVAILABLE" => "GPU CUDA недоступна. Проверьте драйвер NVIDIA и конфигурацию workers.",
+            "CUDA_OOM" => "На GPU недостаточно видеопамяти для этой модели WhisperX.",
+            "TRANSCRIPT_EMPTY" => "WhisperX не получил текст из аудиозаписи.",
+            "TRANSCRIPT_OUTSIDE_MEDIA" => "Таймкоды стенограммы выходят за длительность аудио.",
+            "ALIGNMENT_FAILED" => "Выравнивание таймкодов не выполнено; доступен частичный текст.",
+            "DIARIZATION_FAILED" => "Диаризация не выполнена; спикеры отмечены как «Не определён».",
+            "DIARIZATION_DISABLED" => "Диаризация отключена настройками обработки.",
+            _ => value
+        };
+    }
+
     private void SaveSettings()
     {
         var current = _services.Settings.Load();
@@ -460,6 +566,7 @@ public sealed class RecordingViewModel : ObservableObject
 
     private void ApplyResponse(AgentIpcResponse response)
     {
+        _lastAgentResponse = response;
         var parsedState = response.Ok ? ParseState(response.State) : RecordingState.Error;
         ErrorMessage = !response.Ok || parsedState == RecordingState.Error
             ? response.Error ?? "Recorder Agent сообщил об ошибке."

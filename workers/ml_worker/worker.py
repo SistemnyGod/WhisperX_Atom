@@ -32,12 +32,22 @@ LOGGER = logging.getLogger("whisperx.gpu-worker")
 
 def error_code_for(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
+    if "transcript_empty" in text:
+        return "TRANSCRIPT_EMPTY"
+    if "invalid_timecode" in text:
+        return "TRANSCRIPT_INVALID_TIMECODE"
+    if "transcript_outside_media" in text:
+        return "TRANSCRIPT_OUTSIDE_MEDIA"
     if "cuda" in text and ("out of memory" in text or "oom" in text):
         return "CUDA_OOM"
+    if "cuda" in text and ("unavailable" in text or "required" in text or "not available" in text):
+        return "CUDA_UNAVAILABLE"
     if isinstance(exc, FileNotFoundError):
         return "MEDIA_NOT_FOUND"
     if "hf_token" in text or "huggingface" in text or "gated" in text:
         return "MODEL_ACCESS_ERROR"
+    if "no_audio" in text or "no audio" in text:
+        return "MEDIA_NO_AUDIO"
     if "ffmpeg" in text or "audio" in text:
         return "AUDIO_PROCESSING_ERROR"
     return "GPU_PROCESSING_FAILED"
@@ -120,5 +130,3 @@ async def run() -> None:
 
 if __name__ == "__main__":
     asyncio.run(run())
-
-

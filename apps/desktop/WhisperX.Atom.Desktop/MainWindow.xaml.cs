@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using WinRT.Interop;
+using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Pages;
 using WhisperX_Atom_Desktop.Services;
 
@@ -12,8 +13,10 @@ public sealed partial class MainWindow : Window
 {
     private readonly FrontendServices _services;
     private readonly CancellationTokenSource _statusCts = new();
+    private readonly SemaphoreSlim _agentRecoveryGate = new(1, 1);
     private Task? _statusTask;
     private bool _suppressNavigation;
+    private DateTimeOffset _lastAgentRecoveryAttempt = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
@@ -140,6 +143,8 @@ public sealed partial class MainWindow : Window
 
         var backendAvailable = await backendTask;
         var recorderAvailable = (await recorderTask).Ok;
+        if (backendAvailable && recorderAvailable)
+            await RecoverAgentIfNeededAsync(cancellationToken);
         SetSystemStatus(
             backendAvailable && recorderAvailable ? "Система готова" :
             backendAvailable || recorderAvailable ? "Частично доступна" :
@@ -147,6 +152,47 @@ public sealed partial class MainWindow : Window
             backendAvailable && recorderAvailable ? "SuccessBrush" :
             backendAvailable || recorderAvailable ? "WarningBrush" :
             "DangerBrush");
+    }
+
+    private async Task RecoverAgentIfNeededAsync(CancellationToken cancellationToken)
+    {
+        if (DateTimeOffset.UtcNow - _lastAgentRecoveryAttempt < TimeSpan.FromSeconds(30)) return;
+        if (!await _agentRecoveryGate.WaitAsync(0, cancellationToken)) return;
+        _lastAgentRecoveryAttempt = DateTimeOffset.UtcNow;
+        try
+        {
+            var user = await _services.Backend.GetCurrentUserAsync(cancellationToken);
+            if (user is null || !string.Equals(user.Role, "Administrator", StringComparison.OrdinalIgnoreCase)) return;
+
+            var healthResponse = await _services.Recorder.GetHealthAsync(cancellationToken);
+            var health = healthResponse.Health;
+            if (health is null) return;
+            if (string.Equals(healthResponse.State, "Recording", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(healthResponse.State, "Paused", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(healthResponse.State, "Finalizing", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(health.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase)) return;
+
+            var installationId = health.InstallationId ?? Guid.NewGuid();
+            var enrollment = await _services.Backend.LinkLocalAgentAsync(installationId, health.AgentId, "WhisperX Atom Desktop", cancellationToken);
+            var settings = _services.Settings.Load();
+            await _services.Recorder.ConfigureAgentAsync(
+                _services.Backend.ApiUrl,
+                Guid.Parse(enrollment.AgentId),
+                enrollment.Token,
+                settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(),
+                settings.MicrophoneDeviceId,
+                settings.SystemAudioDeviceId,
+                cancellationToken);
+        }
+        catch (DesktopApiException)
+        {
+            // The next status poll retries after the backoff window. Local recording remains available.
+        }
+        catch (Exception)
+        {
+            // Agent recovery is best effort and must never block the desktop shell or local recording.
+        }
+        finally { _agentRecoveryGate.Release(); }
     }
 
     private void SetSystemStatus(string text, string brushKey)
@@ -162,6 +208,7 @@ public sealed partial class MainWindow : Window
     {
         _statusCts.Cancel();
         _statusCts.Dispose();
+        _agentRecoveryGate.Dispose();
         _services.Backend.Dispose();
     }
 }

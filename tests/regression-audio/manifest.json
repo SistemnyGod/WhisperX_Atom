@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "name": "transcript-mvp-75s",
+    "path": "artifacts/transcription-mvp/fixtures/transcript-mvp-75s.wav",
+    "sha256": "f3b7d792f6cba1dd8086b5a3692c753091b64ef68b5d798f14b18803f1d6adbc",
+    "durationSeconds": 75,
+    "format": "wav",
+    "minimum": {
+      "durationSeconds": 60,
+      "segments": 1,
+      "textCharacters": 1
+    },
+    "notes": "Локальный анонимизированный fixture; аудио находится в artifacts и не коммитится. Перед ASR acceptance заменить на утверждённую речевую запись с тем же manifest-контрактом."
+  }
+]

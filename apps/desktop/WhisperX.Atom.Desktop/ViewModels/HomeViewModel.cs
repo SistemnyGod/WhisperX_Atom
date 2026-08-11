@@ -130,7 +130,7 @@ public sealed class HomeViewModel : ObservableObject
             OnPropertyChanged(nameof(RecordingBadgeText));
             OnPropertyChanged(nameof(MediaTimeText));
             AgentAvailable = response.Ok;
-            AgentStatus = response.Ok ? "Recorder Agent подключён" : "Recorder Agent сообщил об ошибке";
+            AgentStatus = AgentStatusFormatter.Format(response);
             RecordingStatus = response.State switch
             {
                 "Recording" => "Идёт запись",

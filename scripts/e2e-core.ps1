@@ -141,6 +141,6 @@ if ($InboxPath) {
 if ($meeting -and $WaitForGpu) {
   $transcript = Invoke-Api GET "/api/meetings/$($meeting.id)/transcript"
   Write-Host ("transcript status: {0}; segments: {1}" -f $transcript.status, @($transcript.segments).Count)
-  if ($transcript.status -ne "READY" -or @($transcript.segments).Count -eq 0) { throw "GPU E2E produced no ready transcript" }
+  if ($transcript.status -notin @("READY", "PARTIAL_READY") -or @($transcript.segments).Count -eq 0) { throw "GPU E2E produced no ready transcript" }
 }
 Write-Host "E2E smoke completed."

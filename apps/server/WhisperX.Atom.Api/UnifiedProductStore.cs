@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Npgsql;
 
-public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt);
+public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec);
@@ -23,7 +23,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     public async Task<AgentRow?> AuthenticateAgentAsync(Guid agentId, string token)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at FROM recorder_agents WHERE id=@id AND enrollment_hash=@hash", connection);
+        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id FROM recorder_agents WHERE id=@id AND enrollment_hash=@hash", connection);
         command.Parameters.AddWithValue("id", agentId);
         command.Parameters.AddWithValue("hash", Hash(token));
         await using var reader = await command.ExecuteReaderAsync();
@@ -37,10 +37,48 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             INSERT INTO recorder_agents(id,room_id,name,enrollment_hash,version,status,last_seen_at,capabilities)
             VALUES(@id,@room,@name,@hash,@version,'ONLINE',now(),@capabilities::jsonb)
             ON CONFLICT(enrollment_hash) DO UPDATE SET name=excluded.name,room_id=excluded.room_id,version=excluded.version,status='ONLINE',last_seen_at=now(),capabilities=excluded.capabilities
-            RETURNING id,name,room_id,status,last_seen_at
+            RETURNING id,name,room_id,status,last_seen_at,installation_id
             """, connection);
         command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("room", (object?)roomId ?? DBNull.Value); command.Parameters.AddWithValue("name", name.Trim()); command.Parameters.AddWithValue("hash", Hash(token)); command.Parameters.AddWithValue("version", version); command.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
         await using var reader = await command.ExecuteReaderAsync(); await reader.ReadAsync(); return ReadAgent(reader);
+    }
+
+    public async Task<AgentRow> LinkLocalAgentAsync(Guid installationId, Guid? requestedAgentId, string name, Guid? roomId, string token, string version, JsonDocument capabilities)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var existingId = requestedAgentId ?? Guid.Empty;
+        var findSql = requestedAgentId.HasValue
+            ? "SELECT id FROM recorder_agents WHERE installation_id=@installation OR id=@agent ORDER BY CASE WHEN installation_id=@installation THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE"
+            : "SELECT id FROM recorder_agents WHERE installation_id=@installation LIMIT 1 FOR UPDATE";
+        await using (var find = new NpgsqlCommand(findSql, connection, transaction))
+        {
+            find.Parameters.AddWithValue("installation", installationId);
+            if (requestedAgentId.HasValue) find.Parameters.AddWithValue("agent", requestedAgentId.Value);
+            var value = await find.ExecuteScalarAsync();
+            if (value is Guid found) existingId = found;
+        }
+
+        var agentId = existingId == Guid.Empty ? Guid.NewGuid() : existingId;
+        await using var upsert = new NpgsqlCommand("""
+            INSERT INTO recorder_agents(id,installation_id,room_id,name,enrollment_hash,version,status,last_seen_at,capabilities)
+            VALUES(@id,@installation,@room,@name,@hash,@version,'ONLINE',now(),@capabilities::jsonb)
+            ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,room_id=excluded.room_id,name=excluded.name,enrollment_hash=excluded.enrollment_hash,version=excluded.version,status='ONLINE',last_seen_at=now(),capabilities=excluded.capabilities
+            RETURNING id,name,room_id,status,last_seen_at,installation_id
+            """, connection, transaction);
+        upsert.Parameters.AddWithValue("id", agentId);
+        upsert.Parameters.AddWithValue("installation", installationId);
+        upsert.Parameters.AddWithValue("room", (object?)roomId ?? DBNull.Value);
+        upsert.Parameters.AddWithValue("name", name.Trim());
+        upsert.Parameters.AddWithValue("hash", Hash(token));
+        upsert.Parameters.AddWithValue("version", version);
+        upsert.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
+        await using var reader = await upsert.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        var result = ReadAgent(reader);
+        await reader.CloseAsync();
+        await transaction.CommitAsync();
+        return result;
     }
 
     public async Task<bool> HeartbeatAsync(Guid agentId, string status, string version, JsonDocument capabilities)
@@ -54,7 +92,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     public async Task<IReadOnlyList<AgentRow>> ListAgentsAsync()
     {
         var result = new List<AgentRow>(); await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at FROM recorder_agents ORDER BY name", connection);
+        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id FROM recorder_agents ORDER BY name", connection);
         await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(ReadAgent(reader)); return result;
     }
 
@@ -638,7 +676,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
 
     private async Task<NpgsqlConnection> OpenAsync() { var connection = new NpgsqlConnection(_connectionString); await connection.OpenAsync(); return connection; }
     private static string Hash(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
-    private static AgentRow ReadAgent(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4));
+    private static AgentRow ReadAgent(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetGuid(5));
     private static RecordingSessionRow ReadSession(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetDateTime(5));
     private static SummaryRow ReadSummary(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetInt32(3),r.GetString(4),r.GetString(5),r.GetString(6),r.GetString(7),r.GetFieldValue<JsonDocument>(8),r.GetDateTime(9));
 }

@@ -70,7 +70,7 @@ public sealed class SourcesViewModel : ObservableObject
         {
             var response = await _services.Recorder.GetHealthAsync(cancellationToken);
             AgentAvailable = response.Ok;
-            LocalAgentStatus = response.Ok ? "Recorder Agent подключён" : "Recorder Agent вернул ошибку";
+            LocalAgentStatus = AgentStatusFormatter.Format(response);
             RecordingState = TranslateState(response.State);
             ApplyHealth(response.Health);
             return response.Ok ? null : response.Error ?? "Recorder Agent не готов к работе.";

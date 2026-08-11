@@ -30,7 +30,16 @@ public sealed class SettingsViewModel : ObservableObject
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
     public bool IsBusy { get => _isBusy; private set => SetProperty(ref _isBusy, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
-    public string LoginStatusText => IsLoggedIn ? "Вход в API выполнен" : "Вход в API не выполнен";
+    public string SessionExpiryText => _services.Backend.SessionExpiresAtUtc is { } expires
+        ? $"Сессия действительна до {expires.ToLocalTime():dd.MM.yyyy HH:mm}."
+        : "Срок сессии проверяется автоматически.";
+    public string LoginStatusText => _services.Backend.AuthState switch
+    {
+        DesktopAuthState.Authenticated => "Вход в API выполнен",
+        DesktopAuthState.Offline => "API временно недоступен; локальная запись работает",
+        DesktopAuthState.LoginRequired => "Требуется повторный вход в API",
+        _ => IsLoggedIn ? "Проверка сессии API…" : "Вход в API не выполнен"
+    };
 
     public async Task<bool> LoginAsync(string password)
     {
@@ -52,6 +61,7 @@ public sealed class SettingsViewModel : ObservableObject
             StatusText = "Вход в локальный API выполнен.";
             OnPropertyChanged(nameof(IsLoggedIn));
             OnPropertyChanged(nameof(LoginStatusText));
+            OnPropertyChanged(nameof(SessionExpiryText));
             return true;
         }
         catch (Exception ex) { StatusText = SafeError(ex); return false; }
@@ -80,6 +90,56 @@ public sealed class SettingsViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+    public async Task<bool> ReconnectAgentAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            if (!await _services.Backend.EnsureAuthenticatedAsync())
+            {
+                StatusText = "Требуется повторный вход в API.";
+                return false;
+            }
+            var healthResponse = await _services.Recorder.GetHealthAsync();
+            if (healthResponse.Health is null)
+            {
+                StatusText = "Recorder Agent недоступен. Запустите службу Agent.";
+                return false;
+            }
+            if (string.Equals(healthResponse.State, "Recording", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(healthResponse.State, "Paused", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(healthResponse.State, "Finalizing", StringComparison.OrdinalIgnoreCase))
+            {
+                StatusText = "Переподключение отложено до завершения текущей записи.";
+                return false;
+            }
+
+            var health = healthResponse.Health;
+            var enrollment = await _services.Backend.LinkLocalAgentAsync(
+                health.InstallationId ?? Guid.NewGuid(), health.AgentId,
+                string.IsNullOrWhiteSpace(AgentName) ? "WhisperX Atom Desktop" : AgentName.Trim());
+            var settings = _services.Settings.Load();
+            var response = await _services.Recorder.ConfigureAgentAsync(
+                ApiUrl.Trim(), Guid.Parse(enrollment.AgentId), enrollment.Token, ArchiveRoot,
+                settings.MicrophoneDeviceId, settings.SystemAudioDeviceId);
+            StatusText = response.Ok ? "Recorder Agent подключён к серверу." : response.Error ?? "Agent не подтвердил подключение.";
+            return response.Ok;
+        }
+        catch (Exception ex) { StatusText = SafeError(ex); return false; }
+        finally { IsBusy = false; }
+    }
+
+    public async Task LogoutAsync()
+    {
+        await _services.Backend.LogoutAsync();
+        var current = _services.Settings.Load();
+        _services.Settings.Save(current with { ProtectedSessionCookie = null, SessionExpiresAtUtc = null });
+        StatusText = "Выход из API выполнен.";
+        OnPropertyChanged(nameof(IsLoggedIn));
+        OnPropertyChanged(nameof(LoginStatusText));
+        OnPropertyChanged(nameof(SessionExpiryText));
+    }
+
     public async Task SetArchiveRootAsync(string path)
     {
         var fullPath = Path.GetFullPath(path.Trim());
@@ -97,19 +157,9 @@ public sealed class SettingsViewModel : ObservableObject
     private void SaveSettings(string? cookie)
     {
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with
-        {
-            ApiUrl = ApiUrl.TrimEnd('/'),
-            Username = Username.Trim(),
-            ProtectedSessionCookie = string.IsNullOrWhiteSpace(cookie) ? current.ProtectedSessionCookie : null,
-            ArchiveRoot = ArchiveRoot
-        });
-        if (!string.IsNullOrWhiteSpace(cookie))
-        {
-            var refreshed = _services.Settings.Load();
-            DesktopSettings.Save(refreshed.ApiUrl, refreshed.Username, cookie, refreshed.ArchiveRoot, refreshed.MicrophoneDeviceId, refreshed.SystemAudioDeviceId);
-            _services.Backend.ApplySettings(_services.Settings.Load());
-        }
+        var effectiveCookie = string.IsNullOrWhiteSpace(cookie) ? current.UnprotectSessionCookie() : cookie;
+        DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc);
     }
 
     private static string SafeError(Exception ex) => string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;

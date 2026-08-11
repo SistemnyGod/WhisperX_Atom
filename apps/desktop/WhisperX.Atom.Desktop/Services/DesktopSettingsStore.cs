@@ -14,6 +14,7 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.UnprotectSessionCookie(),
             settings.ArchiveRoot,
             settings.MicrophoneDeviceId,
-            settings.SystemAudioDeviceId);
+            settings.SystemAudioDeviceId,
+            settings.SessionExpiresAtUtc);
     }
 }
