@@ -60,6 +60,9 @@ public sealed class BackendService : IBackendService
         }
     }
 
+    public Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default) =>
+        _client.CreateMeetingAsync(title, description, cancellationToken);
+
     public async Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default)
     {
         if (!HasSession) return null;

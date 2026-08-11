@@ -38,18 +38,18 @@
                         </Border>
                         <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="18">
                             <StackPanel>
-                                <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                 <TextBlock Text="{Binding RecordingState}" Margin="0,3,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1">
-                                <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                 <TextBlock Text="{Binding PendingUploadsText}" Margin="0,3,0,0" FontWeight="SemiBold" />
                             </StackPanel>
                         </Grid>
                         <StackPanel Grid.Row="3" Spacing="3">
-                            <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding StorageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="{Binding StorageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -127,15 +127,15 @@
                     <Grid Padding="20,18" ColumnDefinitions="*,Auto">
                         <StackPanel>
                             <TextBlock Text="Серверные агенты" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Только реальные записи из /api/agents" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,4,0,0" />
+                            <TextBlock Text="Только реальные записи из /api/agents" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
                         </StackPanel>
                         <Button Grid.Column="1" Content="Настроить подключение" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" />
                     </Grid>
                     <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.4*,110,150,*">
-                        <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                        <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                        <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                        <TextBlock Grid.Column="3" Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Grid.Column="3" Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                     </Grid>
                     <ListView x:Name="AgentsList" ItemsSource="{Binding RegisteredAgents}" SelectionMode="None" BorderThickness="0" MaxHeight="320">
                         <ListView.ItemTemplate>

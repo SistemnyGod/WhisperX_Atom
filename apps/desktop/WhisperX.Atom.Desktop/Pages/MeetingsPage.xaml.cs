@@ -167,6 +167,13 @@ public sealed partial class MeetingsPage : Page
         UpdateListState();
     }
 
+    private void StatusFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is not null && StatusFilterCombo.SelectedItem is string value)
+            _viewModel.StatusFilter = value;
+        UpdateListState();
+    }
+
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null || _pageCts is null) return;
@@ -317,8 +324,8 @@ public sealed partial class MeetingsPage : Page
             MeetingsActionsPanel.Orientation = ResponsiveLayout.IsWide(e.NewSize.Width)
                 ? Orientation.Horizontal
                 : Orientation.Vertical;
-            MeetingsGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(340);
-            MeetingsGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+            MeetingsGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(1, GridUnitType.Star);
+            MeetingsGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(380);
             MeetingsGrid.RowDefinitions[0].Height = compact ? new GridLength(300) : new GridLength(1, GridUnitType.Star);
             MeetingsGrid.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
             Grid.SetColumn(ListCard, 0);

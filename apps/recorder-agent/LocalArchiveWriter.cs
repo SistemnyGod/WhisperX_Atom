@@ -207,17 +207,17 @@ public sealed class LocalArchiveWriter(
 
     private static void ValidateTrack(IReadOnlyList<RecordingArchiveChunk> chunks)
     {
-        long previousEnd = 0;
+        long? previousEnd = null;
         for (var index = 0; index < chunks.Count; index++)
         {
             var chunk = chunks[index];
             if (chunk.Sequence != index) throw new InvalidOperationException($"recording_chunk_sequence_gap:{chunk.TrackId}:{index}");
-            if (chunk.StartSample != previousEnd) throw new InvalidOperationException($"recording_chunk_sample_gap:{chunk.TrackId}:{index}");
+            if (previousEnd is long expectedStart && chunk.StartSample != expectedStart) throw new InvalidOperationException($"recording_chunk_sample_gap:{chunk.TrackId}:{index}");
             if (!File.Exists(chunk.LocalPath)) throw new FileNotFoundException("recording_chunk_missing", chunk.LocalPath);
             var size = new FileInfo(chunk.LocalPath).Length;
             if (size != chunk.SizeBytes) throw new InvalidOperationException($"recording_chunk_size_mismatch:{chunk.TrackId}:{index}");
             if (!string.Equals(ComputeSha256(chunk.LocalPath), chunk.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException($"recording_chunk_checksum_mismatch:{chunk.TrackId}:{index}");
-            previousEnd += chunk.SampleCount;
+            previousEnd = chunk.StartSample + chunk.SampleCount;
         }
     }
 

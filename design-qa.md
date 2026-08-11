@@ -131,3 +131,114 @@ Automated validation for this stabilization increment:
 - StaticResource guard — passed, all runtime XAML references resolve to declared resources;
 - `git diff --check` — passed; only existing LF/CRLF normalization warnings were reported by Git;
 - native WinUI screenshot/control QA remains `blocked` because a reliable fresh capture path is unavailable in this environment. Manual verification is still required at 1180x720, 1586x992 and 1920x1080, including mouse/keyboard focus and disabled states.
+
+## Reference-aligned Home refinement
+
+Source visual truth: `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-06e035e3-a35d-48c1-8be4-dcde82f2472b.png`.
+
+Implemented:
+
+- the Home hero now follows the reference hierarchy with a compact recording-state badge, a right-aligned duration and the existing local archive/upload status row;
+- `LIVE`, pause, finalizing, error and unavailable labels are derived from the real Recorder Agent IPC state;
+- the duration is rendered only from `AgentIpcResponse.MediaTimeMs`; no timer, signal meter or GPU metric is synthesized;
+- existing routes are visually grouped in the NavigationView with `РАБОТА`, `ДАННЫЕ` and `СИСТЕМА` headers without adding routes;
+- the right operational rail remains honest: quick actions, real Agent/archive state and the notification empty-state only.
+
+Automated validation for this refinement:
+
+- Debug Desktop build — passed, 0 warnings/errors;
+- Release Desktop build — passed, 0 warnings/errors;
+- UTF-8/mojibake guard — passed, 147 runtime files checked;
+- StaticResource guard — passed, all runtime XAML references resolve;
+- `git diff --check` — passed; only existing LF/CRLF normalization warnings were reported by Git.
+
+## Visual QA for the reference-aligned refinement
+
+Implementation screenshot: unavailable; native WinUI capture/control path is not exposed in the current environment.
+
+Viewport: target comparison remains 1180x720, 1586x992 and 1920x1080. Source and implementation pixel dimensions/density cannot be normalized because the implementation screenshot is unavailable. State to verify on a normal Windows desktop: Home with Agent available, Home with Agent unavailable, active recording with a real `MediaTimeMs`, and idle recording state.
+
+Full-view and focused-region comparison: blocked before comparison because the native implementation artifact cannot be captured. The focused regions to verify are the shell navigation grouping, Home hero badge/timer, right operational rail, KPI strip and recent-meetings empty/list state.
+
+Findings: no automated layout or encoding regressions detected. Native visual verification and keyboard/mouse state checks remain open.
+
+Previous iteration result: blocked
+
+## Current plan execution increment
+
+Implemented:
+
+- Recording now uses the same compact state-badge pattern as Home, with real `RecordingState` colors for recording, paused, finalizing, error, unavailable and idle states;
+- repeated caption sizes on Home, Recording, Meetings, Tasks, Assistant, Sources and Settings now reference the shared `CaptionTextSize` token;
+- no new routes, REST/IPC methods, demo values or synthetic device/processing data were introduced.
+- Home now polls only Recorder Agent health every two seconds, with linked cancellation on navigation; API readiness and meetings are refreshed on entry, manual refresh and import instead of on every timer tick.
+
+Validation:
+
+- Debug Desktop build — passed, 0 warnings/errors;
+- Release Desktop build — passed, 0 warnings/errors;
+- UTF-8/mojibake guard — passed, 147 runtime files checked;
+- StaticResource guard — passed, all runtime XAML references resolve;
+- native visual comparison remains blocked because a fresh native WinUI implementation screenshot is unavailable.
+
+Runtime smoke checks:
+
+- `GET http://localhost:8080/health` — HTTP 200, API reports `ok: true`;
+- `GET /api/meetings?limit=1&offset=0` without a session — HTTP 401, authentication boundary is active;
+- `\\.\pipe\WhisperXAtomAgent` is present; direct HEALTH invocation from the current PowerShell identity was denied by the pipe ACL and must be verified through the installed Desktop/service security context.
+
+## Next route implementation increment
+
+Implemented:
+
+- \`Агенты\` route backed by the existing \`/api/agents\` contract and Recorder Agent IPC health;
+- \`Стенограммы\` route backed by the existing paged meetings list and \`/api/meetings/{id}/transcript\`;
+- both routes use linked page cancellation, loading/empty/error/partial-warning states and responsive compact/standard/wide layouts;
+- transcript evidence opens the existing meeting workspace with the selected segment and real start time;
+- no new endpoint, production mock or server model was added;
+- \`Серии оперативок\`, \`Спикеры\`, \`Саммари\` and administration actions remain outside this increment where no complete dedicated contract exists.
+
+Validation:
+
+- Debug Desktop build — passed, 0 warnings/errors;
+- Release Desktop build — passed, 0 warnings/errors;
+- UTF-8/mojibake guard — passed, 165 runtime files checked;
+- StaticResource guard — passed, 15 runtime XAML files checked;
+- \`git diff --check\` — passed;
+- native WinUI visual comparison remains blocked because a fresh native implementation screenshot is unavailable.
+
+## Current route implementation increment
+
+Implemented:
+
+- Speakers route backed by the existing meetings page contract and /api/meetings/{id}/speakers;
+- Summaries route backed by the existing meetings page contract and /api/meetings/{id}/summary;
+- summary rebuild uses the existing RebuildSummaryAsync contract and reloads the server response before updating the selected row;
+- both routes use four-request concurrency limits, linked page cancellation, loading/empty/error/partial-warning states and compact/standard/wide layouts;
+- no new endpoint, server model, production mock or fabricated aggregate was added;
+- Series and full administration remain outside the increment because no complete dedicated contract is available.
+
+Validation:
+
+- Debug Desktop build — passed, 0 warnings/errors;
+- Release Desktop build — passed, 0 warnings/errors;
+- UTF-8/mojibake guard — passed, 183 runtime files checked;
+- StaticResource guard — passed, 17 runtime XAML files checked;
+- git diff --check — passed;
+- native WinUI visual comparison remains blocked because a fresh native implementation screenshot is unavailable.
+
+## Acceptance and packaging checks
+
+- API health/readiness — passed: `/health` and `/ready` returned 200;
+- protected API boundary — passed: meetings, agents and assistant queries returned 401 without a session;
+- cancellation and concurrency — passed: page cancellation is wired and aggregate loaders are limited to four parallel requests;
+- production mock scan — passed: no Mock/Demo/Sample/Fake markers in runtime Desktop files;
+- Debug and Release Desktop builds — passed, 0 warnings/errors;
+- targeted Python acceptance rerun — passed: 82 tests, 56 skipped, 0 errors;
+- sequential Debug and Release builds for Desktop, Recorder Service and Voice Host — passed, 0 warnings/errors;
+- Desktop, Recorder Service and Voice Host publish — passed; Vosk model/native smoke passed;
+- fresh Inno Setup installer build — passed; artifact SHA256 `3EAEF03F8E12D2F7170590901EA19D43C7B66C8D9DE449C50F70B2328C859339`;
+- Voice Host publish uses `MSBuildEnableWorkloadResolver=false` because the installed SDK image lacks workload resolver locator SDKs;
+- native WinUI visual QA — blocked because a fresh native implementation screenshot is unavailable.
+
+final result: blocked

@@ -10,7 +10,9 @@ param(
   [int]$TimeoutSeconds = 180,
   [switch]$StartCore,
   [switch]$WithGpu,
-  [switch]$WaitForGpu
+  [switch]$WithLlm,
+  [switch]$WaitForGpu,
+  [switch]$RestartWorkers
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,9 +62,28 @@ function Wait-Job([string]$MeetingId) {
   throw "Job did not finish within $TimeoutSeconds seconds"
 }
 
+function Restart-ProcessingWorkers {
+  if (-not $RestartWorkers) { return }
+  $composeArgs = @("compose", "-f", "compose.dev.yml", "--profile", "core")
+  $services = @("media-worker")
+  if ($WaitForGpu) {
+    $composeArgs += @("--profile", "gpu")
+    $services += "gpu-worker"
+  }
+  if ($WithLlm) {
+    $composeArgs += @("--profile", "llm")
+    $services += "summary-worker"
+  }
+  $composeArgs += @("restart") + $services
+  Write-Host ("restarting workers: {0}" -f ($services -join ", "))
+  & docker @composeArgs
+  if ($LASTEXITCODE -ne 0) { throw "Unable to restart processing workers" }
+}
+
 if ($StartCore) {
   $composeArgs = @("compose", "-f", "compose.dev.yml", "--profile", "core")
   if ($WithGpu) { $composeArgs += "--profile"; $composeArgs += "gpu" }
+  if ($WithLlm) { $composeArgs += "--profile"; $composeArgs += "llm" }
   $composeArgs += @("up", "-d")
   & docker @composeArgs
   if ($LASTEXITCODE -ne 0) { throw "Unable to start Compose profile" }
@@ -92,6 +113,7 @@ if ($AudioPath) {
   & curl.exe @curlArgs | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "tus PATCH failed for $($file.Name)" }
   Write-Host "tus upload completed: $($file.Name)"
+  Restart-ProcessingWorkers
   $job = Wait-Job $meeting.id
   if ($job.status -eq "FAILED") { throw "tus job failed: $($job.error)" }
 }
@@ -111,6 +133,7 @@ if ($InboxPath) {
   } while ((Get-Date) -lt $deadline)
   if (-not $meeting) { throw "Hot-folder importer did not register $($inbox.Name)" }
   Write-Host "import meeting: $($meeting.id)"
+  Restart-ProcessingWorkers
   $job = Wait-Job $meeting.id
   if ($job.status -eq "FAILED") { throw "hot-folder job failed: $($job.error)" }
 }

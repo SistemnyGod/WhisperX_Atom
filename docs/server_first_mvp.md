@@ -5,7 +5,7 @@
 На Windows 11 с WSL2, Docker Engine и NVIDIA Container Toolkit:
 
 ```powershell
-docker compose --profile core --profile gpu -f compose.dev.yml up -d --build
+docker compose --profile core --profile gpu --profile llm -f compose.dev.yml up -d --build
 ```
 
 Веб-интерфейс: `http://localhost:8080`
@@ -85,5 +85,4 @@ Core-only validation:
 docker compose --profile core -f compose.dev.yml up -d --build
 
 Full GPU validation:
-docker compose --profile core --profile gpu -f compose.dev.yml up -d --build
-
+docker compose --profile core --profile gpu --profile llm -f compose.dev.yml up -d --build

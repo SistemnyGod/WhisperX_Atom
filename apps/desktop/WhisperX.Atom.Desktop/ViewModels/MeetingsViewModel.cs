@@ -11,6 +11,7 @@ public sealed class MeetingsViewModel : ObservableObject
     private readonly List<DesktopMeeting> _allMeetings = [];
     private bool _isLoading;
     private string _searchText = string.Empty;
+    private string _statusFilter = "Все статусы";
     private string _errorText = string.Empty;
     private string _statusText = "";
     private DesktopMeeting? _selectedMeeting;
@@ -18,6 +19,7 @@ public sealed class MeetingsViewModel : ObservableObject
     public MeetingsViewModel(FrontendServices services) => _services = services;
 
     public ObservableCollection<DesktopMeeting> FilteredMeetings { get; } = [];
+    public ObservableCollection<string> StatusFilters { get; } = ["Все статусы", "В обработке", "Готово", "Ошибка", "Отменено"];
 
     public bool IsLoading
     {
@@ -31,6 +33,16 @@ public sealed class MeetingsViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _searchText, value)) return;
+            ApplyFilter();
+        }
+    }
+
+    public string StatusFilter
+    {
+        get => _statusFilter;
+        set
+        {
+            if (!SetProperty(ref _statusFilter, value)) return;
             ApplyFilter();
         }
     }
@@ -115,11 +127,25 @@ public sealed class MeetingsViewModel : ObservableObject
                 meeting.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                 (meeting.Description?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false)).ToList();
 
+        meetings = StatusFilter switch
+        {
+            "В обработке" => meetings.Where(meeting => !IsTerminal(meeting.Status)).ToList(),
+            "Готово" => meetings.Where(meeting => meeting.Status.Equals("READY", StringComparison.OrdinalIgnoreCase) || meeting.Status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase)).ToList(),
+            "Ошибка" => meetings.Where(meeting => meeting.Status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)).ToList(),
+            "Отменено" => meetings.Where(meeting => meeting.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)).ToList(),
+            _ => meetings
+        };
+
         FilteredMeetings.Clear();
         foreach (var meeting in meetings) FilteredMeetings.Add(meeting);
         OnPropertyChanged(nameof(HasMeetings));
         OnPropertyChanged(nameof(HasFilteredMeetings));
     }
+
+    private static bool IsTerminal(string status) => status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
 
     private static string SafeError(Exception ex) => ex is HttpRequestException
         ? "Не удалось подключиться к API. Проверьте backend и вход в API."

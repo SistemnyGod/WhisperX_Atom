@@ -18,15 +18,19 @@
             </StackPanel>
         </Grid>
 
-        <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="340,*" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
+        <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="*,380" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
             <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="16">
-                <Grid RowDefinitions="Auto,Auto,*" RowSpacing="12">
+                <Grid RowDefinitions="Auto,Auto,Auto,*" RowSpacing="12">
                     <Grid ColumnDefinitions="*,Auto">
-                        <TextBlock Text="Список встреч" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="Журнал совещаний" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
                     </Grid>
                     <TextBox x:Name="SearchBox" Grid.Row="1" PlaceholderText="Поиск по названию или описанию" Style="{StaticResource InputStyle}" TextChanged="SearchBox_TextChanged" />
-                    <Grid Grid.Row="2">
+                    <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="8">
+                        <ComboBox x:Name="StatusFilterCombo" ItemsSource="{Binding StatusFilters}" SelectedItem="{Binding StatusFilter, Mode=TwoWay}" Style="{StaticResource FormComboBoxStyle}" SelectionChanged="StatusFilterCombo_SelectionChanged" />
+                        <TextBlock Grid.Column="1" Text="Дата · серия · комната — следующие фильтры" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </Grid>
+                    <Grid Grid.Row="3">
                         <ListView x:Name="MeetingsList" ItemsSource="{Binding FilteredMeetings}" SelectionMode="Single" SelectionChanged="MeetingsList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
@@ -34,8 +38,8 @@
                                         <Grid RowDefinitions="Auto,Auto" RowSpacing="5">
                                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                                                <TextBlock Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" FontSize="12" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Grid.Column="1" Text="{Binding CreatedAt}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                <TextBlock Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="1" Text="{Binding CreatedAt}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                             </Grid>
                                         </Grid>
                                     </Border>
@@ -45,7 +49,7 @@
                         <StackPanel x:Name="ListEmptyState" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Padding="18">
                             <SymbolIcon Symbol="Calendar" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
                             <TextBlock x:Name="ListEmptyTitle" Text="Совещаний нет" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
-                            <TextBlock x:Name="ListEmptyDescription" Text="Войдите в API или импортируйте первую запись." Foreground="{StaticResource MutedTextBrush}" FontSize="12" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+                            <TextBlock x:Name="ListEmptyDescription" Text="Войдите в API или импортируйте первую запись." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
                 </Grid>
@@ -59,7 +63,7 @@
                             <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                             <TextBlock x:Name="WorkspaceMeta" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                             <Border x:Name="WorkspaceStatusBadge" Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left" Margin="0,4,0,0">
-                                <TextBlock x:Name="WorkspaceStatusText" Text="Ожидает выбора встречи" Foreground="{StaticResource AccentBrush}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <TextBlock x:Name="WorkspaceStatusText" Text="Ожидает выбора встречи" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                             </Border>
                         </StackPanel>
                         <Button x:Name="RetryButton" Grid.Column="1" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
@@ -68,15 +72,15 @@
 
                     <Grid Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="20,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="22">
                         <StackPanel Spacing="2">
-                            <TextBlock Text="Состояние обработки" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="Состояние обработки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock x:Name="PipelineText" Text="—" FontWeight="SemiBold" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="2">
-                            <TextBlock Text="Длительность" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="Длительность" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock x:Name="DurationText" Text="—" FontWeight="SemiBold" />
                         </StackPanel>
                         <StackPanel Grid.Column="2" Spacing="2">
-                            <TextBlock Text="Файлы" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                            <TextBlock Text="Файлы" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock x:Name="MediaCountText" Text="—" FontWeight="SemiBold" />
                         </StackPanel>
                     </Grid>
@@ -119,9 +123,9 @@
                                                 <ListView.ItemTemplate>
                                                     <DataTemplate>
                                                         <Grid Padding="8,10" ColumnDefinitions="72,*" ColumnSpacing="10">
-                                                            <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="12" />
+                                                                    <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                             <StackPanel Grid.Column="1" Spacing="3">
-                                                                <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                                        <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                                 <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
                                                             </StackPanel>
                                                         </Grid>
@@ -139,7 +143,7 @@
                                                         </DataTemplate>
                                                     </ListView.ItemTemplate>
                                                 </ListView>
-                                                <TextBlock x:Name="SpeakersEmptyText" Text="Спикеры пока не определены." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="SpeakersEmptyText" Text="Спикеры пока не определены." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                             </StackPanel>
                                         </Border>
                                     </Grid>
@@ -151,7 +155,7 @@
                                             <Grid ColumnDefinitions="*,Auto">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" />
-                                                    <TextBlock x:Name="SummaryMetaText" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                    <TextBlock x:Name="SummaryMetaText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                 </StackPanel>
                                                 <Button Grid.Column="1" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildSummaryButton_Click" />
                                             </Grid>
@@ -186,7 +190,7 @@
                                                     <Grid Padding="8,12" ColumnDefinitions="*,160,150" ColumnSpacing="12">
                                                         <StackPanel Spacing="3">
                                                             <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
-                                                            <TextBlock Text="{Binding Responsible}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                            <TextBlock Text="{Binding Responsible}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                         </StackPanel>
                                                         <ComboBox Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" SelectedValue="{Binding Status, Mode=OneWay}" SelectedValuePath="Content" SelectionChanged="TaskStatusCombo_SelectionChanged" MinWidth="140">
                                                             <ComboBoxItem Content="NEEDS_REVIEW" />
@@ -211,7 +215,7 @@
                                                     <Grid Padding="8,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
                                                         <StackPanel Spacing="3">
                                                             <TextBlock Text="{Binding OriginalName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                                            <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                            <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                         </StackPanel>
                                                         <TextBlock Grid.Column="1" Text="{Binding SizeBytes}" Foreground="{StaticResource MutedTextBrush}" />
                                                         <Button Grid.Column="2" Content="Открыть preview" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenPreviewButton_Click" />
@@ -224,7 +228,7 @@
                                             <StackPanel Spacing="8">
                                                 <TextBlock Text="Preview" Style="{StaticResource SectionTitleStyle}" />
                                                 <MediaPlayerElement x:Name="PreviewPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
-                                                <TextBlock x:Name="PreviewStatusText" Text="Выберите файл с доступным preview." Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                                <TextBlock x:Name="PreviewStatusText" Text="Выберите файл с доступным preview." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                             </StackPanel>
                                         </Border>
                                     </Grid>

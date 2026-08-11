@@ -47,7 +47,10 @@ $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 # and keeps the Inno Setup payload transparent to endpoint protection.
 $desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", "-o", $desktopOut) + $publishRestoreArgs
 $servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $serviceOut) + $publishRestoreArgs
-$voicePublishArgs = @($voiceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $voiceOut) + $publishRestoreArgs
+# The installed .NET 10 SDK image does not ship the workload resolver locator
+# SDKs, although Voice Host only targets WindowsDesktop/WinForms. Disable the
+# resolver for this project so packaging remains deterministic on that image.
+$voicePublishArgs = @($voiceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:MSBuildEnableWorkloadResolver=false", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $voiceOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     & dotnet publish @Arguments
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }

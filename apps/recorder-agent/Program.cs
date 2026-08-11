@@ -23,6 +23,7 @@ try
     builder.Services.AddSingleton<RecordingCoordinator>();
     builder.Services.AddSingleton<AgentApiClient>();
     builder.Services.AddSingleton<LocalArchiveWriter>();
+    builder.Services.AddSingleton<RawChunkRecovery>();
     builder.Services.AddHostedService<AgentPipeHost>();
     builder.Services.AddHostedService<RecorderWorker>();
     builder.Services.AddWindowsService(options => options.ServiceName = "WhisperX Atom Recorder Agent");
@@ -33,12 +34,13 @@ finally
     await Log.CloseAndFlushAsync();
 }
 
-public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, LocalArchiveWriter archive, ILogger<RecorderWorker> logger) : BackgroundService
+public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, LocalArchiveWriter archive, RawChunkRecovery rawRecovery, ILogger<RecorderWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await spool.InitializeAsync(stoppingToken);
         logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.ChunkDurationSeconds, api.IsConfigured);
+        await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
         var recoveryCompleted = false;
         if (api.IsConfigured)
         {
@@ -63,6 +65,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var lastRecovery = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
+            await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
             if (!api.IsConfigured)
             {
                 recoveryCompleted = false;

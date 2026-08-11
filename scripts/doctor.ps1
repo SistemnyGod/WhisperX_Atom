@@ -28,5 +28,4 @@ $inbox = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\W
 $archive = if ($env:WHISPERX_ARCHIVE_HOST) { $env:WHISPERX_ARCHIVE_HOST } else { "C:\WhisperXAtom\Archive" }
 foreach ($path in @($root,$inbox,$archive)) { Check "Storage $path" { New-Item -ItemType Directory -Force -Path $path | Out-Null; $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($path).TrimEnd(':','\')); if ($drive.Free -lt 20GB) { throw "less than 20 GiB free" } } }
 if ($failures.Count) { Write-Host "Preflight failed: $($failures -join ', ')" -ForegroundColor Red; exit 1 }
-Write-Host "Preflight passed. Run: docker compose --env-file .env -f compose.dev.yml --profile core --profile gpu up -d --build" -ForegroundColor Green
-
+Write-Host "Preflight passed. Run: docker compose --env-file .env -f compose.dev.yml --profile core --profile gpu --profile llm up -d --build" -ForegroundColor Green

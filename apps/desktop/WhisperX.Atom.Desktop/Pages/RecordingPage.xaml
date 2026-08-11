@@ -20,7 +20,12 @@
                 <StackPanel x:Name="RecordingMainColumn" Spacing="{StaticResource PageGap}">
                     <Border x:Name="RecordingHeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" Padding="24">
                         <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="12">
-                            <TextBlock Text="{Binding StateTitle}" Style="{StaticResource EyebrowStyle}" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Border x:Name="RecordingStateBadge" Style="{StaticResource StatusBadgeStyle}">
+                                    <TextBlock x:Name="RecordingStateBadgeText" Text="{Binding StateTitle}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" />
+                                </Border>
+                                <TextBlock Text="СОСТОЯНИЕ ЗАПИСИ" Style="{StaticResource EyebrowStyle}" VerticalAlignment="Center" />
+                            </StackPanel>
                             <TextBox Grid.Row="1" Text="{Binding Title, Mode=TwoWay}" Style="{StaticResource InputStyle}" PlaceholderText="Название встречи" />
                             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="12">
                                 <Ellipse x:Name="StateIndicator" Width="14" Height="14" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center" />
@@ -31,11 +36,13 @@
                             <Grid Grid.Row="4" ColumnDefinitions="*,*" ColumnSpacing="18">
                                 <StackPanel>
                                     <TextBlock Text="{Binding MicrophoneStatus}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                    <TextBlock Text="Уровень появится после расширения IPC реальными метриками" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                                    <ProgressBar Value="{Binding MicrophoneLevel}" Minimum="0" Maximum="100" Margin="0,6,0,2" />
+                                    <TextBlock Text="{Binding MicrophoneDbLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1">
                                     <TextBlock Text="{Binding SystemAudioStatus}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                    <TextBlock Text="Без декоративных индикаторов сигнала" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                                    <ProgressBar Value="{Binding SystemAudioLevel}" Minimum="0" Maximum="100" Margin="0,6,0,2" />
+                                    <TextBlock Text="{Binding SystemAudioDbLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                 </StackPanel>
                             </Grid>
                         </Grid>
@@ -47,16 +54,46 @@
                         </InfoBar.ActionButton>
                     </InfoBar>
 
+                    <InfoBar x:Name="WarningInfoBar" IsOpen="False" IsClosable="False" Severity="Warning" />
+
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="8">
                             <TextBlock Text="Жизненный цикл записи" Style="{StaticResource SectionTitleStyle}" />
                             <Grid x:Name="LifeCycleGrid" ColumnDefinitions="*,*,*,*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
-                                <TextBlock Text="1 · Проверка устройств" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="1" Text="2 · Запись в локальный архив" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="2" Text="3 · Сохранение master-файла" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="3" Text="4 · Отправка в очередь" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="4" Text="5 · Подтверждение API" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Text="1 · Проверка" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="2 · Локальное сохранение" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="2" Text="3 · Master-файл" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="3" Text="4 · Синхронизация" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="4" Text="5 · API" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel Spacing="10">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel>
+                                    <TextBlock Text="WhisperX обработка" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="ASR → alignment → diarization → готовая стенограмма" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Text="{Binding ProcessingStatus}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" HorizontalTextAlignment="Right" />
+                            </Grid>
+                            <ProgressBar Value="{Binding ProcessingProgress}" IsIndeterminate="{Binding IsProcessing}" Minimum="0" Maximum="100" />
+                            <TextBlock Text="{Binding TranscriptStatus}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ProcessingError}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding TranscriptPreview}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" MaxLines="3" />
+                            <ListView ItemsSource="{Binding TranscriptSegments}" SelectionMode="None" MaxHeight="220">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10" Padding="0,4">
+                                            <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                            <Button Content="Открыть стенограмму совещания" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanOpenTranscript}" Click="OpenTranscriptButton_Click" HorizontalAlignment="Left" />
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -65,11 +102,12 @@
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel x:Name="RecordingActionsPanel" Spacing="10">
                             <TextBlock Text="Управление записью" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Следующее доступное действие определяется состоянием Agent." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                            <TextBlock Text="Следующее доступное действие определяется состоянием Agent." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                             <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanStart}" Click="StartButton_Click" />
-                            <Button Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanPause}" Click="PauseButton_Click" />
-                            <Button Content="Продолжить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanResume}" Click="ResumeButton_Click" />
+                            <Button x:Name="PauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanPause}" Click="PauseResumeButton_Click" />
                             <Button Content="Метка" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="MarkerButton_Click" />
+                            <Button Content="Решение" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="DecisionButton_Click" />
+                            <Button Content="Задача" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="TaskButton_Click" />
                             <Button Content="Завершить" Style="{StaticResource DangerButtonStyle}" IsEnabled="{Binding CanStop}" Click="StopButton_Click" />
                         </StackPanel>
                     </Border>
@@ -77,10 +115,10 @@
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="10">
                             <TextBlock Text="Источники записи" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Микрофон" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                            <ComboBox x:Name="MicrophoneCombo" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" SelectionChanged="MicrophoneCombo_SelectionChanged" />
-                            <TextBlock Text="Системный звук" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
-                            <ComboBox x:Name="SystemAudioCombo" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" SelectionChanged="SystemAudioCombo_SelectionChanged" />
+                            <TextBlock Text="Микрофон" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <ComboBox x:Name="MicrophoneCombo" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectDevices}" SelectionChanged="MicrophoneCombo_SelectionChanged" />
+                            <TextBlock Text="Системный звук" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <ComboBox x:Name="SystemAudioCombo" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanSelectDevices}" SelectionChanged="SystemAudioCombo_SelectionChanged" />
                         </StackPanel>
                     </Border>
 
@@ -88,9 +126,18 @@
                         <StackPanel Spacing="8">
                             <TextBlock Text="Локальный архив" Style="{StaticResource SectionTitleStyle}" />
                             <TextBlock Text="Постоянная копия записи не удаляется после отправки." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" FontSize="12" />
+                            <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" FontSize="{StaticResource CaptionTextSize}" />
                             <Button Content="Выбрать папку архива" Style="{StaticResource CardButtonStyle}" Click="SelectArchiveButton_Click" />
-                            <TextBlock Text="{Binding PendingUploadsLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="SyncCard" Style="{StaticResource CardStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Синхронизация" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Запись сначала остаётся в локальном архиве. Agent повторяет доставку при восстановлении связи." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding PendingUploadsLabel}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding EncoderBacklogLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <Button x:Name="RetryUploadPanelButton" Content="Повторить отправку" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" />
                         </StackPanel>
                     </Border>
                 </StackPanel>

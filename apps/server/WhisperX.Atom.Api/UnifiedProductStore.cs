@@ -11,6 +11,10 @@ public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
+public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, DateTimeOffset CheckedAt);
+public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
+public enum ActionItemUpdateResult { NotFound, InvalidTransition, Updated }
 
 public sealed class UnifiedProductStore(IConfiguration configuration)
 {
@@ -209,12 +213,19 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         if (tracks.Count == 0)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "recording_tracks_required");
 
-        var expected = RecordingFinalizeSupport.ReadExpectedChunkCounts(manifest, tracks.Keys);
+        var expectations = RecordingFinalizeSupport.ReadExpectedTrackExpectations(manifest, tracks.Keys);
+        var expected = expectations
+            .Where(item => item.Value.ExpectedChunkCount is not null)
+            .ToDictionary(item => item.Key, item => item.Value.ExpectedChunkCount!.Value);
         var missing = RecordingFinalizeSupport.FindMissing(tracks, expected);
         if (missing.Count > 0)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, missing, "recording_chunks_incomplete");
 
-        using var normalizedManifest = RecordingFinalizeSupport.BuildNormalizedManifest(sessionId, tracks, expected);
+        var timelineMismatches = RecordingFinalizeSupport.FindTimelineMismatches(tracks, expectations);
+        if (timelineMismatches.Count > 0)
+            return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "recording_timeline_inconsistent");
+
+        using var normalizedManifest = RecordingFinalizeSupport.BuildNormalizedManifest(sessionId, tracks, expected, expectations);
         var manifestJson = normalizedManifest.RootElement.GetRawText();
         var manifestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifestJson))).ToLowerInvariant();
 
@@ -329,12 +340,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
 
     public async Task<IReadOnlyList<DecisionRow>> ListDecisionsAsync(Guid meetingId)
     {
-        var result = new List<DecisionRow>(); await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT id,meeting_id,summary_id,text,status,created_at FROM decisions WHERE meeting_id=@id ORDER BY created_at", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new DecisionRow(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetString(3),reader.GetString(4),reader.GetDateTime(5))); return result;
+        var result = new List<DecisionRow>(); await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT d.id,d.meeting_id,d.summary_id,d.text,d.status,d.created_at FROM decisions d JOIN summaries s ON s.id=d.summary_id WHERE d.meeting_id=@id AND s.version=(SELECT MAX(s2.version) FROM summaries s2 WHERE s2.meeting_id=d.meeting_id) ORDER BY d.created_at", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new DecisionRow(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetString(3),reader.GetString(4),reader.GetDateTime(5))); return result;
     }
 
     public async Task<IReadOnlyList<ActionItemRow>> ListActionItemsAsync(Guid meetingId)
     {
-        var result = new List<ActionItemRow>(); await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT id,meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id,created_at FROM action_items WHERE meeting_id=@id ORDER BY created_at", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new ActionItemRow(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetDateTime(5),reader.GetString(6),reader.IsDBNull(7)?null:reader.GetGuid(7),reader.GetDateTime(8))); return result;
+        var result = new List<ActionItemRow>(); await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT a.id,a.meeting_id,a.summary_id,a.task,a.responsible,a.deadline,a.status,a.evidence_segment_id,a.created_at FROM action_items a JOIN summaries s ON s.id=a.summary_id WHERE a.meeting_id=@id AND s.version=(SELECT MAX(s2.version) FROM summaries s2 WHERE s2.meeting_id=a.meeting_id) ORDER BY a.created_at", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new ActionItemRow(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetString(3),reader.IsDBNull(4)?null:reader.GetString(4),reader.IsDBNull(5)?null:reader.GetDateTime(5),reader.GetString(6),reader.IsDBNull(7)?null:reader.GetGuid(7),reader.GetDateTime(8))); return result;
     }
 
     public async Task<Guid?> GetActionItemMeetingIdAsync(Guid id)
@@ -346,21 +357,146 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return value is Guid meetingId ? meetingId : null;
     }
 
-    public async Task<bool> UpdateActionItemAsync(Guid id, string task, string? responsible, DateTime? deadline, string status)
+    public async Task<IReadOnlyList<SearchResultRow>> SearchAsync(string query, Guid? meetingId, Guid userId, bool includeAll, int limit, int offset)
+    {
+        var result = new List<SearchResultRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT m.id,m.title,m.status,s.id,s.start_ms,s.end_ms,
+                   COALESCE(ms.display_name,s.speaker_label),s.text,
+                   ts_rank_cd(to_tsvector('simple',COALESCE(s.text,'')),websearch_to_tsquery('simple',@query)),
+                   m.created_at
+            FROM transcript_segments s
+            JOIN transcripts t ON t.id=s.transcript_id
+            JOIN meetings m ON m.id=t.meeting_id
+            LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
+            WHERE (@include_all OR m.owner_id=@owner)
+              AND (@meeting IS NULL OR m.id=@meeting)
+              AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+              AND COALESCE(s.is_hidden,false)=false
+              AND to_tsvector('simple',COALESCE(s.text,'')) @@ websearch_to_tsquery('simple',@query)
+            ORDER BY ts_rank_cd(to_tsvector('simple',COALESCE(s.text,'')),websearch_to_tsquery('simple',@query)) DESC,
+                     m.created_at DESC,s.ordinal
+            LIMIT @limit OFFSET @offset
+            """, connection);
+        command.Parameters.AddWithValue("query", query);
+        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.AddWithValue("owner", userId);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("limit", limit);
+        command.Parameters.AddWithValue("offset", offset);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new SearchResultRow(
+                reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetGuid(3),
+                reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.GetString(7), reader.GetDouble(8), reader.GetDateTime(9)));
+        return result;
+    }
+
+    public async Task<OperationsSnapshot> GetOperationsSnapshotAsync()
+    {
+        await using var connection = await OpenAsync();
+
+        async Task<long> ScalarLongAsync(string sql)
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+
+        var queuedJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'");
+        var runningJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'");
+        var failedJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='FAILED' AND updated_at >= now()-interval '24 hours'");
+        var staleLeases = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE lease_expires_at IS NOT NULL AND lease_expires_at < now() AND status NOT IN ('READY','FAILED','CANCELLED')");
+        var activeGpuJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','SUMMARIZE') AND status IN ('QUEUED','RUNNING')");
+        var failedGpuJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','SUMMARIZE') AND status='FAILED' AND updated_at >= now()-interval '24 hours' AND (error_code LIKE 'GPU_%' OR error_code LIKE 'CUDA_%')");
+        var pendingOutbox = await ScalarLongAsync("SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL");
+        var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
+        var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");
+        return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, DateTimeOffset.UtcNow);
+    }
+
+    public async Task<IReadOnlyList<AuditEventRow>> ListAuditEventsAsync(Guid? meetingId, string? eventType, int limit, int offset)
+    {
+        var result = new List<AuditEventRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT a.id,a.actor_user_id,u.username,a.meeting_id,a.entity_type,a.entity_id,a.event_type,a.before_state,a.after_state,a.created_at
+            FROM audit_events a
+            LEFT JOIN users u ON u.id=a.actor_user_id
+            WHERE (@meeting IS NULL OR a.meeting_id=@meeting)
+              AND (@event_type IS NULL OR a.event_type=@event_type)
+            ORDER BY a.created_at DESC
+            LIMIT @limit OFFSET @offset
+            """, connection);
+        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.AddWithValue("event_type", (object?)eventType ?? DBNull.Value);
+        command.Parameters.AddWithValue("limit", limit);
+        command.Parameters.AddWithValue("offset", offset);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AuditEventRow(
+                reader.GetGuid(0),
+                reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetGuid(5),
+                reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetFieldValue<JsonDocument>(7),
+                reader.IsDBNull(8) ? null : reader.GetFieldValue<JsonDocument>(8),
+                reader.GetDateTime(9)));
+        return result;
+    }
+
+    public async Task<ActionItemUpdateResult> UpdateActionItemAsync(Guid id, string task, string? responsible, DateTime? deadline, string status, Guid? actorUserId)
     {
         var normalizedTask = task?.Trim();
         var normalizedStatus = status?.Trim().ToUpperInvariant();
         if (string.IsNullOrWhiteSpace(normalizedTask) || normalizedTask.Length > 4000 ||
             normalizedStatus is not ("NEEDS_REVIEW" or "OPEN" or "DONE" or "CANCELLED"))
-            return false;
+            return ActionItemUpdateResult.InvalidTransition;
+        var normalizedResponsible = string.IsNullOrWhiteSpace(responsible) ? null : responsible.Trim();
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("UPDATE action_items SET task=@task,responsible=@responsible,deadline=@deadline,status=@status,updated_at=now() WHERE id=@id", connection);
-        command.Parameters.AddWithValue("id", id);
-        command.Parameters.AddWithValue("task", normalizedTask);
-        command.Parameters.AddWithValue("responsible", (object?)responsible ?? DBNull.Value);
-        command.Parameters.AddWithValue("deadline", (object?)deadline ?? DBNull.Value);
-        command.Parameters.AddWithValue("status", normalizedStatus);
-        return await command.ExecuteNonQueryAsync() > 0;
+        await using var tx = await connection.BeginTransactionAsync();
+        ActionItemSnapshot snapshot;
+        await using (var lookup = new NpgsqlCommand("SELECT meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id FROM action_items WHERE id=@id FOR UPDATE", connection, tx))
+        {
+            lookup.Parameters.AddWithValue("id", id);
+            await using var reader = await lookup.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return ActionItemUpdateResult.NotFound;
+            snapshot = new ActionItemSnapshot(
+                reader.GetGuid(0),
+                reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetGuid(6));
+        }
+        if (!IsAllowedActionItemTransition(snapshot.Status, normalizedStatus!))
+            return ActionItemUpdateResult.InvalidTransition;
+        await using (var update = new NpgsqlCommand("UPDATE action_items SET task=@task,responsible=@responsible,deadline=@deadline,status=@status,updated_at=now() WHERE id=@id", connection, tx))
+        {
+            update.Parameters.AddWithValue("id", id);
+            update.Parameters.AddWithValue("task", normalizedTask);
+            update.Parameters.AddWithValue("responsible", (object?)normalizedResponsible ?? DBNull.Value);
+            update.Parameters.AddWithValue("deadline", (object?)deadline ?? DBNull.Value);
+            update.Parameters.AddWithValue("status", normalizedStatus);
+            await update.ExecuteNonQueryAsync();
+        }
+        await AppendAuditEventAsync(
+            connection,
+            tx,
+            actorUserId,
+            snapshot.MeetingId,
+            "ACTION_ITEM",
+            id,
+            "TASK_UPDATED",
+            JsonSerializer.Serialize(new { task = snapshot.Task, responsible = snapshot.Responsible, deadline = snapshot.Deadline, status = snapshot.Status, evidenceSegmentId = snapshot.EvidenceSegmentId }),
+            JsonSerializer.Serialize(new { task = normalizedTask, responsible = normalizedResponsible, deadline, status = normalizedStatus, evidenceSegmentId = snapshot.EvidenceSegmentId }));
+        await tx.CommitAsync();
+        return ActionItemUpdateResult.Updated;
     }
 
     public async Task<JsonDocument> AnswerAssistantAsync(Guid? meetingId, string query)
@@ -389,8 +525,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             while (await reader.ReadAsync())
             {
                 var evidenceMeetingId = reader.GetGuid(1);
-                var startMs = reader.GetInt32(2);
-                var endMs = reader.GetInt32(3);
+                var startMs = reader.GetInt64(2);
+                var endMs = reader.GetInt64(3);
                 evidence.Add(new
                 {
                     meetingId = evidenceMeetingId,
@@ -421,7 +557,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await command.ExecuteNonQueryAsync();
         return JsonDocument.Parse(JsonSerializer.Serialize(new { answer, evidence, source }));
     }
-    public async Task<Guid?> QueueSummaryAsync(Guid meetingId)
+    public async Task<Guid?> QueueSummaryAsync(Guid meetingId, Guid? actorUserId, SummaryRebuildRequest? options = null)
     {
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
@@ -440,24 +576,64 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 return activeJobId;
             }
         }
-        await using var transcript = new NpgsqlCommand("SELECT id FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1", connection, tx);
+        var transcriptSql = options?.TranscriptVersion is int
+            ? "SELECT id FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
+            : "SELECT id FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+        await using var transcript = new NpgsqlCommand(transcriptSql, connection, tx);
         transcript.Parameters.AddWithValue("meeting", meetingId);
+        if (options?.TranscriptVersion is int transcriptVersion)
+            transcript.Parameters.AddWithValue("version", transcriptVersion);
         var transcriptId = await transcript.ExecuteScalarAsync();
         if (transcriptId is not Guid transcriptGuid) return null;
         var jobId = Guid.NewGuid();
         await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0)", connection, tx);
         job.Parameters.AddWithValue("id", jobId); job.Parameters.AddWithValue("meeting", meetingId); await job.ExecuteNonQueryAsync();
-        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = jobId, meeting_id = meetingId, transcript_id = transcriptGuid });
+        var payload = JsonSerializer.Serialize(new
+        {
+            message_id = Guid.NewGuid(),
+            job_id = jobId,
+            meeting_id = meetingId,
+            transcript_id = transcriptGuid,
+            summary_profile = string.IsNullOrWhiteSpace(options?.Profile) ? "GENERAL_MEETING" : options.Profile.Trim().ToUpperInvariant(),
+            prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "summary-v2" : options.PromptVersion.Trim(),
+            reason = options?.Reason?.Trim(),
+            meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { })
+        });
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.summarize',@payload::jsonb)", connection, tx);
         outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", payload); await outbox.ExecuteNonQueryAsync();
+        await AppendAuditEventAsync(connection, tx, actorUserId, meetingId, "SUMMARY", jobId, "SUMMARY_REBUILD_QUEUED", null, JsonSerializer.Serialize(new { jobId, transcriptId = transcriptGuid, reason = options?.Reason }));
         await using var meeting = new NpgsqlCommand("UPDATE meetings SET status='SUMMARIZING' WHERE id=@meeting", connection, tx);
         meeting.Parameters.AddWithValue("meeting", meetingId); await meeting.ExecuteNonQueryAsync();
         await tx.CommitAsync(); return jobId;
     }
-    private static string FormatTimecode(int milliseconds)
+    private static string FormatTimecode(long milliseconds)
     {
         var totalSeconds = Math.Max(0, milliseconds) / 1000;
         return $"{totalSeconds / 3600:00}:{totalSeconds / 60 % 60:00}:{totalSeconds % 60:00}";
+    }
+
+    private sealed record ActionItemSnapshot(Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId);
+
+    private static bool IsAllowedActionItemTransition(string current, string next) => current == next || current switch
+    {
+        "NEEDS_REVIEW" => next is "OPEN" or "CANCELLED",
+        "OPEN" => next is "NEEDS_REVIEW" or "DONE" or "CANCELLED",
+        "DONE" => next is "OPEN" or "CANCELLED",
+        "CANCELLED" => next is "OPEN",
+        _ => false
+    };
+
+    private static async Task AppendAuditEventAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid? actorUserId, Guid? meetingId, string entityType, Guid? entityId, string eventType, string? beforeState, string? afterState)
+    {
+        await using var audit = new NpgsqlCommand("INSERT INTO audit_events(id,actor_user_id,meeting_id,entity_type,entity_id,event_type,before_state,after_state) VALUES(gen_random_uuid(),@actor,@meeting,@entity_type,@entity_id,@event_type,@before::jsonb,@after::jsonb)", connection, tx);
+        audit.Parameters.AddWithValue("actor", (object?)actorUserId ?? DBNull.Value);
+        audit.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        audit.Parameters.AddWithValue("entity_type", entityType);
+        audit.Parameters.AddWithValue("entity_id", (object?)entityId ?? DBNull.Value);
+        audit.Parameters.AddWithValue("event_type", eventType);
+        audit.Parameters.AddWithValue("before", (object?)beforeState ?? DBNull.Value);
+        audit.Parameters.AddWithValue("after", (object?)afterState ?? DBNull.Value);
+        await audit.ExecuteNonQueryAsync();
     }
 
     private async Task<NpgsqlConnection> OpenAsync() { var connection = new NpgsqlConnection(_connectionString); await connection.OpenAsync(); return connection; }

@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -166,16 +167,25 @@ public sealed class AgentApiClient : IDisposable
     public async Task<int> UploadPendingChunksAsync(SpoolStore spool, CancellationToken cancellationToken)
     {
         if (!IsConfigured) return 0;
-        var uploaded = 0;
-        foreach (var chunk in await spool.PendingChunksAsync(50, cancellationToken))
+        var pending = await spool.PendingChunksAsync(200, cancellationToken);
+        var configuredConcurrency = int.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_UPLOAD_CONCURRENCY"), out var parsedConcurrency)
+            ? parsedConcurrency
+            : 3;
+        using var gate = new SemaphoreSlim(Math.Clamp(configuredConcurrency, 1, 4));
+        var uploads = pending.Select(async chunk =>
         {
-            var binding = await spool.GetServerBindingAsync(chunk.SessionId, chunk.TrackId, cancellationToken);
-            if (binding is null || !File.Exists(chunk.LocalPath)) continue;
-            await UploadChunkAsync(binding, chunk, cancellationToken);
-            await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
-            uploaded++;
-        }
-        return uploaded;
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                var binding = await spool.GetServerBindingAsync(chunk.SessionId, chunk.TrackId, cancellationToken);
+                if (binding is null || !File.Exists(chunk.LocalPath)) return false;
+                await UploadChunkAsync(binding, chunk, cancellationToken);
+                await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
+                return true;
+            }
+            finally { gate.Release(); }
+        });
+        return (await Task.WhenAll(uploads)).Count(uploaded => uploaded);
     }
 
     public async Task<int> UploadPendingEventsAsync(SpoolStore spool, string localSessionId, CancellationToken cancellationToken)
@@ -208,24 +218,35 @@ public sealed class AgentApiClient : IDisposable
         if (!IsConfigured) return false;
         var manifest = await spool.BuildManifestAsync(localSessionId, cancellationToken);
         if (manifest is null || manifest.ServerSessionId != serverSessionId) return false;
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/finalize"));
-        AddAuthentication(request);
-        request.Content = JsonContent.Create(new
+        foreach (var localTrack in await spool.GetTrackInfosAsync(localSessionId, cancellationToken))
+            if (await spool.GetServerBindingAsync(localSessionId, localTrack.TrackId, cancellationToken) is null)
+                return false;
+        if (!await ReconcileMissingChunksAsync(serverSessionId, localSessionId, manifest, spool, cancellationToken))
+            return false;
+
+        using var response = await SendWithRetryAsync(async () =>
         {
-            manifest = new
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/finalize"));
+            AddAuthentication(request);
+            request.Content = JsonContent.Create(new
             {
-                session_id = serverSessionId,
-                tracks = manifest.Tracks.Select(track => new
+                manifest = new
                 {
-                    track_id = track.ServerTrackId,
-                    track_type = track.TrackType,
-                    sample_rate = track.SampleRate,
-                    channels = track.Channels,
-                    expected_chunk_count = track.ExpectedChunkCount
-                })
-            }
-        });
-        using var response = await _http.SendAsync(request, cancellationToken);
+                    session_id = serverSessionId,
+                    tracks = manifest.Tracks.Select(track => new
+                    {
+                        track_id = track.ServerTrackId,
+                        track_type = track.TrackType,
+                        sample_rate = track.SampleRate,
+                        channels = track.Channels,
+                        expected_chunk_count = track.ExpectedChunkCount,
+                        start_sample = track.StartSample,
+                        total_samples = track.TotalSamples
+                    })
+                }
+            });
+            return await _http.SendAsync(request, cancellationToken);
+        }, cancellationToken);
         return response.IsSuccessStatusCode;
     }
 
@@ -253,19 +274,89 @@ public sealed class AgentApiClient : IDisposable
 
     private async Task UploadChunkAsync(ServerBinding binding, RecordingChunk chunk, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Put, new Uri(_baseUri, $"api/v1/recording-sessions/{binding.ServerSessionId}/tracks/{binding.ServerTrackId}/chunks/{chunk.Sequence}"));
-        AddAuthentication(request);
-        request.Headers.Add("X-Chunk-SHA256", chunk.Sha256);
-        request.Headers.Add("X-Start-Sample", chunk.StartSample.ToString());
-        request.Headers.Add("X-Sample-Count", chunk.SampleCount.ToString());
-        await using var stream = File.OpenRead(chunk.LocalPath);
-        using var content = new StreamContent(stream);
-        content.Headers.ContentType = new MediaTypeHeaderValue("audio/flac");
-        content.Headers.ContentLength = chunk.SizeBytes;
-        request.Content = content;
-        using var response = await _http.SendAsync(request, cancellationToken);
+        using var response = await SendWithRetryAsync(async () =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put, new Uri(_baseUri, $"api/v1/recording-sessions/{binding.ServerSessionId}/tracks/{binding.ServerTrackId}/chunks/{chunk.Sequence}"));
+            AddAuthentication(request);
+            request.Headers.Add("X-Chunk-SHA256", chunk.Sha256);
+            request.Headers.Add("X-Start-Sample", chunk.StartSample.ToString());
+            request.Headers.Add("X-Sample-Count", chunk.SampleCount.ToString());
+            await using var stream = File.OpenRead(chunk.LocalPath);
+            using var content = new StreamContent(stream);
+            content.Headers.ContentType = new MediaTypeHeaderValue("audio/flac");
+            content.Headers.ContentLength = chunk.SizeBytes;
+            request.Content = content;
+            return await _http.SendAsync(request, cancellationToken);
+        }, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
+
+    private async Task<bool> ReconcileMissingChunksAsync(Guid serverSessionId, string localSessionId, RecordingManifest manifest, SpoolStore spool, CancellationToken cancellationToken)
+    {
+        foreach (var track in manifest.Tracks)
+        {
+            var missing = await ReadMissingChunksAsync(serverSessionId, track.ServerTrackId, track.ExpectedChunkCount, cancellationToken);
+            if (missing is null || missing.Count == 0) continue;
+
+            var localTrackId = await spool.GetLocalTrackIdAsync(localSessionId, track.ServerTrackId, cancellationToken);
+            if (localTrackId is null) return false;
+            var localChunks = await spool.GetChunksAsync(localSessionId, localTrackId, missing, cancellationToken);
+            var bySequence = localChunks.ToDictionary(chunk => chunk.Sequence);
+            var binding = new ServerBinding(localSessionId, localTrackId, serverSessionId, track.ServerTrackId);
+            foreach (var sequence in missing)
+            {
+                if (!bySequence.TryGetValue(sequence, out var chunk) || !File.Exists(chunk.LocalPath)) return false;
+                await UploadChunkAsync(binding, chunk, cancellationToken);
+                await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
+            }
+        }
+        return true;
+    }
+
+    private async Task<IReadOnlyList<int>?> ReadMissingChunksAsync(Guid serverSessionId, Guid serverTrackId, int expectedCount, CancellationToken cancellationToken)
+    {
+        using var response = await SendWithRetryAsync(async () =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/tracks/{serverTrackId}/missing-chunks?expectedCount={Math.Clamp(expectedCount, 0, 100_000)}"));
+            AddAuthentication(request);
+            return await _http.SendAsync(request, cancellationToken);
+        }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        if (!document.RootElement.TryGetProperty("missing", out var missing) || missing.ValueKind != JsonValueKind.Array)
+            return Array.Empty<int>();
+        return missing.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out _)).Select(item => item.GetInt32()).Where(sequence => sequence >= 0).Distinct().OrderBy(sequence => sequence).ToArray();
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(Func<Task<HttpResponseMessage>> send, CancellationToken cancellationToken)
+    {
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                var response = await send();
+                if (!IsTransient(response.StatusCode)) return response;
+                lastError = new HttpRequestException($"Transient recorder API response: {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
+                response.Dispose();
+            }
+            catch (HttpRequestException ex)
+            {
+                lastError = ex;
+            }
+            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                lastError = ex;
+            }
+
+            if (attempt == 2) break;
+            await Task.Delay(TimeSpan.FromMilliseconds(250 * (attempt + 1)), cancellationToken);
+        }
+        throw lastError ?? new HttpRequestException("Recorder API request failed.");
+    }
+
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
     private void AddAuthentication(HttpRequestMessage request)
     {

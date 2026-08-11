@@ -27,10 +27,16 @@ public sealed partial class MainWindow : Window
         var settings = settingsStore.Load();
         HomeNavItem.Content = "Главная";
         RecordingNavItem.Content = "Запись";
-        SourcesNavItem.Content = "Источники";
         MeetingsNavItem.Content = "Совещания";
-        TasksNavItem.Content = "Поручения";
-        AssistantNavItem.Content = "Помощник";
+        SeriesNavItem.Content = "Серии оперативок";
+        TranscriptsNavItem.Content = "Стенограммы";
+        SpeakersNavItem.Content = "Спикеры";
+        SummariesNavItem.Content = "Саммари";
+        TasksNavItem.Content = "Задачи";
+        SearchNavItem.Content = "Поиск";
+        AnalyticsNavItem.Content = "Аналитика";
+        AgentsNavItem.Content = "Агенты";
+        AdministrationNavItem.Content = "Администрирование";
         SettingsNavItem.Content = "Настройки";
         SystemStatusText.Text = "Система";
         ProfileText.Text = string.IsNullOrWhiteSpace(settings.Username) ? "Локальная сессия" : settings.Username;
@@ -62,16 +68,27 @@ public sealed partial class MainWindow : Window
 
     private void NavigateToPage(string route, object? payload = null)
     {
-        object parameter = string.Equals(route, "meetings", StringComparison.OrdinalIgnoreCase) && payload is MeetingNavigationTarget target
+        var normalizedRoute = route.ToLowerInvariant();
+        object parameter = normalizedRoute == "meetings" && payload is MeetingNavigationTarget target
             ? new MeetingNavigationRequest(_services, target)
-            : _services;
-        NavFrame.Navigate(route.ToLowerInvariant() switch
+            : normalizedRoute switch
+            {
+                "series" => new ComingSoonNavigationRequest(_services, "Серии оперативок", "Группируйте повторяющиеся оперативки и отслеживайте их историю."),
+                "search" => new ComingSoonNavigationRequest(_services, "Поиск", "Единый поиск по совещаниям, стенограммам, спикерам и задачам."),
+                "analytics" => new ComingSoonNavigationRequest(_services, "Аналитика", "Сводные показатели по записям, обработке и качеству стенограмм."),
+                "administration" => new ComingSoonNavigationRequest(_services, "Администрирование", "Управление пользователями, ролями и политиками доступа."),
+                _ => _services
+            };
+        NavFrame.Navigate(normalizedRoute switch
         {
             "recording" => typeof(RecordingPage),
-            "sources" => typeof(SourcesPage),
             "meetings" => typeof(MeetingsPage),
+            "series" or "search" or "analytics" or "administration" => typeof(ComingSoonPage),
+            "transcripts" => typeof(TranscriptsPage),
+            "speakers" => typeof(SpeakersPage),
+            "summaries" => typeof(SummariesPage),
             "tasks" => typeof(TasksPage),
-            "assistant" => typeof(AssistantPage),
+            "agents" => typeof(AgentsPage),
             "settings" => typeof(SettingsPage),
             _ => typeof(HomePage)
         }, parameter);

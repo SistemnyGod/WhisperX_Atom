@@ -22,6 +22,21 @@ public sealed class RecordingViewModel : ObservableObject
     private int _pendingUploads;
     private string? _microphoneDeviceId;
     private string? _systemAudioDeviceId;
+    private CancellationTokenSource? _processingCts;
+    private Task? _processingTask;
+    private bool _serverProcessingExpected;
+    private bool _hasAudioSource;
+    private bool _isProcessing;
+    private int _processingProgress;
+    private int _rawChunksPending;
+    private int _rawChunksFailed;
+    private long _rawChunksBytes;
+    private double? _microphoneDb;
+    private double? _systemAudioDb;
+    private string _processingStatus = "После остановки здесь появится статус WhisperX.";
+    private string _transcriptStatus = "Стенограмма ещё не запущена.";
+    private string _processingError = string.Empty;
+    private string _warningMessage = string.Empty;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -50,12 +65,32 @@ public sealed class RecordingViewModel : ObservableObject
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public string ErrorMessage { get => _errorMessage; private set { if (SetProperty(ref _errorMessage, value)) OnPropertyChanged(nameof(HasError)); } }
     public bool HasError => !string.IsNullOrWhiteSpace(ErrorMessage);
+    public string WarningMessage { get => _warningMessage; private set { if (SetProperty(ref _warningMessage, value)) OnPropertyChanged(nameof(HasWarning)); } }
+    public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string? SelectedMicrophoneId => _microphoneDeviceId;
     public string? SelectedSystemAudioId => _systemAudioDeviceId;
     public string PendingUploadsLabel => _pendingUploads == 0 ? "Нет ожидающих отправки" : $"В очереди отправки: {_pendingUploads}";
+    public string EncoderBacklogLabel => _rawChunksPending == 0
+        ? "Кодирование аудио: очередь пуста"
+        : _rawChunksFailed > 0
+            ? $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · ошибок: {_rawChunksFailed}"
+            : $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · {FormatBytes(_rawChunksBytes)}";
+    public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
+    public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
+    public int ProcessingProgress { get => _processingProgress; private set => SetProperty(ref _processingProgress, value); }
+    public string ProcessingStatus { get => _processingStatus; private set => SetProperty(ref _processingStatus, value); }
+    public string TranscriptStatus { get => _transcriptStatus; private set => SetProperty(ref _transcriptStatus, value); }
+    public string ProcessingError { get => _processingError; private set => SetProperty(ref _processingError, value); }
+    public bool HasTranscript => TranscriptSegments.Count > 0;
+    public bool CanOpenTranscript => MeetingId is Guid && HasTranscript;
+    public string TranscriptPreview => string.Join(" ", TranscriptSegments.Take(3).Select(segment => segment.Text).Where(text => !string.IsNullOrWhiteSpace(text)));
     public string MicrophoneStatus { get; private set; } = "Микрофон: ожидает проверки";
     public string SystemAudioStatus { get; private set; } = "Системный звук: ожидает проверки";
+    public double MicrophoneLevel => ToLevel(_microphoneDb);
+    public double SystemAudioLevel => ToLevel(_systemAudioDb);
+    public string MicrophoneDbLabel => FormatDb(_microphoneDb);
+    public string SystemAudioDbLabel => FormatDb(_systemAudioDb);
     public string AgentStatus => State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Recorder Agent подключён";
     public string StateTitle => State switch
     {
@@ -67,7 +102,7 @@ public sealed class RecordingViewModel : ObservableObject
         RecordingState.Error => "Ошибка записи",
         _ => "Готово к записи"
     };
-    public bool CanStart => State is RecordingState.Idle or RecordingState.Error;
+    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error) && _hasAudioSource;
     public bool CanPause => State == RecordingState.Recording;
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
@@ -85,12 +120,15 @@ public sealed class RecordingViewModel : ObservableObject
 
     public async Task StopPollingAsync()
     {
-        if (_pollCts is null) return;
-        _pollCts.Cancel();
-        try { if (_pollTask is not null) await _pollTask; } catch (OperationCanceledException) { }
-        _pollTask = null;
-        _pollCts.Dispose();
-        _pollCts = null;
+        if (_pollCts is not null)
+        {
+            _pollCts.Cancel();
+            try { if (_pollTask is not null) await _pollTask; } catch (OperationCanceledException) { }
+            _pollTask = null;
+            _pollCts.Dispose();
+            _pollCts = null;
+        }
+        await StopProcessingPollingAsync();
     }
 
     private async Task PollLoopAsync(CancellationToken cancellationToken)
@@ -119,14 +157,52 @@ public sealed class RecordingViewModel : ObservableObject
     {
         if (!CanStart) return false;
         ErrorMessage = string.Empty;
+        WarningMessage = string.Empty;
+        ProcessingError = string.Empty;
+        TranscriptStatus = "Стенограмма ещё не запущена.";
+        TranscriptSegments.Clear();
+        OnPropertyChanged(nameof(HasTranscript));
+        OnPropertyChanged(nameof(TranscriptPreview));
+        OnPropertyChanged(nameof(CanOpenTranscript));
         State = RecordingState.Checking;
         StatusMessage = "Синхронизирую настройки и запускаю запись…";
         try
         {
             await SyncConfigurationAsync();
-            var response = await _services.Recorder.StartAsync(string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim());
+            await RefreshAsync();
+            if (!_hasAudioSource)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = "Не найден ни один доступный источник аудио.";
+                return false;
+            }
+
+            var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
+            Guid? serverMeetingId = null;
+            if (_services.Backend.HasSession)
+            {
+                try
+                {
+                    var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
+                    if (Guid.TryParse(meeting.Id, out var parsedMeetingId)) serverMeetingId = parsedMeetingId;
+                }
+                catch (Exception ex)
+                {
+                    WarningMessage = "API недоступен: запись сохранится локально, а отправка будет повторена позже.";
+                    StatusMessage = $"Запись запускается локально. Синхронизация: {SafeError(ex)}";
+                }
+            }
+
+            _serverProcessingExpected = serverMeetingId is not null;
+            var response = await _services.Recorder.StartAsync(title, serverMeetingId);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = response.Error ?? "Recorder Agent не запустил запись.";
+            if (serverMeetingId is Guid createdMeetingId && MeetingId is null) MeetingId = createdMeetingId;
+            if (response.Ok && response.MeetingId is Guid agentMeetingId)
+            {
+                MeetingId ??= agentMeetingId;
+                _serverProcessingExpected = _services.Backend.HasSession;
+            }
             return response.Ok;
         }
         catch (Exception ex)
@@ -140,7 +216,8 @@ public sealed class RecordingViewModel : ObservableObject
 
     public Task<bool> PauseAsync() => ExecuteCommandAsync(_services.Recorder.PauseAsync);
     public Task<bool> ResumeAsync() => ExecuteCommandAsync(_services.Recorder.ResumeAsync);
-    public Task<bool> AddMarkerAsync() => ExecuteCommandAsync(_services.Recorder.AddMarkerAsync);
+    public Task<bool> AddMarkerAsync(string eventType = "MARKER") =>
+        ExecuteCommandAsync(cancellationToken => _services.Recorder.AddMarkerAsync(eventType, cancellationToken));
 
     public async Task<bool> StopRecordingAsync()
     {
@@ -151,8 +228,8 @@ public sealed class RecordingViewModel : ObservableObject
             State = RecordingState.Finalizing;
             StatusMessage = "Сохраняю локальный архив и запускаю доставку…";
             var response = await _services.Recorder.StopAsync();
-            SessionId = response.SessionId;
-            MeetingId = response.MeetingId;
+            SessionId = response.SessionId ?? SessionId;
+            MeetingId = response.MeetingId ?? MeetingId;
             if (!response.Ok)
             {
                 State = RecordingState.Error;
@@ -160,6 +237,8 @@ public sealed class RecordingViewModel : ObservableObject
                 return false;
             }
             ApplyResponse(response);
+            if (_serverProcessingExpected && MeetingId is Guid meetingId)
+                await StartProcessingPollingAsync(meetingId);
             return true;
         }
         catch (Exception ex)
@@ -177,7 +256,10 @@ public sealed class RecordingViewModel : ObservableObject
         {
             var response = await _services.Recorder.RetryUploadAsync(SessionId);
             ErrorMessage = response.Ok ? string.Empty : response.Error ?? "Повторная отправка ещё не завершена.";
+            WarningMessage = response.Ok ? string.Empty : "Серверная доставка ещё не подтверждена. Agent продолжит повторные попытки.";
             await RefreshAsync();
+            if (response.Ok && _serverProcessingExpected && MeetingId is Guid meetingId)
+                await StartProcessingPollingAsync(meetingId);
             return response.Ok;
         }
         catch (Exception ex) { ErrorMessage = SafeError(ex); return false; }
@@ -235,6 +317,141 @@ public sealed class RecordingViewModel : ObservableObject
         catch (Exception ex) { ErrorMessage = SafeError(ex); }
     }
 
+    private async Task StartProcessingPollingAsync(Guid meetingId)
+    {
+        await StopProcessingPollingAsync();
+        ProcessingError = string.Empty;
+        ProcessingProgress = 0;
+        ProcessingStatus = "Ожидаю подтверждение записи и постановку WhisperX в очередь…";
+        TranscriptStatus = "Стенограмма ожидает обработки.";
+        IsProcessing = true;
+        _processingCts = new CancellationTokenSource();
+        _processingTask = PollProcessingAsync(meetingId, _processingCts.Token);
+    }
+
+    private async Task StopProcessingPollingAsync()
+    {
+        if (_processingCts is null) return;
+        _processingCts.Cancel();
+        try { if (_processingTask is not null) await _processingTask; } catch (OperationCanceledException) { }
+        _processingTask = null;
+        _processingCts.Dispose();
+        _processingCts = null;
+        IsProcessing = false;
+    }
+
+    private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(45);
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
+            {
+                if (await RefreshProcessingAsync(meetingId, cancellationToken)) return;
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                ProcessingError = "Время ожидания WhisperX истекло. Откройте совещание для повторной проверки или перезапустите job.";
+                ProcessingStatus = "Обработка не подтверждена вовремя";
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            ProcessingError = $"Не удалось получить состояние обработки: {SafeError(ex)}";
+            ProcessingStatus = "Ошибка отслеживания обработки";
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested) IsProcessing = false;
+        }
+    }
+
+    private async Task<bool> RefreshProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        if (!_services.Backend.HasSession)
+        {
+            ProcessingError = "Войдите в API, чтобы получить стенограмму после локальной записи.";
+            ProcessingStatus = "Запись сохранена локально";
+            return true;
+        }
+
+        var jobsTask = _services.Backend.GetJobsAsync(meetingId, cancellationToken);
+        var transcriptTask = _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
+        await Task.WhenAll(jobsTask, transcriptTask);
+        var jobs = await jobsTask;
+        var job = jobs.Where(item => string.Equals(item.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.Attempt)
+            .ThenByDescending(item => item.Progress)
+            .FirstOrDefault();
+        var transcript = await transcriptTask;
+
+        if (job is not null)
+        {
+            ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
+            ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = job.Error;
+            if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        else
+        {
+            ProcessingStatus = "Ожидаю job транскрибации после финализации медиа…";
+        }
+
+        if (transcript is not null)
+        {
+            TranscriptStatus = DisplayTranscriptStatus(transcript.Status);
+            TranscriptSegments.Clear();
+            foreach (var segment in transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
+            OnPropertyChanged(nameof(HasTranscript));
+            OnPropertyChanged(nameof(TranscriptPreview));
+            OnPropertyChanged(nameof(CanOpenTranscript));
+            if (string.Equals(transcript.Status, "READY", StringComparison.OrdinalIgnoreCase) && HasTranscript)
+            {
+                ProcessingProgress = 100;
+                ProcessingStatus = "Стенограмма готова";
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
+    {
+        "QUEUED" => "В очереди",
+        "RUNNING" => "Выполняется",
+        "READY" => "Готово",
+        "FAILED" => "Ошибка",
+        _ => status
+    };
+
+    private static string DisplayStage(string stage) => stage.ToUpperInvariant() switch
+    {
+        "INGEST" => "подготовка медиа",
+        "NORMALIZING" => "нормализация аудио",
+        "TRANSCRIBING" => "WhisperX ASR",
+        "ALIGNING" => "выравнивание таймкодов",
+        "DIARIZING" => "диаризация спикеров",
+        "QUALITY_CHECK" => "проверка качества",
+        "PERSISTING" => "сохранение стенограммы",
+        "READY" => "готово",
+        "FAILED" => "ошибка",
+        _ => stage
+    };
+
+    private static string DisplayTranscriptStatus(string status) => status.ToUpperInvariant() switch
+    {
+        "PENDING" => "Стенограмма ожидает обработки",
+        "RUNNING" => "Стенограмма формируется",
+        "READY" => "Стенограмма готова",
+        "PARTIAL_READY" => "Готова частичная стенограмма",
+        "FAILED" => "Стенограмма не создана",
+        _ => status
+    };
+
     private void SaveSettings()
     {
         var current = _services.Settings.Load();
@@ -243,15 +460,27 @@ public sealed class RecordingViewModel : ObservableObject
 
     private void ApplyResponse(AgentIpcResponse response)
     {
-        ErrorMessage = response.Ok ? string.Empty : response.Error ?? "Recorder Agent сообщил об ошибке.";
-        State = response.Ok ? ParseState(response.State) : RecordingState.Error;
+        var parsedState = response.Ok ? ParseState(response.State) : RecordingState.Error;
+        ErrorMessage = !response.Ok || parsedState == RecordingState.Error
+            ? response.Error ?? "Recorder Agent сообщил об ошибке."
+            : string.Empty;
+        WarningMessage = response.Ok && parsedState != RecordingState.Error ? response.Error ?? string.Empty : string.Empty;
+        State = response.Ok ? parsedState : RecordingState.Error;
         SessionId = response.SessionId ?? SessionId;
         MeetingId = response.MeetingId ?? MeetingId;
         MediaTimeMs = response.MediaTimeMs;
         if (response.Health is { } health)
         {
             _pendingUploads = health.PendingUploadSessions;
+            _hasAudioSource = health.Microphone || health.SystemAudio;
+            _rawChunksPending = health.RawChunksPending;
+            _rawChunksFailed = health.RawChunksFailed;
+            _rawChunksBytes = health.RawChunksBytes;
+            _microphoneDb = health.MicrophoneDb;
+            _systemAudioDb = health.SystemAudioDb;
+            OnPropertyChanged(nameof(CanStart));
             OnPropertyChanged(nameof(PendingUploadsLabel));
+            OnPropertyChanged(nameof(EncoderBacklogLabel));
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
             _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
@@ -261,12 +490,17 @@ public sealed class RecordingViewModel : ObservableObject
             SystemAudioStatus = health.SystemAudio ? $"Системный звук готов · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
             OnPropertyChanged(nameof(MicrophoneStatus));
             OnPropertyChanged(nameof(SystemAudioStatus));
+            OnPropertyChanged(nameof(MicrophoneLevel));
+            OnPropertyChanged(nameof(SystemAudioLevel));
+            OnPropertyChanged(nameof(MicrophoneDbLabel));
+            OnPropertyChanged(nameof(SystemAudioDbLabel));
         }
         StatusMessage = State switch
         {
             RecordingState.Recording => "Запись идёт. Метки сохраняются в локальном архиве.",
             RecordingState.Paused => "Запись приостановлена. Можно продолжить или завершить.",
             RecordingState.Finalizing => "Локальная копия сохраняется, затем Agent повторит отправку.",
+            RecordingState.Error when !string.IsNullOrWhiteSpace(WarningMessage) => "Локальная запись сохранена, серверную доставку можно повторить.",
             RecordingState.Error => "Проверьте сообщение об ошибке и повторите действие.",
             RecordingState.Unavailable => "Подключите Recorder Agent и повторите проверку.",
             _ => "Устройства готовы. Можно начать новую запись."
@@ -309,6 +543,15 @@ public sealed class RecordingViewModel : ObservableObject
     }
 
     private static string FormatMediaTime(long milliseconds) => TimeSpan.FromMilliseconds(Math.Max(0, milliseconds)).ToString(@"hh\:mm\:ss");
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} Б",
+        < 1024 * 1024 => $"{bytes / 1024d:0.0} КБ",
+        < 1024L * 1024 * 1024 => $"{bytes / (1024d * 1024):0.0} МБ",
+        _ => $"{bytes / (1024d * 1024 * 1024):0.0} ГБ"
+    };
+    private static double ToLevel(double? db) => db is double value ? Math.Clamp((value + 60d) / 60d * 100d, 0d, 100d) : 0d;
+    private static string FormatDb(double? db) => db is double value ? $"{value:0} dB peak" : "Нет измерения";
     private static string? NormalizeDeviceId(string? id) => string.IsNullOrWhiteSpace(id) ? null : id.Trim();
     private static string SafeError(Exception ex) => ex is TimeoutException ? "Recorder Agent не ответил вовремя" : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
 }

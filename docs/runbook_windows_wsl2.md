@@ -17,7 +17,7 @@
 
 ```powershell
 docker compose --env-file .env -f compose.dev.yml --profile core up -d --build
-docker compose --env-file .env -f compose.dev.yml --profile core --profile gpu up -d --build
+docker compose --env-file .env -f compose.dev.yml --profile core --profile gpu --profile llm up -d --build
 ```
 
 Первую команду используйте для API/Web/media smoke без GPU, вторую — для WhisperX worker. Состояние сервисов: `docker compose -f compose.dev.yml ps`.
@@ -55,6 +55,12 @@ docker compose -f compose.dev.yml logs -f gpu-worker
 ```
 
 Smoke-сценарий использует login cookie, tusd hook или hot-folder importer и завершается с ошибкой, если job не становится `READY`.
+
+Для полного GPU-контура с WhisperX и локальным Qwen используйте:
+
+```powershell
+.\scripts\e2e-gpu.ps1 -Start -AudioPath .\sample\meeting.flac
+```
 
 ## Local LLM
 

@@ -56,14 +56,10 @@
                         <FontIcon Glyph="&#xE80F;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItemHeader Content="РАБОТА" />
                 <NavigationViewItem x:Name="RecordingNavItem" Content="Запись" Tag="recording">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE720;" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
-                <NavigationViewItem x:Name="SourcesNavItem" Content="Источники" Tag="sources">
-                    <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE772;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="MeetingsNavItem" Content="Совещания" Tag="meetings">
@@ -71,14 +67,51 @@
                         <FontIcon Glyph="&#xE787;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="TasksNavItem" Content="Поручения" Tag="tasks">
+                <NavigationViewItem x:Name="SeriesNavItem" Content="Серии оперативок" Tag="series">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="TranscriptsNavItem" Content="Стенограммы" Tag="transcripts">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A1;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="SpeakersNavItem" Content="Спикеры" Tag="speakers">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE716;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="SummariesNavItem" Content="Саммари" Tag="summaries">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="TasksNavItem" Content="Задачи" Tag="tasks">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE73E;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AssistantNavItem" Content="Помощник" Tag="assistant">
+                <NavigationViewItemHeader Content="АНАЛИЗ" />
+                <NavigationViewItem x:Name="SearchNavItem" Content="Поиск" Tag="search">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE70F;" />
+                        <FontIcon Glyph="&#xE721;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="AnalyticsNavItem" Content="Аналитика" Tag="analytics">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9D2;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader Content="СИСТЕМА" />
+                <NavigationViewItem x:Name="AgentsNavItem" Content="Агенты" Tag="agents">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE716;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="AdministrationNavItem" Content="Администрирование" Tag="administration">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE7EF;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="SettingsNavItem" Content="Настройки" Tag="settings">

@@ -30,13 +30,14 @@ public sealed partial class HomePage : Page
         ViewModel = new HomeViewModel(_services);
         DataContext = ViewModel;
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
-        await ViewModel.RefreshAsync(_pageCts.Token);
+        await ViewModel.StartPollingAsync(_pageCts.Token);
         UpdateEmptyState();
     }
 
-    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    protected override async void OnNavigatedFrom(NavigationEventArgs e)
     {
         _pageCts?.Cancel();
+        if (ViewModel is not null) await ViewModel.StopPollingAsync();
         _pageCts?.Dispose();
         _pageCts = null;
         if (ViewModel is not null) ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
@@ -45,7 +46,7 @@ public sealed partial class HomePage : Page
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(HomeViewModel.HasMeetings) or nameof(HomeViewModel.MeetingsMessage) or nameof(HomeViewModel.ErrorText))
+        if (e.PropertyName is nameof(HomeViewModel.HasMeetings) or nameof(HomeViewModel.MeetingsMessage) or nameof(HomeViewModel.ErrorText) or nameof(HomeViewModel.RecordingBadgeText) or nameof(HomeViewModel.MediaTimeText))
             UpdateEmptyState();
     }
 
@@ -58,20 +59,31 @@ public sealed partial class HomePage : Page
         var statusBrush = (Brush)Application.Current.Resources[ViewModel.AgentAvailable ? "SuccessBrush" : "NeutralStatusBrush"];
         AgentIndicator.Fill = statusBrush;
         AgentRailIndicator.Fill = statusBrush;
+        UpdateRecordingBadge();
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText);
         ErrorInfoBar.Message = ViewModel.ErrorText;
+    }
+
+    private void UpdateRecordingBadge()
+    {
+        if (ViewModel is null) return;
+        var live = string.Equals(ViewModel.RecordingBadgeText, "LIVE", StringComparison.OrdinalIgnoreCase);
+        RecordingBadge.Background = (Brush)Application.Current.Resources[live ? "DangerSurfaceBrush" : "SurfaceBrush"];
+        RecordingBadge.BorderBrush = (Brush)Application.Current.Resources[live ? "DangerBorderBrush" : "BorderBrush"];
+        RecordingBadgeText.Foreground = (Brush)Application.Current.Resources[live ? "DangerBrush" : "AccentBrush"];
     }
 
     private void HomePage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         ResponsiveLayout.SetTwoColumn(HomeContentGrid, HomeMainColumn, HomeRailColumn, 320, e.NewSize.Width);
-        ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement[] { KpiApiCard, KpiStorageCard, KpiQueueCard }, e.NewSize.Width);
+        ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
     }
 
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
+    private void NewMeetingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
     private void SettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
-    private void OpenSourcesButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("sources");
+    private void OpenRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;

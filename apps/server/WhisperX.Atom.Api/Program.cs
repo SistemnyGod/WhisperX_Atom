@@ -1,10 +1,12 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
 var allowedOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? string.Empty)
@@ -17,6 +19,32 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 
 var app = builder.Build();
 app.UseCors();
+
+app.Use(async (context, next) =>
+{
+    var started = Stopwatch.GetTimestamp();
+    var traceId = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
+    context.Response.Headers["X-Trace-Id"] = traceId;
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "http_request_failed trace_id={TraceId} method={Method} path={Path}", traceId, context.Request.Method, context.Request.Path.Value);
+        throw;
+    }
+    finally
+    {
+        app.Logger.LogInformation(
+            "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
+            traceId,
+            context.Request.Method,
+            context.Request.Path.Value,
+            context.Response.StatusCode,
+            Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    }
+});
 
 var db = app.Services.GetRequiredService<Database>();
 var unified = app.Services.GetRequiredService<UnifiedProductStore>();
@@ -131,6 +159,26 @@ app.MapGet("/api/system/status", async () =>
         return Results.Ok(new { ready = false, postgres = false, freeBytes = 0L, totalBytes = 0L, checkedAt = DateTimeOffset.UtcNow });
     }
 });
+
+app.MapGet("/api/admin/operations", async (HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    return Results.Ok(await store.GetOperationsSnapshotAsync());
+});
+
+app.MapGet("/api/admin/audit", async (Guid? meetingId, string? eventType, int? limit, int? offset, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    var normalizedEventType = string.IsNullOrWhiteSpace(eventType) ? null : eventType.Trim();
+    if (normalizedEventType is not null && normalizedEventType.Length > 80)
+        return Results.BadRequest(new { error = "event_type_too_long" });
+    return Results.Ok(await store.ListAuditEventsAsync(
+        meetingId,
+        normalizedEventType,
+        Math.Clamp(limit ?? 100, 1, 200),
+        Math.Max(offset ?? 0, 0)));
+});
+
 app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IConfiguration configuration) =>
 {
     var user = await db.FindUserAsync(request.Username);
@@ -182,6 +230,27 @@ app.MapGet("/api/meetings", async (int? limit, int? offset, HttpContext context)
     if (CurrentUserId(context) is not Guid userId)
         return Results.Unauthorized();
     return Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), userId, IsPrivileged(context)));
+});
+
+app.MapGet("/api/search", async (string? q, Guid? meetingId, int? limit, int? offset, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
+    var query = q?.Trim();
+    if (string.IsNullOrWhiteSpace(query))
+        return Results.BadRequest(new { error = "query_required" });
+    if (query.Length > 200)
+        return Results.BadRequest(new { error = "query_too_long" });
+    if (meetingId is Guid selectedMeeting && !await CanAccessMeetingAsync(context, selectedMeeting))
+        return Results.NotFound();
+
+    return Results.Ok(await store.SearchAsync(
+        query,
+        meetingId,
+        userId,
+        IsPrivileged(context),
+        Math.Clamp(limit ?? 50, 1, 200),
+        Math.Max(offset ?? 0, 0)));
 });
 
 app.MapGet("/api/meetings/{id:guid}", async (Guid id, HttpContext context) =>
@@ -277,7 +346,7 @@ static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user
 
 async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
 {
-    if (IsPrivileged(context)) return true;
+    if (IsPrivileged(context) || context.Items.ContainsKey("voice_host")) return true;
     var userId = CurrentUserId(context);
     return userId.HasValue && await db.UserOwnsMeetingAsync(meetingId, userId.Value);
 }
@@ -470,10 +539,12 @@ app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext contex
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
 });
-app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
-    var jobId = await store.QueueSummaryAsync(id);
+    if (request?.Profile is { Length: > 40 } || request?.PromptVersion is { Length: > 120 } || request?.Reason is { Length: > 500 })
+        return Results.BadRequest(new { error = "summary_options_too_long" });
+    var jobId = await store.QueueSummaryAsync(id, CurrentUserId(context), request);
     return jobId is null ? Results.Conflict(new { error = "transcript_required" }) : Results.Accepted($"/api/jobs/{jobId}", new { jobId });
 });
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
@@ -496,9 +567,12 @@ app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, 
         return Results.BadRequest(new { error = "task_required" });
     if (status is not ("NEEDS_REVIEW" or "OPEN" or "DONE" or "CANCELLED"))
         return Results.BadRequest(new { error = "invalid_task_status" });
-    return await store.UpdateActionItemAsync(id, task, request.Responsible?.Trim(), request.Deadline, status)
-        ? Results.Ok(new { ok = true })
-        : Results.NotFound();
+    return (await store.UpdateActionItemAsync(id, task, request.Responsible?.Trim(), request.Deadline, status, CurrentUserId(context))) switch
+    {
+        ActionItemUpdateResult.Updated => Results.Ok(new { ok = true }),
+        ActionItemUpdateResult.InvalidTransition => Results.Conflict(new { error = "invalid_task_transition" }),
+        _ => Results.NotFound()
+    };
 });
 app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -626,6 +700,7 @@ public record CreateTrackRequest(string TrackType, string? DeviceId, int SampleR
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId);
+public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
 

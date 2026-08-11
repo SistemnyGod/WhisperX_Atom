@@ -33,13 +33,13 @@ internal static class ResponsiveLayout
         Grid.SetRow(second, wide ? 0 : 1);
     }
 
-    public static void SetCardColumns(Grid grid, IReadOnlyList<FrameworkElement> cards, double width)
+    public static void SetCardColumns(Grid grid, IReadOnlyList<FrameworkElement> cards, double width, int wideMaxColumns = int.MaxValue)
     {
         var columns = GetMode(width) switch
         {
             PageLayoutMode.Compact => 1,
             PageLayoutMode.Standard => 2,
-            _ => cards.Count
+            _ => Math.Min(cards.Count, Math.Max(1, wideMaxColumns))
         };
         grid.ColumnDefinitions.Clear();
         grid.RowDefinitions.Clear();

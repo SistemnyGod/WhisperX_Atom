@@ -17,11 +17,11 @@
                 <Border x:Name="ApiSettingsCard" Style="{StaticResource CardStyle}">
                     <StackPanel Spacing="10">
                         <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="API URL" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="API URL" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
-                        <TextBlock Text="Пользователь" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="Пользователь" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBox Text="{Binding Username, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
-                        <TextBlock Text="Пароль" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="Пароль" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <PasswordBox x:Name="PasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Пароль API" />
                         <StackPanel x:Name="ApiActionsPanel" Orientation="Horizontal" Spacing="8">
                             <Button Content="Войти в API" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" />
@@ -34,12 +34,12 @@
                     <StackPanel Spacing="10">
                         <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" />
                         <TextBlock Text="Регистрация нужна один раз после входа в локальный API." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                        <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
-                        <TextBlock Text="Enrollment secret" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="Enrollment secret" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <PasswordBox x:Name="EnrollmentSecretBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Значение из .env" />
                         <Button Content="Зарегистрировать Agent" Style="{StaticResource PrimaryButtonStyle}" Click="RegisterAgentButton_Click" IsEnabled="{Binding IsLoggedIn}" />
-                        <TextBlock Text="{Binding LoginStatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="{Binding LoginStatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                     </StackPanel>
                 </Border>
             </Grid>

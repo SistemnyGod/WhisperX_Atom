@@ -19,7 +19,7 @@
                         <ComboBox x:Name="ContextBox" Header="Контекст вопроса" Style="{StaticResource FormComboBoxStyle}" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" SelectionChanged="ContextBox_SelectionChanged" />
                         <TextBlock Grid.Column="1" Text="{Binding RoleText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Bottom" />
                     </Grid>
-                    <TextBlock x:Name="GlobalHintText" Grid.Row="1" Text="Вопросы по всей истории доступны только Administrator и Operator." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" />
+                    <TextBlock x:Name="GlobalHintText" Grid.Row="1" Text="Вопросы по всей истории доступны только Administrator и Operator." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" Visibility="Collapsed" />
                     <TextBox x:Name="QuestionBox" Grid.Row="2" Header="Вопрос" PlaceholderText="Задайте вопрос по стенограмме или саммари" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="92" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
                     <Grid Grid.Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="10">
                         <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" />
@@ -51,7 +51,7 @@
                                         <StackPanel Spacing="6" Padding="0,10">
                                             <TextBlock Text="{Binding Timecode}" Foreground="{StaticResource AccentBrush}" />
                                             <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                                            <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                            <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                             <Button Content="Открыть источник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenEvidenceButton_Click" />
                                         </StackPanel>
                                     </DataTemplate>

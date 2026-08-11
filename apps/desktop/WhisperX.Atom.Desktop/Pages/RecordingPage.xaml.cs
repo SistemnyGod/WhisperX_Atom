@@ -43,8 +43,13 @@ public sealed partial class RecordingPage : Page
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(RecordingViewModel.Microphones) or nameof(RecordingViewModel.SystemAudioDevices)) SyncSelections();
-        if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)) UpdateError();
-        if (e.PropertyName is nameof(RecordingViewModel.State)) UpdateStateIndicator();
+        if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)
+            or nameof(RecordingViewModel.WarningMessage) or nameof(RecordingViewModel.HasWarning)) UpdateError();
+        if (e.PropertyName is nameof(RecordingViewModel.State))
+        {
+            UpdateStateIndicator();
+            UpdateActionButtons();
+        }
     }
 
     private void SyncSelections()
@@ -67,7 +72,11 @@ public sealed partial class RecordingPage : Page
         ErrorInfoBar.IsOpen = ViewModel.HasError;
         ErrorInfoBar.Message = ViewModel.ErrorMessage;
         ErrorInfoBar.Severity = InfoBarSeverity.Error;
+        WarningInfoBar.IsOpen = ViewModel.HasWarning;
+        WarningInfoBar.Message = ViewModel.WarningMessage;
+        WarningInfoBar.Severity = InfoBarSeverity.Warning;
         UpdateStateIndicator();
+        UpdateActionButtons();
     }
 
     private async void CheckDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -85,11 +94,25 @@ public sealed partial class RecordingPage : Page
         UpdateError();
     }
 
-    private async void PauseButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.PauseAsync(); UpdateError(); }
-    private async void ResumeButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.ResumeAsync(); UpdateError(); }
+    private async void PauseResumeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        if (ViewModel.State == RecordingState.Paused) await ViewModel.ResumeAsync();
+        else await ViewModel.PauseAsync();
+        UpdateError();
+    }
+
     private async void MarkerButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync(); UpdateError(); }
+    private async void DecisionButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync("DECISION"); UpdateError(); }
+    private async void TaskButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync("ACTION_ITEM"); UpdateError(); }
     private async void StopButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.StopRecordingAsync(); UpdateError(); }
     private async void RetryUploadButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.RetryUploadAsync(); UpdateError(); }
+
+    private void OpenTranscriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel?.MeetingId is not Guid meetingId) return;
+        App.MainWindow.NavigateTo("meetings", new MeetingNavigationTarget(meetingId.ToString(), null, null));
+    }
 
     private async void MicrophoneCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -135,6 +158,32 @@ public sealed partial class RecordingPage : Page
             RecordingState.Finalizing => "WarningBrush",
             _ => "AccentBrush"
         };
-        if (Application.Current.Resources[key] is Brush brush) StateIndicator.Fill = brush;
+        if (Application.Current.Resources[key] is Brush brush)
+        {
+            StateIndicator.Fill = brush;
+            RecordingStateBadgeText.Foreground = brush;
+        }
+
+        var surfaceKey = ViewModel.State switch
+        {
+            RecordingState.Recording or RecordingState.Error or RecordingState.Unavailable => "DangerSurfaceBrush",
+            RecordingState.Paused or RecordingState.Finalizing => "SurfaceOrangeBrush",
+            _ => "SurfaceBrush"
+        };
+        var borderKey = ViewModel.State switch
+        {
+            RecordingState.Recording or RecordingState.Error or RecordingState.Unavailable => "DangerBorderBrush",
+            RecordingState.Paused or RecordingState.Finalizing => "WarningBrush",
+            _ => "BorderBrush"
+        };
+        if (Application.Current.Resources[surfaceKey] is Brush surfaceBrush) RecordingStateBadge.Background = surfaceBrush;
+        if (Application.Current.Resources[borderKey] is Brush borderBrush) RecordingStateBadge.BorderBrush = borderBrush;
+    }
+
+    private void UpdateActionButtons()
+    {
+        if (ViewModel is null) return;
+        PauseResumeButton.Content = ViewModel.State == RecordingState.Paused ? "Продолжить" : "Пауза";
+        PauseResumeButton.IsEnabled = ViewModel.CanPause || ViewModel.CanResume;
     }
 }

@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
 from workers.nats_utils import fetch_available
+from .contracts import MeetingContext, SUMMARY_PROMPT_VERSION, SUMMARY_SCHEMA_VERSION
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
 from .llama_subprocess import LocalLlamaServer
 from .assistant import AssistantWorker
@@ -84,7 +85,37 @@ class SummaryRepository:
                     """,
                     (meeting_id, meeting_id),
                 ).fetchall()
-        return [TranscriptSegment(str(row[0]), int(row[1]), int(row[2]), str(row[3]), str(row[4])) for row in rows]
+            marker_rows = connection.execute(
+                """
+                SELECT e.event_type,e.media_time_ms,e.payload
+                FROM recording_events e
+                JOIN recording_sessions rs ON rs.id=e.session_id
+                WHERE rs.meeting_id=%s
+                  AND e.media_time_ms IS NOT NULL
+                  AND e.event_type IN ('MARKER','DECISION','ACTION_ITEM','VOICE_COMMAND')
+                ORDER BY e.media_time_ms
+                """,
+                (meeting_id,),
+            ).fetchall()
+        markers: list[tuple[str, int]] = []
+        for event_type, media_time_ms, payload in marker_rows:
+            label = str(event_type).upper()
+            if isinstance(payload, dict):
+                detail = payload.get("label") or payload.get("text") or payload.get("command")
+                if detail:
+                    label += ":" + str(detail).strip()[:120]
+            markers.append((label, int(media_time_ms)))
+        return [
+            TranscriptSegment(
+                str(row[0]),
+                int(row[1]),
+                int(row[2]),
+                str(row[3]),
+                str(row[4]),
+                tuple(label for label, at_ms in markers if int(row[2]) >= at_ms - 60_000 and int(row[1]) <= at_ms + 120_000),
+            )
+            for row in rows
+        ]
 
     def persist(self, job_id: str, meeting_id: str, transcript_id: str | None, result: dict[str, Any], model_name: str) -> None:
         source_hash = str(result["source_hash"])
@@ -92,6 +123,13 @@ class SummaryRepository:
             # Serialize summary versions and decision/task inserts for this meeting.
             if connection.execute("SELECT id FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone() is None:
                 raise RuntimeError("meeting_not_found")
+            existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
+            if existing_summary is not None:
+                if str(existing_summary[1]) == "READY":
+                    connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s", (job_id,))
+                    connection.execute("UPDATE meetings SET status='READY' WHERE id=%s", (meeting_id,))
+                    return
+                raise RuntimeError("summary_persist_incomplete")
             if transcript_id:
                 transcript = connection.execute("SELECT id FROM transcripts WHERE id=%s AND meeting_id=%s", (transcript_id, meeting_id)).fetchone()
             else:
@@ -100,18 +138,45 @@ class SummaryRepository:
                 raise RuntimeError("transcript_not_found")
             current = connection.execute("SELECT COALESCE(MAX(version),0) FROM summaries WHERE meeting_id=%s", (meeting_id,)).fetchone()[0]
             summary_id = connection.execute(
-                "INSERT INTO summaries(id,meeting_id,transcript_id,version,status,model_name,prompt_version,source_hash,content) VALUES(gen_random_uuid(),%s,%s,%s,'DRAFT',%s,'summary-v1',%s,%s::jsonb) RETURNING id",
-                (meeting_id, transcript[0], int(current) + 1, model_name, source_hash, Jsonb(result)),
+                "INSERT INTO summaries(id,job_id,meeting_id,transcript_id,version,status,model_name,prompt_version,schema_version,source_hash,quality_score,content) VALUES(gen_random_uuid(),%s,%s,%s,%s,'DRAFT',%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
+                (
+                    job_id,
+                    meeting_id,
+                    transcript[0],
+                    int(current) + 1,
+                    model_name,
+                    str(result.get("prompt_version", SUMMARY_PROMPT_VERSION)),
+                    SUMMARY_SCHEMA_VERSION,
+                    source_hash,
+                    result.get("quality_score"),
+                    Jsonb(result),
+                ),
             ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO summary_runs(id,summary_id,model_name,prompt_version,schema_version,source_hash,finished_at,block_count,input_tokens,output_tokens,generation_ms,quality_score) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,now(),%s,%s,%s,%s,%s)",
+                (
+                    summary_id,
+                    model_name,
+                    str(result.get("prompt_version", SUMMARY_PROMPT_VERSION)),
+                    SUMMARY_SCHEMA_VERSION,
+                    source_hash,
+                    result.get("block_count", 0),
+                    result.get("input_tokens"),
+                    result.get("output_tokens"),
+                    result.get("generation_ms"),
+                    result.get("quality_score"),
+                ),
+            )
             valid_segments = {str(row[0]): (int(row[1]), int(row[2])) for row in connection.execute("SELECT id,start_ms,end_ms FROM transcript_segments WHERE transcript_id=%s", (transcript[0],)).fetchall()}
-            for collection in ("decisions", "risks", "open_questions"):
+            for collection in ("decisions", "risks", "open_questions", "topics", "notable_facts"):
                 for index, item in enumerate(result.get(collection, [])):
                     evidence = [str(value) for value in item.get("evidence_segment_ids", []) if str(value) in valid_segments]
                     for segment_id in evidence:
                         start_ms, end_ms = valid_segments[segment_id]
                         connection.execute("INSERT INTO summary_evidence(id,summary_id,entity_type,entity_key,segment_id,start_ms,end_ms) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s)", (summary_id, collection, str(index), segment_id, start_ms, end_ms))
-                    if collection == "decisions" and item.get("text"):
-                        connection.execute("INSERT INTO decisions(id,meeting_id,summary_id,text,status) VALUES(gen_random_uuid(),%s,%s,%s,'DRAFT')", (meeting_id, summary_id, str(item["text"])))
+                    decision_text = item.get("decision", item.get("text"))
+                    if collection == "decisions" and decision_text:
+                        connection.execute("INSERT INTO decisions(id,meeting_id,summary_id,text,status) VALUES(gen_random_uuid(),%s,%s,%s,'DRAFT')", (meeting_id, summary_id, str(decision_text)))
             for index, item in enumerate(result.get("action_items", [])):
                 task_text = str(item.get("task", "")).strip()
                 if not task_text:
@@ -120,9 +185,12 @@ class SummaryRepository:
                 evidence_id = evidence[0] if evidence else None
                 connection.execute(
                     "INSERT INTO action_items(id,meeting_id,summary_id,task,responsible,deadline,status,evidence_segment_id) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s)",
-                    (meeting_id, summary_id, task_text, item.get("responsible"), parse_deadline(item.get("deadline")), "NEEDS_REVIEW", evidence_id),
+                    (meeting_id, summary_id, task_text, item.get("responsible"), parse_deadline(item.get("deadline_iso", item.get("deadline"))), "NEEDS_REVIEW", evidence_id),
                 )
-            connection.execute("UPDATE summaries SET status='READY' WHERE id=%s", (summary_id,))
+            validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+            needs_review = bool(validation.get("rejected_facts") or validation.get("review_items") or validation.get("review_reasons"))
+            summary_status = "NEEDS_REVIEW" if needs_review else "READY"
+            connection.execute("UPDATE summaries SET status=%s WHERE id=%s", (summary_status, summary_id))
             connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s", (job_id,))
             connection.execute("UPDATE meetings SET status='READY' WHERE id=%s", (meeting_id,))
 
@@ -153,9 +221,12 @@ class SummaryWorker:
         if current in {"READY", "FAILED", "CANCELLED"}:
             LOGGER.info("skip terminal summary job=%s status=%s", job_id, current)
             return
-        self.repository.update_job(job_id, "RUNNING", "SUMMARIZING", 20)
+        self.repository.update_job(job_id, "RUNNING", "PREPARING_CONTEXT", 5)
         try:
             segments = await asyncio.to_thread(self.repository.load_segments, meeting_id, transcript_id)
+            if not segments:
+                raise RuntimeError("transcript_has_no_segments")
+            self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 10)
             LOGGER.info("job=%s waiting for GPU lease", job_id)
             async with self._gpu_lease:
                 LOGGER.info("job=%s acquired GPU lease", job_id)
@@ -163,10 +234,22 @@ class SummaryWorker:
                 await asyncio.to_thread(server.start)
                 try:
                     client = LlamaCppClient(server.base_url, self.model_alias)
-                    result = await SummaryOrchestrator(client.invoke_json).summarize(segments)
+
+                    async def report_progress(stage: str, progress: int) -> None:
+                        await asyncio.to_thread(self.repository.update_job, job_id, "RUNNING", stage, progress)
+
+                    result = await SummaryOrchestrator(
+                        client.invoke_json,
+                        profile=payload.get("summary_profile", payload.get("profile")),
+                        context=MeetingContext.from_mapping(payload.get("meeting_context", payload.get("context"))),
+                        progress=report_progress,
+                    ).summarize(segments)
+                    result["prompt_version"] = str(payload.get("prompt_version") or SUMMARY_PROMPT_VERSION)
                 finally:
                     await asyncio.to_thread(server.stop)
             LOGGER.info("job=%s released GPU lease", job_id)
+            self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
+            self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
             await asyncio.to_thread(self.repository.persist, job_id, meeting_id, transcript_id, result, self.model_alias)
         except Exception as exc:
             self.repository.mark_failed(job_id, meeting_id, type(exc).__name__ + ": " + str(exc))

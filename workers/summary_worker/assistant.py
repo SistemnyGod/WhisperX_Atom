@@ -50,9 +50,13 @@ class AssistantRepository:
             row = connection.execute("SELECT query,meeting_id,status FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
             return (str(row[0]), str(row[1]) if row[1] else None, str(row[2])) if row else None
 
-    def set_status(self, query_id: str, status: str, *, error: str | None = None) -> None:
+    def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with psycopg.connect(self.conninfo) as connection:
-            connection.execute("UPDATE assistant_queries SET status=%s,error_code=%s WHERE id=%s", (status, error, query_id))
+            row = connection.execute(
+                "UPDATE assistant_queries SET status=%s,error_code=%s WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW') RETURNING id",
+                (status, error, query_id),
+            ).fetchone()
+            return row is not None
 
     def context(self, meeting_id: str | None) -> tuple[str, dict[str, tuple[str, int, int]]]:
         with psycopg.connect(self.conninfo) as connection:
@@ -89,7 +93,7 @@ class AssistantRepository:
 
     def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int]]) -> None:
         evidence_ids = [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
-        evidence_ids = [value for value in evidence_ids if value in valid]
+        evidence_ids = list(dict.fromkeys(value for value in evidence_ids if value in valid))[:8]
         answer = str(result.get("answer", "")).strip()
         voice = str(result.get("voice_answer", answer)).strip()
         voice = re.split(r"(?<=[.!?])\s+", voice)
@@ -98,7 +102,7 @@ class AssistantRepository:
         evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
-                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s",
+                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')",
                 (status, answer, voice, Jsonb(evidence), query_id),
             )
 
@@ -118,7 +122,8 @@ class AssistantWorker:
         if row is None or row[2] in {"READY", "FAILED", "NEEDS_REVIEW"}:
             return
         query, meeting_id, _ = row
-        self.repository.set_status(query_id, "RUNNING")
+        if not self.repository.set_status(query_id, "RUNNING"):
+            return
         try:
             context, valid = await asyncio.to_thread(self.repository.context, meeting_id)
             if not context:

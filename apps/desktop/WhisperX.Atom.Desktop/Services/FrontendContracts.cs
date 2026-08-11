@@ -25,10 +25,10 @@ public sealed record RecordingSnapshot(
 public interface IRecorderService
 {
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> StartAsync(string title, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> AddMarkerAsync(CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> AddMarkerAsync(string eventType = "MARKER", CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> StopAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> RetryUploadAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ConfigureAgentAsync(string serverUrl, Guid agentId, string token, string archiveRoot, string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
@@ -51,6 +51,7 @@ public interface IBackendService : IDisposable
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
+    Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);

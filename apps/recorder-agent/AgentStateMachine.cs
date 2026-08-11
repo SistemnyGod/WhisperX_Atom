@@ -7,7 +7,8 @@ public enum RecorderState
     Paused,
     Finalizing,
     Recovering,
-    Offline
+    Offline,
+    Error
 }
 
 public enum RecorderCommand
@@ -63,6 +64,7 @@ public sealed class AgentStateMachine
         (RecorderState.Paused, RecorderState.Recording or RecorderState.Finalizing or RecorderState.Offline) => true,
         (RecorderState.Finalizing, RecorderState.Idle or RecorderState.Offline) => true,
         (RecorderState.Recovering, RecorderState.Recording or RecorderState.Finalizing or RecorderState.Idle) => true,
+        (RecorderState.Error, RecorderState.Idle or RecorderState.Recording) => true,
         _ => false
     };
 }

@@ -5,7 +5,7 @@ namespace WhisperX.Atom.Recorder;
 public static class AgentIpcProtocol
 {
     public const string PipeName = "WhisperXAtomAgent";
-    public const int Version = 2;
+    public const int Version = 3;
 }
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload);
@@ -33,7 +33,16 @@ public sealed record AgentIpcHealth(
     IReadOnlyList<AgentIpcAudioDevice>? CaptureDevices = null,
     IReadOnlyList<AgentIpcAudioDevice>? RenderDevices = null,
     string? SelectedMicrophoneDeviceId = null,
-    string? SelectedSystemAudioDeviceId = null);
+    string? SelectedSystemAudioDeviceId = null,
+    int RawChunksPending = 0,
+    int RawChunksWriting = 0,
+    int RawChunksEncoding = 0,
+    int RawChunksFailed = 0,
+    long RawChunksBytes = 0,
+    double? MicrophonePeak = null,
+    double? SystemAudioPeak = null,
+    double? MicrophoneDb = null,
+    double? SystemAudioDb = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

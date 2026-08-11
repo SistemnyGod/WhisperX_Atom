@@ -10,8 +10,8 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("HEALTH", cancellationToken: cancellationToken);
 
-    public Task<AgentIpcResponse> StartAsync(string title, CancellationToken cancellationToken = default) =>
-        _client.SendAsync("START", new { title }, cancellationToken);
+    public Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("START", new { title, meetingId }, cancellationToken);
 
     public Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("PAUSE", cancellationToken: cancellationToken);
@@ -19,8 +19,13 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("RESUME", cancellationToken: cancellationToken);
 
-    public Task<AgentIpcResponse> AddMarkerAsync(CancellationToken cancellationToken = default) =>
-        _client.SendAsync("MARKER", new { source = "desktop" }, cancellationToken);
+    public Task<AgentIpcResponse> AddMarkerAsync(string eventType = "MARKER", CancellationToken cancellationToken = default) =>
+        _client.SendAsync(eventType switch
+        {
+            "DECISION" => "DECISION",
+            "ACTION_ITEM" => "ACTION_ITEM",
+            _ => "MARKER"
+        }, new { source = "desktop" }, cancellationToken);
 
     public Task<AgentIpcResponse> StopAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("STOP", cancellationToken: cancellationToken);

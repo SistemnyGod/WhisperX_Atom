@@ -121,6 +121,32 @@ def test_summary_worker_is_bound_to_payload_transcript_version():
     assert "WHERE t.id=%s AND t.meeting_id=%s" in worker
 
 
+def test_summary_persistence_is_idempotent_and_audited():
+    worker = read(Path("workers/summary_worker/worker.py"))
+    migration = read(Path("apps/server/WhisperX.Atom.Api/Migrations/010_summary_audit.sql"))
+    store = read(STORE)
+    assert "WHERE job_id=%s FOR UPDATE" in worker
+    assert "summary_persist_incomplete" in worker
+    assert "job_id" in migration
+    assert "ux_summaries_job_id" in migration
+    assert "audit_events" in migration
+    assert "invalid_task_transition" in read(API)
+    assert "AppendAuditEventAsync" in store
+    assert "IsAllowedActionItemTransition" in store
+
+
+def test_assistant_context_and_evidence_are_role_gated_and_terminal_safe():
+    api = read(API)
+    store = read(STORE)
+    worker = read(Path("workers/summary_worker/assistant.py"))
+    assert 'context.Items.ContainsKey("voice_host")' in api
+    assert "private static string FormatTimecode(long milliseconds)" in store
+    assert "reader.GetInt64(2)" in store
+    assert '"meetingId"' in worker or "meetingId" in worker
+    assert "status NOT IN ('READY','FAILED','NEEDS_REVIEW')" in worker
+    assert "list(dict.fromkeys" in worker
+
+
 def test_finalize_is_idempotent_and_command_cursors_are_serialized():
     store = read(STORE)
     migration = read(Path("apps/server/WhisperX.Atom.Api/Migrations/008_backend_hardening.sql"))

@@ -21,8 +21,29 @@ public sealed record RecordingChunk(
     string Status,
     int Attempts);
 
+public sealed record RawRecordingChunk(
+    string Id,
+    string SessionId,
+    string TrackId,
+    int Sequence,
+    string RawPath,
+    string OutputPath,
+    long StartSample,
+    long SampleCount,
+    int SampleRate,
+    int Channels,
+    string TrackType,
+    string Encoding,
+    int BitsPerSample,
+    string Status,
+    long RawSizeBytes,
+    string? RawSha256,
+    string? Error);
+
+public sealed record RawChunkBacklog(int Pending, int Writing, int Encoding, int Failed, long Bytes);
+
 public sealed record ServerBinding(string LocalSessionId, string LocalTrackId, Guid ServerSessionId, Guid ServerTrackId);
-public sealed record RecordingManifestTrack(Guid ServerTrackId, string TrackType, int SampleRate, int Channels, int ExpectedChunkCount, long TotalSamples);
+public sealed record RecordingManifestTrack(Guid ServerTrackId, string TrackType, int SampleRate, int Channels, int ExpectedChunkCount, long TotalSamples, long StartSample = 0);
 public sealed record PendingCommandResult(Guid CommandId, long Cursor, string Status, JsonElement Result);
 public sealed record RecordingEventRow(string Id, string SessionId, string EventType, long? MediaTimeMs, string PayloadJson, DateTimeOffset CreatedAt);
 public sealed record RecordingSessionInfo(string SessionId, Guid? MeetingId, string? Title, DateTimeOffset? StartedAt);
@@ -50,6 +71,7 @@ public sealed class SpoolStore
             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
+            CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS server_bindings(local_session_id TEXT NOT NULL, local_track_id TEXT NOT NULL, server_session_id TEXT NOT NULL, server_track_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(local_session_id, local_track_id));
             CREATE TABLE IF NOT EXISTS agent_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agent_command_results(command_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL, status TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -147,6 +169,99 @@ public sealed class SpoolStore
         return result;
     }
 
+    public void RegisterRawChunk(RawRecordingChunk chunk)
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO recording_raw_chunks(id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,created_at,updated_at)
+            VALUES($id,$session,$track,$sequence,$raw,$output,$start,$count,$rate,$channels,$trackType,$encoding,$bits,'WRITING',$created,$created)
+            ON CONFLICT(track_id,sequence) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$id", chunk.Id);
+        command.Parameters.AddWithValue("$session", chunk.SessionId);
+        command.Parameters.AddWithValue("$track", chunk.TrackId);
+        command.Parameters.AddWithValue("$sequence", chunk.Sequence);
+        command.Parameters.AddWithValue("$raw", chunk.RawPath);
+        command.Parameters.AddWithValue("$output", chunk.OutputPath);
+        command.Parameters.AddWithValue("$start", chunk.StartSample);
+        command.Parameters.AddWithValue("$count", chunk.SampleCount);
+        command.Parameters.AddWithValue("$rate", chunk.SampleRate);
+        command.Parameters.AddWithValue("$channels", chunk.Channels);
+        command.Parameters.AddWithValue("$trackType", chunk.TrackType);
+        command.Parameters.AddWithValue("$encoding", chunk.Encoding);
+        command.Parameters.AddWithValue("$bits", chunk.BitsPerSample);
+        command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+        command.ExecuteNonQuery();
+    }
+
+    public void MarkRawChunkReady(string sessionId, string trackId, int sequence, long sampleCount, long rawSizeBytes, string rawSha256)
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_raw_chunks SET status='RAW_READY',sample_count=$sampleCount,raw_size_bytes=$size,raw_sha256=$sha,error=NULL,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
+        command.Parameters.AddWithValue("$sampleCount", sampleCount);
+        command.Parameters.AddWithValue("$size", rawSizeBytes);
+        command.Parameters.AddWithValue("$sha", rawSha256);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$track", trackId);
+        command.Parameters.AddWithValue("$sequence", sequence);
+        command.ExecuteNonQuery();
+    }
+
+    public async Task SetRawChunkStateAsync(string sessionId, string trackId, int sequence, string status, long? rawSizeBytes = null, string? rawSha256 = null, string? error = null, long? sampleCount = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_raw_chunks SET status=$status,sample_count=COALESCE($sampleCount,sample_count),raw_size_bytes=COALESCE($size,raw_size_bytes),raw_sha256=COALESCE($sha,raw_sha256),error=$error,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
+        command.Parameters.AddWithValue("$status", status);
+        command.Parameters.AddWithValue("$sampleCount", (object?)sampleCount ?? DBNull.Value);
+        command.Parameters.AddWithValue("$size", (object?)rawSizeBytes ?? DBNull.Value);
+        command.Parameters.AddWithValue("$sha", (object?)rawSha256 ?? DBNull.Value);
+        command.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$track", trackId);
+        command.Parameters.AddWithValue("$sequence", sequence);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<RawRecordingChunk>> RawChunksNeedingRecoveryAsync(int limit = 100, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error FROM recording_raw_chunks WHERE status IN ('WRITING','RAW_READY','ENCODING','ENCODE_FAILED') ORDER BY session_id,track_id,sequence LIMIT $limit";
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
+        var result = new List<RawRecordingChunk>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new RawRecordingChunk(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11), reader.GetInt32(12), reader.GetString(13), reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16)));
+        }
+        return result;
+    }
+
+    public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT status,COUNT(*),COALESCE(SUM(raw_size_bytes),0) FROM recording_raw_chunks WHERE status NOT IN ('READY','DISCARDED') GROUP BY status";
+        var counts = new Dictionary<string, (int Count, long Bytes)>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) counts[reader.GetString(0)] = (reader.GetInt32(1), reader.GetInt64(2));
+        var writing = counts.GetValueOrDefault("WRITING").Count;
+        var rawReady = counts.GetValueOrDefault("RAW_READY").Count;
+        var encoding = counts.GetValueOrDefault("ENCODING").Count;
+        var failed = counts.GetValueOrDefault("ENCODE_FAILED").Count;
+        return new RawChunkBacklog(writing + rawReady + encoding + failed, writing, encoding, failed, counts.Values.Sum(item => item.Bytes));
+    }
+
     public async Task AddEventAsync(string sessionId, string eventType, long? mediaTimeMs = null, string payloadJson = "{}", CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
@@ -239,6 +354,43 @@ public sealed class SpoolStore
         return value is string text && Guid.TryParse(text, out var id) ? id : null;
     }
 
+    public async Task<string?> GetLocalTrackIdAsync(string localSessionId, Guid serverTrackId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT local_track_id FROM server_bindings WHERE local_session_id=$session AND server_track_id=$track";
+        command.Parameters.AddWithValue("$session", localSessionId);
+        command.Parameters.AddWithValue("$track", serverTrackId.ToString());
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is string text ? text : null;
+    }
+
+    public async Task<IReadOnlyList<RecordingChunk>> GetChunksAsync(string localSessionId, string localTrackId, IEnumerable<int> sequences, CancellationToken cancellationToken = default)
+    {
+        var requested = sequences.Where(sequence => sequence >= 0).Distinct().Take(100_000).ToArray();
+        if (requested.Length == 0) return Array.Empty<RecordingChunk>();
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        var placeholders = new List<string>(requested.Length);
+        for (var index = 0; index < requested.Length; index++)
+        {
+            var name = $"$sequence{index}";
+            placeholders.Add(name);
+            command.Parameters.AddWithValue(name, requested[index]);
+        }
+        command.CommandText = $"SELECT id,session_id,track_id,sequence,local_path,start_sample,sample_count,sample_rate,channels,track_type,size_bytes,sha256,status,attempts FROM recording_chunks WHERE session_id=$session AND track_id=$track AND sequence IN ({string.Join(',', placeholders)}) ORDER BY sequence";
+        command.Parameters.AddWithValue("$session", localSessionId);
+        command.Parameters.AddWithValue("$track", localTrackId);
+        var result = new List<RecordingChunk>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new RecordingChunk(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetString(9), reader.GetInt64(10), reader.GetString(11), reader.GetString(12), reader.GetInt32(13)));
+        return result;
+    }
+
 
     public async Task<Guid?> GetMeetingIdAsync(string localSessionId, CancellationToken cancellationToken = default)
     {
@@ -274,14 +426,14 @@ public sealed class SpoolStore
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT b.server_session_id,b.server_track_id,c.track_id,c.sequence,c.sample_rate,c.channels,c.track_type,c.sample_count
+            SELECT b.server_session_id,b.server_track_id,c.track_id,c.sequence,c.sample_rate,c.channels,c.track_type,c.start_sample,c.sample_count
             FROM recording_chunks c
             JOIN server_bindings b ON b.local_session_id=c.session_id AND b.local_track_id=c.track_id
             WHERE c.session_id=$session
             ORDER BY b.server_track_id,c.sequence;
             """;
         command.Parameters.AddWithValue("$session", localSessionId);
-        var grouped = new Dictionary<Guid, (Guid ServerSessionId, string TrackType, int SampleRate, int Channels, int MaxSequence, long TotalSamples)>();
+        var grouped = new Dictionary<Guid, (Guid ServerSessionId, string TrackType, int SampleRate, int Channels, int MaxSequence, long StartSample, long TotalSamples)>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -292,13 +444,14 @@ public sealed class SpoolStore
             var sampleRate = reader.GetInt32(4);
             var channels = reader.GetInt32(5);
             var trackType = reader.GetString(6);
-            var sampleCount = reader.GetInt64(7);
-            if (!grouped.TryGetValue(serverTrackId, out var current)) current = (serverSessionId, trackType, sampleRate, channels, -1, 0);
-            grouped[serverTrackId] = (current.ServerSessionId, current.TrackType, current.SampleRate, current.Channels, Math.Max(current.MaxSequence, sequence), current.TotalSamples + sampleCount);
+            var startSample = reader.GetInt64(7);
+            var sampleCount = reader.GetInt64(8);
+            if (!grouped.TryGetValue(serverTrackId, out var current)) current = (serverSessionId, trackType, sampleRate, channels, -1, long.MaxValue, 0);
+            grouped[serverTrackId] = (current.ServerSessionId, current.TrackType, current.SampleRate, current.Channels, Math.Max(current.MaxSequence, sequence), Math.Min(current.StartSample, startSample), current.TotalSamples + sampleCount);
         }
         if (grouped.Count == 0) return null;
         var session = grouped.Values.First().ServerSessionId;
-        return new RecordingManifest(session, grouped.Select(item => new RecordingManifestTrack(item.Key, item.Value.TrackType, item.Value.SampleRate, item.Value.Channels, item.Value.MaxSequence + 1, item.Value.TotalSamples)).ToArray());
+        return new RecordingManifest(session, grouped.Select(item => new RecordingManifestTrack(item.Key, item.Value.TrackType, item.Value.SampleRate, item.Value.Channels, item.Value.MaxSequence + 1, item.Value.TotalSamples, item.Value.StartSample == long.MaxValue ? 0 : item.Value.StartSample)).ToArray());
     }
 
     public async Task<long> GetCursorAsync(CancellationToken cancellationToken = default)
@@ -447,6 +600,7 @@ public sealed class SpoolStore
     public async Task PurgeFinalizedSessionAsync(string sessionId, CancellationToken cancellationToken = default)
     {
         var paths = new List<string>();
+        var rawPaths = new List<string>();
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using (var select = connection.CreateCommand())
@@ -456,10 +610,25 @@ public sealed class SpoolStore
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken)) paths.Add(reader.GetString(0));
         }
+        await using (var rawSelect = connection.CreateCommand())
+        {
+            rawSelect.CommandText = "SELECT raw_path FROM recording_raw_chunks WHERE session_id=$session AND status='READY'";
+            rawSelect.Parameters.AddWithValue("$session", sessionId);
+            await using var reader = await rawSelect.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) rawPaths.Add(reader.GetString(0));
+        }
         await SetSessionStateAsync(sessionId, "FINALIZED", cancellationToken);
         foreach (var path in paths)
         {
             try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
         }
+        foreach (var path in rawPaths)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
+        }
+        await using var cleanup = connection.CreateCommand();
+        cleanup.CommandText = "DELETE FROM recording_raw_chunks WHERE session_id=$session AND status='READY'";
+        cleanup.Parameters.AddWithValue("$session", sessionId);
+        await cleanup.ExecuteNonQueryAsync(cancellationToken);
 }
 }

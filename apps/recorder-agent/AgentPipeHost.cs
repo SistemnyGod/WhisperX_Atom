@@ -17,6 +17,7 @@ public sealed class AgentPipeHost(
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private readonly ConcurrentDictionary<string, Task> _finalizations = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _finalizationErrors = new(StringComparer.Ordinal);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -85,7 +86,9 @@ public sealed class AgentPipeHost(
                     var retrySessionId = ReadString(request.Payload, "sessionId");
                     if (string.IsNullOrWhiteSpace(retrySessionId)) return Error("session_required");
                     var retryCompleted = await FinalizeAsync(retrySessionId, cancellationToken);
-                    return new AgentIpcResponse(retryCompleted, retryCompleted ? RecorderState.Idle.ToString() : RecorderState.Finalizing.ToString(), retrySessionId,
+                    if (retryCompleted) _finalizationErrors.TryRemove(retrySessionId, out _);
+                    else _finalizationErrors[retrySessionId] = "server_finalize_pending";
+                    return new AgentIpcResponse(retryCompleted, retryCompleted ? RecorderState.Idle.ToString() : RecorderState.Error.ToString(), retrySessionId,
                         retryCompleted ? null : "upload_pending", null);
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
@@ -141,6 +144,7 @@ public sealed class AgentPipeHost(
     private void TrackFinalization(RecordingStopHandle stop, Guid? meetingId)
     {
         if (string.IsNullOrWhiteSpace(stop.SessionId)) return;
+        _finalizationErrors.TryRemove(stop.SessionId, out _);
         var task = CompleteFinalizationAsync(stop, meetingId);
         _finalizations[stop.SessionId] = task;
         _ = task.ContinueWith(completed => _finalizations.TryRemove(stop.SessionId, out _), TaskScheduler.Default);
@@ -152,12 +156,14 @@ public sealed class AgentPipeHost(
         {
             await stop.LocalFinalization;
             await archive.CreateAsync(stop.SessionId!, CancellationToken.None);
-            await FinalizeAsync(stop.SessionId, CancellationToken.None);
+            if (!await FinalizeAsync(stop.SessionId, CancellationToken.None))
+                _finalizationErrors[stop.SessionId!] = "server_finalize_pending";
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Recording finalization failed after local stop. Session={SessionId}, Meeting={MeetingId}", stop.SessionId, meetingId);
             await spool.SetSessionStateAsync(stop.SessionId!, "FAILED", CancellationToken.None);
+            _finalizationErrors[stop.SessionId!] = "recording_finalize_failed";
         }
     }
     private async Task<bool> FinalizeAsync(string? localSessionId, CancellationToken cancellationToken)
@@ -185,6 +191,7 @@ public sealed class AgentPipeHost(
             {
                 await archive.SetUploadStateAsync(localSessionId, "CONFIRMED", null, cancellationToken);
                 await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
+                _finalizationErrors.TryRemove(localSessionId, out _);
             }
             else await archive.SetUploadStateAsync(localSessionId, "WAITING_FOR_CONFIRMATION", "Server did not confirm the session", cancellationToken);
             return finalized;
@@ -198,7 +205,8 @@ public sealed class AgentPipeHost(
 
     private AgentIpcResponse Status()
     {
-        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, null, null, recorder.CurrentMediaTimeMs);
+        var visible = VisibleStatus();
+        return new AgentIpcResponse(true, visible.State.ToString(), visible.SessionId, visible.Error, null, null, recorder.CurrentMediaTimeMs);
     }
 
     private async Task<AgentIpcResponse> StatusAsync(CancellationToken cancellationToken)
@@ -207,10 +215,30 @@ public sealed class AgentPipeHost(
         var pendingUploadSessions = 0;
         try { pendingUploadSessions = await spool.PendingUploadSessionCountAsync(cancellationToken); }
         catch (Exception ex) { logger.LogDebug(ex, "Spool database is not initialized while reporting health."); }
-        return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, new AgentIpcHealth(
+        var rawBacklog = new RawChunkBacklog(0, 0, 0, 0, 0);
+        try { rawBacklog = await spool.GetRawChunkBacklogAsync(cancellationToken); }
+        catch (Exception ex) { logger.LogDebug(ex, "Raw chunk backlog is not available while reporting health."); }
+        var visible = VisibleStatus();
+        var peaks = recorder.CurrentAudioPeaks;
+        return new AgentIpcResponse(true, visible.State.ToString(), visible.SessionId, visible.Error, new AgentIpcHealth(
             health.Microphone, health.SystemAudio, health.CaptureDeviceCount, health.RenderDeviceCount, health.FreeBytes, health.TotalBytes, health.Error,
             storage.ArchiveRoot, pendingUploadSessions, health.CaptureDevices, health.RenderDevices,
-            storage.MicrophoneDeviceId, storage.SystemAudioDeviceId), null, recorder.CurrentMediaTimeMs);
+            storage.MicrophoneDeviceId, storage.SystemAudioDeviceId,
+            rawBacklog.Pending, rawBacklog.Writing, rawBacklog.Encoding, rawBacklog.Failed, rawBacklog.Bytes,
+            peaks.MicrophonePeak, peaks.SystemAudioPeak, peaks.MicrophoneDb, peaks.SystemAudioDb), null, recorder.CurrentMediaTimeMs);
+    }
+
+    private (RecorderState State, string? SessionId, string? Error) VisibleStatus()
+    {
+        var finalizingSession = _finalizations.Keys.OrderBy(item => item, StringComparer.Ordinal).FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(finalizingSession))
+            return (RecorderState.Finalizing, finalizingSession, "server_finalize_pending");
+
+        var failedSession = _finalizationErrors.Keys.OrderBy(item => item, StringComparer.Ordinal).FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(failedSession) && _finalizationErrors.TryGetValue(failedSession, out var error))
+            return (RecorderState.Error, failedSession, error);
+
+        return (state.State, recorder.SessionId, null);
     }
 
     private async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, CancellationToken cancellationToken)
@@ -229,7 +257,9 @@ public sealed class AgentPipeHost(
     {
         InvalidOperationException when exception.Message.Contains("Cannot pause", StringComparison.OrdinalIgnoreCase) => "recording_cannot_pause",
         InvalidOperationException when exception.Message.Contains("Cannot resume", StringComparison.OrdinalIgnoreCase) => "recording_cannot_resume",
+        InvalidOperationException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
         InvalidOperationException when exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase) => "recording_already_active",
+        FileNotFoundException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
         IOException when exception.Message.Contains("storage", StringComparison.OrdinalIgnoreCase) => "recording_storage_unavailable",
         UnauthorizedAccessException => "recording_archive_access_denied",
         FileNotFoundException or DirectoryNotFoundException or PathTooLongException => "recording_archive_path_unavailable",
