@@ -180,8 +180,8 @@ def validate_evidence_v2(
 ) -> dict[str, Any]:
     """Validate v2 evidence references and expose review metadata."""
 
-    reviewed = 0
-    unsupported = 0
+    checked_items = 0
+    needs_review_items = 0
     for collection in ("topics", "decisions", "action_items", "risks", "open_questions", "notable_facts"):
         for item in payload.get(collection, []):
             if not isinstance(item, dict):
@@ -212,12 +212,16 @@ def validate_evidence_v2(
                 validation["review_reasons"] = review_reasons
                 item["review_reasons"] = review_reasons
             item["validation"] = validation
-            reviewed += 1
-            unsupported += int(needs_review)
+            checked_items += 1
+            needs_review_items += int(needs_review)
     payload["validation"] = {
         "evidence_checked": True,
-        "review_items": reviewed,
-        "unsupported_claims": unsupported,
+        "checked_items": checked_items,
+        "needs_review_items": needs_review_items,
+        # Compatibility for existing persistence and API consumers. This
+        # field now means items requiring review, not all inspected items.
+        "review_items": needs_review_items,
+        "unsupported_claims": needs_review_items,
     }
     return payload
 

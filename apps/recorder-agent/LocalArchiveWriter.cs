@@ -191,9 +191,19 @@ public sealed class LocalArchiveWriter(
     private async Task ConcatTrackAsync(IReadOnlyList<RecordingArchiveChunk> chunks, string output, CancellationToken cancellationToken)
     {
         var attempt = Guid.NewGuid().ToString("N");
-        var listPath = output + $".{attempt}.concat.txt";
-        var outputPart = output + $".{attempt}.part";
+        var tempRoot = Path.Combine(Path.GetTempPath(), "WhisperXAtom");
+        Directory.CreateDirectory(tempRoot);
+        var listPath = Path.Combine(tempRoot, $"{attempt}.concat.txt");
+        var outputPart = Path.Combine(tempRoot, $"{attempt}.flac.part");
         var lines = chunks.Select(chunk => $"file '{EscapeConcatPath(chunk.LocalPath)}'");
+        var outputDirectory = Path.GetDirectoryName(output);
+        if (string.IsNullOrWhiteSpace(outputDirectory)) throw new InvalidOperationException("LOCAL_ARCHIVE_PATH_INVALID");
+        // Recovery may observe a partially-created archive directory after a
+        // previous process was interrupted. Re-establish the final destination
+        // immediately before the atomic move. Temporary files live in the
+        // system temp directory so service account/path encoding restrictions
+        // cannot prevent creation of the concat input.
+        Directory.CreateDirectory(outputDirectory);
         DeleteIfExists(listPath);
         DeleteIfExists(outputPart);
         // FFmpeg's concat demuxer does not accept a UTF-8 BOM before the first
@@ -216,7 +226,12 @@ public sealed class LocalArchiveWriter(
 
     private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, CancellationToken cancellationToken)
     {
-        var outputPart = output + $".{Guid.NewGuid():N}.part";
+        var outputDirectory = Path.GetDirectoryName(output);
+        if (string.IsNullOrWhiteSpace(outputDirectory)) throw new InvalidOperationException("LOCAL_ARCHIVE_PATH_INVALID");
+        Directory.CreateDirectory(outputDirectory);
+        var tempRoot = Path.Combine(Path.GetTempPath(), "WhisperXAtom");
+        Directory.CreateDirectory(tempRoot);
+        var outputPart = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.master.flac.part");
         DeleteIfExists(outputPart);
         if (tracks.Count == 1)
         {

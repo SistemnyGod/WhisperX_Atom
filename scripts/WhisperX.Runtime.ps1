@@ -41,6 +41,14 @@ function Set-WhisperXRuntimeEnvironment {
     $env:TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = "1"
     $env:LLM_HEALTH_HOST = "127.0.0.1"
     if (-not $env:LLM_HEALTH_PORT) { $env:LLM_HEALTH_PORT = "18080" }
+
+    # PowerShell hosts can expose both PATH and Path as separate keys even
+    # though Windows treats them case-insensitively. Start-Process rejects
+    # that duplicate environment when spawning a worker. Keep one canonical
+    # Path entry for every runtime child process.
+    $pathValue = $env:Path
+    try { Remove-Item Env:\PATH -ErrorAction SilentlyContinue } catch { }
+    if (-not [string]::IsNullOrWhiteSpace($pathValue)) { $env:Path = $pathValue }
 }
 
 function Get-WhisperXRuntimeRoot {

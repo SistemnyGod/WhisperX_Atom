@@ -17,6 +17,11 @@ if ($LASTEXITCODE -ne 0) { throw "DOCKER_CORE_STOP_FAILED: transcript-only Compo
 & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile llm --profile llm-diagnostic stop summary-worker llama-server | Out-Null
 if ($StopRecorder) {
     try { Stop-Service -Name "WhisperXAtomRecorder" -ErrorAction Stop } catch { Write-Warning "RECORDER_STOP_FAILED: Recorder Service was not stopped." }
+    $recorderHostPidPath = Join-Path $runtimeRoot "recorder-host.pid"
+    if (Test-Path -LiteralPath $recorderHostPidPath) {
+        try { Stop-WhisperXProcessTree -ProcessId ([int](Get-Content $recorderHostPidPath -Raw)) } catch { }
+        Remove-Item -LiteralPath $recorderHostPidPath -Force -ErrorAction SilentlyContinue
+    }
 }
 Write-WhisperXRuntimeState -RepoPath $repo -State ([ordered]@{
     overall = "STOPPED"

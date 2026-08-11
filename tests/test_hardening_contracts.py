@@ -218,3 +218,27 @@ def test_summary_and_assistant_workers_extend_long_job_leases():
     assert "maintain_message" in worker
     assert "renew_lease" in worker and "renew_lease" in assistant
     assert "lease_expires_at=now()+interval '30 minutes'" in worker
+
+
+def test_recorder_host_fallback_is_idempotent_and_uses_existing_agent_state():
+    host = read(Path("scripts/start-recorder-host.ps1"))
+    start = read(Path("scripts/start-transcription-mvp.ps1"))
+    stop = read(Path("scripts/stop-transcription-mvp.ps1"))
+    doctor = read(Path("scripts/doctor-transcription-mvp.ps1"))
+    assert "WhisperXAtomAgent" in host
+    assert "recorder-host.pid" in host
+    assert "agent-config.json" in host and "ATOM_AGENT_DATA_ROOT" in host
+    assert "start-recorder-host.ps1" in start
+    assert "Get-Service -Name \"WhisperXAtomRecorder\"" in start
+    assert "recorder-host.pid" in stop
+    assert "Test-RecorderHostPipe" in doctor
+    installer = read(Path("scripts/install-recorder-runtime.ps1"))
+    assert "Start-Process" in installer and "-Verb RunAs" in installer
+    assert "ELEVATION_REQUIRED" in installer
+    assert 'Stop-Service -Name "WhisperXAtomRecorder"' in installer
+    assert "RECORDER_SERVICE_STOP_FAILED" in installer
+    assert "AgentUpdate" in installer and "Install-Service.ps1" in installer
+    launch = read(Path("scripts/launch-desktop.ps1"))
+    assert "--no-restore" in launch
+    assert "Get-RunningDesktopProcess" in launch
+    assert "DESKTOP_ALREADY_RUNNING_DIFFERENT_BUILD" in launch

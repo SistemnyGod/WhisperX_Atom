@@ -43,6 +43,24 @@ from workers.summary_worker.protocol import (
 
 
 class SummaryWorkerTests(unittest.TestCase):
+    def test_valid_v2_evidence_is_checked_without_being_marked_for_review(self):
+        result = validate_evidence_v2(
+            {
+                "topics": [{
+                    "title": "Насос",
+                    "summary": "Проверить насос",
+                    "evidence_segment_ids": ["SEG-1"],
+                }],
+            },
+            {"1"},
+            {"1": "Проверить насос до конца смены"},
+        )
+        validation = result["validation"]
+        self.assertEqual(1, validation["checked_items"])
+        self.assertEqual(0, validation["needs_review_items"])
+        self.assertEqual(0, validation["review_items"])
+        self.assertEqual(0, validation["unsupported_claims"])
+
     def test_protocol_profile_is_versioned_and_has_no_responsible_field(self):
         self.assertEqual(MEETING_PROTOCOL_RU, profile_for(MEETING_PROTOCOL_RU).name)
         self.assertEqual("meeting-protocol-ru-v1", PROTOCOL_RU_SCHEMA_VERSION)

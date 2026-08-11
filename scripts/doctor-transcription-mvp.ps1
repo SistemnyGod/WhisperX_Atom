@@ -54,6 +54,17 @@ function Get-RunningWhisperXServiceNames {
     return @($serviceNames | Sort-Object -Unique)
 }
 
+function Test-RecorderHostPipe {
+    $pipe = $null
+    try {
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "WhisperXAtomAgent", [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        $pipe.Connect(1000)
+        return $pipe.IsConnected
+    }
+    catch { return $false }
+    finally { if ($null -ne $pipe) { $pipe.Dispose() } }
+}
+
 Check "docker" { docker ps --format "{{.ID}}" | Out-Null; if ($LASTEXITCODE -ne 0) { throw "Docker daemon is not accessible" }; "ready" }
 Check "compose" { docker compose version | Out-Null; "ready" }
 if (-not $SkipRegistry) { Check "registry" { docker manifest inspect nats:2.11-alpine | Out-Null; "ready" } -WarningOnly }
@@ -98,9 +109,17 @@ Check "transcriptOnly" {
     "ready"
 }
 Check "recorder" {
-    $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction Stop
-    if ($service.Status -ne "Running") { throw "Recorder Service $($service.Status)" }
-    "ready"
+    $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -eq "Running") { return "ready" }
+    $runtimeRoot = Join-Path $repo "artifacts\runtime"
+    $pidPath = Join-Path $runtimeRoot "recorder-host.pid"
+    if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
+        try {
+            $hostPid = [int](Get-Content -LiteralPath $pidPath -Raw).Trim()
+            if ((Get-Process -Id $hostPid -ErrorAction SilentlyContinue) -and (Test-RecorderHostPipe)) { return "ready" }
+        } catch { }
+    }
+    throw "Recorder Service/host is not running"
 } -WarningOnly
 
 $report = [ordered]@{ generatedAtUtc=[DateTimeOffset]::UtcNow; runtime="transcription-mvp"; checks=$checks; diagnostics=$diagnostics; ok=($failures.Count -eq 0); failures=$failures }

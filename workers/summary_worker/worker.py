@@ -231,7 +231,11 @@ class SummaryRepository:
             needs_review = (
                 quality_status != "READY"
                 if is_protocol
-                else bool(validation.get("rejected_facts") or validation.get("review_items") or validation.get("review_reasons"))
+                else bool(
+                    validation.get("rejected_facts")
+                    or validation.get("needs_review_items", validation.get("review_items"))
+                    or validation.get("review_reasons")
+                )
             )
             summary_status = (
                 quality_status if quality_status in {"READY", "NEEDS_REVIEW", "FAILED"}

@@ -20,6 +20,10 @@ def test_local_archive_uses_bomless_concat_and_atomic_audio_outputs():
     assert "master.flac" in archive
     assert "File.Move(outputPart, output, true)" in archive
     assert "manifest.json" in archive
+    assert "var outputDirectory = Path.GetDirectoryName(output)" in archive
+    assert "Directory.CreateDirectory(outputDirectory)" in archive
+    assert "Path.GetTempPath()" in archive
+    assert "WhisperXAtom" in archive
 
 
 def test_recording_session_has_separate_local_and_delivery_state():

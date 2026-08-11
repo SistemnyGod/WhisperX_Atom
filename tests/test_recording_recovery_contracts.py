@@ -189,6 +189,16 @@ def test_recorder_restart_event_is_structured_and_idempotent():
     assert "AddEventIfMissingAsync" in program and "AddEventIfMissingAsync" in spool
 
 
+def test_startup_retries_legacy_archive_failure_once_without_creating_a_loop():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    program = read("apps/recorder-agent/Program.cs")
+    assert "includeLegacyArchiveFailures" in spool
+    assert "LOCAL_ENCODING_FAILED','LOCAL_ARCHIVE_FAILED" in spool
+    assert "includeLegacyArchiveFailures: true" in program
+    assert "SessionsNeedingRecoveryAsync(includeLegacyArchiveFailures, cancellationToken)" in program
+    assert "excludes LOCAL_FAILED" in program
+
+
 def test_recording_ui_renders_real_peak_history_as_waveform():
     control = read("apps/desktop/WhisperX.Atom.Desktop/Controls/AudioWaveformMonitor.xaml.cs")
     page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml")

@@ -46,7 +46,10 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var recoveryCompleted = false;
         if (api.IsConfigured)
         {
-            recoveryCompleted = await RecoverPendingSessionsAsync(stoppingToken);
+            // One startup-only pass also retries legacy local archive failures
+            // created by pre-BOM-fix binaries. The normal loop intentionally
+            // excludes LOCAL_FAILED so deterministic failures do not spin.
+            recoveryCompleted = await RecoverPendingSessionsAsync(stoppingToken, includeLegacyArchiveFailures: true);
         }
         if (int.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_AUTORECORD_SECONDS"), out var seconds) && seconds > 0)
         {
@@ -259,10 +262,10 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         => (await delivery.RunAsync(localSessionId, cancellationToken)).Success;
 
 
-    private async Task<bool> RecoverPendingSessionsAsync(CancellationToken cancellationToken)
+    private async Task<bool> RecoverPendingSessionsAsync(CancellationToken cancellationToken, bool includeLegacyArchiveFailures = false)
     {
         var completed = true;
-        foreach (var localSessionId in await spool.SessionsNeedingRecoveryAsync(cancellationToken))
+        foreach (var localSessionId in await spool.SessionsNeedingRecoveryAsync(includeLegacyArchiveFailures, cancellationToken))
         {
             if (string.Equals(localSessionId, recorder.SessionId, StringComparison.Ordinal)
                 && state.State is (RecorderState.Recording or RecorderState.Paused or RecorderState.Finalizing))

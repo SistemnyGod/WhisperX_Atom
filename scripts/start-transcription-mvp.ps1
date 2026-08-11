@@ -52,7 +52,12 @@ try {
 
     if (-not $SkipRecorder) {
         $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
-        if ($service -and $service.Status -ne "Running") { Start-Service -Name "WhisperXAtomRecorder" }
+        if ($service) {
+            if ($service.Status -ne "Running") { Start-Service -Name "WhisperXAtomRecorder" }
+        } else {
+            & (Join-Path $PSScriptRoot "start-recorder-host.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_UNAVAILABLE: Recorder Service is not installed and host fallback did not start." }
+        }
     }
     if (-not $SkipDesktop) { & (Join-Path $PSScriptRoot "launch-desktop.ps1") }
     if ($StartWatchdog -and $GpuMode -eq "host") {
