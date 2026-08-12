@@ -52,6 +52,7 @@ public interface IBackendService : IDisposable
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopTranscriptRegistry>> GetTranscriptRegistryPageAsync(int limit, int offset, string? search = null, string? status = null, DateTimeOffset? dateFrom = null, DateTimeOffset? dateTo = null, CancellationToken cancellationToken = default);
     Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default);

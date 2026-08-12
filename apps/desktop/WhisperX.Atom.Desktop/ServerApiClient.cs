@@ -25,6 +25,8 @@ public sealed record DesktopCurrentUser(Guid Id, string Username, string Role)
         || string.Equals(Role, "Operator", StringComparison.OrdinalIgnoreCase);
 }
 public sealed record DesktopTranscript(string Id, string MeetingId, string Status, IReadOnlyList<DesktopTranscriptSegment> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
+public sealed record DesktopTranscriptVersion(string Id, string MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
+public sealed record DesktopTranscriptRegistry(string TranscriptId, string MeetingId, string MeetingTitle, DateTimeOffset MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTimeOffset CreatedAt);
 public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words)
 {
     [JsonIgnore]
@@ -339,6 +341,19 @@ public sealed class ServerApiClient : IDisposable
         return await response.Content.ReadFromJsonAsync<List<DesktopMeeting>>(_json, cancellationToken) ?? [];
     }
 
+    public async Task<IReadOnlyList<DesktopTranscriptRegistry>> GetTranscriptRegistryPageAsync(int limit = 50, int offset = 0, string? search = null, string? status = null, DateTimeOffset? dateFrom = null, DateTimeOffset? dateTo = null, CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+        var query = $"limit={limit}&offset={Math.Max(0, offset)}";
+        if (!string.IsNullOrWhiteSpace(search)) query += "&search=" + Uri.EscapeDataString(search.Trim());
+        if (!string.IsNullOrWhiteSpace(status)) query += "&status=" + Uri.EscapeDataString(status.Trim());
+        if (dateFrom.HasValue) query += "&dateFrom=" + Uri.EscapeDataString(dateFrom.Value.UtcDateTime.ToString("O"));
+        if (dateTo.HasValue) query += "&dateTo=" + Uri.EscapeDataString(dateTo.Value.UtcDateTime.ToString("O"));
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/transcripts?" + query, null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopTranscriptRegistry>>(_json, cancellationToken) ?? [];
+    }
+
     public async Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -494,11 +509,36 @@ public sealed class ServerApiClient : IDisposable
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantQuery>(_json, cancellationToken);
     }
-    public async Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    public async Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, int? version = null, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/transcript", null, cancellationToken);
+        var suffix = version.HasValue ? $"?version={version.Value}" : string.Empty;
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/transcript{suffix}", null, cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<DesktopTranscript>(_json, cancellationToken);
+    }
+
+    public Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken) =>
+        GetTranscriptAsync(meetingId, null, cancellationToken);
+
+    public async Task<IReadOnlyList<DesktopTranscriptVersion>> GetTranscriptVersionsAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/transcript/versions", null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<List<DesktopTranscriptVersion>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<DesktopTranscriptVersion?> EditTranscriptSegmentAsync(Guid meetingId, Guid segmentId, string text, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Patch, $"api/meetings/{meetingId}/transcript/segments/{segmentId}", new { text }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopTranscriptVersion>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopJob?> ReprocessTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meetingId}/transcript/reprocess", new { }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
     }
 
     public async Task<IReadOnlyList<DesktopSpeaker>> GetSpeakersAsync(Guid meetingId, CancellationToken cancellationToken = default)

@@ -68,9 +68,20 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var cursor = Math.Max(persistedCursor, configuredCursor);
         var lastRecovery = DateTimeOffset.MinValue;
         var lastActiveBindingAttempt = DateTimeOffset.MinValue;
+        var lastRetention = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
             await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
+            if (DateTimeOffset.UtcNow - lastRetention >= TimeSpan.FromMinutes(5))
+            {
+                // Eligibility is SQLite state based; this never scans filenames
+                // or touches pending/failed transport.
+                await spool.PurgeEligibleRawRecoveryAsync(stoppingToken);
+                await spool.PurgeEligibleLocalArchivesAsync(stoppingToken);
+                foreach (var candidate in await spool.GetTransportPurgeCandidatesAsync(DateTimeOffset.UtcNow, stoppingToken))
+                    await spool.PurgeFinalizedSessionAsync(candidate.SessionId, stoppingToken);
+                lastRetention = DateTimeOffset.UtcNow;
+            }
             if (!api.IsConfigured)
             {
                 recoveryCompleted = false;

@@ -116,8 +116,9 @@ public sealed class LocalArchiveWriter(
             trackFiles.Add(await DescribeFileAsync(trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken));
         }
 
+        var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken)).Select(track => track.Profile).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "ONLINE";
         var masterPath = Path.Combine(exportDirectory, "master.flac");
-        await CreateMasterAsync(trackFiles.Select(item => Path.Combine(directory, item.RelativePath)).ToArray(), masterPath, cancellationToken);
+        await CreateMasterAsync(trackFiles.Select(item => Path.Combine(directory, item.RelativePath)).ToArray(), masterPath, profile, cancellationToken);
         var exportFiles = new List<ArchiveFileEntry>
         {
             await DescribeFileAsync(masterPath, "export", "master", 48000, 1, null, cancellationToken)
@@ -286,7 +287,7 @@ public sealed class LocalArchiveWriter(
         }
     }
 
-    private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, CancellationToken cancellationToken)
+    private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, string recordingProfile, CancellationToken cancellationToken)
     {
         var outputDirectory = Path.GetDirectoryName(output);
         if (string.IsNullOrWhiteSpace(outputDirectory)) throw new InvalidOperationException("LOCAL_ARCHIVE_PATH_INVALID");
@@ -295,11 +296,12 @@ public sealed class LocalArchiveWriter(
         Directory.CreateDirectory(tempRoot);
         var outputPart = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.master.flac.part");
         DeleteIfExists(outputPart);
-        if (tracks.Count == 1)
+        var selectedTracks = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) ? tracks : new[] { tracks[0] };
+        if (selectedTracks.Count == 1)
         {
             try
             {
-                await RunFfmpegAsync(["-y", "-i", tracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
+                await RunFfmpegAsync(["-y", "-i", selectedTracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
                 await ValidateAudioFileAsync(outputPart, cancellationToken);
                 File.Move(outputPart, output, true);
             }
@@ -308,8 +310,8 @@ public sealed class LocalArchiveWriter(
         }
 
         var arguments = new List<string>();
-        foreach (var track in tracks) arguments.AddRange(["-i", track]);
-        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={tracks.Count}:duration=longest:normalize=0,aresample=48000", "-ac", "1", "-c:a", "flac", "-f", "flac", outputPart]);
+        foreach (var track in selectedTracks) arguments.AddRange(["-i", track]);
+        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={selectedTracks.Count}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000", "-ac", "1", "-c:a", "flac", "-f", "flac", outputPart]);
         try
         {
             await RunFfmpegAsync(arguments, cancellationToken);

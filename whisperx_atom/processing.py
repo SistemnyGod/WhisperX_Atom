@@ -44,11 +44,13 @@ class ProcessingService:
 
         try:
             report("NORMALIZING", 10)
-            ctx.asr_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=True))
+            ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(request.media_path)
+            if ctx.asr_audio_path != request.media_path:
+                ctx.register_temp(ctx.asr_audio_path)
             ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
 
             report("TRANSCRIBING", 30)
-            primary_result: dict[str, Any] = pipeline._run_asr(ctx) or {}
+            primary_result: dict[str, Any] = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
             primary_report = build_transcript_quality_report(primary_result, duration_seconds, thresholds)
             primary_gate = quality_gate(primary_report, thresholds)
             fallback_report = None
@@ -60,18 +62,12 @@ class ProcessingService:
             if thresholds.fallback_enabled and is_retryable_quality_failure(primary_gate):
                 fallback_attempted = True
                 fallback_reason = ",".join(primary_report.reasons) or "quality_gate_failed"
-                original_vad_onset = config.vad_onset
-                original_chunk_size = config.chunk_size
-                try:
-                    config.vad_onset = thresholds.fallback_vad_onset
-                    config.chunk_size = thresholds.fallback_chunk_size
-                    fallback_result = pipeline._run_asr(ctx) or {}
-                    result, selected_pass, primary_report, fallback_report = compare_transcript_quality(
-                        primary_result, fallback_result, duration_seconds, thresholds
-                    )
-                finally:
-                    config.vad_onset = original_vad_onset
-                    config.chunk_size = original_chunk_size
+                fallback_result = pipeline.run_asr_pass(
+                    ctx, thresholds.fallback_vad_onset, thresholds.fallback_chunk_size, config.asr_beam_size
+                ) or {}
+                result, selected_pass, primary_report, fallback_report = compare_transcript_quality(
+                    primary_result, fallback_result, duration_seconds, thresholds
+                )
 
             selected_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             selected_gate = quality_gate(selected_report, thresholds)
@@ -168,10 +164,16 @@ class ProcessingService:
                 "fallback_quality": fallback_report.to_dict() if fallback_report else None,
                 "fallback_reason": fallback_reason,
                 "fallback_attempted": fallback_attempted,
+                "primary_vad_onset": config.vad_onset,
+                "primary_chunk_size": config.chunk_size,
+                "fallback_vad_onset": thresholds.fallback_vad_onset if fallback_attempted else None,
+                "fallback_chunk_size": thresholds.fallback_chunk_size if fallback_attempted else None,
+                "fallback_effective": fallback_attempted,
                 "selected_pass": selected_pass,
                 "thresholds": thresholds.to_dict(),
                 "stage_outcomes": stage_outcomes,
                 "diarization": diarization_quality,
+                "asr_preprocessing": ctx.asr_preprocessing,
             }
             metadata = {
                 "model": config.asr_model,
@@ -182,6 +184,12 @@ class ProcessingService:
                 "word_count": len(result.get("word_segments", [])),
                 "processing_profile": request.profile,
                 "selected_asr_pass": selected_pass,
+                "primary_vad_onset": config.vad_onset,
+                "primary_chunk_size": config.chunk_size,
+                "fallback_vad_onset": thresholds.fallback_vad_onset if fallback_attempted else None,
+                "fallback_chunk_size": thresholds.fallback_chunk_size if fallback_attempted else None,
+                "fallback_effective": fallback_attempted,
+                **ctx.asr_preprocessing,
                 "quality_thresholds": thresholds.to_dict(),
             }
             report("PERSISTING", 100)

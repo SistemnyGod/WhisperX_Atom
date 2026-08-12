@@ -938,7 +938,8 @@ class NonWebRiskTests(unittest.TestCase):
         )[0]
 
         self.assertIn("media_has_audio_stream", worker_audio)
-        self.assertIn("if self.config.preprocess_asr or is_video:", worker_audio)
+        self.assertIn("prepare_asr_input", worker_audio)
+        self.assertIn("if is_video and asr_path == ctx.audio_path:", worker_audio)
         guard_index = worker_audio.index("if self.config.enable_diarization:")
         diar_index = worker_audio.index("diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)")
         self.assertLess(guard_index, diar_index)

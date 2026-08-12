@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
 from workers.nats_utils import fetch_available, maintain_message
+from workers.runtime_heartbeat import AsyncHeartbeat
 from .contracts import (
     MEETING_PROTOCOL_RU,
     PROTOCOL_RU_PROMPT_VERSION,
@@ -326,6 +327,20 @@ async def run() -> None:
     except ImportError as exc:
         raise RuntimeError("Install workers/summary_worker/requirements.txt") from exc
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
+    def summary_capabilities() -> dict[str, Any]:
+        model_path = os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf")
+        manifest_path = os.getenv("LLM_MODEL_MANIFEST", model_path + ".manifest.json")
+        llama_binary = os.getenv("LLAMA_RUNTIME_BINARY", "/opt/llama/llama-server")
+        return {
+            "modelAvailable": os.path.isfile(model_path) and os.path.getsize(model_path) > 0,
+            "modelManifestAvailable": os.path.isfile(manifest_path),
+            "modelChecksumExpected": bool(os.getenv("LLM_MODEL_SHA256")),
+            "llamaRuntimeAvailable": os.path.isfile(llama_binary),
+            "gpuRequired": os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"},
+        }
+    heartbeat = AsyncHeartbeat("summary-worker", capabilities=summary_capabilities)
+    await heartbeat.start()
+    heartbeat.set_state("READY")
     jetstream = client.jetstream()
     try:
         await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
@@ -343,11 +358,16 @@ async def run() -> None:
                     payload = json.loads(message.data)
                     job_id = str(payload.get("job_id", ""))
                     message_id = str(payload.get("message_id", ""))
+                    heartbeat.set_job(job_id or None)
+                    heartbeat.set_state("BUSY")
                     async with maintain_message(message, on_tick=lambda: asyncio.to_thread(summary_worker.repository.renew_lease, job_id, message_id)):
                         await summary_worker.handle(payload)
                     await message.ack()
                 except Exception:
                     await message.nak()
+                finally:
+                    heartbeat.set_job(None)
+                    heartbeat.set_state("READY")
 
     async def consume_assistant() -> None:
         while True:

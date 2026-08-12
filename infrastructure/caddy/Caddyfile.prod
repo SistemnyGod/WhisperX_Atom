@@ -1,0 +1,16 @@
+:80 {
+  redir https://{$PUBLIC_HOST}{uri} permanent
+}
+
+{$PUBLIC_HOST} {
+  tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
+
+  @api path /api/* /health /ready
+  handle @api {
+    reverse_proxy api:8080
+  }
+
+  handle /files/* {
+    reverse_proxy tusd:1080
+  }
+}

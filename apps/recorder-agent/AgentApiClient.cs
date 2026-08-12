@@ -231,14 +231,15 @@ public sealed class AgentApiClient : IDisposable
         {
             if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
             var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
+            var correlationId = (await spool.GetSessionInfoAsync(localSessionId, cancellationToken))?.PipelineCorrelationId;
+            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, localSessionId, correlationId, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
             var serverSessionId = created.Item1;
             if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
             foreach (var track in tracks)
             {
                 var existingBinding = await spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken);
                 if (existingBinding is not null) continue;
-                var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, cancellationToken);
+                var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, correlationId, cancellationToken);
                 await spool.UpsertServerBindingAsync(new ServerBinding(localSessionId, track.TrackId, serverSessionId, serverTrackId), cancellationToken);
             }
             return serverSessionId;
@@ -275,7 +276,8 @@ public sealed class AgentApiClient : IDisposable
                 claimed = true;
                 try
                 {
-                    await UploadChunkAsync(binding, chunk, cancellationToken);
+                    var correlationId = (await spool.GetSessionInfoAsync(chunk.SessionId, cancellationToken))?.PipelineCorrelationId;
+                    await UploadChunkAsync(binding, chunk, correlationId, cancellationToken);
                     await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
                     Interlocked.Increment(ref confirmed);
                 }
@@ -319,7 +321,7 @@ public sealed class AgentApiClient : IDisposable
         var events = await spool.PendingEventsAsync(localSessionId, 200, cancellationToken);
         if (events.Count == 0) return 0;
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{session}/events/batch"));
-        AddAuthentication(request);
+        AddAuthentication(request, (await spool.GetSessionInfoAsync(localSessionId, cancellationToken))?.PipelineCorrelationId);
         request.Content = JsonContent.Create(new
         {
             events = events.Select(item => new
@@ -350,7 +352,7 @@ public sealed class AgentApiClient : IDisposable
         using var response = await SendWithRetryAsync(async () =>
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/finalize"));
-            AddAuthentication(request);
+            AddAuthentication(request, (await spool.GetSessionInfoAsync(localSessionId, cancellationToken))?.PipelineCorrelationId);
             request.Content = JsonContent.Create(new
             {
                 manifest = new
@@ -469,30 +471,32 @@ public sealed class AgentApiClient : IDisposable
     public async Task<bool> IsServerMediaReadyAsync(Guid serverSessionId, CancellationToken cancellationToken)
         => (await GetServerMediaStatusAsync(serverSessionId, cancellationToken)).Ready;
 
-    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, CancellationToken cancellationToken)
+    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, string localSessionId, string? pipelineCorrelationId, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, "api/v1/recording-sessions"));
-        AddAuthentication(request);
-        request.Content = JsonContent.Create(new { meetingId, title, startedAt = DateTimeOffset.UtcNow });
+        AddAuthentication(request, pipelineCorrelationId);
+        request.Content = JsonContent.Create(new { meetingId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId });
         using var response = await _http.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         return (document.RootElement.GetProperty("id").GetGuid(), document.RootElement.GetProperty("meetingId").GetGuid());
     }
 
-    private async Task<Guid> CreateServerTrackAsync(Guid serverSessionId, RecordingTrackInfo track, CancellationToken cancellationToken)
+    private async Task<Guid> CreateServerTrackAsync(Guid serverSessionId, RecordingTrackInfo track, string? pipelineCorrelationId, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/recording-sessions/{serverSessionId}/tracks"));
-        AddAuthentication(request);
+        AddAuthentication(request, pipelineCorrelationId);
         request.Content = JsonContent.Create(new
         {
             trackType = track.TrackType,
             deviceId = track.EndpointId,
             deviceName = track.DeviceFriendlyName,
             selectionMode = track.SelectionMode,
-            profile = track.Profile,
+            recordingProfile = track.Profile,
             sampleRate = track.SampleRate,
-            channels = track.Channels
+            channels = track.Channels,
+            encoding = track.Encoding,
+            bitsPerSample = track.BitsPerSample
         });
         using var response = await _http.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
@@ -500,12 +504,12 @@ public sealed class AgentApiClient : IDisposable
         return document.RootElement.GetProperty("id").GetGuid();
     }
 
-    private async Task UploadChunkAsync(ServerBinding binding, RecordingChunk chunk, CancellationToken cancellationToken)
+    private async Task UploadChunkAsync(ServerBinding binding, RecordingChunk chunk, string? pipelineCorrelationId, CancellationToken cancellationToken)
     {
         using var response = await SendWithRetryAsync(async () =>
         {
             using var request = new HttpRequestMessage(HttpMethod.Put, new Uri(_baseUri, $"api/v1/recording-sessions/{binding.ServerSessionId}/tracks/{binding.ServerTrackId}/chunks/{chunk.Sequence}"));
-            AddAuthentication(request);
+            AddAuthentication(request, pipelineCorrelationId);
             request.Headers.Add("X-Chunk-SHA256", chunk.Sha256);
             request.Headers.Add("X-Start-Sample", chunk.StartSample.ToString());
             request.Headers.Add("X-Sample-Count", chunk.SampleCount.ToString());
@@ -534,7 +538,8 @@ public sealed class AgentApiClient : IDisposable
             foreach (var sequence in missing)
             {
                 if (!bySequence.TryGetValue(sequence, out var chunk) || !File.Exists(chunk.LocalPath)) return false;
-                await UploadChunkAsync(binding, chunk, cancellationToken);
+                var correlationId = (await spool.GetSessionInfoAsync(localSessionId, cancellationToken))?.PipelineCorrelationId;
+                await UploadChunkAsync(binding, chunk, correlationId, cancellationToken);
                 await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
             }
         }
@@ -633,13 +638,14 @@ public sealed class AgentApiClient : IDisposable
     private static bool IsLoopbackUrl(string? value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback;
 
-    private void AddAuthentication(HttpRequestMessage request)
+    private void AddAuthentication(HttpRequestMessage request, string? pipelineCorrelationId = null)
     {
         request.Headers.Add("X-Agent-Id", _agentId.ToString());
         // Keep transport correlation explicit without putting secrets or audio
         // content into logs. Server responses return the authoritative trace id
         // which is persisted in the local receipt for the whole recording chain.
         request.Headers.TryAddWithoutValidation("X-Trace-Id", Guid.NewGuid().ToString("N"));
+        if (!string.IsNullOrWhiteSpace(pipelineCorrelationId)) request.Headers.TryAddWithoutValidation("X-Correlation-Id", pipelineCorrelationId);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
     }
 

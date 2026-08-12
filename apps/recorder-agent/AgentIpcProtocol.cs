@@ -146,4 +146,8 @@ public sealed record FinalizationResult(
     Guid? MediaAssetId = null,
     Guid? ProcessingJobId = null,
     string? TraceId = null,
-    DateTimeOffset? NextRetryAtUtc = null);
+    DateTimeOffset? NextRetryAtUtc = null,
+    string LocalArchiveState = "PENDING",
+    string DeliveryState = "NOT_STARTED",
+    string ServerFinalizeState = "NOT_STARTED",
+    string MediaState = "PENDING");

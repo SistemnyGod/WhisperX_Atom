@@ -35,11 +35,17 @@ $ffmpeg = Invoke-Safe { & (Get-Command ffmpeg.exe -ErrorAction Stop).Source -ver
 $ffprobe = Invoke-Safe { & (Get-Command ffprobe.exe -ErrorAction Stop).Source -version }
 $dotnet = Invoke-Safe { & dotnet --version }
 $modelPath = $env:LLM_MODEL_FILE
-$modelHash = $null
-if ($modelPath -and (Test-Path -LiteralPath $modelPath -PathType Leaf)) { $modelHash = (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+$modelHash = $env:LLM_MODEL_SHA256
+# Deep hashing is intentionally opt-in: release install/download verifies it,
+# while normal startup only records the pinned expected checksum.
+if ($env:WHISPERX_RUNTIME_MANIFEST_DEEP -eq "true" -and $modelPath -and (Test-Path -LiteralPath $modelPath -PathType Leaf)) { $modelHash = (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+$gitCommit = Invoke-Safe { git -C $RepoPath rev-parse HEAD }
 
 $manifest = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+    releaseVersion = $env:WHISPERX_RELEASE_VERSION
+    gitCommit = $gitCommit
+    runtimeProfile = if ($env:WHISPERX_RUNTIME_PROFILE) { $env:WHISPERX_RUNTIME_PROFILE } else { "development" }
     runtime = [ordered]@{
         python = $pythonVersion
         dotnet = $dotnet
@@ -65,6 +71,11 @@ $manifest = [ordered]@{
         quantization = $env:COMPUTE_TYPE
         identifier = $env:WHISPERX_MODEL
         sha256 = $null
+    }, [ordered]@{
+        name = "diarization"
+        revision = $env:DIARIZATION_MODEL_REVISION
+        identifier = $env:DIARIZATION_MODEL
+        sha256 = $env:DIARIZATION_MODEL_SHA256
     }, [ordered]@{
         name = $env:LLM_MODEL_FILE
         revision = $env:LLM_MODEL_REVISION

@@ -1,0 +1,35 @@
+services:
+  # Apply this override together with compose.dev.yml. It replaces the API
+  # runtime contract with an explicit Production configuration and removes
+  # the direct host port; clients enter through the HTTPS gateway below.
+  api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      DOTNET_ENVIRONMENT: Production
+      COOKIE_SECURE: "true"
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB for production};Username=${POSTGRES_USER:?Set POSTGRES_USER for production};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}"
+      POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB for production};Username=${POSTGRES_USER:?Set POSTGRES_USER for production};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}"
+      BOOTSTRAP_ADMIN_USERNAME: "${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME for production}"
+      BOOTSTRAP_ADMIN_PASSWORD: "${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD for production}"
+      TUS_HOOK_SECRET: "${TUS_HOOK_SECRET:?Set TUS_HOOK_SECRET for production}"
+      IMPORT_WORKER_TOKEN: "${IMPORT_WORKER_TOKEN:?Set IMPORT_WORKER_TOKEN for production}"
+      AGENT_ENROLLMENT_SECRET: "${AGENT_ENROLLMENT_SECRET:?Set AGENT_ENROLLMENT_SECRET for production}"
+      VOICE_HOST_TOKEN: "${VOICE_HOST_TOKEN:?Set VOICE_HOST_TOKEN for production}"
+    ports: []
+
+  prod-gateway:
+    profiles: ["prod"]
+    image: caddy:2.8
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: "${PUBLIC_HOST:?Set PUBLIC_HOST for production}"
+    ports:
+      - "${PRODUCTION_HTTPS_BIND_ADDRESS:-0.0.0.0}:443:443"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - "${TLS_CERTS_HOST:?Set TLS_CERTS_HOST to a directory containing fullchain.pem and privkey.pem}:/etc/caddy/certs:ro"
+    depends_on:
+      api:
+        condition: service_healthy
+      tusd:
+        condition: service_started

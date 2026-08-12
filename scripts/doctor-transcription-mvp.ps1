@@ -78,7 +78,9 @@ Check "ffmpeg" { if (-not (Get-Command ffmpeg.exe -ErrorAction Stop)) { throw "f
 $dataRoot = if ($env:WHISPERX_DATA_HOST) { $env:WHISPERX_DATA_HOST } else { "C:\WhisperXAtom\Data" }
 $inboxRoot = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" }
 $archiveRoot = if ($env:WHISPERX_ARCHIVE_HOST) { $env:WHISPERX_ARCHIVE_HOST } else { "C:\WhisperXAtom\Archive" }
-$apiBase = if ($env:WHISPERX_API_URL) { $env:WHISPERX_API_URL.TrimEnd('/') } else { "http://192.168.2.194:8080" }
+# This doctor targets the local Development compose profile. Production has a
+# separate deployment command and must be checked through its HTTPS gateway.
+$apiBase = if ($env:WHISPERX_DEV_API_URL) { $env:WHISPERX_DEV_API_URL.TrimEnd('/') } else { "http://127.0.0.1:8080" }
 $gpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" }
 foreach ($pair in @(@("data",$dataRoot), @("inbox",$inboxRoot), @("archive",$archiveRoot))) {
     $name = $pair[0]; $path = $pair[1]
@@ -99,6 +101,16 @@ Check "systemReadiness" {
     if (-not $payload.ready) { throw "system readiness is false" }
     "ready"
 }
+Check "summaryRuntime" {
+    if (-not $diagnostics.systemReadiness) { throw "system readiness unavailable" }
+    $qwen = $diagnostics.systemReadiness.components.qwen
+    $diagnostics.summaryWorker = $diagnostics.systemReadiness.components.workers.'summary-worker'
+    $diagnostics.qwenModel = $qwen
+    $diagnostics.llamaCpp = $qwen.reason
+    $diagnostics.gpuLease = if ($qwen.status -eq "BUSY") { "BUSY" } else { "READY" }
+    if ($qwen.status -eq "UNAVAILABLE") { throw "Qwen runtime unavailable: $($qwen.reason)" }
+    $qwen.status
+} -WarningOnly
 Check "services" {
     try {
         $names = @(Get-RunningWhisperXServiceNames)

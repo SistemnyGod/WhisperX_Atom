@@ -118,6 +118,11 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
 
     audio_stream = next(stream for stream in probe["streams"] if stream.get("codec_type") == "audio")
+    assembly_input = input_path.parent / "assembly-input.json"
+    try:
+        recording_tracks = json.loads(assembly_input.read_text(encoding="utf-8")).get("recording_tracks", []) if assembly_input.is_file() else []
+    except (OSError, json.JSONDecodeError):
+        recording_tracks = []
     quality_report = {
         "duration_ms": int(probe["duration_ms"]),
         "sample_rate": int(audio_stream.get("sample_rate") or 0),
@@ -127,6 +132,7 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "derived_sample_rate": 16000,
         "derived_channels": 1,
         "warnings": [],
+        "recording_tracks": recording_tracks,
         **_measure_pcm_quality(asr),
     }
 

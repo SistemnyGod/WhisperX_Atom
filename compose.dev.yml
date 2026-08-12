@@ -8,7 +8,7 @@ x-media-volumes: &media-volumes
 services:
   postgres:
     profiles: ["core", "gpu", "llm"]
-    image: postgres:17-alpine
+    image: postgres:17.5-alpine3.21
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-whisperx_atom}
@@ -26,7 +26,7 @@ services:
 
   nats:
     profiles: ["core", "gpu", "llm"]
-    image: nats:2.11-alpine
+    image: nats:2.11.6-alpine3.21
     restart: unless-stopped
     command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes:
@@ -42,7 +42,7 @@ services:
 
   tusd:
     profiles: ["core", "gpu"]
-    image: tusproject/tusd:v2.6
+    image: tusproject/tusd:v2.6.0
     restart: unless-stopped
     # Docker Desktop exposes Windows bind mounts as root-owned. tusd normally
     # runs as uid 1000 and cannot create /data/uploads on this target.
@@ -63,6 +63,9 @@ services:
       context: ./apps/server/WhisperX.Atom.Api
     restart: unless-stopped
     environment:
+      # This file is development-only. Production uses compose.prod.yml.
+      ASPNETCORE_ENVIRONMENT: Development
+      DOTNET_ENVIRONMENT: Development
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
       POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
@@ -71,14 +74,13 @@ services:
       IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
       AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET}
       VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SECURE: "false"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      # LAN clients use the host's IPv4 address (for example
-      # http://192.168.2.194:8080). Keep the database, NATS and tusd private.
-      - "${WHISPERX_API_BIND_ADDRESS:-0.0.0.0}:8080:8080"
+      # Development API is intentionally reachable only by the local Desktop.
+      - "127.0.0.1:8080:8080"
     volumes: *media-volumes
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]

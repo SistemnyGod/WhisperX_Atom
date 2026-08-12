@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, codex/server-first-platform]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_installer:
+        description: Build the optional Windows installer
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - run: dotnet restore apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj
+      - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj
+      - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj
+      - run: dotnet restore apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj
+      - run: dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --no-restore -c Release
+      - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj --no-restore -c Release
+      - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj --no-restore -c Release
+      - run: dotnet publish apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore -c Release -r win-x64 -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -o artifacts/ci/desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-validation
+          path: artifacts/ci/desktop
+          retention-days: 7
+
+  python-targeted-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pytest -q tests/test_*contracts.py tests/test_media_retry.py
+
+  migration-validation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: whisperx_ci
+          POSTGRES_USER: whisperx
+          POSTGRES_PASSWORD: ci-only-password
+        options: >-
+          --health-cmd "pg_isready -U whisperx -d whisperx_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply migrations in filename order
+        env:
+          PGPASSWORD: ci-only-password
+        run: |
+          for migration in $(find apps/server/WhisperX.Atom.Api/Migrations -maxdepth 1 -name '*.sql' -printf '%f\n' | sort); do
+            psql -h localhost -U whisperx -d whisperx_ci -v ON_ERROR_STOP=1 -f "apps/server/WhisperX.Atom.Api/Migrations/$migration"
+          done
+          psql -h localhost -U whisperx -d whisperx_ci -v ON_ERROR_STOP=1 -c "SELECT count(*) AS migration_tables FROM information_schema.tables WHERE table_schema='public';"
+
+  desktop-resource-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: ./scripts/test-desktop-resources.ps1
+
+  optional-package-installer:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet restore apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj
+      - run: ./scripts/publish-desktop.ps1 -NoRestore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-installer
+          path: artifacts/publish
+          retention-days: 14

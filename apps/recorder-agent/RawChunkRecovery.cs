@@ -15,7 +15,7 @@ public sealed class RawChunkRecovery(
 
     public async Task<bool> RecoverAsync(string? activeSessionId, CancellationToken cancellationToken = default)
     {
-        var completed = await RegisterOrphanRawPartsAsync(activeSessionId, cancellationToken);
+        var completed = await RegisterOrphanRawFilesAsync(activeSessionId, cancellationToken);
         foreach (var raw in await spool.RawChunksNeedingRecoveryAsync(100, cancellationToken))
         {
             if (string.Equals(raw.SessionId, activeSessionId, StringComparison.Ordinal)) continue;
@@ -76,7 +76,7 @@ public sealed class RawChunkRecovery(
         return completed;
     }
 
-    private async Task<bool> RegisterOrphanRawPartsAsync(string? activeSessionId, CancellationToken cancellationToken)
+    private async Task<bool> RegisterOrphanRawFilesAsync(string? activeSessionId, CancellationToken cancellationToken)
     {
         var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
@@ -85,32 +85,37 @@ public sealed class RawChunkRecovery(
 
         var completed = true;
         IEnumerable<string> candidates;
-        try { candidates = Directory.EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories).ToArray(); }
+        try
+        {
+            // A closed .pcm is the normal disk-backed overflow queue. Keep
+            // .pcm.part here as well for a crash that happened before close.
+            candidates = Directory.EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)
+                .Concat(Directory.EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories))
+                .ToArray();
+        }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Could not scan raw PCM recovery files.");
             return false;
         }
 
-        foreach (var partPath in candidates)
+        foreach (var candidatePath in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var trackDirectory = Directory.GetParent(partPath);
+            var trackDirectory = Directory.GetParent(candidatePath);
             var sessionDirectory = trackDirectory?.Parent;
             if (trackDirectory is null || sessionDirectory is null) continue;
             var sessionId = sessionDirectory.Name;
             var trackId = trackDirectory.Name;
             if (string.Equals(sessionId, activeSessionId, StringComparison.Ordinal)) continue;
 
-            var fileName = Path.GetFileName(partPath);
-            const string suffix = ".pcm.part";
-            if (!fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-                || !int.TryParse(fileName[..^suffix.Length], out var sequence)
+            var isPart = candidatePath.EndsWith(".pcm.part", StringComparison.OrdinalIgnoreCase);
+            var rawPath = isPart ? candidatePath[..^".part".Length] : candidatePath;
+            var fileName = Path.GetFileNameWithoutExtension(rawPath);
+            if (!int.TryParse(fileName, out var sequence)
                 || sequence < 0)
                 continue;
-
-            var rawPath = partPath[..^".part".Length];
-            if (File.Exists(rawPath)) continue;
+            if (isPart && File.Exists(rawPath)) continue;
 
             var trackInfo = await spool.GetTrackInfoAsync(trackId, cancellationToken);
             if (trackInfo is null)
@@ -119,14 +124,14 @@ public sealed class RawChunkRecovery(
                 // file untouched than to encode it with a guessed sample
                 // format. The next startup can retry after the metadata is
                 // available.
-                logger.LogWarning("Orphan raw chunk has no track metadata. Session={SessionId}, Track={TrackId}, Path={Path}", sessionId, trackId, partPath);
+                logger.LogWarning("Orphan raw chunk has no track metadata. Session={SessionId}, Track={TrackId}, Path={Path}", sessionId, trackId, candidatePath);
                 completed = false;
                 continue;
             }
 
             try
             {
-                var size = new FileInfo(partPath).Length;
+                var size = new FileInfo(candidatePath).Length;
                 var blockAlign = Math.Max(1, trackInfo.Channels * Math.Max(1, trackInfo.BitsPerSample / 8));
                 var sampleCount = size / blockAlign;
                 if (sampleCount <= 0)

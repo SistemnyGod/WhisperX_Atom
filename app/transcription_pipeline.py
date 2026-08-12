@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import re
 import subprocess
 import traceback
+import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -30,6 +33,13 @@ def _as_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _preprocess_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"auto", "always", "never"}:
+        return normalized
+    return "always" if normalized in {"1", "true", "yes", "on"} else "never"
 
 
 def _normalize_text(text: str) -> str:
@@ -63,6 +73,7 @@ class PipelineContext:
     diar_df: Any = None
     speaker_embeddings: Optional[dict] = None
     error: Optional[str] = None
+    asr_preprocessing: dict[str, Any] = field(default_factory=dict)
     temp_paths: list[Path] = field(default_factory=list)
 
     def register_temp(self, path: Optional[Path]) -> Optional[Path]:
@@ -79,7 +90,7 @@ class PipelineConfig:
     device: str
     compute_type: str
     batch_size: int
-    preprocess_asr: bool
+    preprocess_asr: str
     asr_beam_size: int
     vad_onset: float
     chunk_size: int
@@ -115,7 +126,7 @@ class PipelineConfig:
             device=device,
             compute_type=compute,
             batch_size=_as_int("BATCH_SIZE", 8),
-            preprocess_asr=_as_bool("PREPROCESS_ASR", True),
+            preprocess_asr=_preprocess_mode(os.getenv("PREPROCESS_ASR", "auto")),
             asr_beam_size=_as_int("BEAM_SIZE", 7),
             vad_onset=float(os.getenv("VAD_ONSET", "0.40")),
             chunk_size=_as_int("CHUNK_SIZE", 20),
@@ -160,26 +171,32 @@ class ModelCacheManager:
         hotwords: str,
     ):
         key = self._asr_key(model, device, compute_type, backend)
+        existing = self._asr.get(key)
+        if backend == "whisperx" and existing is not None:
+            current_vad = getattr(existing, "vad_params", {}) or {}
+            if float(current_vad.get("vad_onset", -1)) != float(vad_onset) or int(current_vad.get("chunk_size", -1)) != int(chunk_size):
+                # WhisperX fixes vad_onset in the wrapper's VAD at load time.
+                # Keep the ctranslate2 weights object, but never keep primary
+                # and fallback wrappers alive together on CUDA.
+                base_model = existing.model
+                del self._asr[key]
+                del existing
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                self._asr[key] = self._load_whisperx_wrapper(
+                    model, device, compute_type, language, beam_size, vad_onset,
+                    chunk_size, initial_prompt, hotwords, base_model,
+                )
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
                 self._asr[key] = WhisperModel(model, device=device, compute_type=compute_type)
             else:
-                self._asr[key] = whisperx.load_model(
-                    model,
-                    device=device,
-                    compute_type=compute_type,
-                    language=language,
-                    asr_options={
-                        "beam_size": beam_size,
-                        "initial_prompt": initial_prompt or None,
-                        "hotwords": hotwords or None,
-                    },
-                    vad_options={
-                        "vad_onset": float(vad_onset),
-                        "chunk_size": int(chunk_size),
-                    },
+                self._asr[key] = self._load_whisperx_wrapper(
+                    model, device, compute_type, language, beam_size, vad_onset,
+                    chunk_size, initial_prompt, hotwords, None,
                 )
                 if PipelineConfig.from_env().use_torch_compile:
                     try:
@@ -188,6 +205,15 @@ class ModelCacheManager:
                     except Exception:
                         pass
         return self._asr[key]
+
+    @staticmethod
+    def _load_whisperx_wrapper(model: str, device: str, compute_type: str, language: str | None, beam_size: int, vad_onset: float, chunk_size: int, initial_prompt: str, hotwords: str, base_model: Any | None):
+        return whisperx.load_model(
+            model, device=device, compute_type=compute_type, language=language,
+            asr_options={"beam_size": beam_size, "initial_prompt": initial_prompt or None, "hotwords": hotwords or None},
+            vad_options={"vad_onset": float(vad_onset), "chunk_size": int(chunk_size)},
+            model=base_model,
+        )
 
     def get_align_model(self, language_code: str, device: str):
         key = (language_code, device)
@@ -291,10 +317,11 @@ class TranscriptionPipeline:
                     if not has_audio:
                         raise RuntimeError(f"В видео нет аудиодорожки: {ctx.audio_path}")
 
-                asr_path = ctx.audio_path
-                if self.config.preprocess_asr or is_video:
+                asr_path, ctx.asr_preprocessing = await asyncio.to_thread(self.prepare_asr_input, ctx.audio_path)
+                if is_video and asr_path == ctx.audio_path:
                     asr_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=True)
-                ctx.asr_audio_path = ctx.register_temp(asr_path)
+                    ctx.asr_preprocessing.update({"asr_input_path_kind": "video_source", "preprocessing_applied": True, "preprocessing_profile": "asr_soft"})
+                ctx.asr_audio_path = ctx.register_temp(asr_path) if asr_path != ctx.audio_path else asr_path
 
                 diar_path = None
                 if self.config.enable_diarization:
@@ -422,7 +449,7 @@ class TranscriptionPipeline:
             except Exception:
                 pass
 
-    def _run_asr(self, ctx: PipelineContext) -> dict:
+    def run_asr_pass(self, ctx: PipelineContext, vad_onset: float, chunk_size: int, beam_size: int) -> dict:
         source = str(ctx.asr_audio_path or ctx.audio_path)
         if self.config.asr_backend == "faster-whisper":
             model = self.cache.get_asr_model(
@@ -431,19 +458,18 @@ class TranscriptionPipeline:
                 self.config.compute_type,
                 "faster-whisper",
                 language=self.config.language,
-                beam_size=self.config.asr_beam_size,
-                vad_onset=self.config.vad_onset,
-                chunk_size=self.config.chunk_size,
+                beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
                 initial_prompt=self.config.initial_prompt,
                 hotwords=self._hotwords_text,
             )
             segments_iter, info = model.transcribe(
                 source,
-                beam_size=self.config.asr_beam_size,
+                beam_size=beam_size,
                 word_timestamps=True,
                 language=self.config.language,
+                chunk_size=chunk_size,
                 vad_filter=True,
-                vad_parameters={"threshold": self.config.vad_onset},
+                vad_parameters={"threshold": vad_onset},
                 initial_prompt=self.config.initial_prompt or None,
                 hotwords=self._hotwords_text or None,
             )
@@ -486,16 +512,17 @@ class TranscriptionPipeline:
             self.config.compute_type,
             "whisperx",
             language=self.config.language,
-            beam_size=self.config.asr_beam_size,
-            vad_onset=self.config.vad_onset,
-            chunk_size=self.config.chunk_size,
+            beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
             initial_prompt=self.config.initial_prompt,
             hotwords=self._hotwords_text,
         )
-        result = model.transcribe(source, batch_size=self.config.batch_size)
+        result = model.transcribe(source, batch_size=self.config.batch_size, chunk_size=chunk_size)
         if not isinstance(result, dict):
             raise RuntimeError("Unexpected ASR result format from whisperx")
         return result
+
+    def _run_asr(self, ctx: PipelineContext) -> dict:
+        return self.run_asr_pass(ctx, self.config.vad_onset, self.config.chunk_size, self.config.asr_beam_size)
 
     def _align_result(self, ctx: PipelineContext, result: dict) -> dict:
         language = result.get("language")
@@ -651,6 +678,28 @@ class TranscriptionPipeline:
     def _preprocess_audio(self, input_path: Path, asr: bool) -> Path:
         profile = "asr_soft" if asr else "diar"
         return self._preprocess_audio_profile(input_path, profile)
+
+    @staticmethod
+    def _is_canonical_asr_wav(path: Path) -> bool:
+        try:
+            with wave.open(str(path), "rb") as source:
+                return source.getframerate() == 16000 and source.getnchannels() == 1 and source.getsampwidth() == 2 and source.getcomptype() == "NONE"
+        except (wave.Error, OSError):
+            return False
+
+    def prepare_asr_input(self, input_path: Path) -> tuple[Path, dict[str, Any]]:
+        mode = self.config.preprocess_asr
+        canonical = self._is_canonical_asr_wav(input_path)
+        apply = mode == "always" or (mode == "auto" and not canonical)
+        started = time.perf_counter()
+        path = self._preprocess_audio(input_path, asr=True) if apply else input_path
+        return path, {
+            "asr_input_path_kind": "canonical_asr_wav" if canonical else "source_media",
+            "preprocessing_mode": mode,
+            "preprocessing_applied": apply,
+            "preprocessing_profile": "asr_soft" if apply else None,
+            "preprocessing_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
 
     def _preprocess_audio_profile(self, input_path: Path, profile: str) -> Path:
         output_path = preprocess_output_path(input_path, profile)

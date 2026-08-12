@@ -29,7 +29,7 @@ public static class UiStatusMapper
             ["TRANSCRIBING"] = new("TRANSCRIBING", "Транскрибация", UiStatusKind.Processing),
             ["ALIGNING"] = new("ALIGNING", "Выравнивание", UiStatusKind.Processing),
             ["DIARIZING"] = new("DIARIZING", "Диаризация", UiStatusKind.Processing),
-            ["SUMMARIZING"] = new("SUMMARIZING", "Формируется саммари", UiStatusKind.Processing),
+            ["SUMMARIZING"] = new("SUMMARIZING", "Transcript ✓ · Summary формируется", UiStatusKind.Processing),
             ["TRANSCRIPT_READY"] = new("TRANSCRIPT_READY", "Стенограмма готова", UiStatusKind.Success),
             ["READY"] = new("READY", "Готово", UiStatusKind.Success),
             ["PARTIAL_READY"] = new("PARTIAL_READY", "Готово с предупреждениями", UiStatusKind.Warning),

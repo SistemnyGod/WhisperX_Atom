@@ -23,7 +23,7 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
-if ([string]::IsNullOrWhiteSpace($BaseUrl)) { $BaseUrl = if ($env:WHISPERX_API_URL) { $env:WHISPERX_API_URL } else { "http://192.168.2.194:8080" } }
+if ([string]::IsNullOrWhiteSpace($BaseUrl)) { $BaseUrl = if ($env:WHISPERX_DEV_API_URL) { $env:WHISPERX_DEV_API_URL } else { "http://127.0.0.1:8080" } }
 if ([string]::IsNullOrWhiteSpace($TusUrl)) { $TusUrl = if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "http://localhost:1080" } }
 if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" } }
 if ([string]::IsNullOrWhiteSpace($Password)) { $Password = $env:BOOTSTRAP_ADMIN_PASSWORD }

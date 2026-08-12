@@ -10,6 +10,13 @@ param(
 $ErrorActionPreference = "Stop"
 $target = Join-Path $ModelsRoot "qwen3-8b"
 New-Item -ItemType Directory -Force -Path $target | Out-Null
+$model = Join-Path $target $FileName
+if (Test-Path -LiteralPath $model -PathType Leaf) {
+  $existingSha256 = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
+  if ($existingSha256 -ne $Sha256) { throw "Production model checksum mismatch; refusing to replace existing file: $model" }
+  Write-Host "Pinned model already verified: $model"
+  exit 0
+}
 
 $hfCommand = Get-Command hf -ErrorAction SilentlyContinue
 $hfPath = if ($hfCommand) { $hfCommand.Source } else { Join-Path $env:APPDATA "Python\Python312\Scripts\hf.exe" }
@@ -20,7 +27,6 @@ if (-not (Test-Path -LiteralPath $hfPath)) {
 & $hfPath download $Repository $FileName --revision $Revision --local-dir $target
 if ($LASTEXITCODE -ne 0) { throw "Model download failed" }
 
-$model = Join-Path $target $FileName
 if (-not (Test-Path -LiteralPath $model)) { throw "Downloaded model is missing: $model" }
 $actualSha256 = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
 if ($actualSha256 -ne $Sha256) { throw "Model checksum mismatch: expected $Sha256, got $actualSha256" }

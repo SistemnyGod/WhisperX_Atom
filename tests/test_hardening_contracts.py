@@ -174,7 +174,9 @@ def test_retention_is_conservative_and_produces_dry_run_report():
     cleanup = read(Path("scripts/retention-cleanup.ps1"))
     policy = read(Path("apps/recorder-agent/StorageWatermark.cs"))
     assert "-DryRun" in cleanup and "wouldDeleteFiles" in cleanup
-    assert "protectedReasons" in cleanup and "media_confirmation_missing" in cleanup
+    assert "protectedReasons" in cleanup and "state_store_or_sqlite3_unavailable" in cleanup
+    assert "transport_purge_after" in cleanup and "local_archive_purge_after" in cleanup
+    assert "pathLower" not in cleanup and "media[-_]?ready" not in cleanup
     assert "BLOCK_RECORDING" in policy and "WHISPERX_STORAGE_WARNING_PERCENT" in policy
     assert "WHISPERX_RETENTION_TRANSPORT_GRACE_HOURS" in policy
 

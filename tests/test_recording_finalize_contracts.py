@@ -39,6 +39,23 @@ def test_recording_session_has_separate_local_and_delivery_state():
     assert "SERVER_UNAVAILABLE" in host
 
 
+def test_archive_and_server_delivery_start_in_parallel_after_encoder_drain():
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    run = coordinator.split("private async Task<FinalizationResult> RunCoreAsync", 1)[1]
+    assert "await stop.LocalFinalization;" in host
+    assert "var archiveTask = CreateLocalArchiveAsync" in run
+    assert "var deliveryTask = DeliverToServerAsync" in run
+    assert run.index("var archiveTask") < run.index("await Task.WhenAll(archiveTask, deliveryTask)")
+    assert run.index("var deliveryTask") < run.index("await Task.WhenAll(archiveTask, deliveryTask)")
+    assert "Local archive failed; continuing server delivery" in coordinator
+    assert "localFinalizeState: \"LOCAL_FAILED\"" in coordinator
+    assert "deliveryState: \"DELIVERY_FAILED\"" in coordinator
+    assert "LocalArchiveState" in read("apps/recorder-agent/AgentIpcProtocol.cs")
+    assert "ServerFinalizeState" in read("apps/recorder-agent/AgentIpcProtocol.cs")
+    assert "MediaState" in read("apps/recorder-agent/AgentIpcProtocol.cs")
+
+
 def test_desktop_maps_finalize_codes_and_never_displays_raw_finalize_error():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml")

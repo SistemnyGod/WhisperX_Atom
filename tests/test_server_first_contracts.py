@@ -1,5 +1,4 @@
 import asyncio
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -43,11 +42,9 @@ class ServerFirstContractTests(unittest.TestCase):
         for name in ("original_name", "source_type", "source_path", "storage_key", "size_bytes", "sha256"):
             self.assertIn(f'JsonPropertyName("{name}")', api)
     def test_media_paths_are_independent_of_job_json(self):
-        with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "staging" / "job.part"
-            path.parent.mkdir()
-            path.write_bytes(b"partial")
-            self.assertTrue(path.name.endswith(".part"))
+        path = Path("staging") / "job.part"
+        self.assertEqual(path.parent, Path("staging"))
+        self.assertEqual(path.suffix, ".part")
 
     def test_inbox_leases_and_workers_support_redelivery(self):
         migration = Path("apps/server/WhisperX.Atom.Api/Migrations/002_inbox_leases.sql").read_text(encoding="utf-8")
@@ -81,7 +78,7 @@ class ServerFirstContractTests(unittest.TestCase):
 
     def test_latest_transcript_query_does_not_mix_versions(self):
         api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
-        self.assertIn("t.version=(SELECT MAX(version)", api)
+        self.assertIn("t.version=COALESCE(@version,(SELECT MAX(version)", api)
 
     def test_search_contract_is_bounded_and_scoped(self):
         api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")

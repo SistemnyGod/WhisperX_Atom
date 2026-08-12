@@ -4,7 +4,7 @@ The product UI is a Windows desktop application. The browser UI is not required.
 
 - `WhisperX.Atom.Desktop`: WPF operator and administration UI.
 - `WhisperX.Atom.Recorder.Service`: Windows Service for capture, local spool and upload.
-- Internal API/Docker workers run on the local GPU server and are exposed to the configured private LAN (default: `http://192.168.2.194:8080`).
+- The local Development API is loopback-only at `http://127.0.0.1:8080`; Production uses the separate HTTPS gateway configuration.
 - `AgentPipeHost` exposes a local Named Pipe (`WhisperXAtomAgent`) for desktop recording controls.
 
 Build a package:
@@ -29,7 +29,7 @@ The launcher checks the local Debug/Release output and the published package, an
 3. Run `scripts\\build-installer.ps1`.
 4. The `.exe` installer is written to `artifacts\\installer`.
 
-The installer registers `WhisperXAtomRecorder` as an automatic Windows Service and creates a Desktop shortcut. The internal Docker/API backend is configured separately; the Desktop default API endpoint is `http://192.168.2.194:8080`. Set `WHISPERX_API_URL` in the repository `.env` when the server PC receives a different LAN address.
+The installer registers `WhisperXAtomRecorder` as an automatic Windows Service and creates a Desktop shortcut. The internal Docker/API backend is configured separately; the local Development Desktop endpoint is `http://127.0.0.1:8080`. Production clients must use the HTTPS gateway host configured in `.env.production`.
 
 The Windows host must have FFmpeg on PATH. The Recorder Service uses it to encode local FLAC chunks; the installer checks this requirement during service registration.
 

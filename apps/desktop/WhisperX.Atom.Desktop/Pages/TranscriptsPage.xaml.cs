@@ -85,10 +85,12 @@ public sealed partial class TranscriptsPage : Page
         UpdateDetails();
     }
 
-    private void TranscriptsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void TranscriptsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_viewModel is not null) _viewModel.SelectedItem = TranscriptsList.SelectedItem as TranscriptRegistryItem;
-        UpdateDetails();
+        if (_viewModel is null || _pageCts is null || TranscriptsList.SelectedItem is not TranscriptRegistryItem item) return;
+        try { await _viewModel.LoadSelectedAsync(item, _pageCts.Token); UpdateDetails(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ErrorInfoBar.Message = UiErrorFormatter.Format(ex); ErrorInfoBar.IsOpen = true; }
     }
 
     private void SegmentsList_SelectionChanged(object sender, SelectionChangedEventArgs e)

@@ -15,16 +15,23 @@ public sealed class TranscriptRegistryItem
     }
 
     public DesktopMeeting Meeting { get; }
-    public DesktopTranscript? Transcript { get; }
-    public string QualityText => QualityCategory(Transcript?.QualityScore);
-    public bool HasQualityWarning => Transcript?.IsPartial == true;
+    public DesktopTranscriptRegistry? Registry { get; }
+    public DesktopTranscript? Transcript { get; private set; }
+    public void SetTranscript(DesktopTranscript? transcript) => Transcript = transcript;
+    public TranscriptRegistryItem(DesktopTranscriptRegistry registry)
+    {
+        Registry = registry;
+        Meeting = new DesktopMeeting(registry.MeetingId, registry.MeetingTitle, null, registry.Status, registry.MeetingCreatedAt);
+    }
+    public string QualityText => QualityCategory(Transcript?.QualityScore ?? Registry?.QualityScore);
+    public bool HasQualityWarning => Transcript?.IsPartial == true || Registry?.IsPartial == true;
     public string MeetingTitle => string.IsNullOrWhiteSpace(Meeting.Title) ? "Без названия" : Meeting.Title;
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
-    public string StatusText => Transcript?.Status ?? "Недоступна";
-    public string SegmentCountText => Transcript is null ? "—" : Transcript.Segments.Count.ToString(CultureInfo.CurrentCulture);
-    public string DurationText => Transcript is null || Transcript.Segments.Count == 0
-        ? "—"
-        : FormatDuration(Transcript.Segments.Max(segment => segment.EndMs));
+    public string StatusText => Transcript?.Status ?? Registry?.Status ?? "Недоступна";
+    public string SegmentCountText => (Transcript?.Segments.Count ?? Registry?.SegmentCount)?.ToString(CultureInfo.CurrentCulture) ?? "—";
+    public string DurationText => Transcript is { Segments.Count: > 0 }
+        ? FormatDuration(Transcript.Segments.Max(segment => segment.EndMs))
+        : Registry is not null ? FormatDuration(Registry.DurationMs) : "—";
 
     private static string FormatDuration(long milliseconds) => TimeSpan.FromMilliseconds(milliseconds).ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
 
@@ -132,37 +139,12 @@ public sealed class TranscriptsViewModel : ObservableObject
                 return;
             }
 
-            var meetings = await LoadAllMeetingsAsync(cancellationToken);
-            var loaded = new List<TranscriptRegistryItem>();
-            var failures = 0;
-            using var gate = new SemaphoreSlim(4, 4);
-            var work = meetings.Select(async meeting =>
-            {
-                DesktopTranscript? transcript = null;
-                if (!Guid.TryParse(meeting.Id, out var meetingId))
-                {
-                    Interlocked.Increment(ref failures);
-                }
-                else
-                {
-                    await gate.WaitAsync(cancellationToken);
-                    try { transcript = await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken); }
-                    catch (OperationCanceledException) { throw; }
-                    catch { Interlocked.Increment(ref failures); }
-                    finally { gate.Release(); }
-                }
-
-                lock (loaded) loaded.Add(new TranscriptRegistryItem(meeting, transcript));
-            });
-            await Task.WhenAll(work);
-
-            _allItems.AddRange(loaded.OrderByDescending(item => item.Meeting.CreatedAt));
+            var registry = await _services.Backend.GetTranscriptRegistryPageAsync(limit: 200, offset: 0, cancellationToken: cancellationToken);
+            _allItems.AddRange(registry.Select(item => new TranscriptRegistryItem(item)));
             ApplyFilters();
             StatusText = _allItems.Count == 0
                 ? "Встреч пока нет."
-                : $"Загружено встреч: {_allItems.Count}; стенограммы: {_allItems.Count(item => item.Transcript is not null)}.";
-            if (failures > 0)
-                WarningText = $"Не удалось загрузить стенограммы для встреч: {failures}. Доступные данные сохранены.";
+                : $"Загружено встреч: {_allItems.Count}. Стенограмма загружается после выбора встречи.";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -174,18 +156,19 @@ public sealed class TranscriptsViewModel : ObservableObject
         finally { IsLoading = false; }
     }
 
-    private async Task<IReadOnlyList<DesktopMeeting>> LoadAllMeetingsAsync(CancellationToken cancellationToken)
+    public async Task LoadSelectedAsync(TranscriptRegistryItem item, CancellationToken cancellationToken = default)
     {
-        const int pageSize = 200;
-        var result = new List<DesktopMeeting>();
-        var offset = 0;
-        while (true)
+        if (!Guid.TryParse(item.Meeting.Id, out var meetingId)) return;
+        IsLoading = true;
+        try
         {
-            var page = await _services.Backend.GetMeetingsPageAsync(pageSize, offset, cancellationToken);
-            result.AddRange(page);
-            if (page.Count < pageSize) return result;
-            offset += page.Count;
+            item.SetTranscript(await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken));
+            SelectedItem = item;
+            ApplySegmentFilter();
+            OnPropertyChanged(nameof(SelectedQualityText));
+            OnPropertyChanged(nameof(SelectedQualityWarningText));
         }
+        finally { IsLoading = false; }
     }
 
     private void ApplyFilters()

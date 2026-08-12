@@ -71,9 +71,25 @@ def test_server_marks_chunk_confirmed_only_after_atomic_file_move():
 def test_transport_spool_purge_requires_server_media_validation():
     spool = read("apps/recorder-agent/SpoolStore.cs")
     purge = spool.split("public async Task PurgeFinalizedSessionAsync", 1)[1]
-    assert "SELECT media_validated_at FROM recording_sessions" in purge
-    assert "if (validatedAt is null || validatedAt is DBNull) return;" in purge
-    assert purge.index('DELETE FROM recording_raw_chunks') < purge.index('SetSessionStateAsync(sessionId, "FINALIZED"')
+    eligibility = spool.split("public async Task<IReadOnlyList<RetentionCandidate>> GetTransportPurgeCandidatesAsync", 1)[1].split("public async Task<IReadOnlyList<RetentionCandidate>> GetLocalArchivePurgeCandidatesAsync", 1)[0]
+    assert "s.media_validated_at IS NOT NULL" in eligibility
+    assert "s.transport_purge_after IS NOT NULL AND s.transport_purge_after <= $now" in eligibility
+    assert "s.delivery_state IN ('CONFIRMED','COMPLETED')" in eligibility
+    assert "pending.status<>'CONFIRMED'" in eligibility
+    assert "if (candidate is null) return;" in purge
+    assert purge.index('DELETE FROM recording_raw_chunks') < purge.index("UPDATE recording_sessions SET state='FINALIZED'")
+
+
+def test_retention_deadlines_are_persisted_and_master_zero_is_forever():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    worker = read("apps/recorder-agent/Program.cs")
+    assert "transport_purge_after" in spool
+    assert "raw_purge_after" in spool
+    assert "local_archive_purge_after" in spool
+    assert "now.Add(policy.TransportGrace)" in spool
+    assert "policy.LocalMasterRetention <= TimeSpan.Zero ? DBNull.Value" in spool
+    assert "PurgeEligibleLocalArchivesAsync" in worker
+    assert "PurgeEligibleRawRecoveryAsync" in worker
 
 
 def test_terminal_server_assembly_failure_does_not_retry_forever_or_purge_spool():
@@ -109,16 +125,33 @@ def test_realtime_capture_handoff_does_not_hash_or_persist_on_callback():
     queue = writer.split("private void QueueCurrentChunk", 1)[1].split("private async Task ProcessQueueAsync", 1)[0]
     assert "Channel.CreateBounded" in writer
     assert "BoundedChannelFullMode.Wait" in writer
-    assert "_overflow.Enqueue" in queue
-    assert "FlacEncoder.ComputeSha256" not in append
-    assert "RegisterRawChunk" not in append
-    assert "Flush(true)" not in queue
+    assert "ConcurrentQueue<PendingRawChunk>" not in writer
+    assert "FileStream RawStream" not in writer
+    for forbidden in ("FlacEncoder.ComputeSha256", "RegisterRawChunk", "Flush(true)", "FFmpeg", "WaitAsync"):
+        assert forbidden not in append + queue
+    assert "raw.Dispose()" in queue
+    assert "File.Move(rawPartPath, rawPath, true)" in queue
+    assert queue.index("File.Move(rawPartPath, rawPath, true)") < queue.index("_pending.Writer.TryWrite(descriptor)")
     process = writer.split("private async Task ProcessChunkAsync", 1)[1]
     assert "RegisterRawChunk" in process
     assert "FlacEncoder.ComputeSha256" in process
     assert "Flush(true)" in process
     assert "while (true)" in writer
-    assert "if (!signaled && !_disposed)" in writer
+    assert "ProcessDiscoveredChunksAsync" in writer
+
+
+def test_disk_backed_overflow_is_bounded_and_restart_recoverable():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    writer = coordinator.split("internal sealed class PcmFlacChunkWriter", 1)[1]
+    assert "Math.Clamp(value, 1, 64)" in writer  # capacity=1 is a supported stress setting
+    assert "_overflow" not in writer
+    assert 'Directory.EnumerateFiles(directory, "*.pcm")' in writer
+    assert "RawChunkExistsAsync" in writer and "RawChunkExistsAsync" in spool
+    assert 'EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)' in recovery
+    assert 'EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories)' in recovery
+    assert "GetUnregisteredClosedRawBacklogAsync" in spool
 
 
 def test_upload_queue_prioritizes_active_sessions_and_persists_chunk_backoff():

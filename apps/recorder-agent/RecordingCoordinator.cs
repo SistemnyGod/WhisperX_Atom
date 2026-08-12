@@ -123,11 +123,12 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
 
         var sessionId = Guid.NewGuid().ToString("N");
+        var pipelineCorrelationId = Guid.NewGuid().ToString("N");
         try
         {
             // Offline sessions deliberately keep meeting_id NULL. The server meeting is
             // created later by BindSessionAsync and persisted back into the spool.
-            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", cancellationToken);
+            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
 
             CaptureTrack? microphone = null;
@@ -729,14 +730,13 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 
 internal sealed class PcmFlacChunkWriter : IAsyncDisposable
 {
+    // This is deliberately just metadata. A completed raw file is closed and
+    // renamed before its descriptor is offered to the channel, so the channel
+    // can never retain a FileStream when the encoder is behind.
     private sealed record PendingRawChunk(
         string Id,
         int Sequence,
-        FileStream RawStream,
         string RawPath,
-        string RawPartPath,
-        string OutputPart,
-        string Output,
         long StartSample,
         long SampleCount);
 
@@ -750,15 +750,11 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly object _gate = new();
     // The capture callback must never wait for the encoder. The bounded channel
-    // is the fast path; overflow descriptors are kept as durable work items
-    // until the single encoder loop catches up. The PCM itself is already on
-    // disk, so a slow encoder cannot cause audio loss or an unbounded PCM buffer.
+    // is only a fast path. A full channel leaves the closed .pcm on disk, where
+    // the encoder loop and restart recovery can discover it later.
     private readonly Channel<PendingRawChunk> _pending;
-    private readonly ConcurrentQueue<PendingRawChunk> _overflow = new();
     private readonly SemaphoreSlim _workSignal = new(0);
     private readonly int _queueCapacity;
-    private int _queuedDescriptors;
-    private int _processedDescriptors;
     private readonly Task _encoderTask;
     private FileStream? _raw;
     private string? _rawPath;
@@ -770,14 +766,6 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private bool _disposed;
     private Exception? _encoderFailure;
 
-    public RawChunkBacklog CurrentBacklog
-    {
-        get
-        {
-            var queued = Math.Max(0, Volatile.Read(ref _queuedDescriptors) - Volatile.Read(ref _processedDescriptors));
-            return new RawChunkBacklog(queued, 0, queued, _encoderFailure is null ? 0 : 1, 0, null, queued > 10 ? "CRITICAL" : queued > 3 ? "LAGGING" : "HEALTHY");
-        }
-    }
     public long MediaTimeMs
     {
         get
@@ -812,7 +800,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private static int ReadQueueCapacity()
     {
         var configured = Environment.GetEnvironmentVariable("ATOM_AGENT_ENCODER_QUEUE_CAPACITY");
-        return int.TryParse(configured, out var value) ? Math.Clamp(value, 4, 64) : 24;
+        return int.TryParse(configured, out var value) ? Math.Clamp(value, 1, 64) : 24;
     }
 
     public void Append(ReadOnlySpan<byte> pcm)
@@ -876,16 +864,14 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _sampleCount = 0;
         if (rawPartPath is null) throw new InvalidOperationException("raw_chunk_part_path_missing");
         if (rawId is null) throw new InvalidOperationException("raw_chunk_id_missing");
-        var directory = Path.GetDirectoryName(rawPath)!;
-        var outputPart = Path.Combine(directory, $"{sequence:D8}.flac.part");
-        var output = Path.Combine(directory, $"{sequence:D8}.flac");
-        var descriptor = new PendingRawChunk(rawId, sequence, raw, rawPath, rawPartPath, outputPart, output, startSample, sampleCount);
-        // Never block the WASAPI callback when the encoder is behind. The raw
-        // stream remains owned by this descriptor and is finalized by the
-        // background loop.
-        if (!_pending.Writer.TryWrite(descriptor)) _overflow.Enqueue(descriptor);
-        Interlocked.Increment(ref _queuedDescriptors);
-        _workSignal.Release();
+        // Closing and promoting the file is the handoff boundary. It is the
+        // durable fallback queue if TryWrite below finds the in-memory channel
+        // full. Do not move this work into the encoder loop: that would retain
+        // an unbounded number of open capture streams.
+        raw.Dispose();
+        File.Move(rawPartPath, rawPath, true);
+        var descriptor = new PendingRawChunk(rawId, sequence, rawPath, startSample, sampleCount);
+        if (_pending.Writer.TryWrite(descriptor)) _workSignal.Release();
         _sequence++;
         _startSample += sampleCount;
     }
@@ -894,50 +880,67 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     {
         while (true)
         {
-            var signaled = await _workSignal.WaitAsync(TimeSpan.FromMilliseconds(250));
-            if (!signaled && !_disposed)
-                continue;
-
-            while (_pending.Reader.TryRead(out var chunk) || _overflow.TryDequeue(out chunk))
+            while (_pending.Reader.TryRead(out var chunk))
             {
-                try
-                {
-                    await ProcessChunkAsync(chunk);
-                }
-                finally
-                {
-                    Interlocked.Increment(ref _processedDescriptors);
-                }
+                await ProcessChunkAsync(chunk);
             }
 
-            if (_disposed && Volatile.Read(ref _processedDescriptors) >= Volatile.Read(ref _queuedDescriptors)) break;
+            // A closed .pcm with no SQLite row is the durable overflow queue.
+            // Scanning here also covers a process that stopped after closing a
+            // raw file but before it could enqueue a descriptor.
+            await ProcessDiscoveredChunksAsync();
+
+            if (_disposed) break;
+            await _workSignal.WaitAsync(TimeSpan.FromMilliseconds(250));
+        }
+    }
+
+    private async Task ProcessDiscoveredChunksAsync()
+    {
+        var directory = Path.Combine(_root, "recordings", _sessionId, _trackId);
+        if (!Directory.Exists(directory)) return;
+
+        foreach (var rawPath in Directory.EnumerateFiles(directory, "*.pcm").OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var name = Path.GetFileNameWithoutExtension(rawPath);
+            if (!int.TryParse(name, out var sequence) || sequence < 0) continue;
+            if (await _spool.RawChunkExistsAsync(_sessionId, _trackId, sequence)) continue;
+
+            var size = new FileInfo(rawPath).Length;
+            var sampleCount = size / Math.Max(1, _format.BlockAlign);
+            if (sampleCount <= 0) continue;
+            var startSample = checked((long)sequence * _format.SampleRate * RecordingContract.ChunkDurationSeconds);
+            await ProcessChunkAsync(new PendingRawChunk(Guid.NewGuid().ToString("N"), sequence, rawPath, startSample, sampleCount));
         }
     }
 
     private async Task ProcessChunkAsync(PendingRawChunk chunk)
     {
+        var directory = Path.GetDirectoryName(chunk.RawPath)!;
+        var outputPart = Path.Combine(directory, $"{chunk.Sequence:D8}.flac.part");
+        var output = Path.Combine(directory, $"{chunk.Sequence:D8}.flac");
         try
         {
             // All expensive durability and persistence work is deliberately
             // outside the realtime callback.
             _spool.RegisterRawChunk(new RawRecordingChunk(
                 chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.RawPath,
-                chunk.Output, chunk.StartSample, chunk.SampleCount,
+                output, chunk.StartSample, chunk.SampleCount,
                 _format.SampleRate, _format.Channels, _trackType,
                 _format.Encoding.ToString(), _format.BitsPerSample, "WRITING", 0, null, null));
-            await chunk.RawStream.FlushAsync(CancellationToken.None);
-            chunk.RawStream.Flush(true);
-            chunk.RawStream.Dispose();
-            File.Move(chunk.RawPartPath, chunk.RawPath, true);
+            // The callback only closes the stream. The expensive durability
+            // flush happens here, after the descriptor has left realtime code.
+            await using (var raw = new FileStream(chunk.RawPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 4096, FileOptions.SequentialScan))
+                raw.Flush(true);
             var rawSize = new FileInfo(chunk.RawPath).Length;
             var rawSha = FlacEncoder.ComputeSha256(chunk.RawPath);
             _spool.MarkRawChunkReady(_sessionId, _trackId, chunk.Sequence, chunk.SampleCount, rawSize, rawSha);
             await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODING");
-            FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, chunk.OutputPart, _format);
-            File.Move(chunk.OutputPart, chunk.Output, true);
-            var size = new FileInfo(chunk.Output).Length;
-            var sha = FlacEncoder.ComputeSha256(chunk.Output);
-            await _spool.UpsertChunkAsync(new RecordingChunk(chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.Output, chunk.StartSample, chunk.SampleCount, _format.SampleRate, _format.Channels, _trackType, size, sha, "READY", 0));
+            FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, outputPart, _format);
+            File.Move(outputPart, output, true);
+            var size = new FileInfo(output).Length;
+            var sha = FlacEncoder.ComputeSha256(output);
+            await _spool.UpsertChunkAsync(new RecordingChunk(chunk.Id, _sessionId, _trackId, chunk.Sequence, output, chunk.StartSample, chunk.SampleCount, _format.SampleRate, _format.Channels, _trackType, size, sha, "READY", 0));
             await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "READY", size, sha);
             File.Delete(chunk.RawPath);
             _logger.LogInformation("Audio chunk ready. Session={SessionId}, Track={TrackType}, Sequence={Sequence}, Samples={Samples}", _sessionId, _trackType, chunk.Sequence, chunk.SampleCount);
@@ -946,8 +949,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         {
             _encoderFailure ??= ex;
             _logger.LogError(ex, "Failed to encode audio chunk. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", _sessionId, _trackType, chunk.Sequence);
-            try { chunk.RawStream.Dispose(); } catch (Exception disposeError) { _logger.LogDebug(disposeError, "Could not close raw chunk stream."); }
-            try { if (File.Exists(chunk.OutputPart)) File.Delete(chunk.OutputPart); } catch (IOException) { }
+            try { if (File.Exists(outputPart)) File.Delete(outputPart); } catch (IOException) { }
             try { await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODE_FAILED", error: ex.Message); } catch (Exception stateError) { _logger.LogDebug(stateError, "Could not persist encoder failure. Session={SessionId}, Sequence={Sequence}", _sessionId, chunk.Sequence); }
         }
     }

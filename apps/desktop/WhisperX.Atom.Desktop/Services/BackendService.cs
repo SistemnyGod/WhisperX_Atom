@@ -44,6 +44,7 @@ public sealed class BackendService : IBackendService
     public Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default) => _client.GetSystemStatusAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default) => _client.GetMeetingsAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default) => _client.GetMeetingsPageAsync(limit, offset, cancellationToken);
+    public Task<IReadOnlyList<DesktopTranscriptRegistry>> GetTranscriptRegistryPageAsync(int limit, int offset, string? search = null, string? status = null, DateTimeOffset? dateFrom = null, DateTimeOffset? dateTo = null, CancellationToken cancellationToken = default) => _client.GetTranscriptRegistryPageAsync(limit, offset, search, status, dateFrom, dateTo, cancellationToken);
     public Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default) => _client.GetCurrentUserAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default) => _client.GetAgentsAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default) => _client.GetAssistantConversationsAsync(includeArchived, cancellationToken);

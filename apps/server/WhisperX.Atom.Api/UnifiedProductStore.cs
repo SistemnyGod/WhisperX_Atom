@@ -5,9 +5,10 @@ using Npgsql;
 
 public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
-public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt);
+public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
+public sealed record RecordingCorrelationRow(Guid ServerSessionId, string? LocalSessionId, string? PipelineCorrelationId, JsonDocument Timings);
 public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage);
-public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec);
+public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
@@ -28,7 +29,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     public async Task<AgentRow?> AuthenticateAgentAsync(Guid agentId, string token)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id FROM recorder_agents WHERE id=@id AND enrollment_hash=@hash", connection);
+        await using var command = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id FROM recorder_agents WHERE id=@id AND enrollment_hash=@hash AND token_revoked_at IS NULL", connection);
         command.Parameters.AddWithValue("id", agentId);
         command.Parameters.AddWithValue("hash", Hash(token));
         await using var reader = await command.ExecuteReaderAsync();
@@ -109,6 +110,23 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return (bool)(await command.ExecuteScalarAsync())!;
     }
 
+    public async Task<bool> RevokeAgentTokenAsync(Guid agentId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE recorder_agents SET token_revoked_at=now(),status='REVOKED' WHERE id=@id AND token_revoked_at IS NULL", connection);
+        command.Parameters.AddWithValue("id", agentId);
+        return await command.ExecuteNonQueryAsync() == 1;
+    }
+
+    public async Task<bool> ReplaceAgentTokenAsync(Guid agentId, string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE recorder_agents SET enrollment_hash=@hash,token_revoked_at=NULL,status='OFFLINE' WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", agentId);
+        command.Parameters.AddWithValue("hash", Hash(token));
+        return await command.ExecuteNonQueryAsync() == 1;
+    }
+
     public async Task<Guid> CreateCommandAsync(Guid agentId, string commandType, JsonDocument payload)
     {
         await using var connection = await OpenAsync();
@@ -144,7 +162,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("id", commandId); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("status", status); command.Parameters.AddWithValue("result", result.RootElement.GetRawText()); return await command.ExecuteNonQueryAsync() > 0;
     }
 
-    public async Task<RecordingSessionRow?> CreateRecordingSessionAsync(Guid? meetingId, Guid? agentId, string? title = null, DateTimeOffset? startedAt = null)
+    public async Task<RecordingSessionRow?> CreateRecordingSessionAsync(Guid? meetingId, Guid? agentId, string? title = null, DateTimeOffset? startedAt = null, string? pipelineCorrelationId = null, string? localSessionId = null)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
@@ -163,8 +181,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             meeting.Parameters.AddWithValue("title", resolvedTitle);
             await meeting.ExecuteNonQueryAsync();
         }
-        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,state,started_at) VALUES(@id,@meeting,@agent,'RECORDING',COALESCE(@started,now())) RETURNING id,meeting_id,agent_id,state,started_at,finished_at", connection, transaction);
-        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("meeting", resolvedMeetingId); command.Parameters.AddWithValue("agent", (object?)agentId ?? DBNull.Value); command.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value);
+        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,state,started_at,pipeline_correlation_id,local_session_id) VALUES(@id,@meeting,@agent,'RECORDING',COALESCE(@started,now()),@correlation,@local) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
+        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("meeting", resolvedMeetingId); command.Parameters.AddWithValue("agent", (object?)agentId ?? DBNull.Value); command.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value); command.Parameters.AddWithValue("correlation", (object?)pipelineCorrelationId ?? DBNull.Value); command.Parameters.AddWithValue("local", (object?)localSessionId ?? DBNull.Value);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         var result = ReadSession(reader);
@@ -173,12 +191,35 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return result;
     }
 
-    public async Task<RecordingTrackRow?> CreateRecordingTrackAsync(Guid agentId, Guid sessionId, string trackType, string? deviceId, int sampleRate, int channels)
+    public async Task<RecordingTrackRow?> CreateRecordingTrackAsync(Guid agentId, Guid sessionId, string trackType, string? deviceId, string? deviceName, string? selectionMode, string? recordingProfile, int sampleRate, int channels, string? encoding, int? bitsPerSample)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("INSERT INTO recording_tracks(id,session_id,track_type,device_id,sample_rate,channels) SELECT @id,@session,@type,@device,@rate,@channels WHERE EXISTS(SELECT 1 FROM recording_sessions WHERE id=@session AND agent_id=@agent) RETURNING id,session_id,track_type,sample_rate,channels,codec", connection);
-        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("type", trackType); command.Parameters.AddWithValue("device", (object?)deviceId ?? DBNull.Value); command.Parameters.AddWithValue("rate", sampleRate); command.Parameters.AddWithValue("channels", channels);
-        await using var reader = await command.ExecuteReaderAsync(); return !await reader.ReadAsync() ? null : new RecordingTrackRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4), reader.GetString(5));
+        await using var command = new NpgsqlCommand("INSERT INTO recording_tracks(id,session_id,track_type,device_id,device_name,selection_mode,recording_profile,sample_rate,channels,encoding,bits_per_sample) SELECT @id,@session,@type,@device,@name,@mode,@profile,@rate,@channels,@encoding,@bits WHERE EXISTS(SELECT 1 FROM recording_sessions WHERE id=@session AND agent_id=@agent) RETURNING id,session_id,track_type,sample_rate,channels,codec,device_id,device_name,selection_mode,recording_profile,encoding,bits_per_sample", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("type", trackType); command.Parameters.AddWithValue("device", (object?)deviceId ?? DBNull.Value); command.Parameters.AddWithValue("name", (object?)deviceName ?? DBNull.Value); command.Parameters.AddWithValue("mode", (object?)selectionMode ?? DBNull.Value); command.Parameters.AddWithValue("profile", (object?)recordingProfile ?? DBNull.Value); command.Parameters.AddWithValue("rate", sampleRate); command.Parameters.AddWithValue("channels", channels); command.Parameters.AddWithValue("encoding", (object?)encoding ?? DBNull.Value); command.Parameters.AddWithValue("bits", (object?)bitsPerSample ?? DBNull.Value);
+        await using var reader = await command.ExecuteReaderAsync(); return !await reader.ReadAsync() ? null : new RecordingTrackRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetInt32(11));
+    }
+
+    public async Task<IReadOnlyList<RecordingTrackRow>> ListRecordingTracksAsync(Guid meetingId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT t.id,t.session_id,t.track_type,t.sample_rate,t.channels,t.codec,t.device_id,t.device_name,t.selection_mode,t.recording_profile,t.encoding,t.bits_per_sample FROM recording_tracks t JOIN recording_sessions s ON s.id=t.session_id WHERE s.meeting_id=@meeting ORDER BY t.created_at", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        var rows = new List<RecordingTrackRow>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) rows.Add(new RecordingTrackRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetInt32(11)));
+        return rows;
+    }
+
+    public async Task<IReadOnlyList<RecordingCorrelationRow>> ListRecordingCorrelationAsync(Guid meetingId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,pipeline_correlation_id,stage_timings,local_session_id FROM recording_sessions WHERE meeting_id=@meeting ORDER BY created_at", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        var result = new List<RecordingCorrelationRow>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new RecordingCorrelationRow(reader.GetGuid(0), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(1) ? null : reader.GetString(1), JsonDocument.Parse(reader.IsDBNull(2) ? "{}" : reader.GetString(2))));
+        return result;
     }
 
     public async Task<bool> AgentOwnsTrackAsync(Guid agentId, Guid sessionId, Guid trackId)
@@ -391,7 +432,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             var payload = JsonSerializer.Serialize(new
             {
                 message_id = Guid.NewGuid(), job_id = jobId, meeting_id = meetingId, media_asset_id = assetId,
-                stage = "INGEST", attempt = 0, storage_key = storageKey, source_type = "recorder_session", session_id = sessionId
+                stage = "INGEST", attempt = 0, storage_key = storageKey, source_type = "recorder_session", session_id = sessionId, correlation_id = await GetPipelineCorrelationIdAsync(connection, tx, sessionId)
             });
             await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'media.ingest',@payload::jsonb)", connection, tx);
             outbox.Parameters.AddWithValue("id", Guid.NewGuid());
@@ -947,18 +988,29 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var transcriptId = await transcript.ExecuteScalarAsync();
         if (transcriptId is not Guid transcriptGuid) return null;
         var jobId = Guid.NewGuid();
-        await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0)", connection, tx);
-        job.Parameters.AddWithValue("id", jobId); job.Parameters.AddWithValue("meeting", meetingId); await job.ExecuteNonQueryAsync();
+        await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,@transcript) ON CONFLICT DO NOTHING RETURNING id", connection, tx);
+        job.Parameters.AddWithValue("id", jobId); job.Parameters.AddWithValue("meeting", meetingId); job.Parameters.AddWithValue("transcript", transcriptGuid);
+        if (await job.ExecuteScalarAsync() is not Guid insertedJobId)
+        {
+            await using var duplicate = new NpgsqlCommand("SELECT id FROM jobs WHERE input_transcript_id=@transcript AND type='SUMMARIZE' AND status IN ('QUEUED','RUNNING') ORDER BY created_at DESC LIMIT 1", connection, tx);
+            duplicate.Parameters.AddWithValue("transcript", transcriptGuid);
+            var existingJobId = await duplicate.ExecuteScalarAsync();
+            await tx.CommitAsync();
+            return existingJobId as Guid?;
+        }
+        jobId = insertedJobId;
         var payload = JsonSerializer.Serialize(new
         {
             message_id = Guid.NewGuid(),
             job_id = jobId,
             meeting_id = meetingId,
             transcript_id = transcriptGuid,
-            summary_profile = string.IsNullOrWhiteSpace(options?.Profile) ? "GENERAL_MEETING" : options.Profile.Trim().ToUpperInvariant(),
-            prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "summary-v2" : options.PromptVersion.Trim(),
+            summary_profile = string.IsNullOrWhiteSpace(options?.Profile) ? (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant() : options.Profile.Trim().ToUpperInvariant(),
+            prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "meeting-protocol-ru-v1" : options.PromptVersion.Trim(),
             reason = options?.Reason?.Trim(),
-            meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { })
+            meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { }),
+            source_hash = (string?)null,
+            correlation_id = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId)
         });
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.summarize',@payload::jsonb)", connection, tx);
         outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", payload); await outbox.ExecuteNonQueryAsync();
@@ -1000,7 +1052,21 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     private async Task<NpgsqlConnection> OpenAsync() { var connection = new NpgsqlConnection(_connectionString); await connection.OpenAsync(); return connection; }
     private static string Hash(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     private static AgentRow ReadAgent(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetGuid(5));
-    private static RecordingSessionRow ReadSession(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetDateTime(5));
+    private static RecordingSessionRow ReadSession(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetDateTime(5),r.FieldCount > 6 && !r.IsDBNull(6) ? r.GetString(6) : null);
+
+    private static async Task<string?> GetPipelineCorrelationIdAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid sessionId)
+    {
+        await using var command = new NpgsqlCommand("SELECT pipeline_correlation_id FROM recording_sessions WHERE id=@session", connection, transaction);
+        command.Parameters.AddWithValue("session", sessionId);
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    private static async Task<string?> GetPipelineCorrelationIdForMeetingAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid meetingId)
+    {
+        await using var command = new NpgsqlCommand("SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=@meeting ORDER BY created_at DESC LIMIT 1", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        return await command.ExecuteScalarAsync() as string;
+    }
     private static SummaryRow ReadSummary(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetInt32(3),r.GetString(4),r.GetString(5),r.GetString(6),r.GetString(7),r.GetFieldValue<JsonDocument>(8),r.GetDateTime(9));
 }
 public sealed record MissingRecordingChunks(Guid TrackId, IReadOnlyList<int> Sequences);

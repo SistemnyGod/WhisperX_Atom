@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.10-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv
 COPY workers/media_worker /srv/workers/media_worker

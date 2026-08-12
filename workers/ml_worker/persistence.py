@@ -74,17 +74,18 @@ class JobRepository:
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":
                 return False
-            job = connection.execute("SELECT status FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            job = connection.execute("SELECT status,type FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if job is None or str(job[0]) == "CANCELLED":
                 return False
             existing = connection.execute("SELECT id, version FROM transcripts WHERE meeting_id=%s ORDER BY version DESC LIMIT 1", (meeting_id,)).fetchone()
             version = int(existing[1]) + 1 if existing else 1
+            version_kind = "REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"
             transcript_status = result.get("status", "READY")
             warnings = result.get("warnings", [])
             quality = result.get("quality", {})
             transcript_id = connection.execute(
-                "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s) RETURNING id",
-                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass")),
+                "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id",
+                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), existing[0] if existing else None, version_kind),
             ).fetchone()[0]
             speakers: dict[str, str] = {}
             for segment in result.get("segments", []):
@@ -108,24 +109,34 @@ class JobRepository:
                     (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
                 )
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"}:
+                summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
+                prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v1")
                 summary_job = connection.execute(
-                    "SELECT id FROM jobs WHERE meeting_id=%s AND type='SUMMARIZE' AND status NOT IN ('READY','FAILED','CANCELLED') ORDER BY created_at DESC LIMIT 1",
-                    (meeting_id,),
+                    "SELECT id FROM jobs WHERE input_transcript_id=%s AND type='SUMMARIZE' AND status IN ('QUEUED','RUNNING') LIMIT 1",
+                    (transcript_id,),
                 ).fetchone()
                 if summary_job is None:
                     summary_job_id = connection.execute(
-                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0) RETURNING id",
-                        (meeting_id,),
-                    ).fetchone()[0]
-                    message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
-                    payload = json.dumps({
-                        "message_id": str(message_id),
-                        "job_id": str(summary_job_id),
-                        "meeting_id": meeting_id,
-                        "transcript_id": str(transcript_id),
-                        "source_hash": result.get("source_hash"),
-                    })
-                    connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)", (message_id, payload))
+                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,%s) ON CONFLICT DO NOTHING RETURNING id",
+                        (meeting_id, transcript_id),
+                    ).fetchone()
+                    if summary_job_id is None:
+                        connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))
+                    else:
+                        summary_job_id = summary_job_id[0]
+                        message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
+                        payload = json.dumps({
+                            "message_id": str(message_id),
+                            "job_id": str(summary_job_id),
+                            "meeting_id": meeting_id,
+                            "transcript_id": str(transcript_id),
+                            "source_hash": result.get("source_hash"),
+                            "summary_profile": summary_profile,
+                            "prompt_version": prompt_version,
+                            "meeting_context": {},
+                            "correlation_id": result.get("correlation_id"),
+                        })
+                        connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)", (message_id, payload))
                 connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))
             else:
                 connection.execute("UPDATE meetings SET status='TRANSCRIPT_READY' WHERE id=%s", (meeting_id,))
