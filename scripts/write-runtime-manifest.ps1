@@ -1,9 +1,10 @@
 [CmdletBinding()]
-param([string]$RepoPath, [string]$OutputPath)
+param([string]$RepoPath, [string]$OutputPath, [string]$ModelManifestPath)
 
 $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($RepoPath)) { $RepoPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $RepoPath "artifacts\release\runtime-manifest.json" }
+if ([string]::IsNullOrWhiteSpace($ModelManifestPath)) { $ModelManifestPath = Join-Path $RepoPath "artifacts\release\model-manifest.json" }
 if (Test-Path -LiteralPath (Join-Path $RepoPath ".env") -PathType Leaf) {
     . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
     Import-WhisperXDotEnv -RepoPath $RepoPath
@@ -32,7 +33,7 @@ function Get-HfSnapshot([string]$Repository, [string]$Revision) {
     $snapshot = Join-Path $root ("snapshots\" + $resolved)
     if (-not (Test-Path -LiteralPath $snapshot -PathType Container)) { return $null }
     $inventory = @(Get-ChildItem -LiteralPath $snapshot -File -Recurse | ForEach-Object {
-        ((Resolve-Path -LiteralPath $_.FullName -Relative).TrimStart('.','\','/') + "|" + $_.Length)
+        ($_.FullName.Substring($snapshot.Length).TrimStart('\','/').Replace('\','/') + "|" + $_.Length)
     } | Sort-Object)
     $inventoryBytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -63,6 +64,8 @@ $asrSnapshot = Get-HfSnapshot $asrRepository $env:WHISPERX_MODEL_REVISION
 $diarizationSnapshot = Get-HfSnapshot $env:DIARIZATION_MODEL $env:DIARIZATION_MODEL_REVISION
 $asrRevision = if ($asrSnapshot) { $asrSnapshot.revision } else { $env:WHISPERX_MODEL_REVISION }
 $diarizationRevision = if ($diarizationSnapshot) { $diarizationSnapshot.revision } else { $env:DIARIZATION_MODEL_REVISION }
+$asrInventoryHash = if ($asrSnapshot) { $asrSnapshot.fileInventoryHash } else { $null }
+$diarizationInventoryHash = if ($diarizationSnapshot) { $diarizationSnapshot.fileInventoryHash } else { $null }
 # Deep hashing is intentionally opt-in: release install/download verifies it,
 # while normal startup only records the pinned expected checksum.
 if ($env:WHISPERX_RUNTIME_MANIFEST_DEEP -eq "true" -and $modelPath -and (Test-Path -LiteralPath $modelPath -PathType Leaf)) { $modelHash = (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -80,10 +83,16 @@ $requiredProduction = [ordered]@{
     pytorch = $torchVersion
     ctranslate2 = $ctranslateVersion
     pyannote = $pyannoteVersion
+    onnxRuntime = $onnxVersion
+    cuda = $torchRuntime
     ffmpeg = $ffmpeg
     ffprobe = $ffprobe
     whisperXModelRevision = $asrRevision
+    whisperXModelIdentifier = $asrRepository
+    whisperXModelInventoryHash = $asrInventoryHash
     diarizationModelRevision = $diarizationRevision
+    diarizationModelIdentifier = $env:DIARIZATION_MODEL
+    diarizationModelInventoryHash = $diarizationInventoryHash
     llmModelRevision = $env:LLM_MODEL_REVISION
     llmModelSha256 = $modelHash
 }
@@ -96,6 +105,7 @@ if ($runtimeProfile -in @("production", "release")) {
 }
 
 $manifest = [ordered]@{
+    schemaVersion = 1
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     releaseVersion = $releaseVersion
     gitCommit = $gitCommit
@@ -125,13 +135,13 @@ $manifest = [ordered]@{
         quantization = $env:COMPUTE_TYPE
         identifier = $asrRepository
         sha256 = $env:WHISPERX_MODEL_SHA256
-        fileInventoryHash = if ($asrSnapshot) { $asrSnapshot.fileInventoryHash } else { $null }
+        fileInventoryHash = $asrInventoryHash
     }, [ordered]@{
         name = "diarization"
         revision = $diarizationRevision
         identifier = $env:DIARIZATION_MODEL
         sha256 = $env:DIARIZATION_MODEL_SHA256
-        fileInventoryHash = if ($diarizationSnapshot) { $diarizationSnapshot.fileInventoryHash } else { $null }
+        fileInventoryHash = $diarizationInventoryHash
     }, [ordered]@{
         name = $env:LLM_MODEL_FILE
         revision = $env:LLM_MODEL_REVISION
@@ -143,4 +153,13 @@ $manifest = [ordered]@{
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
 $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $OutputPath -Encoding utf8
+$modelManifest = [ordered]@{
+    schemaVersion = 1
+    generatedAtUtc = $manifest.generatedAtUtc
+    releaseVersion = $releaseVersion
+    gitCommit = $gitCommit
+    models = @($manifest.models)
+}
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ModelManifestPath) | Out-Null
+$modelManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ModelManifestPath -Encoding utf8
 $manifest | ConvertTo-Json -Depth 12

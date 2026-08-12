@@ -14,6 +14,10 @@ def test_release_manifest_has_pinned_release_identity_and_models():
     for field in ("releaseVersion", "gitCommit", "runtimeProfile", "WHISPERX_MODEL_REVISION", "DIARIZATION_MODEL_REVISION", "LLM_MODEL_REVISION", "LLM_MODEL_SHA256"):
         assert field in manifest or field in env
     assert "WHISPERX_RUNTIME_MANIFEST_DEEP" in manifest
+    assert "ModelManifestPath" in manifest
+    assert "model-manifest.json" in manifest
+    assert "whisperXModelInventoryHash" in manifest
+    assert "onnxRuntime = $onnxVersion" in manifest
 
 
 def test_llm_download_fails_before_replacing_mismatched_production_model():
