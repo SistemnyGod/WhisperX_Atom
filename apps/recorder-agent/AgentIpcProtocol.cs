@@ -85,7 +85,9 @@ public sealed record AgentIpcHealth(
     int RawChunksReadyForUpload = 0,
     string StorageWatermarkState = "NORMAL",
     double StorageFreePercent = 100,
-    string? StorageWatermarkReason = null);
+    string? StorageWatermarkReason = null,
+    string RecordingProfile = "ROOM",
+    bool RecordingProfileManaged = false);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

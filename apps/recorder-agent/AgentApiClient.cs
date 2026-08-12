@@ -59,6 +59,11 @@ public sealed class AgentApiClient : IDisposable
         _storage.SetAudioDevices(
             Environment.GetEnvironmentVariable("ATOM_AGENT_MICROPHONE_DEVICE_ID") ?? config?.MicrophoneDeviceId,
             Environment.GetEnvironmentVariable("ATOM_AGENT_SYSTEM_AUDIO_DEVICE_ID") ?? config?.SystemAudioDeviceId);
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE")) && config?.RecordingProfile is not null)
+        {
+            try { _storage.SetRecordingProfile(config.RecordingProfile); }
+            catch (InvalidOperationException) { /* An environment override remains authoritative. */ }
+        }
         var baseUrl = ResolveServerUrl(config);
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
@@ -96,7 +101,7 @@ public sealed class AgentApiClient : IDisposable
         var temporary = _configPath + ".part";
         await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true,
             _installationId,
-            _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId), cancellationToken);
+            _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile), cancellationToken);
         File.Move(temporary, _configPath, true);
     }
 
@@ -113,7 +118,8 @@ public sealed class AgentApiClient : IDisposable
             _installationId,
             normalized,
             _storage.MicrophoneDeviceId,
-            _storage.SystemAudioDeviceId);
+            _storage.SystemAudioDeviceId,
+            _storage.RecordingProfile);
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -131,7 +137,27 @@ public sealed class AgentApiClient : IDisposable
             _installationId,
             _storage.ArchiveRoot,
             _storage.MicrophoneDeviceId,
-            _storage.SystemAudioDeviceId);
+            _storage.SystemAudioDeviceId,
+            _storage.RecordingProfile);
+        await PersistConfigurationAsync(temporary, configuration, cancellationToken);
+        File.Move(temporary, _configPath, true);
+    }
+
+    public async Task SetRecordingProfileAsync(string profile, CancellationToken cancellationToken = default)
+    {
+        _storage.SetRecordingProfile(profile);
+        if (!IsConfigured) return;
+        var temporary = _configPath + ".part";
+        var configuration = new AgentConfiguration(
+            _baseUri.ToString().TrimEnd('/'),
+            _agentId.ToString(),
+            ProtectToken(_token),
+            true,
+            _installationId,
+            _storage.ArchiveRoot,
+            _storage.MicrophoneDeviceId,
+            _storage.SystemAudioDeviceId,
+            _storage.RecordingProfile);
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -676,7 +702,8 @@ public sealed class AgentApiClient : IDisposable
         Guid InstallationId = default,
         string? ArchiveRoot = null,
         string? MicrophoneDeviceId = null,
-        string? SystemAudioDeviceId = null);
+        string? SystemAudioDeviceId = null,
+        string? RecordingProfile = "ROOM");
 
     private static string ProtectToken(string token) => Convert.ToBase64String(ProtectedData.Protect(
         Encoding.UTF8.GetBytes(token),

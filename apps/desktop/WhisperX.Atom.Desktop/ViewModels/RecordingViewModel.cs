@@ -22,6 +22,8 @@ public sealed class RecordingViewModel : ObservableObject
     private int _pendingUploads;
     private string? _microphoneDeviceId;
     private string? _systemAudioDeviceId;
+    private string _recordingProfile = "ROOM";
+    private bool _recordingProfileManaged;
     private CancellationTokenSource? _processingCts;
     private Task? _processingTask;
     private CancellationTokenSource? _sessionCts;
@@ -75,10 +77,18 @@ public sealed class RecordingViewModel : ObservableObject
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
         _microphoneDeviceId = settings.MicrophoneDeviceId;
         _systemAudioDeviceId = settings.SystemAudioDeviceId;
+        _recordingProfile = NormalizeRecordingProfile(settings.RecordingProfile);
     }
 
     public ObservableCollection<AudioDeviceOption> Microphones { get; } = [];
     public ObservableCollection<AudioDeviceOption> SystemAudioDevices { get; } = [];
+    public IReadOnlyList<RecordingProfileOption> RecordingProfiles { get; } =
+    [
+        new("ROOM", "Комната — микрофон"),
+        new("ONLINE", "Онлайн — микрофон + система"),
+        new("MIC_ONLY", "Только микрофон"),
+        new("SYSTEM_ONLY", "Только системный звук")
+    ];
     public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) { NotifyCommands(); OnPropertyChanged(nameof(CanTestAudio)); } } }
     public string Title { get => _title; set => SetProperty(ref _title, value); }
     public string? SessionId
@@ -202,6 +212,9 @@ public sealed class RecordingViewModel : ObservableObject
     // Local capture has already stopped in Finalizing; encoding and delivery run in the
     // background and must not prevent configuring the next recording.
     public bool CanSelectDevices => State is not RecordingState.Recording and not RecordingState.Paused;
+    public string RecordingProfile { get => _recordingProfile; private set => SetProperty(ref _recordingProfile, value); }
+    public bool RecordingProfileManaged { get => _recordingProfileManaged; private set => SetProperty(ref _recordingProfileManaged, value); }
+    public bool CanSelectRecordingProfile => !_recordingProfileManaged && State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
 
     public async Task StartPollingAsync()
     {
@@ -407,6 +420,26 @@ public sealed class RecordingViewModel : ObservableObject
         await SaveAndSyncDevicesAsync();
     }
 
+    public async Task SetRecordingProfileAsync(string? profile)
+    {
+        if (!CanSelectRecordingProfile) return;
+        var normalized = NormalizeRecordingProfile(profile);
+        if (string.Equals(_recordingProfile, normalized, StringComparison.Ordinal)) return;
+        try
+        {
+            var response = await _services.Recorder.SetRecordingProfileAsync(normalized);
+            if (!response.Ok)
+            {
+                ErrorMessage = MapRecordingError(response.Error ?? "Не удалось сохранить профиль записи.");
+                return;
+            }
+            RecordingProfile = normalized;
+            SaveSettings();
+            ApplyResponse(response);
+        }
+        catch (Exception ex) { ErrorMessage = SafeError(ex); }
+    }
+
     public async Task TestMicrophoneAsync()
     {
         if (!CanTestAudio) return;
@@ -457,6 +490,7 @@ public sealed class RecordingViewModel : ObservableObject
     {
         await _services.Recorder.SetArchiveRootAsync(ArchiveRoot);
         await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId);
+        await _services.Recorder.SetRecordingProfileAsync(_recordingProfile);
         SaveSettings();
     }
 
@@ -762,7 +796,7 @@ public sealed class RecordingViewModel : ObservableObject
     private void SaveSettings()
     {
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with { ArchiveRoot = ArchiveRoot, MicrophoneDeviceId = _microphoneDeviceId, SystemAudioDeviceId = _systemAudioDeviceId });
+        _services.Settings.Save(current with { ArchiveRoot = ArchiveRoot, MicrophoneDeviceId = _microphoneDeviceId, SystemAudioDeviceId = _systemAudioDeviceId, RecordingProfile = _recordingProfile });
     }
 
     private void ApplyResponse(AgentIpcResponse response)
@@ -792,6 +826,8 @@ public sealed class RecordingViewModel : ObservableObject
             _rawChunksReadyForUpload = health.RawChunksReadyForUpload;
             _storageWatermarkState = health.StorageWatermarkState;
             _storageFreePercent = health.StorageFreePercent;
+            RecordingProfileManaged = health.RecordingProfileManaged;
+            RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
             _microphoneDb = health.MicrophoneDb;
             _systemAudioDb = health.SystemAudioDb;
             _microphoneRmsDb = health.MicrophoneRmsDb;
@@ -900,6 +936,7 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(CanStop));
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(CanSelectDevices));
+        OnPropertyChanged(nameof(CanSelectRecordingProfile));
         OnPropertyChanged(nameof(AgentStatus));
     }
 
@@ -926,5 +963,10 @@ public sealed class RecordingViewModel : ObservableObject
         return updated;
     }
     private static string? NormalizeDeviceId(string? id) => string.IsNullOrWhiteSpace(id) ? null : id.Trim();
+    private static string NormalizeRecordingProfile(string? profile)
+    {
+        var normalized = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
+    }
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Recorder Agent не ответил. Проверьте локальный сервис.");
 }

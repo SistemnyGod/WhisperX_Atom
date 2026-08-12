@@ -32,6 +32,7 @@ public sealed partial class RecordingPage : Page
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         await ViewModel.StartPollingAsync();
         SyncSelections();
+        SyncRecordingProfile();
         UpdateError();
     }
 
@@ -44,6 +45,7 @@ public sealed partial class RecordingPage : Page
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(RecordingViewModel.Microphones) or nameof(RecordingViewModel.SystemAudioDevices)) SyncSelections();
+        if (e.PropertyName is nameof(RecordingViewModel.RecordingProfile)) SyncRecordingProfile();
         if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)
             or nameof(RecordingViewModel.WarningMessage) or nameof(RecordingViewModel.HasWarning)) UpdateError();
         if (e.PropertyName is nameof(RecordingViewModel.State))
@@ -85,7 +87,14 @@ public sealed partial class RecordingPage : Page
         if (ViewModel is null) return;
         await ViewModel.RefreshAsync();
         SyncSelections();
+        SyncRecordingProfile();
         UpdateError();
+    }
+
+    private void SyncRecordingProfile()
+    {
+        if (ViewModel is null) return;
+        RecordingProfileSelector.SelectedValue = ViewModel.RecordingProfile;
     }
 
     private async void TestMicrophoneButton_Click(object sender, RoutedEventArgs e)
@@ -133,6 +142,13 @@ public sealed partial class RecordingPage : Page
     {
         if (_updatingSelections || ViewModel is null || SystemAudioSelector.SelectedItem is not AudioDeviceOption option) return;
         await ViewModel.SetSystemAudioAsync(option.Id);
+        UpdateError();
+    }
+
+    private async void RecordingProfile_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ViewModel is null || RecordingProfileSelector.SelectedValue is not string profile) return;
+        await ViewModel.SetRecordingProfileAsync(profile);
         UpdateError();
     }
 

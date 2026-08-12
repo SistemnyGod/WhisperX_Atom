@@ -36,6 +36,7 @@ public interface IRecorderService
     Task<AgentIpcResponse> RetryUploadAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ConfigureAgentAsync(string serverUrl, Guid agentId, string token, string archiveRoot, string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> SetRecordingProfileAsync(string recordingProfile, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default);
 }
@@ -78,7 +79,12 @@ public interface IBackendService : IDisposable
     Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> DeleteMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopTranscriptVersion>> GetTranscriptVersionsAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopTranscriptVersion?> EditTranscriptSegmentAsync(Guid meetingId, Guid segmentId, string text, CancellationToken cancellationToken = default);
+    Task<DesktopJob?> ReprocessTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopSpeaker>> GetSpeakersAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<bool> RenameSpeakerAsync(Guid meetingId, Guid speakerId, string displayName, CancellationToken cancellationToken = default);
+    Task<bool> MergeSpeakersAsync(Guid meetingId, Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMedia>> GetMediaAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
@@ -143,6 +149,8 @@ public sealed record AudioDeviceOption(string Id, string Name, bool IsDefault, s
 {
     public string DisplayName => IsDefault ? $"{Name} · по умолчанию" : Name;
 }
+
+public sealed record RecordingProfileOption(string Code, string DisplayName);
 
 public sealed class FrontendServices(
     IRecorderService recorder,

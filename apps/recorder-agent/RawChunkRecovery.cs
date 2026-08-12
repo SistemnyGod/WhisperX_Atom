@@ -111,10 +111,9 @@ public sealed class RawChunkRecovery(
 
             var isPart = candidatePath.EndsWith(".pcm.part", StringComparison.OrdinalIgnoreCase);
             var rawPath = isPart ? candidatePath[..^".part".Length] : candidatePath;
+            var exactName = RawChunkFileName.TryParse(rawPath, out var sequence, out var exactStartSample, out var exactSampleCount);
             var fileName = Path.GetFileNameWithoutExtension(rawPath);
-            if (!int.TryParse(fileName, out var sequence)
-                || sequence < 0)
-                continue;
+            if (!exactName && (!int.TryParse(fileName, out sequence) || sequence < 0)) continue;
             if (isPart && File.Exists(rawPath)) continue;
 
             var trackInfo = await spool.GetTrackInfoAsync(trackId, cancellationToken);
@@ -133,7 +132,7 @@ public sealed class RawChunkRecovery(
             {
                 var size = new FileInfo(candidatePath).Length;
                 var blockAlign = Math.Max(1, trackInfo.Channels * Math.Max(1, trackInfo.BitsPerSample / 8));
-                var sampleCount = size / blockAlign;
+                var sampleCount = exactName ? exactSampleCount : size / blockAlign;
                 if (sampleCount <= 0)
                 {
                     logger.LogWarning("Ignoring empty orphan raw chunk. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", sessionId, trackId, sequence);
@@ -142,7 +141,7 @@ public sealed class RawChunkRecovery(
 
                 var existingEnd = await spool.GetNextTrackStartSampleAsync(trackId, cancellationToken);
                 var estimatedStart = (long)sequence * trackInfo.SampleRate * RecordingContract.ChunkDurationSeconds;
-                var startSample = Math.Max(existingEnd, estimatedStart);
+                var startSample = exactName ? exactStartSample : Math.Max(existingEnd, estimatedStart);
                 var directory = Path.GetDirectoryName(rawPath)!;
                 var output = Path.Combine(directory, $"{sequence:D8}.flac");
                 spool.RegisterRawChunk(new RawRecordingChunk(
@@ -150,6 +149,8 @@ public sealed class RawChunkRecovery(
                     startSample, sampleCount, trackInfo.SampleRate, trackInfo.Channels,
                     trackInfo.TrackType, trackInfo.Encoding, trackInfo.BitsPerSample, "WRITING", 0, null, null));
                 logger.LogInformation("Registered orphan raw chunk for recovery. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", sessionId, trackId, sequence);
+                if (!exactName)
+                    await spool.AddEventAsync(sessionId, "RAW_CHUNK_LEGACY_TIMELINE_INFERRED", payloadJson: System.Text.Json.JsonSerializer.Serialize(new { trackId, sequence, startSample }), cancellationToken: cancellationToken);
             }
             catch (Exception ex)
             {
@@ -166,9 +167,11 @@ public sealed class RawChunkRecovery(
         var size = new FileInfo(raw.RawPath).Length;
         if (size <= 0) throw new InvalidOperationException("raw_chunk_empty");
         var blockAlign = Math.Max(1, raw.Channels * Math.Max(1, raw.BitsPerSample / 8));
-        var sampleCount = size / blockAlign;
-        if (sampleCount <= 0) throw new InvalidOperationException("raw_chunk_has_no_complete_samples");
-        await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "RAW_READY", size, FlacEncoder.ComputeSha256(raw.RawPath), sampleCount: sampleCount, cancellationToken: cancellationToken);
+        var fileSampleCount = size / blockAlign;
+        if (fileSampleCount <= 0) throw new InvalidOperationException("raw_chunk_has_no_complete_samples");
+        if (raw.SampleCount > 0 && fileSampleCount != raw.SampleCount)
+            throw new InvalidOperationException($"raw_chunk_timeline_size_mismatch:{raw.SampleCount}:{fileSampleCount}");
+        await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "RAW_READY", size, FlacEncoder.ComputeSha256(raw.RawPath), sampleCount: raw.SampleCount, cancellationToken: cancellationToken);
     }
 
     private static void TryDelete(string path)

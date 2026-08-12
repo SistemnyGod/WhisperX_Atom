@@ -130,8 +130,9 @@ def test_realtime_capture_handoff_does_not_hash_or_persist_on_callback():
     for forbidden in ("FlacEncoder.ComputeSha256", "RegisterRawChunk", "Flush(true)", "FFmpeg", "WaitAsync"):
         assert forbidden not in append + queue
     assert "raw.Dispose()" in queue
-    assert "File.Move(rawPartPath, rawPath, true)" in queue
-    assert queue.index("File.Move(rawPartPath, rawPath, true)") < queue.index("_pending.Writer.TryWrite(descriptor)")
+    assert "File.Move(rawPartPath, durableRawPath, true)" in queue
+    assert "RawChunkFileName.Create(sequence, startSample, sampleCount)" in queue
+    assert queue.index("File.Move(rawPartPath, durableRawPath, true)") < queue.index("_pending.Writer.TryWrite(descriptor)")
     process = writer.split("private async Task ProcessChunkAsync", 1)[1]
     assert "RegisterRawChunk" in process
     assert "FlacEncoder.ComputeSha256" in process
@@ -152,6 +153,9 @@ def test_disk_backed_overflow_is_bounded_and_restart_recoverable():
     assert 'EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)' in recovery
     assert 'EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories)' in recovery
     assert "GetUnregisteredClosedRawBacklogAsync" in spool
+    assert "RawChunkFileName.TryParse(rawPath" in coordinator
+    assert "RawChunkFileName.TryParse(rawPath" in recovery
+    assert "RAW_CHUNK_LEGACY_TIMELINE_INFERRED" in recovery
 
 
 def test_upload_queue_prioritizes_active_sessions_and_persists_chunk_backoff():
@@ -292,6 +296,13 @@ def test_recording_profiles_preserve_track_metadata_and_use_controlled_mix():
     assert "normalize=1" in assembly
     assert "alimiter=limit=0.95" in assembly
     assert "ASSEMBLING" in worker and "ASSEMBLED" in worker and "MEDIA_READY" in worker
+    settings = read("apps/recorder-agent/AgentStorageSettings.cs")
+    contract = read("recording-profile-contract.json")
+    assert '_recordingProfile = NormalizeRecordingProfile' in settings
+    assert ', "ROOM")' in assembly
+    assert '?? "ROOM"' in read("apps/recorder-agent/LocalArchiveWriter.cs")
+    assert "adelay=" in assembly and "AUDIO_TRACK_DRIFT_HIGH" in assembly
+    assert "originalTracksPreserved" in contract
 
 
 def test_media_quality_report_is_emitted_with_ready_for_asr_payload():

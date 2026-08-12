@@ -37,7 +37,7 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
@@ -62,7 +62,12 @@ public sealed class BackendService : IBackendService
     public Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.CancelMeetingAsync(meetingId, cancellationToken);
     public Task<bool> DeleteMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.DeleteMeetingAsync(meetingId, cancellationToken);
     public Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetTranscriptAsync(meetingId, cancellationToken);
+    public Task<IReadOnlyList<DesktopTranscriptVersion>> GetTranscriptVersionsAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetTranscriptVersionsAsync(meetingId, cancellationToken);
+    public Task<DesktopTranscriptVersion?> EditTranscriptSegmentAsync(Guid meetingId, Guid segmentId, string text, CancellationToken cancellationToken = default) => _client.EditTranscriptSegmentAsync(meetingId, segmentId, text, cancellationToken);
+    public Task<DesktopJob?> ReprocessTranscriptAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.ReprocessTranscriptAsync(meetingId, cancellationToken);
     public Task<IReadOnlyList<DesktopSpeaker>> GetSpeakersAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetSpeakersAsync(meetingId, cancellationToken);
+    public Task<bool> RenameSpeakerAsync(Guid meetingId, Guid speakerId, string displayName, CancellationToken cancellationToken = default) => _client.RenameSpeakerAsync(meetingId, speakerId, displayName, cancellationToken);
+    public Task<bool> MergeSpeakersAsync(Guid meetingId, Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default) => _client.MergeSpeakersAsync(meetingId, sourceSpeakerId, targetSpeakerId, cancellationToken);
     public Task<IReadOnlyList<DesktopMedia>> GetMediaAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetMediaAsync(meetingId, cancellationToken);
     public Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetSummaryAsync(meetingId, cancellationToken);
     public Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.RebuildSummaryAsync(meetingId, cancellationToken);

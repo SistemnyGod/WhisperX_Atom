@@ -10,6 +10,7 @@ public sealed class AgentStorageSettings
     private string _archiveRoot;
     private string? _microphoneDeviceId;
     private string? _systemAudioDeviceId;
+    private string _recordingProfile;
 
     public AgentStorageSettings()
     {
@@ -17,6 +18,7 @@ public sealed class AgentStorageSettings
             ?? DefaultArchiveRoot();
         _microphoneDeviceId = NormalizeDeviceId(Environment.GetEnvironmentVariable("ATOM_AGENT_MICROPHONE_DEVICE_ID"));
         _systemAudioDeviceId = NormalizeDeviceId(Environment.GetEnvironmentVariable("ATOM_AGENT_SYSTEM_AUDIO_DEVICE_ID"));
+        _recordingProfile = NormalizeRecordingProfile(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE"));
     }
 
     public string ArchiveRoot
@@ -39,6 +41,22 @@ public sealed class AgentStorageSettings
     public string? SystemAudioDeviceId
     {
         get { lock (_gate) return _systemAudioDeviceId; }
+    }
+
+    public string RecordingProfile
+    {
+        get { lock (_gate) return _recordingProfile; }
+    }
+
+    public bool RecordingProfileManaged => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE"));
+
+    public string SetRecordingProfile(string? profile)
+    {
+        if (RecordingProfileManaged)
+            throw new InvalidOperationException("recording_profile_managed_by_environment");
+        var normalized = NormalizeRecordingProfile(profile);
+        lock (_gate) _recordingProfile = normalized;
+        return normalized;
     }
 
     public void SetAudioDevices(string? microphoneDeviceId, string? systemAudioDeviceId)
@@ -72,4 +90,10 @@ public sealed class AgentStorageSettings
     }
 
     private static string? NormalizeDeviceId(string? deviceId) => string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
+
+    private static string NormalizeRecordingProfile(string? profile)
+    {
+        var normalized = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
+    }
 }

@@ -88,6 +88,14 @@ public sealed class AgentPipeHost(
                     var systemAudioDeviceId = ReadString(request.Payload, "systemAudioDeviceId");
                     await api.SetAudioDevicesAsync(microphoneDeviceId, systemAudioDeviceId, cancellationToken);
                     return await StatusAsync(cancellationToken);
+                case "SET_RECORDING_PROFILE":
+                    if (storage.RecordingProfileManaged) return Error("recording_profile_managed_by_environment");
+                    var requestedProfile = ReadString(request.Payload, "recordingProfile");
+                    if (string.IsNullOrWhiteSpace(requestedProfile)) return Error("recording_profile_required");
+                    if (state.State is RecorderState.Recording or RecorderState.Paused or RecorderState.Finalizing)
+                        return Error("recording_profile_locked");
+                    await api.SetRecordingProfileAsync(requestedProfile, cancellationToken);
+                    return await StatusAsync(cancellationToken);
                 case "TEST_AUDIO_SOURCE":
                 case "MICROPHONE_TEST":
                     var testDeviceId = ReadString(request.Payload, "deviceId");
@@ -235,7 +243,8 @@ public sealed class AgentPipeHost(
             peaks.MicrophoneSilenceDurationMs, peaks.SystemAudioSilenceDurationMs,
             peaks.MicrophoneTelemetryStale, peaks.SystemAudioTelemetryStale, rawBacklog.Health,
             activeSessionId, backgroundPendingSessions, backgroundFailedSessions,
-            rawBacklog.Ready, rawBacklog.ReadyForUpload, watermark.State.ToString(), watermark.FreePercent, watermark.Reason), null, recorder.CurrentMediaTimeMs,
+            rawBacklog.Ready, rawBacklog.ReadyForUpload, watermark.State.ToString(), watermark.FreePercent, watermark.Reason,
+            storage.RecordingProfile, storage.RecordingProfileManaged), null, recorder.CurrentMediaTimeMs,
             AgentIpcProtocol.Version, null, sessionStatus);
     }
 

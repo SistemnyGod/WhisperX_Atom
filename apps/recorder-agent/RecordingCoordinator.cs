@@ -36,7 +36,6 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     private readonly ILogger<RecordingCoordinator> _logger;
     private readonly string _dataRoot;
     private readonly string _ffmpegPath;
-    private readonly string _recordingProfile;
     private readonly object _gate = new();
     private CaptureTrack? _microphone;
     private CaptureTrack? _systemAudio;
@@ -52,7 +51,6 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         _dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
         _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
-        _recordingProfile = ReadRecordingProfile();
     }
 
     public string? SessionId => _sessionId;
@@ -137,7 +135,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             string? microphoneWarning = null;
             string? systemWarning = null;
             using var deviceEnumerator = new MMDeviceEnumerator();
-            var profile = _recordingProfile;
+            var profile = _storage.RecordingProfile;
             if (profile is not ("ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY"))
                 throw new InvalidOperationException("recording_profile_invalid");
             var captureMicrophone = profile is not "SYSTEM_ONLY";
@@ -210,9 +208,6 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             throw;
         }
     }
-
-    private static string ReadRecordingProfile()
-        => (Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE") ?? "ONLINE").Trim().ToUpperInvariant();
 
     private void EnsureStorageAvailable()
     {
@@ -869,8 +864,9 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         // full. Do not move this work into the encoder loop: that would retain
         // an unbounded number of open capture streams.
         raw.Dispose();
-        File.Move(rawPartPath, rawPath, true);
-        var descriptor = new PendingRawChunk(rawId, sequence, rawPath, startSample, sampleCount);
+        var durableRawPath = Path.Combine(Path.GetDirectoryName(rawPath)!, RawChunkFileName.Create(sequence, startSample, sampleCount));
+        File.Move(rawPartPath, durableRawPath, true);
+        var descriptor = new PendingRawChunk(rawId, sequence, durableRawPath, startSample, sampleCount);
         if (_pending.Writer.TryWrite(descriptor)) _workSignal.Release();
         _sequence++;
         _startSample += sampleCount;
@@ -902,14 +898,19 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
 
         foreach (var rawPath in Directory.EnumerateFiles(directory, "*.pcm").OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
+            var exactName = RawChunkFileName.TryParse(rawPath, out var sequence, out var exactStartSample, out var exactSampleCount);
             var name = Path.GetFileNameWithoutExtension(rawPath);
-            if (!int.TryParse(name, out var sequence) || sequence < 0) continue;
+            if (!exactName && (!int.TryParse(name, out sequence) || sequence < 0)) continue;
             if (await _spool.RawChunkExistsAsync(_sessionId, _trackId, sequence)) continue;
 
             var size = new FileInfo(rawPath).Length;
-            var sampleCount = size / Math.Max(1, _format.BlockAlign);
+            var sampleCount = exactName ? exactSampleCount : size / Math.Max(1, _format.BlockAlign);
             if (sampleCount <= 0) continue;
-            var startSample = checked((long)sequence * _format.SampleRate * RecordingContract.ChunkDurationSeconds);
+            var startSample = exactName
+                ? exactStartSample
+                : checked((long)sequence * _format.SampleRate * RecordingContract.ChunkDurationSeconds);
+            if (!exactName)
+                _logger.LogWarning("RAW_CHUNK_LEGACY_TIMELINE_INFERRED Session={SessionId} Track={TrackId} Sequence={Sequence}", _sessionId, _trackId, sequence);
             await ProcessChunkAsync(new PendingRawChunk(Guid.NewGuid().ToString("N"), sequence, rawPath, startSample, sampleCount));
         }
     }
