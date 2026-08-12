@@ -36,6 +36,15 @@ public sealed partial class SettingsPage : Page
         UpdateStatus();
     }
 
+    private async void ChangePasswordButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.ChangePasswordAsync(PasswordBox.Password, NewPasswordBox.Password);
+        PasswordBox.Password = string.Empty;
+        NewPasswordBox.Password = string.Empty;
+        UpdateStatus();
+    }
+
     private async void CheckBackendButton_Click(object sender, RoutedEventArgs e)
     {
         if (_services is null) return;

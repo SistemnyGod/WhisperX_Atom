@@ -108,7 +108,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
     }
 
-    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default)
+    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null)
     {
         EnsureStorageAvailable();
         EnsureFfmpegAvailable();
@@ -126,7 +126,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         {
             // Offline sessions deliberately keep meeting_id NULL. The server meeting is
             // created later by BindSessionAsync and persisted back into the spool.
-            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken);
+            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
 
             CaptureTrack? microphone = null;
@@ -555,7 +555,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private DateTimeOffset? _lastAudioAtUtc;
         private DateTimeOffset? _silenceStartedAtUtc;
 
-        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null, Action<CaptureTrack, string, Exception>? failureHandler = null, string profile = "ONLINE")
+        public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null, Action<CaptureTrack, string, Exception>? failureHandler = null, string profile = "ROOM")
         {
             _sessionId = sessionId;
             _capture = capture;

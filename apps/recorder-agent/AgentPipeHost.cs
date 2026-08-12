@@ -115,8 +115,9 @@ public sealed class AgentPipeHost(
                         await BuildSessionStatusAsync(retrySessionId, cancellationToken));
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
+                    var ownerUserId = ReadGuid(request.Payload, "ownerUserId");
                     var title = ReadString(request.Payload, "title");
-                    var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken);
+                    var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId);
                     Guid? serverSessionId = null;
                     string? bindingWarning = null;
                     if (api.IsConfigured)

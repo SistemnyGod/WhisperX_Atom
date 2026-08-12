@@ -18,13 +18,15 @@
                     <StackPanel Spacing="10">
                         <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
                         <TextBlock Text="API URL" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                        <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
+                        <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" IsReadOnly="{Binding ServerOriginManaged}" Style="{StaticResource InputStyle}" />
                         <TextBlock Text="Пользователь" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBox Text="{Binding Username, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
                         <TextBlock Text="Пароль" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <PasswordBox x:Name="PasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Пароль API" />
+                        <PasswordBox x:Name="NewPasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Новый пароль (минимум 12 символов)" />
                         <StackPanel x:Name="ApiActionsPanel" Orientation="Horizontal" Spacing="8">
                             <Button Content="Войти в API" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" />
+                            <Button Content="Сменить пароль" Style="{StaticResource SecondaryButtonStyle}" Click="ChangePasswordButton_Click" IsEnabled="{Binding IsLoggedIn}" />
                             <Button Content="Проверить backend" Style="{StaticResource SecondaryButtonStyle}" Click="CheckBackendButton_Click" />
                         </StackPanel>
                     </StackPanel>

@@ -37,15 +37,17 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
     public Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default) => _client.GetSystemStatusAsync(cancellationToken);
+    public Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default) => _client.GetSystemVersionAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default) => _client.GetMeetingsAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default) => _client.GetMeetingsPageAsync(limit, offset, cancellationToken);
     public Task<IReadOnlyList<DesktopTranscriptRegistry>> GetTranscriptRegistryPageAsync(int limit, int offset, string? search = null, string? status = null, DateTimeOffset? dateFrom = null, DateTimeOffset? dateTo = null, CancellationToken cancellationToken = default) => _client.GetTranscriptRegistryPageAsync(limit, offset, search, status, dateFrom, dateTo, cancellationToken);
     public Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default) => _client.GetCurrentUserAsync(cancellationToken);
+    public Task<bool> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken = default) => _client.ChangePasswordAsync(currentPassword, newPassword, cancellationToken);
     public Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default) => _client.GetAgentsAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default) => _client.GetAssistantConversationsAsync(includeArchived, cancellationToken);
     public Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default) => _client.CreateAssistantConversationAsync(title, scopeType, meetingId, cancellationToken);
@@ -87,6 +89,11 @@ public sealed class BackendService : IBackendService
             _client.Dispose();
             _client.SessionChanged -= PersistSession;
             _client = candidate;
+            var currentUser = await candidate.GetCurrentUserAsync(cancellationToken);
+            var currentSettings = new DesktopSettingsStore().Load();
+            DesktopSettings.Save(ApiUrl, currentSettings.Username, SessionCookie, currentSettings.ArchiveRoot,
+                currentSettings.MicrophoneDeviceId, currentSettings.SystemAudioDeviceId, SessionExpiresAtUtc,
+                currentSettings.RecordingProfile, currentUser?.Id);
             return true;
         }
         catch
@@ -101,6 +108,8 @@ public sealed class BackendService : IBackendService
     public Task LogoutAsync(CancellationToken cancellationToken = default) => _client.LogoutAsync(cancellationToken);
     public Task<DesktopAgentEnrollment> LinkLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default) =>
         _client.LinkLocalAgentAsync(installationId, agentId, name, cancellationToken);
+    public Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default) =>
+        _client.BootstrapLocalAgentAsync(installationId, agentId, name, cancellationToken);
 
     public Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default) =>
         _client.CreateMeetingAsync(title, description, cancellationToken);

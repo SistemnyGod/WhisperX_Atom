@@ -10,18 +10,44 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
+static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
+    || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
+    || value.StartsWith("replace-with", StringComparison.OrdinalIgnoreCase)
+    || value.StartsWith("change-me", StringComparison.OrdinalIgnoreCase)
+    || value.Equals("password", StringComparison.OrdinalIgnoreCase)
+    || value.Equals("changeme", StringComparison.OrdinalIgnoreCase);
+
+static bool IsPrivateLanOrigin(string? value)
+{
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp || uri.IsLoopback || uri.Port <= 0)
+        return false;
+    if (!System.Net.IPAddress.TryParse(uri.Host, out var address) || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        return false;
+    var bytes = address.GetAddressBytes();
+    return bytes[0] == 10
+        || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+        || (bytes[0] == 192 && bytes[1] == 168);
+}
+
 if (builder.Environment.IsProduction())
 {
-    static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
-        || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
-        || value.StartsWith("replace-with", StringComparison.OrdinalIgnoreCase)
-        || value.StartsWith("change-me", StringComparison.OrdinalIgnoreCase)
-        || value.Equals("password", StringComparison.OrdinalIgnoreCase)
-        || value.Equals("changeme", StringComparison.OrdinalIgnoreCase);
     if (string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase))
         throw new InvalidOperationException("PRODUCTION_COOKIE_SECURE_REQUIRED");
     foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET" })
         if (IsUnsafeSecret(builder.Configuration[name])) throw new InvalidOperationException($"PRODUCTION_SECRET_INVALID:{name}");
+}
+else if (builder.Environment.IsEnvironment("Lan"))
+{
+    if (!string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(builder.Configuration["ALLOW_INSECURE_LAN_HTTP"], "true", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("LAN_HTTP_EXPLICIT_REQUIRED");
+    if (!IsPrivateLanOrigin(builder.Configuration["SERVER_ORIGIN"]))
+        throw new InvalidOperationException("LAN_SERVER_ORIGIN_INVALID");
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET" })
+    {
+        var value = builder.Configuration[name];
+        if (IsUnsafeSecret(value) || value!.Length < 16) throw new InvalidOperationException($"LAN_SECRET_INVALID:{name}");
+    }
 }
 builder.Services.AddRateLimiter(options =>
 {
@@ -194,8 +220,15 @@ app.Use(async (context, next) =>
 
     }
 
+    if (context.Request.Path.StartsWithSegments("/api/auth/change-password"))
+    {
+        // This endpoint is authenticated below and is also allowed for Reader
+        // users who have been provisioned with a temporary password.
+    }
+
     if (context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
+        context.Request.Path.StartsWithSegments("/api/system/version") ||
         context.Request.Path.StartsWithSegments("/api/auth/login") ||
         context.Request.Path.StartsWithSegments("/api/auth/refresh") ||
         context.Request.Path.StartsWithSegments("/api/auth/logout") ||
@@ -216,6 +249,14 @@ app.Use(async (context, next) =>
 
     var user = await db.GetUserForSessionAsync(session);
     if (user is null) { context.Response.StatusCode = StatusCodes.Status401Unauthorized; await context.Response.WriteAsJsonAsync(new { error = "authentication_required" }); return; }
+    if (user.MustChangePassword && !context.Request.Path.StartsWithSegments("/api/auth/change-password")
+        && !context.Request.Path.StartsWithSegments("/api/auth/me")
+        && !context.Request.Path.StartsWithSegments("/api/auth/logout"))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { error = "PASSWORD_CHANGE_REQUIRED" });
+        return;
+    }
     if (!RoleAllows(user.Role, context.Request.Method, context.Request.Path)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "insufficient_role" }); return; }
     context.Items["user_id"] = user.Id;
     context.Items["user_role"] = user.Role;
@@ -223,20 +264,56 @@ app.Use(async (context, next) =>
     await next();
 });
 
-app.MapGet("/health", () => Results.Ok(new { ok = true, service = "whisperx-atom-api" }));
+app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
+app.MapGet("/health", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
+app.MapGet("/health/ready", async () =>
+{
+    var postgres = true;
+    var nats = true;
+    var storage = true;
+    try { await db.PingAsync(); } catch { postgres = false; }
+    try
+    {
+        var natsUrl = builder.Configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        nats = (await http.GetAsync(natsUrl)).IsSuccessStatusCode;
+    }
+    catch { nats = false; }
+    try
+    {
+        var root = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+        Directory.CreateDirectory(root);
+        var probe = Path.Combine(root, ".ready-probe");
+        await File.WriteAllTextAsync(probe, "ready");
+        File.Delete(probe);
+    }
+    catch { storage = false; }
+    var ready = postgres && nats && storage;
+    return Results.Json(new { ready, postgres, nats, storage, serverTimeUtc = DateTimeOffset.UtcNow }, statusCode: ready ? 200 : 503);
+});
 app.MapGet("/ready", async () =>
 {
     try
     {
         await db.PingAsync();
-        return Results.Ok(new { ready = true, postgres = true });
+        return Results.Ok(new { ready = true, postgres = true, serverTimeUtc = DateTimeOffset.UtcNow });
     }
     catch (Exception ex)
     {
         app.Logger.LogError(ex, "Readiness check failed");
-        return Results.Json(new { ready = false, postgres = false }, statusCode: 503);
+        return Results.Json(new { ready = false, postgres = false, serverTimeUtc = DateTimeOffset.UtcNow }, statusCode: 503);
     }
 });
+
+app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(new
+{
+    product = "WhisperX Atom",
+    apiVersion = 1,
+    releaseVersion = configuration["WHISPERX_RELEASE_VERSION"] ?? "dev",
+    minDesktopVersion = configuration["WHISPERX_MIN_DESKTOP_VERSION"] ?? "0.1.0",
+    minRecorderVersion = configuration["WHISPERX_MIN_RECORDER_VERSION"] ?? "0.1.0",
+    serverTimeUtc = DateTimeOffset.UtcNow
+}));
 
 app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration) =>
 {
@@ -422,7 +499,22 @@ app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IC
         return Results.Unauthorized();
 
     await IssueAuthCookiesAsync(http, configuration, user);
-    return Results.Ok(new { user = new { id = user.Id, username = user.Username, role = user.Role } });
+    return Results.Ok(new { user = new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = user.MustChangePassword } });
+});
+
+app.MapPost("/api/auth/change-password", async (ChangePasswordRequest request, HttpContext http, IConfiguration configuration) =>
+{
+    if (CurrentUserId(http) is not Guid userId) return Results.Unauthorized();
+    var currentSession = http.Request.Cookies["wa_session"];
+    if (string.IsNullOrWhiteSpace(request.NewPassword) || request.NewPassword.Length < 12)
+        return Results.BadRequest(new { error = "password_minimum_length_12" });
+    if (!await db.ChangePasswordAsync(userId, request.CurrentPassword, request.NewPassword, currentSession))
+        return Results.BadRequest(new { error = "password_change_rejected" });
+    var user = await db.GetUserForSessionAsync(currentSession ?? string.Empty);
+    if (user is null) return Results.Unauthorized();
+    await IssueAuthCookiesAsync(http, configuration, user);
+    if (!string.IsNullOrWhiteSpace(currentSession)) await db.RevokeSessionAsync(currentSession);
+    return Results.Ok(new { changed = true, user = new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = false } });
 });
 
 app.MapPost("/api/auth/refresh", async (HttpContext http, IConfiguration configuration) =>
@@ -460,7 +552,60 @@ app.MapGet("/api/auth/me", async (HttpContext http) =>
     var user = await db.GetUserForSessionAsync(http.Request.Cookies["wa_session"]!);
     return user is null
         ? Results.Unauthorized()
-        : Results.Ok(new { id = user.Id, username = user.Username, role = user.Role });
+        : Results.Ok(new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = user.MustChangePassword });
+});
+
+app.MapGet("/api/admin/users", async (HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return Results.Ok(await db.ListUsersAsync());
+});
+
+app.MapPost("/api/admin/users", async (AdminUserCreateRequest request, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var username = request.Username?.Trim();
+    var role = request.Role?.Trim();
+    if (string.IsNullOrWhiteSpace(username) || username.Length > 160 || role is not ("Administrator" or "Operator" or "Editor" or "Reader"))
+        return Results.BadRequest(new { error = "invalid_user" });
+    var temporaryPassword = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+    var user = await db.CreateUserAsync(username, role, temporaryPassword);
+    return user is null ? Results.Conflict(new { error = "user_exists" }) : Results.Created($"/api/admin/users/{user.Id}", new { user, temporaryPassword });
+});
+
+app.MapPatch("/api/admin/users/{userId:guid}", async (Guid userId, AdminUserUpdateRequest request, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    if (request.Role is not null && request.Role is not ("Administrator" or "Operator" or "Editor" or "Reader"))
+        return Results.BadRequest(new { error = "invalid_role" });
+    return await db.UpdateUserAsync(userId, request.Role, request.IsActive) ? Results.Ok(new { updated = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/reset-password", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var temporaryPassword = await db.ResetPasswordAsync(userId);
+    return temporaryPassword is null ? Results.NotFound() : Results.Ok(new { userId, temporaryPassword });
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/disable", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var updated = await db.UpdateUserAsync(userId, null, false);
+    if (updated) await db.RevokeUserSessionsAsync(userId);
+    return updated ? Results.Ok(new { userId, isActive = false }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/enable", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return await db.UpdateUserAsync(userId, null, true) ? Results.Ok(new { userId, isActive = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/revoke-sessions", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return await db.RevokeUserSessionsAsync(userId) ? Results.Ok(new { userId, revoked = true }) : Results.NotFound();
 });
 
 app.MapPost("/api/meetings", async (MeetingCreateRequest request, HttpContext context) =>
@@ -636,6 +781,8 @@ async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
 static bool RoleAllows(string role, string method, PathString path)
 {
     if (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase)) return true;
+    if (path.StartsWithSegments("/api/auth/change-password")) return true;
+    if (path.StartsWithSegments("/api/agents/bootstrap")) return HttpMethods.IsPost(method);
     if (HttpMethods.IsGet(method) || HttpMethods.IsHead(method)) return true;
     if (!string.Equals(role, "Editor", StringComparison.OrdinalIgnoreCase)) return false;
     if (HttpMethods.IsPatch(method)) return true;
@@ -763,11 +910,22 @@ app.MapPost("/api/agents/link-local", async (AgentLinkLocalRequest request, Http
     return Results.Ok(new { agentId = agent.Id, agent, token });
 });
 
+app.MapPost("/api/agents/bootstrap", async (AgentBootstrapRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    if (request.InstallationId == Guid.Empty) return Results.BadRequest(new { error = "installation_id_required" });
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var result = await store.BootstrapAgentAsync(request.InstallationId, userId, string.IsNullOrWhiteSpace(request.Name) ? "WhisperX Atom Recorder" : request.Name.Trim(), request.AgentId, token, request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"));
+    if (result is null) return Results.BadRequest(new { error = "agent_bootstrap_rejected" });
+    if (result.ReenrollRequired) return Results.Conflict(new { error = "REENROLL_REQUIRED", agentId = result.Agent.Id });
+    return Results.Ok(new { agentId = result.Agent.Id, agent = result.Agent, token = result.Token });
+});
+
 app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var correlationId = request.PipelineCorrelationId ?? context.Request.Headers["X-Correlation-Id"].ToString();
-    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId, request.Title, request.StartedAt, correlationId, request.LocalSessionId);
+    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId);
     return session is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{session.Id}", session);
 });
 
@@ -1138,9 +1296,10 @@ app.Run();
 
 public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
 public record AgentLinkLocalRequest(Guid InstallationId, Guid? AgentId, string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
+public record AgentBootstrapRequest(Guid InstallationId, Guid? AgentId, string? Name, string? Version, JsonDocument? Capabilities);
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
-public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
+public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null);
 public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
@@ -1153,6 +1312,9 @@ public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
 
 public record LoginRequest(string Username, string Password);
+public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+public record AdminUserCreateRequest(string Username, string Role = "Reader");
+public record AdminUserUpdateRequest(string? Role, bool? IsActive);
 public record MeetingCreateRequest(string Title, string? Description);
 public record MeetingCancelRequest(bool Force = false);
 public record UploadReservationRequest(string FileName, long SizeBytes);
@@ -1172,7 +1334,9 @@ public record TranscriptSegmentEditRequest(string Text, string? Reason = null);
 public sealed record TranscriptVersionRow(Guid Id, Guid MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
 public sealed record TranscriptRegistryRow(Guid TranscriptId, Guid MeetingId, string MeetingTitle, DateTime MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTime CreatedAt);
 
-public sealed record UserRow(Guid Id, string Username, string PasswordHash, string Role);
+public sealed record UserRow(Guid Id, string Username, string PasswordHash, string Role, bool MustChangePassword = false);
+public sealed record AdminUserRow(Guid Id, string Username, string Role, bool IsActive, bool MustChangePassword, DateTime CreatedAt);
+public sealed record TemporaryPasswordResult(AdminUserRow User, string TemporaryPassword);
 public sealed record RefreshRotation(UserRow User, string RefreshToken);
 public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
 public sealed record JobRow(Guid Id, Guid MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
@@ -1330,22 +1494,107 @@ public sealed class Database(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT id, username, password_hash, role FROM users WHERE username=@username AND is_active", connection);
+            "SELECT id, username, password_hash, role, must_change_password FROM users WHERE username=@username AND is_active", connection);
         command.Parameters.AddWithValue("username", username);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null :
-            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
+            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4));
+    }
+
+    public async Task<IReadOnlyList<AdminUserRow>> ListUsersAsync()
+    {
+        var result = new List<AdminUserRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,username,role,is_active,must_change_password,created_at FROM users ORDER BY username", connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AdminUserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetDateTime(5)));
+        return result;
+    }
+
+    public async Task<AdminUserRow?> CreateUserAsync(string username, string role, string temporaryPassword)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("INSERT INTO users(id,username,password_hash,role,must_change_password) VALUES(@id,@username,@hash,@role,true) RETURNING id,username,role,is_active,must_change_password,created_at", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("username", username.Trim());
+        command.Parameters.AddWithValue("hash", PasswordService.Hash(temporaryPassword));
+        command.Parameters.AddWithValue("role", role);
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync();
+            return !await reader.ReadAsync() ? null : new AdminUserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetDateTime(5));
+        }
+        catch (PostgresException ex) when (ex.SqlState == "23505") { return null; }
+    }
+
+    public async Task<bool> UpdateUserAsync(Guid userId, string? role, bool? isActive)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE users SET role=COALESCE(@role,role),is_active=COALESCE(@active,is_active) WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", userId);
+        command.Parameters.AddWithValue("role", (object?)role ?? DBNull.Value);
+        command.Parameters.AddWithValue("active", (object?)isActive ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    public async Task<string?> ResetPasswordAsync(Guid userId)
+    {
+        var password = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE users SET password_hash=@hash,must_change_password=true,password_changed_at=NULL WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", userId);
+        command.Parameters.AddWithValue("hash", PasswordService.Hash(password));
+        return await command.ExecuteNonQueryAsync() > 0 ? password : null;
+    }
+
+    public async Task<bool> RevokeUserSessionsAsync(Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var sessions = new NpgsqlCommand("UPDATE sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        sessions.Parameters.AddWithValue("id", userId);
+        await sessions.ExecuteNonQueryAsync();
+        await using var refresh = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        refresh.Parameters.AddWithValue("id", userId);
+        var changed = await refresh.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return changed >= 0;
+    }
+
+    public async Task<bool> ChangePasswordAsync(Guid userId, string currentPassword, string newPassword, string? currentSessionToken = null)
+    {
+        if (newPassword.Length < 12) return false;
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var select = new NpgsqlCommand("SELECT password_hash FROM users WHERE id=@id AND is_active FOR UPDATE", connection, transaction);
+        select.Parameters.AddWithValue("id", userId);
+        var hash = await select.ExecuteScalarAsync() as string;
+        if (hash is null || !PasswordService.Verify(currentPassword, hash)) { await transaction.RollbackAsync(); return false; }
+        await using var update = new NpgsqlCommand("UPDATE users SET password_hash=@hash,must_change_password=false,password_changed_at=now() WHERE id=@id", connection, transaction);
+        update.Parameters.AddWithValue("id", userId);
+        update.Parameters.AddWithValue("hash", PasswordService.Hash(newPassword));
+        await update.ExecuteNonQueryAsync();
+        await using var sessions = new NpgsqlCommand("UPDATE sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL AND (@current_hash IS NULL OR token_hash<>@current_hash)", connection, transaction);
+        sessions.Parameters.AddWithValue("id", userId);
+        sessions.Parameters.AddWithValue("current_hash", currentSessionToken is null ? DBNull.Value : SessionHash(currentSessionToken));
+        await sessions.ExecuteNonQueryAsync();
+        await using var refresh = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        refresh.Parameters.AddWithValue("id", userId);
+        await refresh.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return true;
     }
 
     public async Task<UserRow?> GetUserForSessionAsync(string token)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT u.id, u.username, u.password_hash, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=@hash AND s.expires_at > now() AND s.revoked_at IS NULL AND u.is_active", connection);
+            "SELECT u.id, u.username, u.password_hash, u.role, u.must_change_password FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=@hash AND s.expires_at > now() AND s.revoked_at IS NULL AND u.is_active", connection);
         command.Parameters.AddWithValue("hash", SessionHash(token));
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null :
-            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
+            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4));
     }
 
     public async Task<bool> IsSessionValidAsync(string token) => await GetUserForSessionAsync(token) is not null;
@@ -1378,7 +1627,7 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         await using var select = new NpgsqlCommand(
-            "SELECT r.id,r.user_id,r.family_id,r.expires_at,r.revoked_at,r.replaced_by,u.id,u.username,u.password_hash,u.role FROM refresh_sessions r JOIN users u ON u.id=r.user_id WHERE r.token_hash=@hash FOR UPDATE", connection, transaction);
+            "SELECT r.id,r.user_id,r.family_id,r.expires_at,r.revoked_at,r.replaced_by,u.id,u.username,u.password_hash,u.role,u.must_change_password FROM refresh_sessions r JOIN users u ON u.id=r.user_id WHERE r.token_hash=@hash FOR UPDATE", connection, transaction);
         select.Parameters.AddWithValue("hash", SessionHash(token));
         await using var reader = await select.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
@@ -1388,7 +1637,7 @@ public sealed class Database(IConfiguration configuration)
         }
 
         var id = reader.GetGuid(0);
-        var user = new UserRow(reader.GetGuid(6), reader.GetString(7), reader.GetString(8), reader.GetString(9));
+        var user = new UserRow(reader.GetGuid(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), reader.GetBoolean(10));
         var familyId = reader.GetGuid(2);
         var expired = reader.GetDateTime(3) <= DateTime.UtcNow;
         var revoked = !reader.IsDBNull(4);

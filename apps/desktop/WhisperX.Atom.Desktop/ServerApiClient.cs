@@ -19,7 +19,7 @@ public sealed record DesktopMeeting(string Id, string Title, string? Description
     public string CreatedAtText => CreatedAt.LocalDateTime.ToString("dd.MM.yyyy HH:mm");
 }
 public sealed record DesktopMeetingCancellation(string MeetingId, string Status, int CancelledJobs);
-public sealed record DesktopCurrentUser(Guid Id, string Username, string Role)
+public sealed record DesktopCurrentUser(Guid Id, string Username, string Role, bool MustChangePassword = false)
 {
     public bool IsPrivileged => string.Equals(Role, "Administrator", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Role, "Operator", StringComparison.OrdinalIgnoreCase);
@@ -37,6 +37,7 @@ public sealed record DesktopSummary(string Id, string MeetingId, Guid? Transcrip
 public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record DesktopAgentEnrollment(string AgentId, string Token);
+public sealed record DesktopAgentBootstrapResult(string AgentId, string? Token, bool ReenrollRequired = false);
 public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Status, DateTimeOffset? LastSeenAt, Guid? InstallationId = null)
 {
     [JsonIgnore]
@@ -46,6 +47,7 @@ public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Sta
     public string RoomText => RoomId?.ToString() ?? "Не назначена";
 }
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
+public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error)
 {
@@ -96,7 +98,11 @@ public sealed class ServerApiClient : IDisposable
         var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies };
         _http = new HttpClient(handler) { BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())) };
         _uploadHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        TusBaseAddress = new Uri(NormalizeBaseUrl(Environment.GetEnvironmentVariable("WHISPERX_TUS_URL") ?? "http://localhost:1080"));
+        var serverOrigin = Environment.GetEnvironmentVariable("WHISPERX_TUS_URL")
+            ?? MachineServerConfig.ServerOriginOrNull()
+            ?? baseUrl
+            ?? DesktopSettings.DefaultApiUrl();
+        TusBaseAddress = new Uri(NormalizeBaseUrl(serverOrigin));
     }
 
     public Uri BaseAddress => _http.BaseAddress!;
@@ -160,6 +166,17 @@ public sealed class ServerApiClient : IDisposable
         }
         catch (DesktopApiException) { return null; }
     }
+
+    public async Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var response = await _http.GetAsync("api/system/version", cancellationToken);
+            if (!response.IsSuccessStatusCode) return null;
+            return await response.Content.ReadFromJsonAsync<DesktopSystemVersion>(_json, cancellationToken);
+        }
+        catch (HttpRequestException) { return null; }
+    }
     public async Task<bool> LoginAsync(string username, string password, CancellationToken cancellationToken = default)
     {
         using var response = await _http.PostAsJsonAsync("api/auth/login", new { username, password }, _json, cancellationToken);
@@ -170,6 +187,12 @@ public sealed class ServerApiClient : IDisposable
             Interlocked.Increment(ref _authVersion);
             SessionChanged?.Invoke();
         }
+        return response.IsSuccessStatusCode;
+    }
+
+    public async Task<bool> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/auth/change-password", new { currentPassword, newPassword }, cancellationToken);
         return response.IsSuccessStatusCode;
     }
 
@@ -212,6 +235,27 @@ public sealed class ServerApiClient : IDisposable
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         var root = document.RootElement;
         return new DesktopAgentEnrollment(root.GetProperty("agentId").GetString()!, root.GetProperty("token").GetString()!);
+    }
+
+    public async Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/agents/bootstrap", new
+        {
+            installationId,
+            agentId,
+            name,
+            version = "0.1.0",
+            capabilities = new { desktop = true, microphone = true, systemAudio = true }
+        }, cancellationToken);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        var root = document.RootElement;
+        if (response.StatusCode == HttpStatusCode.Conflict && string.Equals(root.GetProperty("error").GetString(), "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), null, true);
+        response.EnsureSuccessStatusCode();
+        var token = root.TryGetProperty("token", out var tokenElement) && tokenElement.ValueKind == JsonValueKind.String
+            ? tokenElement.GetString()
+            : null;
+        return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), token);
     }
 
     private async Task<bool> RefreshAsync(long observedVersion, CancellationToken cancellationToken)

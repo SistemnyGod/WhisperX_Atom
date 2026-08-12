@@ -28,7 +28,7 @@ public interface IRecorderService
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> AddMarkerAsync(string eventType = "MARKER", CancellationToken cancellationToken = default);
@@ -51,10 +51,12 @@ public interface IBackendService : IDisposable
     void ApplySettings(DesktopSettings settings);
     Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);
+    Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopTranscriptRegistry>> GetTranscriptRegistryPageAsync(int limit, int offset, string? search = null, string? status = null, DateTimeOffset? dateFrom = null, DateTimeOffset? dateTo = null, CancellationToken cancellationToken = default);
     Task<DesktopCurrentUser?> GetCurrentUserAsync(CancellationToken cancellationToken = default);
+    Task<bool> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default);
     Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default);
@@ -70,6 +72,7 @@ public interface IBackendService : IDisposable
     Task<bool> EnsureAuthenticatedAsync(CancellationToken cancellationToken = default);
     Task LogoutAsync(CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment> LinkLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default);
+    Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);

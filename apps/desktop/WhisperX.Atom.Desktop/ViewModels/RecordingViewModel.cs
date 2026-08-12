@@ -334,7 +334,17 @@ public sealed class RecordingViewModel : ObservableObject
             }
 
             _serverProcessingExpected = serverMeetingId is not null;
-            var response = await _services.Recorder.StartAsync(title, serverMeetingId);
+            var ownerUserId = _services.Settings.Load().OwnerUserId;
+            if (_services.Backend.HasSession)
+            {
+                try
+                {
+                    var currentUser = await _services.Backend.GetCurrentUserAsync(CancellationToken.None);
+                    ownerUserId = currentUser?.Id ?? ownerUserId;
+                }
+                catch { /* offline capture keeps the persisted owner when available */ }
+            }
+            var response = await _services.Recorder.StartAsync(title, serverMeetingId, ownerUserId);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
             if (serverMeetingId is Guid createdMeetingId && MeetingId is null) MeetingId = createdMeetingId;

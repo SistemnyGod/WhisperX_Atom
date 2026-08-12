@@ -4,6 +4,7 @@ using System.Text.Json;
 using Npgsql;
 
 public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
+public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
 public sealed record RecordingCorrelationRow(Guid ServerSessionId, string? LocalSessionId, string? PipelineCorrelationId, JsonDocument Timings);
@@ -95,6 +96,72 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return await command.ExecuteNonQueryAsync() > 0;
     }
 
+    public async Task<AgentBootstrapResult?> BootstrapAgentAsync(Guid installationId, Guid userId, string name, Guid? requestedAgentId, string token, string version, JsonDocument capabilities)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        Guid? agentId = null;
+        AgentRow? existing = null;
+        var tokenRevoked = false;
+        await using (var find = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id,token_revoked_at FROM recorder_agents WHERE installation_id=@installation OR (@agent IS NOT NULL AND id=@agent) ORDER BY CASE WHEN installation_id=@installation THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE", connection, transaction))
+        {
+            find.Parameters.AddWithValue("installation", installationId);
+            find.Parameters.AddWithValue("agent", (object?)requestedAgentId ?? DBNull.Value);
+            await using var reader = await find.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                agentId = reader.GetGuid(0);
+                existing = new AgentRow(agentId.Value, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetGuid(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetDateTime(4), reader.IsDBNull(5) ? null : reader.GetGuid(5));
+                tokenRevoked = !reader.IsDBNull(6);
+            }
+        }
+
+        if (existing is not null && tokenRevoked)
+        {
+            await transaction.CommitAsync();
+            return new AgentBootstrapResult(existing, null, true);
+        }
+
+        agentId ??= Guid.NewGuid();
+        await using (var upsert = new NpgsqlCommand("""
+            INSERT INTO recorder_agents(id,installation_id,name,enrollment_hash,version,status,last_seen_at,capabilities)
+            VALUES(@id,@installation,@name,@hash,@version,'ONLINE',now(),@capabilities::jsonb)
+            ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,version=excluded.version,status='ONLINE',last_seen_at=now(),capabilities=excluded.capabilities
+            """, connection, transaction))
+        {
+            upsert.Parameters.AddWithValue("id", agentId.Value);
+            upsert.Parameters.AddWithValue("installation", installationId);
+            upsert.Parameters.AddWithValue("name", name.Trim());
+            upsert.Parameters.AddWithValue("hash", Hash(token));
+            upsert.Parameters.AddWithValue("version", version);
+            upsert.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
+            await upsert.ExecuteNonQueryAsync();
+        }
+        await using (var link = new NpgsqlCommand("INSERT INTO agent_user_links(agent_id,user_id,is_active,last_used_at) VALUES(@agent,@user,true,now()) ON CONFLICT(agent_id,user_id) DO UPDATE SET is_active=true,last_used_at=now()", connection, transaction))
+        {
+            link.Parameters.AddWithValue("agent", agentId.Value);
+            link.Parameters.AddWithValue("user", userId);
+            await link.ExecuteNonQueryAsync();
+        }
+        await using var resultCommand = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id FROM recorder_agents WHERE id=@id", connection, transaction);
+        resultCommand.Parameters.AddWithValue("id", agentId.Value);
+        await using var resultReader = await resultCommand.ExecuteReaderAsync();
+        if (!await resultReader.ReadAsync()) return null;
+        var result = ReadAgent(resultReader);
+        await resultReader.CloseAsync();
+        await transaction.CommitAsync();
+        return new AgentBootstrapResult(result, existing is null ? token : null);
+    }
+
+    public async Task<bool> AgentUserLinkedAsync(Guid agentId, Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM agent_user_links WHERE agent_id=@agent AND user_id=@user AND is_active)", connection);
+        command.Parameters.AddWithValue("agent", agentId);
+        command.Parameters.AddWithValue("user", userId);
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
     public async Task<IReadOnlyList<AgentRow>> ListAgentsAsync()
     {
         var result = new List<AgentRow>(); await using var connection = await OpenAsync();
@@ -162,27 +229,41 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("id", commandId); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("status", status); command.Parameters.AddWithValue("result", result.RootElement.GetRawText()); return await command.ExecuteNonQueryAsync() > 0;
     }
 
-    public async Task<RecordingSessionRow?> CreateRecordingSessionAsync(Guid? meetingId, Guid? agentId, string? title = null, DateTimeOffset? startedAt = null, string? pipelineCorrelationId = null, string? localSessionId = null)
+    public async Task<RecordingSessionRow?> CreateRecordingSessionAsync(Guid? meetingId, Guid? agentId, Guid? ownerUserId, string? title = null, DateTimeOffset? startedAt = null, string? pipelineCorrelationId = null, string? localSessionId = null)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         var resolvedMeetingId = meetingId ?? Guid.NewGuid();
+        Guid? resolvedOwnerUserId = ownerUserId;
         if (meetingId is Guid existingMeetingId)
         {
             await using var existingMeeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@id FOR UPDATE", connection, transaction);
             existingMeeting.Parameters.AddWithValue("id", existingMeetingId);
-            if (string.Equals(await existingMeeting.ExecuteScalarAsync() as string, "CANCELLED", StringComparison.OrdinalIgnoreCase))
+            await using var meetingReader = await existingMeeting.ExecuteReaderAsync();
+            if (!await meetingReader.ReadAsync()) return null;
+            var existingStatus = meetingReader.GetString(0);
+            await meetingReader.CloseAsync();
+            await using var ownerCommand = new NpgsqlCommand("SELECT owner_id FROM meetings WHERE id=@id", connection, transaction);
+            ownerCommand.Parameters.AddWithValue("id", existingMeetingId);
+            var ownerValue = await ownerCommand.ExecuteScalarAsync();
+            var existingOwner = ownerValue is Guid ownerGuid ? ownerGuid : (Guid?)null;
+            resolvedOwnerUserId ??= existingOwner;
+            if (string.Equals(existingStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase) || (existingOwner.HasValue && resolvedOwnerUserId != existingOwner))
                 return null;
         }
+        if (resolvedOwnerUserId is not Guid owner || agentId is not Guid authenticatedAgent || !await AgentUserLinkedAsync(authenticatedAgent, owner))
+            return null;
         var resolvedTitle = string.IsNullOrWhiteSpace(title) ? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}" : title.Trim();
-        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,title,status) VALUES(@id,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status) VALUES(@id,@owner,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
         {
             meeting.Parameters.AddWithValue("id", resolvedMeetingId);
+            meeting.Parameters.AddWithValue("owner", owner);
             meeting.Parameters.AddWithValue("title", resolvedTitle);
             await meeting.ExecuteNonQueryAsync();
         }
-        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,state,started_at,pipeline_correlation_id,local_session_id) VALUES(@id,@meeting,@agent,'RECORDING',COALESCE(@started,now()),@correlation,@local) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
+        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,owner_user_id,state,started_at,pipeline_correlation_id,local_session_id) VALUES(@id,@meeting,@agent,@owner,'RECORDING',COALESCE(@started,now()),@correlation,@local) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
         command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("meeting", resolvedMeetingId); command.Parameters.AddWithValue("agent", (object?)agentId ?? DBNull.Value); command.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value); command.Parameters.AddWithValue("correlation", (object?)pipelineCorrelationId ?? DBNull.Value); command.Parameters.AddWithValue("local", (object?)localSessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("owner", owner);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         var result = ReadSession(reader);
@@ -330,12 +411,17 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
-        await using var sessionCommand = new NpgsqlCommand("SELECT meeting_id FROM recording_sessions WHERE id=@id AND agent_id=@agent FOR UPDATE", connection, tx);
+        await using var sessionCommand = new NpgsqlCommand("SELECT rs.meeting_id,rs.owner_user_id,COALESCE((SELECT u.is_active FROM users u WHERE u.id=rs.owner_user_id),false) FROM recording_sessions rs WHERE rs.id=@id AND rs.agent_id=@agent FOR UPDATE", connection, tx);
         sessionCommand.Parameters.AddWithValue("id", sessionId);
         sessionCommand.Parameters.AddWithValue("agent", agentId);
-        var meetingValue = await sessionCommand.ExecuteScalarAsync();
-        if (meetingValue is not Guid meetingId)
+        await using var sessionReader = await sessionCommand.ExecuteReaderAsync();
+        if (!await sessionReader.ReadAsync())
             return new FinalizeRecordingResult(false, false, null, null, null, Array.Empty<MissingRecordingChunks>(), "recording_session_not_found");
+        var meetingId = sessionReader.GetGuid(0);
+        var ownerActive = !sessionReader.IsDBNull(2) && sessionReader.GetBoolean(2);
+        await sessionReader.CloseAsync();
+        if (!ownerActive)
+            return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "OWNER_AUTHORIZATION_REJECTED");
 
         // A second finalize must return the existing pipeline instead of resetting a
         // session that is already ingesting or has reached a terminal state.

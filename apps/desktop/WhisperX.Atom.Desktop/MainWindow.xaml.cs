@@ -157,14 +157,21 @@ public sealed partial class MainWindow : Window
     {
         SetSystemStatus("Проверка системы", "NeutralStatusBrush");
         var backendTask = _services.Backend.CheckReadyAsync(cancellationToken);
+        var versionTask = _services.Backend.GetSystemVersionAsync(cancellationToken);
         var recorderTask = _services.Recorder.GetHealthAsync(cancellationToken);
-        await Task.WhenAll(backendTask, recorderTask);
+        await Task.WhenAll(backendTask, versionTask, recorderTask);
 
         var backendAvailable = await backendTask;
+        var serverVersion = await versionTask;
         var recorderAvailable = (await recorderTask).Ok;
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
             QueueAgentRecovery(cancellationToken);
+        if (serverVersion is not null && Math.Abs((serverVersion.ServerTimeUtc - DateTimeOffset.UtcNow).TotalMinutes) > 5)
+        {
+            SetSystemStatus("Время ПК отличается от времени сервера более чем на 5 минут", "WarningBrush");
+            return;
+        }
         SetSystemStatus(
             backendAvailable && !authenticated ? "Требуется вход" :
             backendAvailable && recorderAvailable ? "Система готова" :
@@ -193,7 +200,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var user = await _services.Backend.GetCurrentUserAsync(cancellationToken);
-            if (user is null || !string.Equals(user.Role, "Administrator", StringComparison.OrdinalIgnoreCase)) return;
+            if (user is null) return;
 
             var healthResponse = await _services.Recorder.GetHealthAsync(cancellationToken);
             var health = healthResponse.Health;
@@ -204,7 +211,13 @@ public sealed partial class MainWindow : Window
             if (string.Equals(health.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase)) return;
 
             var installationId = health.InstallationId ?? Guid.NewGuid();
-            var enrollment = await _services.Backend.LinkLocalAgentAsync(installationId, health.AgentId, "WhisperX Atom Desktop", cancellationToken);
+            var enrollment = await _services.Backend.BootstrapLocalAgentAsync(installationId, health.AgentId, "WhisperX Atom Desktop", cancellationToken);
+            if (enrollment.ReenrollRequired)
+            {
+                SetSystemStatus("Требуется повторная регистрация Recorder Agent", "WarningBrush");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(enrollment.Token)) return;
             var settings = _services.Settings.Load();
             await _services.Recorder.ConfigureAgentAsync(
                 _services.Backend.ApiUrl,

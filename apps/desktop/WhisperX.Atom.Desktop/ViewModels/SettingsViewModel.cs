@@ -13,23 +13,28 @@ public sealed class SettingsViewModel : ObservableObject
     private string _agentName = "WhisperX Atom Desktop";
     private string _statusText = string.Empty;
     private bool _isBusy;
+    public bool ServerOriginManaged { get; }
+    private bool _mustChangePassword;
 
     public SettingsViewModel(FrontendServices services)
     {
         _services = services;
         var settings = services.Settings.Load();
-        _apiUrl = settings.ApiUrl;
+        var machineConfig = MachineServerConfig.Load();
+        ServerOriginManaged = machineConfig?.Managed == true;
+        _apiUrl = ServerOriginManaged ? machineConfig!.ServerOrigin : settings.ApiUrl;
         _username = settings.Username;
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
     }
 
-    public string ApiUrl { get => _apiUrl; set => SetProperty(ref _apiUrl, value); }
+    public string ApiUrl { get => _apiUrl; set { if (!ServerOriginManaged) SetProperty(ref _apiUrl, value); } }
     public string Username { get => _username; set => SetProperty(ref _username, value); }
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string AgentName { get => _agentName; set => SetProperty(ref _agentName, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
     public bool IsBusy { get => _isBusy; private set => SetProperty(ref _isBusy, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
+    public bool MustChangePassword { get => _mustChangePassword; private set => SetProperty(ref _mustChangePassword, value); }
     public string SessionExpiryText => _services.Backend.SessionExpiresAtUtc is { } expires
         ? $"Сессия действительна до {expires.ToLocalTime():dd.MM.yyyy HH:mm}."
         : "Срок сессии проверяется автоматически.";
@@ -60,8 +65,35 @@ public sealed class SettingsViewModel : ObservableObject
             SaveSettings(_services.Backend.SessionCookie);
             StatusText = "Вход в локальный API выполнен.";
             OnPropertyChanged(nameof(IsLoggedIn));
+            var currentUser = await _services.Backend.GetCurrentUserAsync();
+            MustChangePassword = currentUser?.MustChangePassword == true;
+            if (MustChangePassword) StatusText = "Вход выполнен. Установите новый пароль.";
             OnPropertyChanged(nameof(LoginStatusText));
             OnPropertyChanged(nameof(SessionExpiryText));
+            return true;
+        }
+        catch (Exception ex) { StatusText = SafeError(ex); return false; }
+        finally { IsBusy = false; }
+    }
+
+    public async Task<bool> ChangePasswordAsync(string currentPassword, string newPassword)
+    {
+        if (string.IsNullOrWhiteSpace(currentPassword) || string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 12)
+        {
+            StatusText = "Новый пароль должен содержать не менее 12 символов.";
+            return false;
+        }
+        try
+        {
+            IsBusy = true;
+            if (!await _services.Backend.ChangePasswordAsync(currentPassword, newPassword))
+            {
+                StatusText = "Сервер отклонил смену пароля.";
+                return false;
+            }
+            MustChangePassword = false;
+            SaveSettings(_services.Backend.SessionCookie);
+            StatusText = "Пароль изменён.";
             return true;
         }
         catch (Exception ex) { StatusText = SafeError(ex); return false; }

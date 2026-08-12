@@ -257,8 +257,10 @@ public sealed class AgentApiClient : IDisposable
         {
             if (!IsConfigured) throw new InvalidOperationException("Agent server credentials are not configured.");
             var existingServerSession = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
-            var correlationId = (await spool.GetSessionInfoAsync(localSessionId, cancellationToken))?.PipelineCorrelationId;
-            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, localSessionId, correlationId, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
+            var sessionInfo = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
+            var correlationId = sessionInfo?.PipelineCorrelationId;
+            var ownerUserId = sessionInfo?.OwnerUserId;
+            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, localSessionId, correlationId, ownerUserId, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
             var serverSessionId = created.Item1;
             if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
             foreach (var track in tracks)
@@ -497,11 +499,11 @@ public sealed class AgentApiClient : IDisposable
     public async Task<bool> IsServerMediaReadyAsync(Guid serverSessionId, CancellationToken cancellationToken)
         => (await GetServerMediaStatusAsync(serverSessionId, cancellationToken)).Ready;
 
-    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, string localSessionId, string? pipelineCorrelationId, CancellationToken cancellationToken)
+    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, string localSessionId, string? pipelineCorrelationId, Guid? ownerUserId, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, "api/v1/recording-sessions"));
         AddAuthentication(request, pipelineCorrelationId);
-        request.Content = JsonContent.Create(new { meetingId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId });
+        request.Content = JsonContent.Create(new { meetingId, ownerUserId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId });
         using var response = await _http.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -618,7 +620,7 @@ public sealed class AgentApiClient : IDisposable
         statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
     private static bool IsRetryableFinalizeError(string code, HttpStatusCode statusCode) =>
-        code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED"
+        code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "OWNER_AUTHORIZATION_REJECTED"
         || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
     private static string ResolveServerUrl(AgentConfiguration? config)
@@ -628,6 +630,9 @@ public sealed class AgentApiClient : IDisposable
 
         var configuredUrl = config?.ServerUrl?.Trim();
         if (IsHttpUrl(configuredUrl) && !IsLoopbackUrl(configuredUrl)) return configuredUrl!.TrimEnd('/') + "/";
+
+        var machineUrl = MachineServerConfig.ServerOriginOrNull();
+        if (IsHttpUrl(machineUrl)) return machineUrl!.TrimEnd('/') + "/";
 
         var runtimeUrl = Environment.GetEnvironmentVariable("WHISPERX_API_URL")?.Trim();
         if (IsHttpUrl(runtimeUrl)) return runtimeUrl!.TrimEnd('/') + "/";

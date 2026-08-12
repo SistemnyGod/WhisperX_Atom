@@ -16,6 +16,7 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.MicrophoneDeviceId,
             settings.SystemAudioDeviceId,
             settings.SessionExpiresAtUtc,
-            settings.RecordingProfile);
+            settings.RecordingProfile,
+            settings.OwnerUserId);
     }
 }

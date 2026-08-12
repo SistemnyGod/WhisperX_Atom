@@ -12,7 +12,8 @@ public sealed record DesktopSettings(
     string? MicrophoneDeviceId = null,
     string? SystemAudioDeviceId = null,
     DateTimeOffset? SessionExpiresAtUtc = null,
-    string? RecordingProfile = "ROOM")
+    string? RecordingProfile = "ROOM",
+    Guid? OwnerUserId = null)
 {
     private const string FallbackLanApiUrl = "http://192.168.2.194:8080";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -34,9 +35,11 @@ public sealed record DesktopSettings(
         catch (JsonException) { return CreateDefault(); }
     }
 
-    public static string DefaultApiUrl() => ReadHttpUrlEnvironment("WHISPERX_API_URL") ?? FallbackLanApiUrl;
+    public static string DefaultApiUrl() => MachineServerConfig.ServerOriginOrNull()
+        ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
+        ?? FallbackLanApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM")
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -46,7 +49,8 @@ public sealed record DesktopSettings(
             NormalizeDeviceId(microphoneDeviceId),
             NormalizeDeviceId(systemAudioDeviceId),
             sessionExpiresAtUtc,
-            NormalizeRecordingProfile(recordingProfile));
+            NormalizeRecordingProfile(recordingProfile),
+            ownerUserId);
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -86,6 +90,9 @@ public sealed record DesktopSettings(
     {
         var configuredUrl = settings.ApiUrl?.TrimEnd('/');
         var defaultUrl = DefaultApiUrl();
+        var machineConfig = MachineServerConfig.Load();
+        if (machineConfig?.Managed == true)
+            configuredUrl = machineConfig.ServerOrigin.TrimEnd('/');
         if (string.IsNullOrWhiteSpace(configuredUrl) || IsLoopbackUrl(configuredUrl))
         {
             configuredUrl = defaultUrl;
@@ -102,7 +109,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId);
             }
         }
         catch
