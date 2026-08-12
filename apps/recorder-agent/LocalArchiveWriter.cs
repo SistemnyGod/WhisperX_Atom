@@ -107,22 +107,28 @@ public sealed class LocalArchiveWriter(
         }
 
         var trackFiles = new List<ArchiveFileEntry>();
+        var masterInputs = new List<MasterTrackInput>();
         foreach (var group in chunks.GroupBy(item => new { item.TrackId, item.TrackType, item.SampleRate, item.Channels }).OrderBy(item => item.Key.TrackType))
         {
             var ordered = group.OrderBy(item => item.Sequence).ToArray();
             ValidateTrack(ordered);
             var trackPath = Path.Combine(sourceDirectory, $"track-{Sanitize(group.Key.TrackType)}-{Sanitize(group.Key.TrackId[..Math.Min(8, group.Key.TrackId.Length)])}.flac");
             await ConcatTrackAsync(ordered, trackPath, cancellationToken);
-            trackFiles.Add(await DescribeFileAsync(trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken));
+            var entry = await DescribeFileAsync(trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken);
+            trackFiles.Add(entry);
+            masterInputs.Add(new MasterTrackInput(trackPath, group.Key.TrackType, group.Key.SampleRate, ordered[0].StartSample, ordered.Sum(item => item.SampleCount)));
         }
 
-        var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken)).Select(track => track.Profile).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "ONLINE";
+        var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken)).Select(track => track.Profile).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "ROOM";
         var masterPath = Path.Combine(exportDirectory, "master.flac");
-        await CreateMasterAsync(trackFiles.Select(item => Path.Combine(directory, item.RelativePath)).ToArray(), masterPath, profile, cancellationToken);
+        var assemblyResult = await CreateMasterAsync(masterInputs, masterPath, profile, cancellationToken);
         var exportFiles = new List<ArchiveFileEntry>
         {
             await DescribeFileAsync(masterPath, "export", "master", 48000, 1, null, cancellationToken)
         };
+        var assemblyResultPath = Path.Combine(exportDirectory, "assembly-result.json");
+        WriteJsonAtomically(assemblyResultPath, assemblyResult);
+        exportFiles.Add(await DescribeFileAsync(assemblyResultPath, "export", "assembly-result", 0, 0, null, cancellationToken));
 
         var previewPath = Path.Combine(exportDirectory, "preview.opus");
         try
@@ -287,7 +293,7 @@ public sealed class LocalArchiveWriter(
         }
     }
 
-    private async Task CreateMasterAsync(IReadOnlyList<string> tracks, string output, string recordingProfile, CancellationToken cancellationToken)
+    private async Task<MasterAssemblyResult> CreateMasterAsync(IReadOnlyList<MasterTrackInput> tracks, string output, string recordingProfile, CancellationToken cancellationToken)
     {
         var outputDirectory = Path.GetDirectoryName(output);
         if (string.IsNullOrWhiteSpace(outputDirectory)) throw new InvalidOperationException("LOCAL_ARCHIVE_PATH_INVALID");
@@ -296,22 +302,45 @@ public sealed class LocalArchiveWriter(
         Directory.CreateDirectory(tempRoot);
         var outputPart = Path.Combine(tempRoot, $"{Guid.NewGuid():N}.master.flac.part");
         DeleteIfExists(outputPart);
-        var selectedTracks = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) ? tracks : new[] { tracks[0] };
+        var microphone = tracks.FirstOrDefault(track => track.TrackType.Contains("microphone", StringComparison.OrdinalIgnoreCase));
+        var loopback = tracks.FirstOrDefault(track => track.TrackType.Contains("system", StringComparison.OrdinalIgnoreCase) || track.TrackType.Contains("loopback", StringComparison.OrdinalIgnoreCase));
+        var selectedTracks = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase)
+            ? tracks
+            : recordingProfile.Equals("SYSTEM_ONLY", StringComparison.OrdinalIgnoreCase) ? (loopback is null ? tracks.Take(1).ToArray() : [loopback])
+            : microphone is null ? tracks.Take(1).ToArray() : [microphone];
+        var baseStart = selectedTracks.Min(track => track.FirstStartSample);
+        var timeline = new List<MasterTrackTimeline>();
+        foreach (var track in selectedTracks)
+        {
+            var actual = await GetDurationMsAsync(track.Path, cancellationToken);
+            var expected = track.ExpectedSamples * 1000d / Math.Max(1, track.SampleRate);
+            timeline.Add(new MasterTrackTimeline(track.TrackType, Math.Round((track.FirstStartSample - baseStart) * 1000d / Math.Max(1, track.SampleRate)), Math.Round(expected), actual, Math.Round(actual - expected)));
+        }
+        var tolerance = int.TryParse(Environment.GetEnvironmentVariable("AUDIO_TRACK_DRIFT_TOLERANCE_MS"), out var configuredTolerance) ? configuredTolerance : 250;
+        var warnings = timeline.Where(item => Math.Abs(item.DriftMs) > tolerance).Select(_ => "AUDIO_TRACK_DRIFT_HIGH").Distinct().ToArray();
+        var result = new MasterAssemblyResult(recordingProfile, selectedTracks.Count == 1 ? (recordingProfile.Equals("SYSTEM_ONLY", StringComparison.OrdinalIgnoreCase) ? "loopback" : "microphone") : "controlled_mix", selectedTracks.Count, recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && selectedTracks.Count > 1 ? "controlled_online_mix" : "single_original_track", tolerance, timeline, warnings);
         if (selectedTracks.Count == 1)
         {
             try
             {
-                await RunFfmpegAsync(["-y", "-i", selectedTracks[0], "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
+                await RunFfmpegAsync(["-y", "-i", selectedTracks[0].Path, "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
                 await ValidateAudioFileAsync(outputPart, cancellationToken);
                 File.Move(outputPart, output, true);
             }
             finally { DeleteIfExists(outputPart); }
-            return;
+            if (warnings.Length > 0) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
+            return result;
         }
 
         var arguments = new List<string>();
-        foreach (var track in selectedTracks) arguments.AddRange(["-i", track]);
-        arguments.AddRange(["-y", "-filter_complex", $"amix=inputs={selectedTracks.Count}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000", "-ac", "1", "-c:a", "flac", "-f", "flac", outputPart]);
+        foreach (var track in selectedTracks) arguments.AddRange(["-i", track.Path]);
+        var chains = selectedTracks.Select((track, index) => {
+            var delay = Math.Max(0, (long)timeline[index].StartOffsetMs);
+            return $"[{index}:a]aresample=48000:async=1000:first_pts=0,adelay={delay}:all=1[a{index}]";
+        }).ToArray();
+        var labels = string.Concat(selectedTracks.Select((_, index) => $"[a{index}]"));
+        var filter = string.Join(';', chains) + $";{labels}amix=inputs={selectedTracks.Count}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000[mix]";
+        arguments.AddRange(["-y", "-filter_complex", filter, "-map", "[mix]", "-ac", "1", "-c:a", "flac", "-f", "flac", outputPart]);
         try
         {
             await RunFfmpegAsync(arguments, cancellationToken);
@@ -319,6 +348,20 @@ public sealed class LocalArchiveWriter(
             File.Move(outputPart, output, true);
         }
         finally { DeleteIfExists(outputPart); }
+        if (warnings.Length > 0) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
+        return result;
+    }
+
+    private async Task<long> GetDurationMsAsync(string path, CancellationToken cancellationToken)
+    {
+        using var process = new Process { StartInfo = new ProcessStartInfo { FileName = _ffprobePath, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
+        foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path }) process.StartInfo.ArgumentList.Add(argument);
+        if (!process.Start()) throw new InvalidOperationException("ffprobe_start_failed");
+        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        if (process.ExitCode != 0 || !double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+            throw new InvalidOperationException("ffprobe_invalid_audio");
+        return (long)Math.Round(seconds * 1000d);
     }
 
     private async Task RunFfmpegAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
@@ -442,4 +485,7 @@ public sealed class LocalArchiveWriter(
 
     private sealed record ArchiveManifest(string SessionId, Guid? MeetingId, string Title, DateTimeOffset? StartedAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string UploadState, string? UploadError, IReadOnlyList<ArchiveFileEntry> Files);
     private sealed record ArchiveFileEntry(string Kind, string Name, string RelativePath, long SizeBytes, string Sha256, int SampleRate, int Channels, long? SampleCount);
+    private sealed record MasterTrackInput(string Path, string TrackType, int SampleRate, long FirstStartSample, long ExpectedSamples);
+    private sealed record MasterTrackTimeline(string TrackType, double StartOffsetMs, double ExpectedDurationMs, long ActualDurationMs, double DriftMs);
+    private sealed record MasterAssemblyResult(string RecordingProfile, string SelectedAsrSource, int TrackCount, string MixStrategy, int DriftToleranceMs, IReadOnlyList<MasterTrackTimeline> Tracks, IReadOnlyList<string> Warnings);
 }

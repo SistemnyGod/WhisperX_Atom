@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "profiles": {
+    "ROOM": {
+      "capture": ["microphone"],
+      "asrSource": "microphone",
+      "masterSource": "microphone",
+      "mix": "single_original_track"
+    },
+    "ONLINE": {
+      "capture": ["microphone", "system"],
+      "asrSource": "controlled_mix",
+      "masterSource": "controlled_mix",
+      "mix": "aresample_per_input_then_adelay_amix_normalize_limiter_mono"
+    },
+    "MIC_ONLY": {
+      "capture": ["microphone"],
+      "asrSource": "microphone",
+      "masterSource": "microphone",
+      "mix": "single_original_track"
+    },
+    "SYSTEM_ONLY": {
+      "capture": ["system"],
+      "asrSource": "loopback",
+      "masterSource": "loopback",
+      "mix": "single_original_track"
+    }
+  },
+  "onlineFilter": "aresample=48000:async=1000:first_pts=0,adelay=<start_offset_ms>:all=1;amix=normalize=1;alimiter=limit=0.95;mono",
+  "driftToleranceMs": 250,
+  "originalTracksPreserved": true
+}

@@ -123,16 +123,27 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         recording_tracks = json.loads(assembly_input.read_text(encoding="utf-8")).get("recording_tracks", []) if assembly_input.is_file() else []
     except (OSError, json.JSONDecodeError):
         recording_tracks = []
+    assembly_result_path = input_path.parent / "assembly-result.json"
+    try:
+        assembly_result = json.loads(assembly_result_path.read_text(encoding="utf-8")) if assembly_result_path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        assembly_result = {}
+    drift_values = [float(item.get("driftMs", item.get("drift_ms", 0))) for item in assembly_result.get("tracks", []) if isinstance(item, dict)]
     quality_report = {
         "duration_ms": int(probe["duration_ms"]),
         "sample_rate": int(audio_stream.get("sample_rate") or 0),
         "channels": int(audio_stream.get("channels") or 0),
         "codec": audio_stream.get("codec_name"),
-        "selected_asr_source": "audio_stream_0",
+        "selected_asr_source": assembly_result.get("selectedAsrSource", assembly_result.get("selected_asr_source", "audio_stream_0")),
+        "recording_profile": assembly_result.get("recordingProfile", assembly_result.get("recording_profile")),
+        "track_count": assembly_result.get("trackCount", assembly_result.get("track_count", len(recording_tracks))),
+        "drift_ms": max((abs(value) for value in drift_values), default=0),
+        "mix_strategy": assembly_result.get("mixStrategy", assembly_result.get("mix_strategy", "single_original_track")),
         "derived_sample_rate": 16000,
         "derived_channels": 1,
         "warnings": [],
         "recording_tracks": recording_tracks,
+        "assembly": assembly_result,
         **_measure_pcm_quality(asr),
     }
 

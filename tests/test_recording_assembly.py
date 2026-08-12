@@ -37,8 +37,8 @@ class RecordingAssemblyTests(unittest.TestCase):
                 return recording_assembly.Chunk(sequence, key, start, 12_000, path.stat().st_size, _sha256(path))
 
             tracks = [
-                recording_assembly.Track("mic", "microphone", (chunk("/data/mic-0", 0, 0), chunk("/data/mic-1", 1, 12_000))),
-                recording_assembly.Track("loop", "system", (chunk("/data/loop-0", 0, 0), chunk("/data/loop-1", 1, 12_000))),
+                recording_assembly.Track("mic", "microphone", (chunk("/data/mic-0", 0, 0), chunk("/data/mic-1", 1, 12_000)), recording_profile="ONLINE"),
+                recording_assembly.Track("loop", "system", (chunk("/data/loop-0", 0, 0), chunk("/data/loop-1", 1, 12_000)), recording_profile="ONLINE"),
             ]
 
             class FakeConnection:

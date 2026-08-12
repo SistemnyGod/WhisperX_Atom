@@ -27,13 +27,14 @@ class Chunk:
 class Track:
     track_id: str
     track_type: str
-    device_id: str | None
-    device_name: str | None
-    selection_mode: str | None
-    recording_profile: str | None
-    encoding: str | None
-    bits_per_sample: int | None
     chunks: tuple[Chunk, ...]
+    device_id: str | None = None
+    device_name: str | None = None
+    selection_mode: str | None = None
+    recording_profile: str | None = None
+    encoding: str | None = None
+    bits_per_sample: int | None = None
+    sample_rate: int = 48000
 
 
 def _conninfo() -> str:
@@ -59,6 +60,20 @@ def _storage_path(storage_key: str) -> Path:
 
 def _run_ffmpeg(args: list[str]) -> None:
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], check=True, timeout=1800)
+
+
+def _probe_duration_ms(path: Path) -> int:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    try:
+        return round(float(result.stdout.strip()) * 1000)
+    except ValueError as exc:
+        raise ValueError("recording_track_duration_unavailable") from exc
 
 
 def _concat_track(track: Track, output: Path) -> None:
@@ -101,7 +116,7 @@ def _load_tracks(session_id: str) -> list[Track]:
     with psycopg.connect(_conninfo()) as connection:
         rows = connection.execute(
             """
-            SELECT t.id::text,t.track_type,t.device_id,t.device_name,t.selection_mode,t.recording_profile,t.encoding,t.bits_per_sample,c.sequence,c.storage_key,c.start_sample,c.sample_count,c.size_bytes,c.sha256
+            SELECT t.id::text,t.track_type,t.device_id,t.device_name,t.selection_mode,t.recording_profile,t.encoding,t.bits_per_sample,t.sample_rate,c.sequence,c.storage_key,c.start_sample,c.sample_count,c.size_bytes,c.sha256
             FROM recording_tracks t
             LEFT JOIN recording_chunks c ON c.track_id=t.id AND c.status='CONFIRMED'
             WHERE t.session_id=%s
@@ -111,12 +126,29 @@ def _load_tracks(session_id: str) -> list[Track]:
         ).fetchall()
 
     grouped: dict[str, tuple[tuple, list[Chunk]]] = {}
-    for track_id, track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, sequence, storage_key, start_sample, sample_count, size_bytes, sha256 in rows:
+    for track_id, track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, sample_rate, sequence, storage_key, start_sample, sample_count, size_bytes, sha256 in rows:
         if track_id not in grouped:
-            grouped[track_id] = ((track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample), [])
+            grouped[track_id] = ((track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, int(sample_rate or 48000)), [])
         if sequence is not None:
             grouped[track_id][1].append(Chunk(sequence, storage_key, start_sample, sample_count, size_bytes, sha256))
-    return [Track(track_id, *metadata, tuple(chunks)) for track_id, (metadata, chunks) in grouped.items()]
+    return [Track(track_id=track_id, track_type=metadata[0], device_id=metadata[1], device_name=metadata[2], selection_mode=metadata[3], recording_profile=metadata[4], encoding=metadata[5], bits_per_sample=metadata[6], sample_rate=metadata[7], chunks=tuple(chunks)) for track_id, (metadata, chunks) in grouped.items()]
+
+
+def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict:
+    if not track.chunks:
+        return {"track_id": track.track_id, "expected_duration_ms": 0, "actual_duration_ms": 0, "start_offset_ms": 0, "drift_ms": 0}
+    first = track.chunks[0].start_sample
+    end = track.chunks[-1].start_sample + track.chunks[-1].sample_count
+    rate = max(1, track.sample_rate)
+    expected = round((end - first) * 1000 / rate)
+    actual = _probe_duration_ms(path)
+    return {
+        "track_id": track.track_id,
+        "expected_duration_ms": expected,
+        "actual_duration_ms": actual,
+        "start_offset_ms": round((first - base_start_sample) * 1000 / rate),
+        "drift_ms": actual - expected,
+    }
 
 
 def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
@@ -131,9 +163,25 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         _concat_track(track, output)
         assembled.append(output)
 
-    profile = next((str(track.recording_profile).upper() for track in tracks if track.recording_profile), "ONLINE")
+    profile = next((str(track.recording_profile).upper() for track in tracks if track.recording_profile), "ROOM")
     microphone = next((path for track, path in zip(tracks, assembled) if "microphone" in track.track_type.lower()), None)
     system = next((path for track, path in zip(tracks, assembled) if "system" in track.track_type.lower() or "loopback" in track.track_type.lower()), None)
+    first_start = min((track.chunks[0].start_sample for track in tracks if track.chunks), default=0)
+    timeline = [_timeline_metadata(track, path, first_start) for track, path in zip(tracks, assembled)]
+    drift_tolerance = int(os.getenv("AUDIO_TRACK_DRIFT_TOLERANCE_MS", "250"))
+    warnings = ["AUDIO_TRACK_DRIFT_HIGH" for item in timeline if abs(item["drift_ms"]) > drift_tolerance]
+    assembly_result = {
+        "recording_profile": profile,
+        "track_count": len(tracks),
+        "selected_asr_source": "microphone" if profile in {"ROOM", "MIC_ONLY"} and microphone else "loopback" if profile == "SYSTEM_ONLY" and system else "controlled_mix" if profile == "ONLINE" else "single_track",
+        "mix_strategy": "controlled_online_mix" if profile == "ONLINE" and len(assembled) > 1 else "single_original_track",
+        "drift_tolerance_ms": drift_tolerance,
+        "tracks": timeline,
+        "warnings": sorted(set(warnings)),
+    }
+    (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if warnings:
+        raise ValueError("AUDIO_TRACK_DRIFT_HIGH")
     if profile in {"ROOM", "MIC_ONLY"} and microphone is not None:
         source = microphone
     elif profile == "SYSTEM_ONLY" and system is not None:
@@ -145,10 +193,15 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         inputs: list[str] = []
         for path in assembled:
             inputs.extend(["-i", str(path)])
-        filter_spec = f"amix=inputs={len(assembled)}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000"
+        chains = []
+        for index, item in enumerate(timeline):
+            delay = max(0, int(item["start_offset_ms"]))
+            chains.append(f"[{index}:a]aresample=48000:async=1000:first_pts=0,adelay={delay}:all=1[a{index}]")
+        labels = "".join(f"[a{index}]" for index in range(len(assembled)))
+        filter_spec = ";".join(chains) + f";{labels}amix=inputs={len(assembled)}:duration=longest:dropout_transition=2:normalize=1,alimiter=limit=0.95,aresample=48000[mix]"
         temporary = source.with_name(f"{source.name}.{os.urandom(8).hex()}.part")
         try:
-            _run_ffmpeg([*inputs, "-filter_complex", filter_spec, "-ac", "1", "-c:a", "flac", "-f", "flac", str(temporary)])
+            _run_ffmpeg([*inputs, "-filter_complex", filter_spec, "-map", "[mix]", "-ac", "1", "-c:a", "flac", "-f", "flac", str(temporary)])
             if not temporary.is_file() or temporary.stat().st_size == 0:
                 raise ValueError("recording_mix_output_empty")
             temporary.replace(source)
