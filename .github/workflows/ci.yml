@@ -58,7 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17.5-alpine3.21
+        ports:
+          - 5432/tcp
         env:
           POSTGRES_DB: whisperx_ci
           POSTGRES_USER: whisperx
@@ -72,11 +74,15 @@ jobs:
       - name: Apply migrations in filename order
         env:
           PGPASSWORD: ci-only-password
+          PGHOST: 127.0.0.1
+          PGPORT: ${{ job.services.postgres.ports[5432] }}
+          PGUSER: whisperx
+          PGDATABASE: whisperx_ci
         run: |
           for migration in $(find apps/server/WhisperX.Atom.Api/Migrations -maxdepth 1 -name '*.sql' -printf '%f\n' | sort); do
-            psql -h localhost -U whisperx -d whisperx_ci -v ON_ERROR_STOP=1 -f "apps/server/WhisperX.Atom.Api/Migrations/$migration"
+            psql -v ON_ERROR_STOP=1 -f "apps/server/WhisperX.Atom.Api/Migrations/$migration"
           done
-          psql -h localhost -U whisperx -d whisperx_ci -v ON_ERROR_STOP=1 -c "SELECT count(*) AS migration_tables FROM information_schema.tables WHERE table_schema='public';"
+          psql -v ON_ERROR_STOP=1 -c "SELECT count(*) AS migration_tables FROM information_schema.tables WHERE table_schema='public';"
 
   desktop-resource-check:
     runs-on: windows-latest
