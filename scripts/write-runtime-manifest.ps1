@@ -18,6 +18,28 @@ function Get-PackageVersion([string]$Python, [string]$Package) {
     $code = "import importlib.metadata as m; print(m.version('$Package'))"
     return Invoke-Safe { & $Python -c $code }
 }
+function Get-HfSnapshot([string]$Repository, [string]$Revision) {
+    if ([string]::IsNullOrWhiteSpace($Repository)) { return $null }
+    $hfHome = if ($env:HF_HOME) { $env:HF_HOME } else { Join-Path $env:USERPROFILE ".cache\huggingface" }
+    $cacheName = "models--" + ($Repository -replace "/", "--")
+    $root = Join-Path (Join-Path $hfHome "hub") $cacheName
+    $ref = if ([string]::IsNullOrWhiteSpace($Revision)) { Join-Path $root "refs\main" } else { Join-Path $root ("refs\" + $Revision) }
+    if (-not (Test-Path -LiteralPath $ref -PathType Leaf)) {
+        if (-not [string]::IsNullOrWhiteSpace($Revision) -and (Test-Path -LiteralPath (Join-Path $root "refs\main") -PathType Leaf)) { $ref = Join-Path $root "refs\main" }
+        else { return $null }
+    }
+    $resolved = (Get-Content -LiteralPath $ref -Raw).Trim()
+    $snapshot = Join-Path $root ("snapshots\" + $resolved)
+    if (-not (Test-Path -LiteralPath $snapshot -PathType Container)) { return $null }
+    $inventory = @(Get-ChildItem -LiteralPath $snapshot -File -Recurse | ForEach-Object {
+        ((Resolve-Path -LiteralPath $_.FullName -Relative).TrimStart('.','\','/') + "|" + $_.Length)
+    } | Sort-Object)
+    $inventoryBytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $inventoryHash = ([BitConverter]::ToString($sha.ComputeHash($inventoryBytes))).Replace("-", "").ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return [ordered]@{ repository = $Repository; revision = $resolved; snapshotPath = $snapshot; fileInventoryHash = $inventoryHash; fileCount = $inventory.Count }
+}
 
 $python = if ($env:WHISPERX_HOST_PYTHON -and (Test-Path -LiteralPath $env:WHISPERX_HOST_PYTHON)) { $env:WHISPERX_HOST_PYTHON } else {
     $command = Get-Command py.exe -ErrorAction SilentlyContinue
@@ -36,16 +58,48 @@ $ffprobe = Invoke-Safe { & (Get-Command ffprobe.exe -ErrorAction Stop).Source -v
 $dotnet = Invoke-Safe { & dotnet --version }
 $modelPath = $env:LLM_MODEL_FILE
 $modelHash = $env:LLM_MODEL_SHA256
+$asrRepository = if ($env:WHISPERX_MODEL_REPOSITORY) { $env:WHISPERX_MODEL_REPOSITORY } else { "Systran/faster-whisper-large-v3" }
+$asrSnapshot = Get-HfSnapshot $asrRepository $env:WHISPERX_MODEL_REVISION
+$diarizationSnapshot = Get-HfSnapshot $env:DIARIZATION_MODEL $env:DIARIZATION_MODEL_REVISION
+$asrRevision = if ($asrSnapshot) { $asrSnapshot.revision } else { $env:WHISPERX_MODEL_REVISION }
+$diarizationRevision = if ($diarizationSnapshot) { $diarizationSnapshot.revision } else { $env:DIARIZATION_MODEL_REVISION }
 # Deep hashing is intentionally opt-in: release install/download verifies it,
 # while normal startup only records the pinned expected checksum.
 if ($env:WHISPERX_RUNTIME_MANIFEST_DEEP -eq "true" -and $modelPath -and (Test-Path -LiteralPath $modelPath -PathType Leaf)) { $modelHash = (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant() }
 $gitCommit = Invoke-Safe { git -C $RepoPath rev-parse HEAD }
+$runtimeProfile = if ($env:WHISPERX_RUNTIME_PROFILE) { $env:WHISPERX_RUNTIME_PROFILE } else { "development" }
+$releaseVersion = if ($env:WHISPERX_RELEASE_VERSION) { $env:WHISPERX_RELEASE_VERSION } else { "dev" }
+$placeholderPattern = '^(|replace-with|changeme|change-me|password|latest|generate-|replace-with-)'
+$requiredProduction = [ordered]@{
+    releaseVersion = $releaseVersion
+    gitCommit = $gitCommit
+    python = $pythonVersion
+    dotnet = $dotnet
+    whisperX = $whisperVersion
+    fasterWhisper = $fasterVersion
+    pytorch = $torchVersion
+    ctranslate2 = $ctranslateVersion
+    pyannote = $pyannoteVersion
+    ffmpeg = $ffmpeg
+    ffprobe = $ffprobe
+    whisperXModelRevision = $asrRevision
+    diarizationModelRevision = $diarizationRevision
+    llmModelRevision = $env:LLM_MODEL_REVISION
+    llmModelSha256 = $modelHash
+}
+if ($runtimeProfile -in @("production", "release")) {
+    foreach ($entry in $requiredProduction.GetEnumerator()) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Value) -or ([string]$entry.Value -match $placeholderPattern)) {
+            throw "RUNTIME_MANIFEST_INCOMPLETE: $($entry.Key)"
+        }
+    }
+}
 
 $manifest = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
-    releaseVersion = $env:WHISPERX_RELEASE_VERSION
+    releaseVersion = $releaseVersion
     gitCommit = $gitCommit
-    runtimeProfile = if ($env:WHISPERX_RUNTIME_PROFILE) { $env:WHISPERX_RUNTIME_PROFILE } else { "development" }
+    runtimeProfile = $runtimeProfile
     runtime = [ordered]@{
         python = $pythonVersion
         dotnet = $dotnet
@@ -59,23 +113,25 @@ $manifest = [ordered]@{
         onnxRuntime = $onnxVersion
         ffmpeg = $ffmpeg
         ffprobe = $ffprobe
-        nats = $env:NATS_IMAGE
-        postgres = $env:POSTGRES_IMAGE
+        nats = if ($env:NATS_IMAGE) { $env:NATS_IMAGE } else { "nats:2.11.6-alpine3.21" }
+        postgres = if ($env:POSTGRES_IMAGE) { $env:POSTGRES_IMAGE } else { "postgres:17.5-alpine3.21" }
         qwen = $env:LLM_MODEL_FILE
         llamaCpp = $env:LLAMA_IMAGE
         vosk = $env:VOSK_MODEL_PATH
     }
     models = @([ordered]@{
         name = if ($env:WHISPERX_MODEL) { $env:WHISPERX_MODEL } else { "large-v3" }
-        revision = $env:WHISPERX_MODEL_REVISION
+        revision = $asrRevision
         quantization = $env:COMPUTE_TYPE
-        identifier = $env:WHISPERX_MODEL
-        sha256 = $null
+        identifier = $asrRepository
+        sha256 = $env:WHISPERX_MODEL_SHA256
+        fileInventoryHash = if ($asrSnapshot) { $asrSnapshot.fileInventoryHash } else { $null }
     }, [ordered]@{
         name = "diarization"
-        revision = $env:DIARIZATION_MODEL_REVISION
+        revision = $diarizationRevision
         identifier = $env:DIARIZATION_MODEL
         sha256 = $env:DIARIZATION_MODEL_SHA256
+        fileInventoryHash = if ($diarizationSnapshot) { $diarizationSnapshot.fileInventoryHash } else { $null }
     }, [ordered]@{
         name = $env:LLM_MODEL_FILE
         revision = $env:LLM_MODEL_REVISION

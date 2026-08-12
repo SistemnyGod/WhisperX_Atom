@@ -68,15 +68,36 @@ class JobRepository:
                     (socket.gethostname(), message_id),
                 )
 
+    def resolve_pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute("SELECT pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
+            if row and row[0]:
+                return str(row[0])
+            row = connection.execute(
+                "SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
         with psycopg.connect(self.conninfo) as connection:
             # Serialize transcript versions and summary-job creation per meeting.
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":
                 return False
-            job = connection.execute("SELECT status,type FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            job = connection.execute("SELECT status,type,pipeline_correlation_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if job is None or str(job[0]) == "CANCELLED":
                 return False
+            correlation_id = result.get("correlation_id") or (str(job[2]) if job[2] else None)
+            if not correlation_id:
+                fallback = connection.execute(
+                    "SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (meeting_id,),
+                ).fetchone()
+                correlation_id = str(fallback[0]) if fallback and fallback[0] else None
+            if correlation_id:
+                result["correlation_id"] = correlation_id
+                connection.execute("UPDATE jobs SET pipeline_correlation_id=%s WHERE id=%s", (correlation_id, job_id))
             existing = connection.execute("SELECT id, version FROM transcripts WHERE meeting_id=%s ORDER BY version DESC LIMIT 1", (meeting_id,)).fetchone()
             version = int(existing[1]) + 1 if existing else 1
             version_kind = "REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"
@@ -117,8 +138,8 @@ class JobRepository:
                 ).fetchone()
                 if summary_job is None:
                     summary_job_id = connection.execute(
-                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,%s) ON CONFLICT DO NOTHING RETURNING id",
-                        (meeting_id, transcript_id),
+                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id",
+                        (meeting_id, transcript_id, correlation_id),
                     ).fetchone()
                     if summary_job_id is None:
                         connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))

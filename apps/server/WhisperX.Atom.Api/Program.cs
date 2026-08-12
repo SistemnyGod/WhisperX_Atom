@@ -306,12 +306,16 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         var capabilities = summaryWorker.Capabilities.RootElement;
         var modelAvailable = capabilities.TryGetProperty("modelAvailable", out var model) && model.ValueKind == JsonValueKind.True;
         var manifestAvailable = capabilities.TryGetProperty("modelManifestAvailable", out var manifest) && manifest.ValueKind == JsonValueKind.True;
+        var manifestValid = capabilities.TryGetProperty("modelManifestValid", out var validManifest) && validManifest.ValueKind == JsonValueKind.True;
         var llamaAvailable = capabilities.TryGetProperty("llamaRuntimeAvailable", out var llama) && llama.ValueKind == JsonValueKind.True;
         var gpuBusy = gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         var summaryBusy = summaryWorker.CurrentJobId is not null || string.Equals(summaryWorker.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing" }
             : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing" }
+            : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch" }
             : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing" }
+            : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable" }
+            : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded" }
             : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy" }
             : new { status = "READY", reason = "summary_worker_ready" };
     }
@@ -1957,11 +1961,12 @@ public sealed class Database(IConfiguration configuration)
         asset.Parameters.AddWithValue("meeting", meetingId); await using var reader = await asset.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null; var assetId = reader.GetGuid(0); var storageKey = reader.GetString(1); await reader.CloseAsync();
         var id = Guid.NewGuid();
-        await using var insert = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage,progress) VALUES(@id,@meeting,@asset,'TRANSCRIBE_REPROCESS','QUEUED','UPLOADED',0)", connection, tx);
-        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("meeting", meetingId); insert.Parameters.AddWithValue("asset", assetId); await insert.ExecuteNonQueryAsync();
+        var correlation = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId);
+        await using var insert = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage,progress,pipeline_correlation_id) VALUES(@id,@meeting,@asset,'TRANSCRIBE_REPROCESS','QUEUED','UPLOADED',0,@correlation)", connection, tx);
+        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("meeting", meetingId); insert.Parameters.AddWithValue("asset", assetId); insert.Parameters.AddWithValue("correlation", (object?)correlation ?? DBNull.Value); await insert.ExecuteNonQueryAsync();
         var messageId = Guid.NewGuid();
-        await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',@job,'meeting_id',@meeting,'media_asset_id',@asset,'stage','UPLOADED','storage_key',@storage,'reprocess',true))", connection, tx);
-        outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("message", messageId); outbox.Parameters.AddWithValue("job", id); outbox.Parameters.AddWithValue("meeting", meetingId); outbox.Parameters.AddWithValue("asset", assetId); outbox.Parameters.AddWithValue("storage", storageKey); await outbox.ExecuteNonQueryAsync();
+        await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',@job,'meeting_id',@meeting,'media_asset_id',@asset,'stage','UPLOADED','storage_key',@storage,'reprocess',true,'correlation_id',@correlation))", connection, tx);
+        outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("message", messageId); outbox.Parameters.AddWithValue("job", id); outbox.Parameters.AddWithValue("meeting", meetingId); outbox.Parameters.AddWithValue("asset", assetId); outbox.Parameters.AddWithValue("storage", storageKey); outbox.Parameters.AddWithValue("correlation", (object?)correlation ?? DBNull.Value); await outbox.ExecuteNonQueryAsync();
         await AppendAuditAsync(connection, tx, actorUserId, meetingId, "TRANSCRIPT", null, "TRANSCRIPT_REPROCESS_QUEUED", null, JsonSerializer.Serialize(new { id, assetId }));
         await tx.CommitAsync(); return new JobRow(id, meetingId, "TRANSCRIBE_REPROCESS", "QUEUED", "UPLOADED", 0, 0, null);
     }
@@ -1977,6 +1982,13 @@ public sealed class Database(IConfiguration configuration)
         var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
         return connection;
+    }
+
+    private static async Task<string?> GetPipelineCorrelationIdForMeetingAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid meetingId)
+    {
+        await using var command = new NpgsqlCommand("SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=@meeting ORDER BY created_at DESC LIMIT 1", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        return await command.ExecuteScalarAsync() as string;
     }
 
     private static JobRow ReadJob(NpgsqlDataReader reader) =>

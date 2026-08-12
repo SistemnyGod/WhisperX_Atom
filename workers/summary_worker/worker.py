@@ -52,6 +52,17 @@ class SummaryRepository:
             row = connection.execute("SELECT status FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row else None
 
+    def pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute("SELECT pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
+            if row and row[0]:
+                return str(row[0])
+            row = connection.execute(
+                "SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None) -> None:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
@@ -147,9 +158,19 @@ class SummaryRepository:
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":
                 return False
-            job = connection.execute("SELECT status FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            job = connection.execute("SELECT status,pipeline_correlation_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if job is None or str(job[0]) == "CANCELLED":
                 return False
+            correlation_id = result.get("correlation_id") or (str(job[1]) if job[1] else None)
+            if not correlation_id:
+                fallback = connection.execute(
+                    "SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (meeting_id,),
+                ).fetchone()
+                correlation_id = str(fallback[0]) if fallback and fallback[0] else None
+            if correlation_id:
+                result["correlation_id"] = correlation_id
+                connection.execute("UPDATE jobs SET pipeline_correlation_id=%s WHERE id=%s", (correlation_id, job_id))
             existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
             if existing_summary is not None:
                 if str(existing_summary[1]) == "READY":
@@ -271,12 +292,14 @@ class SummaryWorker:
         meeting_id = str(payload["meeting_id"])
         transcript_id = str(payload["transcript_id"]) if payload.get("transcript_id") else None
         message_id = str(payload.get("message_id", ""))
+        correlation_id = payload.get("correlation_id") or self.repository.pipeline_correlation(job_id, meeting_id)
         if message_id and not self.repository.claim(message_id, job_id):
             return
         current = self.repository.job_state(job_id)
         if current in {"READY", "FAILED", "CANCELLED"}:
             LOGGER.info("skip terminal summary job=%s status=%s", job_id, current)
             return
+        LOGGER.info("summary job=%s correlation_id=%s meeting_id=%s", job_id, correlation_id, meeting_id)
         self.repository.update_job(job_id, "RUNNING", "PREPARING_CONTEXT", 5)
         try:
             segments = await asyncio.to_thread(self.repository.load_segments, meeting_id, transcript_id)
@@ -308,6 +331,8 @@ class SummaryWorker:
                     if profile_name == MEETING_PROTOCOL_RU:
                         result["profile"] = MEETING_PROTOCOL_RU
                         result["schema_version"] = PROTOCOL_RU_SCHEMA_VERSION
+                    if correlation_id:
+                        result["correlation_id"] = correlation_id
                 finally:
                     await asyncio.to_thread(server.stop)
             LOGGER.info("job=%s released GPU lease", job_id)
@@ -331,16 +356,54 @@ async def run() -> None:
         model_path = os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf")
         manifest_path = os.getenv("LLM_MODEL_MANIFEST", model_path + ".manifest.json")
         llama_binary = os.getenv("LLAMA_RUNTIME_BINARY", "/opt/llama/llama-server")
+        model_available = os.path.isfile(model_path) and os.path.getsize(model_path) > 0
+        manifest_available = os.path.isfile(manifest_path)
+        expected_sha = os.getenv("LLM_MODEL_SHA256", "").strip().upper()
+        manifest_sha = ""
+        manifest_revision = ""
+        manifest_size = None
+        manifest_valid = False
+        validation_reason = "model_missing" if not model_available else "model_manifest_missing"
+        if manifest_available:
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+                    manifest = json.load(manifest_file)
+                manifest_sha = str(manifest.get("sha256", "")).upper()
+                manifest_revision = str(manifest.get("revision", ""))
+                manifest_size = int(manifest.get("size", 0))
+                size_matches = manifest_size == os.path.getsize(model_path)
+                sha_matches = not expected_sha or manifest_sha == expected_sha
+                filename_matches = str(manifest.get("filename", "")) == os.path.basename(model_path)
+                manifest_valid = bool(manifest.get("schemaVersion") == 1 and manifest_sha and size_matches and sha_matches and filename_matches)
+                validation_reason = "ready" if manifest_valid else "model_manifest_mismatch"
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                validation_reason = "model_manifest_invalid"
         return {
-            "modelAvailable": os.path.isfile(model_path) and os.path.getsize(model_path) > 0,
-            "modelManifestAvailable": os.path.isfile(manifest_path),
-            "modelChecksumExpected": bool(os.getenv("LLM_MODEL_SHA256")),
+            "modelPath": model_path,
+            "manifestPath": manifest_path,
+            "modelAvailable": model_available,
+            "modelManifestAvailable": manifest_available,
+            "modelManifestValid": manifest_valid,
+            "modelChecksumExpected": bool(expected_sha),
+            "modelExpectedSha256": expected_sha,
+            "modelManifestSha256": manifest_sha,
+            "modelManifestRevision": manifest_revision,
+            "modelManifestSize": manifest_size,
+            "modelValidationReason": validation_reason,
             "llamaRuntimeAvailable": os.path.isfile(llama_binary),
             "gpuRequired": os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"},
         }
     heartbeat = AsyncHeartbeat("summary-worker", capabilities=summary_capabilities)
     await heartbeat.start()
-    heartbeat.set_state("READY")
+    def set_runtime_state() -> None:
+        capabilities = summary_capabilities()
+        if not capabilities["modelAvailable"] or not capabilities["llamaRuntimeAvailable"]:
+            heartbeat.set_state("UNAVAILABLE", capabilities["modelValidationReason"])
+        elif not capabilities["modelManifestValid"]:
+            heartbeat.set_state("DEGRADED", capabilities["modelValidationReason"])
+        else:
+            heartbeat.set_state("READY")
+    set_runtime_state()
     jetstream = client.jetstream()
     try:
         await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
@@ -367,7 +430,7 @@ async def run() -> None:
                     await message.nak()
                 finally:
                     heartbeat.set_job(None)
-                    heartbeat.set_state("READY")
+                    set_runtime_state()
 
     async def consume_assistant() -> None:
         while True:

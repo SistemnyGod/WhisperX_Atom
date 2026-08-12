@@ -26,6 +26,8 @@ def test_recording_outbox_and_media_handoff_keep_correlation():
     assert "correlation_id" in api
     assert 'next_message = dict(payload)' in worker
     assert 'correlation_id = payload.get("correlation_id")' in worker
+    assert 'payload["processing_job_id"] = job_id' in read("workers/ml_worker/worker.py")
+    assert "pipeline_correlation_id" in read("apps/server/WhisperX.Atom.Api/Migrations/023_jobs_pipeline_correlation.sql")
 
 
 def test_diagnostics_returns_real_session_ids_and_persisted_timings():

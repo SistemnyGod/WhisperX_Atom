@@ -407,6 +407,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var jobLookup = new NpgsqlCommand("SELECT id FROM jobs WHERE media_asset_id=@asset AND type='TRANSCRIBE'", connection, tx);
         jobLookup.Parameters.AddWithValue("asset", assetId);
         jobId = (Guid)(await jobLookup.ExecuteScalarAsync())!;
+        var pipelineCorrelationId = await GetPipelineCorrelationIdAsync(connection, tx, sessionId);
+        await using (var correlationUpdate = new NpgsqlCommand("UPDATE jobs SET pipeline_correlation_id=@correlation WHERE id=@job", connection, tx))
+        {
+            correlationUpdate.Parameters.AddWithValue("correlation", (object?)pipelineCorrelationId ?? DBNull.Value);
+            correlationUpdate.Parameters.AddWithValue("job", jobId);
+            await correlationUpdate.ExecuteNonQueryAsync();
+        }
 
         await using var state = new NpgsqlCommand("""
             UPDATE recording_sessions
@@ -988,8 +995,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var transcriptId = await transcript.ExecuteScalarAsync();
         if (transcriptId is not Guid transcriptGuid) return null;
         var jobId = Guid.NewGuid();
-        await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,@transcript) ON CONFLICT DO NOTHING RETURNING id", connection, tx);
+        var pipelineCorrelationId = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId);
+        await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,@transcript,@correlation) ON CONFLICT DO NOTHING RETURNING id", connection, tx);
         job.Parameters.AddWithValue("id", jobId); job.Parameters.AddWithValue("meeting", meetingId); job.Parameters.AddWithValue("transcript", transcriptGuid);
+        job.Parameters.AddWithValue("correlation", (object?)pipelineCorrelationId ?? DBNull.Value);
         if (await job.ExecuteScalarAsync() is not Guid insertedJobId)
         {
             await using var duplicate = new NpgsqlCommand("SELECT id FROM jobs WHERE input_transcript_id=@transcript AND type='SUMMARIZE' AND status IN ('QUEUED','RUNNING') ORDER BY created_at DESC LIMIT 1", connection, tx);
@@ -1010,7 +1019,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             reason = options?.Reason?.Trim(),
             meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { }),
             source_hash = (string?)null,
-            correlation_id = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId)
+            correlation_id = pipelineCorrelationId
         });
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.summarize',@payload::jsonb)", connection, tx);
         outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", payload); await outbox.ExecuteNonQueryAsync();

@@ -11,9 +11,29 @@ $ErrorActionPreference = "Stop"
 $target = Join-Path $ModelsRoot "qwen3-8b"
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 $model = Join-Path $target $FileName
+$manifest = "$model.manifest.json"
+
+function Write-ModelManifest {
+  param([string]$Path, [string]$Hash, [long]$Size)
+  $document = [ordered]@{
+    schemaVersion = 1
+    repository = $Repository
+    revision = $Revision
+    filename = $FileName
+    sha256 = $Hash.ToUpperInvariant()
+    size = $Size
+    verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+  }
+  $temporaryManifest = "$Path.part"
+  $json = $document | ConvertTo-Json -Depth 4
+  [System.IO.File]::WriteAllText($temporaryManifest, $json, [System.Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temporaryManifest -Destination $Path -Force
+}
+
 if (Test-Path -LiteralPath $model -PathType Leaf) {
   $existingSha256 = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
   if ($existingSha256 -ne $Sha256) { throw "Production model checksum mismatch; refusing to replace existing file: $model" }
+  Write-ModelManifest -Path $manifest -Hash $existingSha256 -Size (Get-Item -LiteralPath $model).Length
   Write-Host "Pinned model already verified: $model"
   exit 0
 }
@@ -30,4 +50,5 @@ if ($LASTEXITCODE -ne 0) { throw "Model download failed" }
 if (-not (Test-Path -LiteralPath $model)) { throw "Downloaded model is missing: $model" }
 $actualSha256 = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
 if ($actualSha256 -ne $Sha256) { throw "Model checksum mismatch: expected $Sha256, got $actualSha256" }
+Write-ModelManifest -Path $manifest -Hash $actualSha256 -Size (Get-Item -LiteralPath $model).Length
 Write-Host ("Model ready: {0} ({1:N2} GiB)" -f $model, ((Get-Item -LiteralPath $model).Length / 1GB))

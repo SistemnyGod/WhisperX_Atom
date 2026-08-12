@@ -105,9 +105,28 @@ Check "summaryRuntime" {
     if (-not $diagnostics.systemReadiness) { throw "system readiness unavailable" }
     $qwen = $diagnostics.systemReadiness.components.qwen
     $diagnostics.summaryWorker = $diagnostics.systemReadiness.components.workers.'summary-worker'
+    $workerCapabilities = $diagnostics.summaryWorker.capabilities
     $diagnostics.qwenModel = $qwen
-    $diagnostics.llamaCpp = $qwen.reason
-    $diagnostics.gpuLease = if ($qwen.status -eq "BUSY") { "BUSY" } else { "READY" }
+    $diagnostics.llamaCpp = [ordered]@{
+        status = $qwen.status
+        reason = $qwen.reason
+        binaryAvailable = $workerCapabilities.llamaRuntimeAvailable
+    }
+    $diagnostics.gpuLease = [ordered]@{
+        status = if ($qwen.status -eq "BUSY") { "BUSY" } else { "READY" }
+        reason = $qwen.reason
+    }
+    $diagnostics.qwenModel = [ordered]@{
+        status = $qwen.status
+        reason = $qwen.reason
+        path = $workerCapabilities.modelPath
+        manifest = $workerCapabilities.manifestPath
+        revision = $workerCapabilities.modelManifestRevision
+        sha256 = $workerCapabilities.modelManifestSha256
+        expectedSha256 = $workerCapabilities.modelExpectedSha256
+        size = $workerCapabilities.modelManifestSize
+        validationReason = $workerCapabilities.modelValidationReason
+    }
     if ($qwen.status -eq "UNAVAILABLE") { throw "Qwen runtime unavailable: $($qwen.reason)" }
     $qwen.status
 } -WarningOnly

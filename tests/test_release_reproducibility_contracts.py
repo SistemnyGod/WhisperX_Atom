@@ -19,6 +19,8 @@ def test_release_manifest_has_pinned_release_identity_and_models():
 def test_llm_download_fails_before_replacing_mismatched_production_model():
     script = read("scripts/llm-download.ps1")
     assert "refusing to replace existing file" in script
+    assert "Write-ModelManifest" in script
+    assert "schemaVersion = 1" in script
     assert script.index("Production model checksum mismatch") < script.index("hfPath download")
 
 

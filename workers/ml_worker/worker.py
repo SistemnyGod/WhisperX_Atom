@@ -116,6 +116,10 @@ class GpuWorker:
                     result = await asyncio.to_thread(self._service.process, request, progress)
                 LOGGER.info("job=%s released GPU lease", job_id)
                 payload = result.to_dict()
+                payload["correlation_id"] = message.get("correlation_id") or payload.get("correlation_id")
+                payload["meeting_id"] = str(message["meeting_id"])
+                payload["processing_job_id"] = job_id
+                LOGGER.info("transcript result correlation_id=%s meeting_id=%s job_id=%s", payload.get("correlation_id"), payload["meeting_id"], job_id)
                 persisted = await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)
                 if not persisted:
                     LOGGER.info("job=%s result discarded because the meeting was cancelled or deleted", job_id)
