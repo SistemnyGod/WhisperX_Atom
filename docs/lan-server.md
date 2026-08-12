@@ -8,8 +8,8 @@ LAN-профиль предназначен для изолированной д
 
 ```powershell
 Copy-Item .env.lan.example .env.lan
-.scriptsstart-whisperx-lan-server.ps1 -ConfigureFirewall -InstallStartupTask
-.scriptsdoctor-whisperx-lan-server.ps1
+.\scripts\start-whisperx-lan-server.ps1 -ConfigureFirewall -InstallStartupTask
+.\scripts\doctor-whisperx-lan-server.ps1
 ```
 
 Профиль публикует только `http://192.168.2.194:8080` (или адрес из `.env.lan`). API, TUS, PostgreSQL и NATS не имеют host-портов. Gateway направляет `/api/*`, `/health/*`, `/ready` в API и `/files/*` в TUS.
@@ -31,7 +31,7 @@ Copy-Item .env.lan.example .env.lan
 ## Диагностика
 
 ```powershell
-.scripts\doctor-whisperx-lan-server.ps1
+.\scripts\doctor-whisperx-lan-server.ps1
 ```
 
 Отчёт сохраняется в `artifacts\acceptance\lan-server\doctor.json`. Команда проверяет Compose-конфигурацию, private origin, secrets без вывода их значений, gateway live/readiness и TCP 8080.

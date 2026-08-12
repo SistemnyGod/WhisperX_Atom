@@ -33,6 +33,13 @@ Check "lanConfiguration" {
     $octets = $address.GetAddressBytes()
     $private = $octets[0] -eq 10 -or ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or ($octets[0] -eq 192 -and $octets[1] -eq 168)
     if (-not $private -or $address.IPAddressToString -eq "127.0.0.1") { throw "SERVER_ORIGIN must be non-loopback private IPv4" }
+    $bindAddressText = Read-EnvValue "LAN_BIND_ADDRESS"
+    $bindAddress = $null
+    if (-not [System.Net.IPAddress]::TryParse($bindAddressText, [ref]$bindAddress) -or $bindAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { throw "LAN_BIND_ADDRESS must be IPv4" }
+    $bindOctets = $bindAddress.GetAddressBytes()
+    $bindPrivate = $bindOctets[0] -eq 10 -or ($bindOctets[0] -eq 172 -and $bindOctets[1] -ge 16 -and $bindOctets[1] -le 31) -or ($bindOctets[0] -eq 192 -and $bindOctets[1] -eq 168)
+    if (-not $bindPrivate -or $bindAddress.IPAddressToString -eq "127.0.0.1") { throw "LAN_BIND_ADDRESS must be non-loopback private IPv4" }
+    if ($bindAddress.IPAddressToString -ne $address.IPAddressToString) { throw "LAN_BIND_ADDRESS must match SERVER_ORIGIN host" }
     foreach ($secretName in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET")) {
         $secret = Read-EnvValue $secretName
         if ([string]::IsNullOrWhiteSpace($secret) -or $secret.Length -lt 16 -or $secret -match "^(generate-|replace-with|change-me|password|changeme)$") { throw "$secretName is missing or placeholder" }
