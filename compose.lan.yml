@@ -1,5 +1,3 @@
-name: whisperx-atom-lan
-
 services:
   postgres:
     ports: !reset []
@@ -18,6 +16,7 @@ services:
       ALLOW_INSECURE_LAN_HTTP: "true"
       SERVER_ORIGIN: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
       CORS_ALLOWED_ORIGINS: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.lan}"
       AUTO_SUMMARY_ENABLED: "true"
       AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
     ports: !reset []
@@ -45,4 +44,3 @@ services:
         condition: service_healthy
       tusd:
         condition: service_started
-
