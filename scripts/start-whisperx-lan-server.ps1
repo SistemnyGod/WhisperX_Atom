@@ -3,12 +3,14 @@ param(
     [string]$EnvFile = "",
     [switch]$Rebuild,
     [switch]$EnableQwen,
+    [switch]$SkipLegacyStop,
     [switch]$InstallStartupTask,
     [switch]$ConfigureFirewall
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$projectName = "whisperx-atom"
 if ([string]::IsNullOrWhiteSpace($EnvFile)) { $EnvFile = Join-Path $repo ".env.lan" }
 if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
     throw "ENV_REQUIRED: create $EnvFile from .env.lan.example and replace placeholders."
@@ -24,8 +26,12 @@ function Read-EnvValue([string]$name) {
 $lanAddress = Read-EnvValue "LAN_BIND_ADDRESS"
 $serverOrigin = Read-EnvValue "SERVER_ORIGIN"
 $allowHttp = Read-EnvValue "ALLOW_INSECURE_LAN_HTTP"
+$gpuMode = Read-EnvValue "GPU_WORKER_MODE"
+$autoSummary = Read-EnvValue "AUTO_SUMMARY_ENABLED"
 if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($serverOrigin)) { throw "LAN_CONFIG_INVALID: LAN_BIND_ADDRESS and SERVER_ORIGIN are required." }
 if ($allowHttp -ne "true") { throw "LAN_HTTP_EXPLICIT_REQUIRED: set ALLOW_INSECURE_LAN_HTTP=true only for the isolated LAN profile." }
+if ($gpuMode -ne "container") { throw "LAN_GPU_MODE_REQUIRED: set GPU_WORKER_MODE=container in .env.lan." }
+if (-not $EnableQwen -and $autoSummary -ne "false") { throw "LAN_QWEN_DISABLED_REQUIRED: set AUTO_SUMMARY_ENABLED=false until transcript gates pass." }
 $originUri = $null
 if (-not [Uri]::TryCreate($serverOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$originUri) -or $originUri.Scheme -ne "http") { throw "LAN_SERVER_ORIGIN_INVALID: use http://<private-ip>:8080." }
 $originAddress = $null
@@ -54,7 +60,23 @@ Push-Location $repo
 try {
     docker info | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "DOCKER_UNAVAILABLE: Docker Desktop is not ready." }
-    $composeBase = @("compose", "--env-file", $EnvFile, "-f", "compose.dev.yml", "-f", "compose.lan.yml")
+    if (-not $SkipLegacyStop) {
+        # Match the old Compose project by label. Name-prefix matching is
+        # unsafe because the canonical project's lan-gateway is named
+        # whisperx-atom-lan-gateway-1 as well.
+        $legacyNames = @(docker ps -a --filter "label=com.docker.compose.project=whisperx-atom-lan" --format "{{.Names}}")
+        if ($LASTEXITCODE -ne 0) { throw "LEGACY_RUNTIME_INSPECTION_FAILED" }
+        $legacyRunning = @($legacyNames | ForEach-Object {
+            $state = (& docker inspect -f "{{.State.Running}}" $_ 2>$null | Out-String).Trim()
+            if ($state -eq "true") { $_ }
+        })
+        foreach ($legacy in $legacyRunning) {
+            Write-Warning "Stopping preserved legacy container $legacy"
+            docker stop $legacy | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "LEGACY_RUNTIME_STOP_FAILED: $legacy" }
+        }
+    }
+    $composeBase = @("compose", "--project-name", $projectName, "--env-file", $EnvFile, "-f", "compose.dev.yml", "-f", "compose.lan.yml")
     $coreCompose = $composeBase + @("--profile", "core", "--profile", "lan", "up", "-d", "--pull", "never")
     if ($Rebuild) { $coreCompose += "--build" }
     $coreCompose += @("postgres", "nats", "api", "tusd", "lan-gateway")
@@ -71,6 +93,15 @@ try {
         Start-Sleep -Seconds 3
     }
     if (-not $coreReady) { throw "SERVER_DEGRADED: core health did not become ready within 120 seconds." }
+    $artifact = Join-Path $repo "artifacts\acceptance\lan-server"
+    New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+    [ordered]@{
+        generatedAtUtc = [DateTimeOffset]::UtcNow
+        project = $projectName
+        serverOrigin = $serverOrigin
+        status = "SERVER_CORE_READY"
+        checks = [ordered]@{ live = "READY"; ready = "READY" }
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifact "core-readiness.json") -Encoding utf8
 
     # Do not activate workers against an inherited backlog. Cancelled/failed
     # historical records remain untouched; only runnable work blocks startup.
@@ -101,6 +132,24 @@ try {
     $stateText = (& docker @psArgs | Out-String)
     $degraded = @($requiredServices | Where-Object { $stateText -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
     if ($degraded.Count -gt 0) { Write-Warning "SERVER_DEGRADED: services not running: $($degraded -join ', ')" }
+    [ordered]@{
+        generatedAtUtc = [DateTimeOffset]::UtcNow
+        project = $projectName
+        serverOrigin = $serverOrigin
+        status = if ($degraded.Count -eq 0) { "PROCESSING_READY" } else { "SERVER_DEGRADED" }
+        requiredServices = $requiredServices
+        degradedServices = $degraded
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifact "processing-readiness.json") -Encoding utf8
+    [ordered]@{
+        generatedAtUtc = [DateTimeOffset]::UtcNow
+        project = $projectName
+        envFile = ".env.lan"
+        serverOrigin = $serverOrigin
+        profiles = @("core", "gpu", "lan")
+        qwen = if ($EnableQwen) { "EXPLICITLY_ENABLED" } else { "DISABLED" }
+        publicBinding = "$lanAddress`:8080"
+        legacyPolicy = "preserve_and_stop"
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifact "compose-config.txt") -Encoding utf8
     if ($ConfigureFirewall) {
         & (Join-Path $PSScriptRoot "configure-whisperx-lan-firewall.ps1") -Subnet (Read-EnvValue "LAN_SUBNET") -Port 8080
     }

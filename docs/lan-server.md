@@ -1,5 +1,52 @@
 # WhisperX Atom LAN Server
 
+## Canonical runtime
+
+The only supported server runtime is the Compose project `whisperx-atom`:
+
+```text
+compose.dev.yml + compose.lan.yml
+origin: http://192.168.2.194:8080
+GPU_WORKER_MODE=container
+AUTO_SUMMARY_ENABLED=false
+```
+
+Development uses `compose.dev.yml` alone and binds only to `127.0.0.1`; it is for local tests, not the LAN server. Production uses the separate HTTPS profile in `compose.prod.yml`.
+
+Start the LAN server:
+
+```powershell
+.\run_whisperx_lan_server.bat
+```
+
+The launcher uses `.env.lan`, forces project name `whisperx-atom`, preserves volumes and stops only preserved legacy `whisperx-atom-lan-*` containers. It never runs `down -v`, deletes containers, clears PostgreSQL/NATS, or resumes cancelled/failed jobs.
+
+Stop without deleting data:
+
+```powershell
+.\scripts\stop-whisperx-lan-server.ps1
+```
+
+Run diagnostics:
+
+```powershell
+.\scripts\doctor-whisperx-lan-server.ps1
+```
+
+The Desktop client is separate:
+
+```powershell
+.\run_app.bat
+```
+
+Qwen remains disabled until the 60-second and 5-minute transcript gates pass. Enable it only with the explicit `-EnableQwen` launcher option.
+
+The launcher writes non-sensitive evidence to `artifacts/acceptance/lan-server/`:
+`compose-config.txt`, `core-readiness.json`, and `processing-readiness.json`.
+The doctor additionally writes `doctor.json`. Without credentials, the doctor
+reports authenticated worker readiness as `AUTH_REQUIRED`; this does not make a
+healthy LAN core fail. Do not pass passwords or tokens on a command line.
+
 LAN-профиль предназначен для изолированной доверенной сети. Development остаётся loopback HTTP, а Production использует отдельный HTTPS gateway.
 
 ## Первый запуск

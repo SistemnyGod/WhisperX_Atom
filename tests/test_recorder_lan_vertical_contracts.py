@@ -51,6 +51,33 @@ def test_lan_start_keeps_qwen_off_until_explicit_flag():
     assert "after transcript gates" in startup
 
 
+def test_lan_runtime_has_one_canonical_compose_project_and_safe_stop():
+    startup = read("scripts/start-whisperx-lan-server.ps1")
+    stop = read("scripts/stop-whisperx-lan-server.ps1")
+    batch = read("run_whisperx_lan_server.bat")
+    assert 'projectName = "whisperx-atom"' in startup
+    assert '"--project-name", $projectName' in startup
+    assert "label=com.docker.compose.project=whisperx-atom-lan" in startup
+    assert "docker stop" in startup
+    assert 'projectName = "whisperx-atom"' in stop
+    assert '"--project-name", $projectName' in stop
+    assert '"--profile", "llm"' in stop
+    assert "docker compose stop" not in stop
+    assert "start-whisperx-lan-server.ps1" in batch
+
+
+def test_lan_doctor_checks_core_processing_legacy_and_qwen_state():
+    doctor = read("scripts/doctor-whisperx-lan-server.ps1")
+    assert 'projectName = "whisperx-atom"' in doctor
+    assert 'Check "coreServices"' in doctor
+    assert 'Check "processingServices"' in doctor
+    assert 'Check "legacyRuntime"' in doctor
+    assert "label=com.docker.compose.project=whisperx-atom-lan" in doctor
+    assert 'Check "qwen"' in doctor
+    assert 'core-readiness.json' in doctor
+    assert 'processing-readiness.json' in doctor
+
+
 def test_lan_start_guards_inherited_runnable_work_before_gpu_workers():
     startup = read("scripts/start-whisperx-lan-server.ps1")
     assert "STARTUP_QUEUE_GUARD_BLOCKED" in startup
