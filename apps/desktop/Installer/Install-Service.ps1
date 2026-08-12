@@ -21,6 +21,28 @@ try { [void][System.Security.Principal.SecurityIdentifier]::new($AllowedUserSid)
 $agentDataRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\Agent"
 New-Item -ItemType Directory -Force -Path $agentDataRoot | Out-Null
 Set-Content -LiteralPath (Join-Path $agentDataRoot "allowed-user.sid") -Value $AllowedUserSid -Encoding ascii -NoNewline
+$agentConfigPath = Join-Path $agentDataRoot "agent-config.json"
+$serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://192.168.2.194:8080" } else { $env:WHISPERX_API_URL }
+if (-not (Test-Path -LiteralPath $agentConfigPath -PathType Leaf)) {
+    $agentConfig = [ordered]@{
+        ServerUrl = $serverOrigin.TrimEnd('/')
+        AgentId = ""
+        Token = ""
+        Encrypted = $false
+        InstallationId = [Guid]::NewGuid()
+        RecordingProfile = "ROOM"
+    } | ConvertTo-Json
+    $agentConfigPart = "$agentConfigPath.part"
+    Set-Content -LiteralPath $agentConfigPart -Value $agentConfig -Encoding utf8
+    Move-Item -LiteralPath $agentConfigPart -Destination $agentConfigPath -Force
+}
+$machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
+if (-not (Test-Path -LiteralPath $machineConfigPath -PathType Leaf)) {
+    $machineConfig = [ordered]@{ schemaVersion = 1; serverOrigin = $serverOrigin.TrimEnd('/'); managed = $false } | ConvertTo-Json
+    $machineConfigPart = "$machineConfigPath.part"
+    Set-Content -LiteralPath $machineConfigPart -Value $machineConfig -Encoding utf8
+    Move-Item -LiteralPath $machineConfigPart -Destination $machineConfigPath -Force
+}
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($null -ne $existing) {
     if ($existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue }

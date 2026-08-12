@@ -40,7 +40,7 @@ GET /api/meetings/{id}/transcript
 
 ## TUS
 
-Desktop использует tusd на `http://localhost:1080`:
+Desktop использует единый ServerOrigin и LAN gateway на `http://192.168.2.194:8080/files/` (для другого LAN адреса замените origin):
 
 ```text
 POST /files       создать upload

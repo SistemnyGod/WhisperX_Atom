@@ -3,7 +3,7 @@ param(
   [string]$AudioPath,
   [string]$InboxPath,
   [string]$BaseUrl = "http://127.0.0.1:8080",
-  [string]$TusUrl = "http://localhost:1080",
+  [string]$TusUrl = "",
   [int]$TimeoutSeconds = 3600,
   [switch]$Start,
   [switch]$RestartWorkers

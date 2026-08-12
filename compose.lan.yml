@@ -1,0 +1,48 @@
+name: whisperx-atom-lan
+
+services:
+  postgres:
+    ports: !reset []
+
+  nats:
+    ports: !reset []
+
+  tusd:
+    ports: !reset []
+
+  api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Lan
+      DOTNET_ENVIRONMENT: Lan
+      COOKIE_SECURE: "false"
+      ALLOW_INSECURE_LAN_HTTP: "true"
+      SERVER_ORIGIN: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
+      CORS_ALLOWED_ORIGINS: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
+      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
+    ports: !reset []
+
+  gpu-worker:
+    environment:
+      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
+
+  summary-worker:
+    environment:
+      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
+
+  lan-gateway:
+    profiles: ["lan"]
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "${LAN_BIND_ADDRESS:?Set LAN_BIND_ADDRESS in .env.lan}:8080:8080"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile.lan:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      tusd:
+        condition: service_started
+
