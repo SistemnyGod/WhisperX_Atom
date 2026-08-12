@@ -37,7 +37,12 @@ public sealed record DesktopSummary(string Id, string MeetingId, Guid? Transcrip
 public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record DesktopAgentEnrollment(string AgentId, string Token);
-public sealed record DesktopAgentBootstrapResult(string AgentId, string? Token, bool ReenrollRequired = false);
+public sealed record DesktopAgentBootstrapResult(
+    string AgentId,
+    string? Token,
+    bool ReenrollRequired = false,
+    bool Linked = true,
+    string State = "AGENT_READY");
 public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Status, DateTimeOffset? LastSeenAt, Guid? InstallationId = null)
 {
     [JsonIgnore]
@@ -48,6 +53,7 @@ public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Sta
 }
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
 public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
+public sealed record DesktopProcessingReadiness(bool Ready, JsonElement Components, JsonElement? Queue, DateTimeOffset? CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error)
 {
@@ -174,6 +180,31 @@ public sealed class ServerApiClient : IDisposable
         catch (DesktopApiException) { return null; }
     }
 
+    public async Task<DesktopProcessingReadiness?> GetProcessingReadinessAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/system/readiness", null, cancellationToken);
+            if (!response.IsSuccessStatusCode) return null;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            var root = document.RootElement;
+            var ready = root.TryGetProperty("ready", out var readyElement) && readyElement.ValueKind == JsonValueKind.True;
+            var components = root.TryGetProperty("components", out var componentsElement) ? componentsElement.Clone() : default;
+            JsonElement? queue = root.TryGetProperty("queue", out var queueElement) && queueElement.ValueKind != JsonValueKind.Null
+                ? queueElement.Clone()
+                : null;
+            var checkedAt = root.TryGetProperty("checkedAt", out var checkedElement)
+                && checkedElement.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(checkedElement.GetString(), out var parsed)
+                ? parsed
+                : (DateTimeOffset?)null;
+            return new DesktopProcessingReadiness(ready, components, queue, checkedAt);
+        }
+        catch (DesktopApiException) { return null; }
+        catch (HttpRequestException) { return null; }
+        catch (JsonException) { return null; }
+    }
+
     public async Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -257,7 +288,12 @@ public sealed class ServerApiClient : IDisposable
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         var root = document.RootElement;
         if (response.StatusCode == HttpStatusCode.Conflict && string.Equals(root.GetProperty("error").GetString(), "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase))
-            return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), null, true);
+            return new DesktopAgentBootstrapResult(
+                root.GetProperty("agentId").GetGuid().ToString(),
+                null,
+                true,
+                false,
+                root.TryGetProperty("state", out var reenrollState) ? reenrollState.GetString() ?? "REENROLL_REQUIRED" : "REENROLL_REQUIRED");
         if (!response.IsSuccessStatusCode)
         {
             var errorCode = root.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.String
@@ -274,7 +310,36 @@ public sealed class ServerApiClient : IDisposable
         var token = root.TryGetProperty("token", out var tokenElement) && tokenElement.ValueKind == JsonValueKind.String
             ? tokenElement.GetString()
             : null;
-        return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), token);
+        var linked = !root.TryGetProperty("linked", out var linkedElement)
+            || linkedElement.ValueKind == JsonValueKind.True;
+        var state = root.TryGetProperty("state", out var stateElement) && stateElement.ValueKind == JsonValueKind.String
+            ? stateElement.GetString() ?? (linked ? "AGENT_READY" : "AGENT_LINK_PENDING")
+            : linked ? "AGENT_READY" : "AGENT_LINK_PENDING";
+        return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), token, false, linked, state);
+    }
+
+    public async Task<DesktopAgentEnrollment> ReenrollAgentAsync(Guid agentId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/agents/{agentId}/reenroll", null, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        JsonDocument? document = null;
+        try { if (!string.IsNullOrWhiteSpace(body)) document = JsonDocument.Parse(body); }
+        catch (JsonException) { }
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorCode = document is not null && document.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.String
+                ? error.GetString() ?? "AGENT_REENROLL_FAILED"
+                : $"AGENT_REENROLL_FAILED_{(int)response.StatusCode}";
+            throw new DesktopApiException((int)response.StatusCode, errorCode, errorCode);
+        }
+
+        if (document is null)
+            throw new DesktopApiException((int)response.StatusCode, "AGENT_REENROLL_RESPONSE_INVALID", "Сервер вернул пустой ответ на re-enroll Agent.");
+        var root = document.RootElement;
+        return new DesktopAgentEnrollment(
+            root.GetProperty("agentId").GetGuid().ToString(),
+            root.GetProperty("token").GetString() ?? throw new DesktopApiException(200, "AGENT_REENROLL_TOKEN_MISSING", "Сервер не вернул новый токен Agent."));
     }
 
     private async Task<bool> RefreshAsync(long observedVersion, CancellationToken cancellationToken)
@@ -444,6 +509,13 @@ public sealed class ServerApiClient : IDisposable
         return await response.Content.ReadFromJsonAsync<List<DesktopJob>>(_json, cancellationToken) ?? [];
     }
 
+    public async Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/jobs/{jobId}", null, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
+    }
+
     public async Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/jobs/{jobId}/events", null, cancellationToken);
@@ -458,10 +530,15 @@ public sealed class ServerApiClient : IDisposable
             if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) continue;
             try { latest = JsonSerializer.Deserialize<DesktopJob>(line[5..].Trim(), _json); }
             catch (JsonException) { continue; }
-            if (latest is { Status: "READY" or "FAILED" or "CANCELLED" }) break;
+            if (latest is not null && IsTerminalJobStatus(latest.Status)) break;
         }
         return latest;
     }
+
+    private static bool IsTerminalJobStatus(string? status) => status is not null
+        && (status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase));
 
     public async Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default)
     {
@@ -626,10 +703,16 @@ public sealed class ServerApiClient : IDisposable
         return await response.Content.ReadFromJsonAsync<DesktopSummary>(_json, cancellationToken);
     }
 
-    public async Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    public async Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meetingId}/summary/rebuild", null, cancellationToken);
-        return response.IsSuccessStatusCode;
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
+    }
+
+    public async Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        return await QueueSummaryRebuildAsync(meetingId, cancellationToken) is not null;
     }
 
     public async Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default)

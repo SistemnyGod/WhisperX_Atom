@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$output = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $OutputRoot)) }
+$output = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
 if ([string]::IsNullOrWhiteSpace($output) -or $output -eq $repoRoot -or $output.Length -lt ($repoRoot.Length + 8)) {
     throw "Refusing unsafe output path: $output"
 }
@@ -53,7 +53,8 @@ $servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--se
 $voicePublishArgs = @($voiceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:MSBuildEnableWorkloadResolver=false", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $voiceOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     & dotnet publish @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
+    $exitCode = [int]$LASTEXITCODE
+    if ($exitCode -ne 0) { throw "dotnet publish failed with exit code $exitCode" }
 }
 Invoke-Publish $desktopPublishArgs
 Invoke-Publish $servicePublishArgs
@@ -62,6 +63,29 @@ Invoke-Publish $voicePublishArgs
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Configure-VoiceUser.ps1") $output
+
+# FFmpeg is an explicit installer input. Do not silently pick an arbitrary
+# executable from the build host PATH; release packaging must be reproducible.
+$ffmpegSource = if (-not [string]::IsNullOrWhiteSpace($env:WHISPERX_FFMPEG_DIR)) { $env:WHISPERX_FFMPEG_DIR } else { Join-Path $repoRoot "vendor\ffmpeg\win-x64" }
+$ffmpegSource = [IO.Path]::GetFullPath($ffmpegSource)
+foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
+    $source = Join-Path $ffmpegSource $tool
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Pinned FFmpeg payload is missing: $source. Stage the verified binaries under vendor\ffmpeg\win-x64 or set WHISPERX_FFMPEG_DIR."
+    }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $serviceOut $tool) -Force
+}
+$ffmpegManifest = Join-Path $ffmpegSource "ffmpeg-manifest.json"
+if (-not (Test-Path -LiteralPath $ffmpegManifest -PathType Leaf)) { throw "Pinned FFmpeg manifest is missing: $ffmpegManifest" }
+$manifest = Get-Content -LiteralPath $ffmpegManifest -Raw | ConvertFrom-Json
+if ($manifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$manifest.version)) { throw "Pinned FFmpeg manifest is invalid." }
+foreach ($entry in $manifest.files) {
+    $payload = Join-Path $serviceOut ([string]$entry.file)
+    if (-not (Test-Path -LiteralPath $payload -PathType Leaf)) { throw "Pinned FFmpeg manifest file is missing: $($entry.file)" }
+    $actual = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Pinned FFmpeg checksum mismatch: $($entry.file)" }
+}
+Copy-Item -LiteralPath $ffmpegManifest -Destination (Join-Path $serviceOut "ffmpeg-manifest.json") -Force
 $voiceModels = Join-Path $output "VoiceHost\Models\Voice"
 
 New-Item -ItemType Directory -Force -Path $voiceModels | Out-Null

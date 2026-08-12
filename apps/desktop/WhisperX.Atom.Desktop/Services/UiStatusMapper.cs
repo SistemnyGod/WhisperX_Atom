@@ -50,6 +50,20 @@ public static class UiStatusMapper
     }
 
     public static string Text(string? code) => Map(code).Text;
+
+    public static bool IsQwenDisabled(DesktopProcessingReadiness? readiness)
+    {
+        if (readiness is null || readiness.Components.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !readiness.Components.TryGetProperty("qwen", out var qwen)
+            || qwen.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !qwen.TryGetProperty("status", out var status)
+            || status.ValueKind != System.Text.Json.JsonValueKind.String)
+            return false;
+        return string.Equals(status.GetString(), "DISABLED", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public const string SummaryDisabledMessage =
+        "Саммари отключено настройками сервера. Включите AUTO_SUMMARY_ENABLED и Summary Worker, чтобы пересборка стала доступна.";
 }
 
 public static class UiErrorFormatter

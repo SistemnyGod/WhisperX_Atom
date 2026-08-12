@@ -47,7 +47,9 @@ public sealed class AgentApiClient : IDisposable
 {
     private const string FallbackLanServerUrl = "http://192.168.2.194:8080";
     private readonly HttpClient _http = CreateHttpClient(TimeSpan.FromSeconds(8));
-    private readonly HttpClient _uploadHttp = CreateHttpClient(TimeSpan.FromSeconds(60));
+    // Chunk uploads may legitimately carry long recordings over a busy LAN;
+    // keep a separate policy from the short control client.
+    private readonly HttpClient _uploadHttp = CreateHttpClient(TimeSpan.FromSeconds(120));
     private readonly HttpClient _streamHttp = CreateHttpClient(Timeout.InfiniteTimeSpan);
     private Uri _baseUri;
     private Guid _agentId;
@@ -121,6 +123,26 @@ public sealed class AgentApiClient : IDisposable
         await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true,
             _installationId,
             _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile), cancellationToken);
+        File.Move(temporary, _configPath, true);
+    }
+
+    public async Task UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured || !Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri))
+            throw new InvalidOperationException("agent_configuration_invalid");
+        lock (_configurationGate)
+        {
+            _baseUri = uri;
+            _serverConnectionState = "UNKNOWN";
+            _lastServerError = null;
+            _nextHeartbeatAtUtc = DateTimeOffset.UtcNow;
+        }
+        var temporary = _configPath + ".part";
+        var configuration = new AgentConfiguration(
+            uri.ToString().TrimEnd('/'), _agentId.ToString(), ProtectToken(_token), true,
+            _installationId, _storage.ArchiveRoot, _storage.MicrophoneDeviceId,
+            _storage.SystemAudioDeviceId, _storage.RecordingProfile);
+        await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
 
@@ -304,10 +326,13 @@ public sealed class AgentApiClient : IDisposable
         }
     }
 
-    public async Task<int> UploadPendingChunksAsync(SpoolStore spool, CancellationToken cancellationToken)
+    public Task<int> UploadPendingChunksAsync(SpoolStore spool, CancellationToken cancellationToken) =>
+        UploadPendingChunksAsync(spool, null, cancellationToken);
+
+    public async Task<int> UploadPendingChunksAsync(SpoolStore spool, string? localSessionId, CancellationToken cancellationToken)
     {
         if (!IsConfigured) return 0;
-        var pending = await spool.PendingChunksAsync(200, cancellationToken);
+        var pending = await spool.PendingChunksAsync(localSessionId, 200, cancellationToken);
         var configuredConcurrency = int.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_UPLOAD_CONCURRENCY"), out var parsedConcurrency)
             ? parsedConcurrency
             : 3;
@@ -449,7 +474,11 @@ public sealed class AgentApiClient : IDisposable
                     }).Distinct().OrderBy(value => value).ToArray();
             }
             catch (JsonException) { }
-            var code = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden ? "AGENT_AUTH_REJECTED" : error ?? "SERVER_FINALIZE_REJECTED";
+            // Preserve typed ownership/configuration errors even when the API
+            // uses 401/403. Only an untyped auth failure is remapped.
+            var code = error ?? (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                ? "AGENT_AUTH_REJECTED"
+                : "SERVER_FINALIZE_REJECTED");
             return new ServerFinalizeReceipt(false, serverSessionId, null, null, null, traceId, code, IsRetryableFinalizeError(code, response.StatusCode), missing);
         }
 
@@ -612,7 +641,10 @@ public sealed class AgentApiClient : IDisposable
             AddAuthentication(request);
             return await _http.SendAsync(request, cancellationToken);
         }, cancellationToken);
-        if (!response.IsSuccessStatusCode) return null;
+        // Preserve typed auth/ownership errors. Returning null here converted a
+        // 401/403 into SERVER_CHUNKS_MISSING, which incorrectly scheduled an
+        // endless retry for a revoked or misconfigured Agent token.
+        await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         if (!document.RootElement.TryGetProperty("missing", out var missing) || missing.ValueKind != JsonValueKind.Array)
             return Array.Empty<int>();
@@ -649,9 +681,13 @@ public sealed class AgentApiClient : IDisposable
     private static bool IsTransient(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
-    private static bool IsRetryableFinalizeError(string code, HttpStatusCode statusCode) =>
-        code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "OWNER_AUTHORIZATION_REJECTED"
-        || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
+    private static bool IsRetryableFinalizeError(string code, HttpStatusCode statusCode)
+    {
+        if (code is "OWNER_AUTHORIZATION_REJECTED" or "AGENT_USER_LINK_REQUIRED" or "MEETING_OWNER_MISMATCH" or "MEETING_CANCELLED")
+            return false;
+        return code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED"
+            || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
+    }
 
     private static HttpClient CreateHttpClient(TimeSpan timeout)
     {

@@ -13,8 +13,15 @@
     <Content Include="..\Assets\VoiceResponses\*.wav" Link="Assets\VoiceResponses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\WhisperX.Atom.Voice.Core\WhisperX.Atom.Voice.Core.csproj" />
-    <ProjectReference Include="..\..\recorder-agent\WhisperX.Atom.Recorder.Core.csproj" />
+    <ProjectReference Include="..\WhisperX.Atom.Voice.Core\WhisperX.Atom.Voice.Core.csproj" SkipGetTargetFrameworkProperties="true" />
+    <!-- Recorder.Core is built by the Desktop/Service publish step. Referencing
+         that deterministic output avoids the .NET 10 SDK GetTargetPath graph
+         bug caused by Recorder.Core's shared-folder output layout. -->
+    <ProjectReference Include="..\..\recorder-agent\WhisperX.Atom.Recorder.Core.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+    <Reference Include="WhisperX.Atom.Recorder.Core" Condition="Exists('..\..\recorder-agent\bin\core\net10.0\WhisperX.Atom.Recorder.Core.dll')">
+      <HintPath>..\..\recorder-agent\bin\core\net10.0\WhisperX.Atom.Recorder.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="System.Speech" Version="10.0.0" />

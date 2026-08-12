@@ -58,8 +58,12 @@ def test_desktop_start_has_a_server_independent_title_path():
     desktop = read(Path("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs"))
     view_model = read(Path("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs"))
     agent = read(Path("apps/recorder-agent/AgentPipeHost.cs"))
-    assert "CreateMeetingAsync(title" in view_model
-    assert "StartAsync(title, serverMeetingId, ownerUserId)" in view_model
+    start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
+    assert "StartAsync(title, serverMeetingId, ownerUserId)" in start
+    assert "RecorderWorker creates/binds the server session in the background" in start
+    assert "CreateMeetingAsync(title" not in start
+    assert "EnsureAgentReadyAsync" not in start
+    assert "GetCurrentUserAsync" not in start
     assert 'BindSessionAsync(sessionId, meetingId, title' not in agent
     assert 'server_binding_pending' in agent
     assert 'GetMeetingIdAsync(localSessionId' in agent

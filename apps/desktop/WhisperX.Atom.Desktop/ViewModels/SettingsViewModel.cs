@@ -13,6 +13,7 @@ public sealed class SettingsViewModel : ObservableObject
     private string _agentName = "WhisperX Atom Desktop";
     private string _statusText = string.Empty;
     private bool _isBusy;
+    private string _diagnosticsPath = string.Empty;
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -33,6 +34,7 @@ public sealed class SettingsViewModel : ObservableObject
     public string AgentName { get => _agentName; set => SetProperty(ref _agentName, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
     public bool IsBusy { get => _isBusy; private set => SetProperty(ref _isBusy, value); }
+    public string DiagnosticsPath { get => _diagnosticsPath; private set => SetProperty(ref _diagnosticsPath, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool MustChangePassword { get => _mustChangePassword; private set => SetProperty(ref _mustChangePassword, value); }
     public string SessionExpiryText => _services.Backend.SessionExpiresAtUtc is { } expires
@@ -163,13 +165,103 @@ public sealed class SettingsViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+    public async Task<bool> StartRecorderServiceAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            var snapshot = await _services.RecorderService.StartAsync();
+            StatusText = snapshot.PipeReachable
+                ? "Recorder Service запущен, Named Pipe доступен."
+                : snapshot.Error ?? "Recorder Service запущен, но Named Pipe пока недоступен.";
+            return snapshot.PipeReachable;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task<bool> SaveDiagnosticsAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            DiagnosticsPath = await _services.Diagnostics.WriteAsync();
+            StatusText = $"Диагностика сохранена: {DiagnosticsPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
 #endif
+    public async Task<bool> StartRecorderServiceAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            var snapshot = await _services.RecorderService.StartAsync();
+            StatusText = snapshot.PipeReachable
+                ? "Recorder Service запущен, Named Pipe доступен."
+                : snapshot.Error ?? "Recorder Service запущен, но Named Pipe пока недоступен.";
+            return snapshot.PipeReachable;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task<bool> SaveDiagnosticsAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            DiagnosticsPath = await _services.Diagnostics.WriteAsync();
+            StatusText = $"Диагностика сохранена: {DiagnosticsPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
     public async Task<bool> ReconnectAgentAsync()
     {
         try
         {
             IsBusy = true;
             var result = await _services.AgentBootstrap.EnsureAgentReadyAsync();
+            if (result.RequiresReenroll && result.AgentId is Guid agentId)
+            {
+                var enrollment = await _services.Backend.ReenrollAgentAsync(agentId);
+                var settings = _services.Settings.Load();
+                var configured = await _services.Recorder.ConfigureAgentAsync(
+                    ApiUrl.Trim(),
+                    agentId,
+                    enrollment.Token,
+                    settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(),
+                    settings.MicrophoneDeviceId,
+                    settings.SystemAudioDeviceId);
+                if (!configured.Ok)
+                {
+                    StatusText = configured.Error ?? "Recorder Agent не принял новый токен.";
+                    return false;
+                }
+                result = await _services.AgentBootstrap.EnsureAgentReadyAsync();
+            }
             StatusText = result.Message;
             return result.Ready;
         }

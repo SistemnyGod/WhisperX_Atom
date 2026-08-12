@@ -105,16 +105,29 @@ class AsyncHeartbeat:
 
     async def _run(self) -> None:
         while True:
-            await asyncio.to_thread(self._write)
+            try:
+                await asyncio.to_thread(self._write)
+            except Exception:
+                # A heartbeat failure must never terminate the heartbeat task;
+                # the next tick can recover the database connection.
+                pass
             await asyncio.sleep(self.interval)
 
     def _write(self) -> None:
+        capabilities: dict[str, Any] = {}
+        error_code = self._error
+        if self.capabilities:
+            try:
+                capabilities = dict(self.capabilities())
+            except Exception as exc:
+                capabilities = {"capabilitiesAvailable": False, "capabilitiesError": type(exc).__name__}
+                error_code = error_code or "HEARTBEAT_CAPABILITIES_FAILED"
         write_heartbeat(
             self.worker_name,
             status=self._status,
             current_job_id=self._job_id,
-            capabilities=self.capabilities() if self.capabilities else {},
-            last_error_code=self._error,
+            capabilities=capabilities,
+            last_error_code=error_code,
         )
 
 

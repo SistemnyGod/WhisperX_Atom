@@ -190,6 +190,10 @@ public sealed class RecordingViewModel : ObservableObject
     public bool SystemAudioTelemetryStale => _systemAudioTelemetryStale;
     public string MicrophoneTestStatus { get => _microphoneTestStatus; private set => SetProperty(ref _microphoneTestStatus, value); }
     public bool CanTestAudio => State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
+    // A previously confirmed Agent/owner pair may continue local-first
+    // capture while the LAN server is offline. It is still not advertised as
+    // server-ready, but the persisted owner makes the local path safe.
+    public bool AgentReady => _services.AgentBootstrap.IsReady || _services.AgentBootstrap.LastStatus.OfflineEligible;
     public string AgentStatus => _lastAgentResponse is { } response
         ? AgentStatusFormatter.Format(response)
         : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
@@ -203,7 +207,7 @@ public sealed class RecordingViewModel : ObservableObject
         RecordingState.Error => "Ошибка записи",
         _ => "Готово к записи"
     };
-    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error) && _hasAudioSource;
+    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error) && _hasAudioSource && AgentReady;
     public bool CanPause => State == RecordingState.Recording;
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
@@ -259,6 +263,12 @@ public sealed class RecordingViewModel : ObservableObject
         try
         {
             ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken));
+            OnPropertyChanged(nameof(AgentReady));
+            OnPropertyChanged(nameof(CanStart));
+            if (_services.Backend.HasSession && !AgentReady && State is (RecordingState.Idle or RecordingState.Error))
+            {
+                StatusMessage = _services.AgentBootstrap.LastStatus.Message;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (RecorderIpcException ex) when (ex.Transient && (State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing))
@@ -297,10 +307,13 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(TranscriptPreview));
         OnPropertyChanged(nameof(CanOpenTranscript));
         State = RecordingState.Checking;
-        StatusMessage = "Синхронизирую настройки и запускаю запись…";
+        StatusMessage = "Проверяю Recorder Agent и запускаю запись…";
         try
         {
-            await SyncConfigurationAsync();
+            // Device/profile/archive changes are persisted and acknowledged
+            // when changed and during Agent bootstrap. Replaying all commands
+            // here serialized START behind IPC/SQLite round trips and caused
+            // false timeout errors.
             await RefreshAsync();
             var preflight = await _services.Recorder.PreflightAsync();
             if (!preflight.Ok || preflight.Preflight is null || !preflight.Preflight.Ready)
@@ -322,69 +335,27 @@ public sealed class RecordingViewModel : ObservableObject
             }
 
             var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
+            // START is deliberately local-first. Creating a server Meeting here
+            // would put network latency back into the capture critical path and
+            // would leave empty server meetings when the microphone fails.
+            // RecorderWorker creates/binds the server session in the background
+            // after the local session has been accepted.
             Guid? serverMeetingId = null;
-            if (_services.Backend.HasSession)
+            var bootstrap = _services.AgentBootstrap.LastStatus;
+            if (!bootstrap.Ready && !bootstrap.OfflineEligible)
             {
-                try
-                {
-                    var bootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync(CancellationToken.None);
-                    if (!bootstrap.Ready && !bootstrap.IsTransient)
-                    {
-                        State = RecordingState.Error;
-                        ErrorMessage = MapRecordingError(bootstrap.Code);
-                        StatusMessage = bootstrap.Message;
-                        return false;
-#if false // Retained as a migration reference; AgentBootstrapCoordinator owns this path.
-                        var enrollment = await _services.Backend.BootstrapLocalAgentAsync(
-                            agentHealth.Health.InstallationId ?? Guid.NewGuid(), agentId, "WhisperX Atom Desktop", CancellationToken.None);
-                        if (enrollment.ReenrollRequired)
-                        {
-                            State = RecordingState.Error;
-                            ErrorMessage = "Recorder Agent требует повторной регистрации. Автоматическая ротация токена запрещена.";
-                            return false;
-                        }
-                        if (!string.IsNullOrWhiteSpace(enrollment.Token))
-                        {
-                            var settings = _services.Settings.Load();
-                            await _services.Recorder.ConfigureAgentAsync(_services.Backend.ApiUrl, Guid.Parse(enrollment.AgentId), enrollment.Token,
-                                settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(), settings.MicrophoneDeviceId, settings.SystemAudioDeviceId, CancellationToken.None);
-                        }
-#endif
-                    }
-                    if (!bootstrap.Ready) WarningMessage = bootstrap.Message;
-                    var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
-                    if (Guid.TryParse(meeting.Id, out var parsedMeetingId)) serverMeetingId = parsedMeetingId;
-                }
-                catch (DesktopApiException ex) when (ex.StatusCode != 0 && !ex.Retryable)
-                {
-                    State = RecordingState.Error;
-                    ErrorMessage = MapRecordingError(ex.ErrorCode);
-                    StatusMessage = ex.TraceId is null ? ex.Message : $"{ex.Message} (trace: {ex.TraceId})";
-                    return false;
-                }
-                catch (DesktopApiException ex) when (ex.StatusCode == 0 || ex.Retryable)
-                {
-                    WarningMessage = "API недоступен: запись сохранится локально, а отправка будет повторена позже.";
-                    StatusMessage = $"Запись запускается локально. Синхронизация: {SafeError(ex)}";
-                }
-                catch (Exception ex)
-                {
-                    WarningMessage = "API недоступен: запись сохранится локально, а отправка будет повторена позже.";
-                    StatusMessage = $"Запись запускается локально. Синхронизация: {SafeError(ex)}";
-                }
+                State = RecordingState.Error;
+                ErrorMessage = MapRecordingError(bootstrap.Code);
+                StatusMessage = bootstrap.Message;
+                return false;
+            }
+            if (!bootstrap.Ready)
+            {
+                WarningMessage = bootstrap.Message;
             }
 
-            _serverProcessingExpected = serverMeetingId is not null;
+            _serverProcessingExpected = _services.Backend.HasSession;
             var ownerUserId = _services.Settings.Load().OwnerUserId;
-            if (_services.Backend.HasSession)
-            {
-                try
-                {
-                    var currentUser = await _services.Backend.GetCurrentUserAsync(CancellationToken.None);
-                    ownerUserId = currentUser?.Id ?? ownerUserId;
-                }
-                catch { /* offline capture keeps the persisted owner when available */ }
-            }
             var response = await _services.Recorder.StartAsync(title, serverMeetingId, ownerUserId);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
@@ -458,17 +429,19 @@ public sealed class RecordingViewModel : ObservableObject
     public async Task SetMicrophoneAsync(string? id)
     {
         if (!CanSelectDevices || string.Equals(_microphoneDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
+        var previous = _microphoneDeviceId;
         _microphoneDeviceId = NormalizeDeviceId(id);
         OnPropertyChanged(nameof(SelectedMicrophoneId));
-        await SaveAndSyncDevicesAsync();
+        await SaveAndSyncDevicesAsync(previous, _systemAudioDeviceId, microphoneChanged: true, systemChanged: false);
     }
 
     public async Task SetSystemAudioAsync(string? id)
     {
         if (!CanSelectDevices || string.Equals(_systemAudioDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
+        var previous = _systemAudioDeviceId;
         _systemAudioDeviceId = NormalizeDeviceId(id);
         OnPropertyChanged(nameof(SelectedSystemAudioId));
-        await SaveAndSyncDevicesAsync();
+        await SaveAndSyncDevicesAsync(_microphoneDeviceId, previous, microphoneChanged: false, systemChanged: true);
     }
 
     public async Task SetRecordingProfileAsync(string? profile)
@@ -537,19 +510,35 @@ public sealed class RecordingViewModel : ObservableObject
         catch (Exception ex) { ErrorMessage = SafeError(ex); State = RecordingState.Error; return false; }
     }
 
-    private async Task SyncConfigurationAsync()
+    private async Task SaveAndSyncDevicesAsync(string? previousMicrophoneId, string? previousSystemAudioId, bool microphoneChanged, bool systemChanged)
     {
-        await _services.Recorder.SetArchiveRootAsync(ArchiveRoot);
-        await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId);
-        await _services.Recorder.SetRecordingProfileAsync(_recordingProfile);
-        SaveSettings();
-    }
-
-    private async Task SaveAndSyncDevicesAsync()
-    {
-        SaveSettings();
-        try { var response = await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId); ErrorMessage = response.Ok ? string.Empty : MapRecordingError(response.Error ?? "Agent не подтвердил устройства."); await RefreshAsync(); }
-        catch (Exception ex) { ErrorMessage = SafeError(ex); }
+        try
+        {
+            var response = await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId);
+            if (!response.Ok) throw new InvalidOperationException(response.Error ?? "Agent не подтвердил устройства.");
+            ApplyResponse(response);
+            await RefreshAsync();
+            var confirmed = response.Health ?? _lastAgentResponse?.Health;
+            var microphoneConfirmed = !microphoneChanged || string.Equals(
+                NormalizeDeviceId(confirmed?.SelectedMicrophoneDeviceId), _microphoneDeviceId, StringComparison.OrdinalIgnoreCase);
+            var systemConfirmed = !systemChanged || string.Equals(
+                NormalizeDeviceId(confirmed?.SelectedSystemAudioDeviceId), _systemAudioDeviceId, StringComparison.OrdinalIgnoreCase);
+            if (!microphoneConfirmed || !systemConfirmed)
+                throw new InvalidOperationException("DEVICE_SELECTION_NOT_CONFIRMED");
+            SaveSettings();
+            ErrorMessage = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _microphoneDeviceId = previousMicrophoneId;
+            _systemAudioDeviceId = previousSystemAudioId;
+            OnPropertyChanged(nameof(SelectedMicrophoneId));
+            OnPropertyChanged(nameof(SelectedSystemAudioId));
+            ErrorMessage = ex is InvalidOperationException { Message: "DEVICE_SELECTION_NOT_CONFIRMED" }
+                ? "Recorder Agent не подтвердил выбранное устройство. Возвращено предыдущее значение."
+                : SafeError(ex);
+            try { await _services.Recorder.SetAudioDevicesAsync(previousMicrophoneId, previousSystemAudioId); } catch { }
+        }
     }
 
     private async Task StartProcessingPollingAsync(Guid meetingId)
@@ -710,7 +699,7 @@ public sealed class RecordingViewModel : ObservableObject
                 try
                 {
                     var jobs = await _services.Backend.GetJobsAsync(meetingId, cancellationToken);
-                    var job = jobs.Where(item => string.Equals(item.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase))
+                    var job = jobs.Where(IsTranscriptJob)
                         .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault();
                     if (job is not null && !string.Equals(job.Status, "READY", StringComparison.OrdinalIgnoreCase) && !string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
                         await _services.Backend.WaitForJobEventsAsync(Guid.Parse(job.Id), cancellationToken);
@@ -751,7 +740,7 @@ public sealed class RecordingViewModel : ObservableObject
         var transcriptTask = _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
         await Task.WhenAll(jobsTask, transcriptTask);
         var jobs = await jobsTask;
-        var job = jobs.Where(item => string.Equals(item.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase))
+        var job = jobs.Where(IsTranscriptJob)
             .OrderByDescending(item => item.Attempt)
             .ThenByDescending(item => item.Progress)
             .FirstOrDefault();
@@ -789,6 +778,10 @@ public sealed class RecordingViewModel : ObservableObject
 
         return false;
     }
+
+    private static bool IsTranscriptJob(DesktopJob job) =>
+        string.Equals(job.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(job.Type, "TRANSCRIBE_REPROCESS", StringComparison.OrdinalIgnoreCase);
 
     private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
     {
@@ -864,7 +857,7 @@ public sealed class RecordingViewModel : ObservableObject
         SessionId = response.SessionId ?? SessionId;
         MeetingId = response.MeetingId ?? MeetingId;
         MediaTimeMs = response.MediaTimeMs;
-        if (response.Health is { } health)
+            if (response.Health is { } health)
         {
             _pendingUploads = health.PendingUploadSessions;
             _hasAudioSource = health.Microphone || health.SystemAudio;
@@ -899,8 +892,10 @@ public sealed class RecordingViewModel : ObservableObject
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
             _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
-            UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден");
-            UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден");
+            if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
+                OnPropertyChanged(nameof(Microphones));
+            if (UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден"))
+                OnPropertyChanged(nameof(SystemAudioDevices));
             MicrophoneStatus = health.Microphone ? $"Микрофон готов · устройств: {health.CaptureDeviceCount}" : "Микрофон не найден";
             SystemAudioStatus = health.SystemAudio ? $"Системный звук готов · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
             OnPropertyChanged(nameof(MicrophoneStatus));
@@ -915,7 +910,9 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(SystemAudioWaveform));
             OnPropertyChanged(nameof(MicrophoneTelemetryStale));
             OnPropertyChanged(nameof(SystemAudioTelemetryStale));
-        }
+            }
+            OnPropertyChanged(nameof(AgentReady));
+            OnPropertyChanged(nameof(CanStart));
         StatusMessage = State switch
         {
             RecordingState.Recording => "Запись идёт. Метки сохраняются в локальном архиве.",
@@ -927,20 +924,25 @@ public sealed class RecordingViewModel : ObservableObject
             RecordingState.Unavailable => "Подключите Recorder Agent и повторите проверку.",
             _ => "Устройства готовы. Можно начать новую запись."
         };
+        if (_services.Backend.HasSession && !AgentReady && State is (RecordingState.Idle or RecordingState.Error))
+            StatusMessage = _services.AgentBootstrap.LastStatus.Message;
         if (response.SessionStatus is { } sessionStatus) ApplySessionStatus(sessionStatus);
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(AgentStatus));
     }
 
-    private static void UpdateDevices(IReadOnlyList<AgentIpcAudioDevice>? source, ObservableCollection<AudioDeviceOption> target, string? selectedId, string unavailableLabel)
+    private static bool UpdateDevices(IReadOnlyList<AgentIpcAudioDevice>? source, ObservableCollection<AudioDeviceOption> target, string? selectedId, string unavailableLabel)
     {
-        target.Clear();
-        target.Add(new AudioDeviceOption(string.Empty, "Windows по умолчанию", true, "Active"));
-        if (source is null) return;
+        var desired = new List<AudioDeviceOption> { new(string.Empty, "Windows по умолчанию", true, "Active") };
+        if (source is null) source = Array.Empty<AgentIpcAudioDevice>();
         if (!string.IsNullOrWhiteSpace(selectedId) && source.All(x => !string.Equals(x.Id, selectedId, StringComparison.OrdinalIgnoreCase)))
-            target.Add(new AudioDeviceOption(selectedId, unavailableLabel, false, "Unavailable"));
-        foreach (var device in source) target.Add(new AudioDeviceOption(device.Id, device.Name, device.IsDefault, device.State));
+            desired.Add(new AudioDeviceOption(selectedId, unavailableLabel, false, "Unavailable"));
+        desired.AddRange(source.Select(device => new AudioDeviceOption(device.Id, device.Name, device.IsDefault, device.State)));
+        if (target.Count == desired.Count && target.Zip(desired).All(pair => pair.First == pair.Second)) return false;
+        target.Clear();
+        foreach (var device in desired) target.Add(device);
+        return true;
     }
 
     private static RecordingState ParseState(string? state) => state?.ToUpperInvariant() switch
@@ -972,6 +974,9 @@ public sealed class RecordingViewModel : ObservableObject
             "FFMPEG_UNAVAILABLE" => "Не найден FFmpeg для локальной сборки аудио.",
             "SESSION_REQUIRED" => "Не найдена локальная сессия записи для повторной отправки.",
             "AGENT_USER_LINK_REQUIRED" => "Recorder Agent ещё не привязан к текущему пользователю. Повторите вход или обратитесь к администратору.",
+            "DEVICE_SELECTION_NOT_CONFIRMED" => "Recorder Agent не подтвердил выбранное устройство. Предыдущее устройство восстановлено.",
+            "AGENT_HEARTBEAT_STALE" => "Recorder Agent не подтвердил свежее подключение к серверу.",
+            "AGENT_SERVER_UNAVAILABLE" => "Recorder Agent не подключён к LAN-серверу. Локальная запись останется доступной после подтверждённой привязки.",
             "OWNER_REQUIRED" => "Для серверной записи не определён владелец. Выполните вход в приложение.",
             "OWNER_AUTHORIZATION_REJECTED" => "Пользователь больше не может отправлять эту запись. Локальная копия сохранена.",
             "MEETING_OWNER_MISMATCH" => "Запись принадлежит другому пользователю и не может быть отправлена из этого сеанса.",

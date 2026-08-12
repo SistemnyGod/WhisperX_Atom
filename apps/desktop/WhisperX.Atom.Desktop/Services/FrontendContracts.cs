@@ -35,6 +35,7 @@ public interface IRecorderService
     Task<AgentIpcResponse> StopAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> RetryUploadAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ConfigureAgentAsync(string serverUrl, Guid agentId, string token, string archiveRoot, string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetRecordingProfileAsync(string recordingProfile, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default);
@@ -52,6 +53,7 @@ public interface IBackendService : IDisposable
     void ApplySettings(DesktopSettings settings);
     Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);
+    Task<DesktopProcessingReadiness?> GetProcessingReadinessAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default);
@@ -74,10 +76,12 @@ public interface IBackendService : IDisposable
     Task LogoutAsync(CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment> LinkLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default);
     Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default);
+    Task<DesktopAgentEnrollment> ReenrollAgentAsync(Guid agentId, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default);
@@ -91,6 +95,7 @@ public interface IBackendService : IDisposable
     Task<bool> MergeSpeakersAsync(Guid meetingId, Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMedia>> GetMediaAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default);
@@ -164,6 +169,9 @@ public sealed class FrontendServices
         Backend = backend;
         Settings = settings;
         AgentBootstrap = new AgentBootstrapCoordinator(this);
+        JobTracker = new ProcessingJobTracker(backend);
+        RecorderService = new RecorderServiceController(recorder);
+        Diagnostics = new ClientRuntimeDiagnostics(this);
     }
 
     public IRecorderService Recorder { get; }
@@ -171,6 +179,9 @@ public sealed class FrontendServices
     public ISettingsStore Settings { get; }
     public FrontendNavigationState Navigation { get; } = new();
     public AgentBootstrapCoordinator AgentBootstrap { get; }
+    public ProcessingJobTracker JobTracker { get; }
+    public RecorderServiceController RecorderService { get; }
+    public ClientRuntimeDiagnostics Diagnostics { get; }
     public event Action? LoggedOut;
 
     public void RaiseLoggedOut() => LoggedOut?.Invoke();

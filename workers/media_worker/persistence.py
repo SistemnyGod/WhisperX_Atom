@@ -138,7 +138,12 @@ def update_recording_session_state(session_id: str, state: str) -> None:
     """Expose media lifecycle independently from the transcription job."""
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
-            "UPDATE recording_sessions SET state=%s WHERE id=%s",
+            """
+            UPDATE recording_sessions
+            SET state=%s
+            WHERE id=%s
+              AND state NOT IN ('CANCELLED','FINALIZED')
+            """,
             (state, session_id),
         )
 

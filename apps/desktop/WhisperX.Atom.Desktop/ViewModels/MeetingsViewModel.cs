@@ -384,8 +384,31 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         IsRefreshingSummary = true;
         try
         {
-            var accepted = await _services.Backend.RebuildSummaryAsync(meetingId, cancellationToken);
-            if (!accepted) return false;
+            var readiness = await _services.Backend.GetProcessingReadinessAsync(cancellationToken);
+            if (UiStatusMapper.IsQwenDisabled(readiness))
+            {
+                ErrorText = UiStatusMapper.SummaryDisabledMessage;
+                PipelineText = "Саммари отключено настройками сервера";
+                return false;
+            }
+            var job = await _services.Backend.QueueSummaryRebuildAsync(meetingId, cancellationToken);
+            if (job is null)
+            {
+                ErrorText = "Саммари не поставлено в очередь. Проверьте, что Qwen включена и стенограмма готова.";
+                return false;
+            }
+            LatestJob = job;
+            PipelineText = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)} · {job.Progress}%";
+            var completed = await _services.JobTracker.WaitForTerminalAsync(job, current =>
+            {
+                LatestJob = current;
+                PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
+            }, cancellationToken);
+            if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
+            {
+                ErrorText = completed?.Error ?? "Пересборка саммари завершилась ошибкой.";
+                return false;
+            }
             Summary = await _services.Backend.GetSummaryAsync(meetingId, cancellationToken);
             SummaryText = FormatSummary(Summary);
             SummaryMetaText = Summary is null ? string.Empty : $"Версия {Summary.Version} · {Summary.ModelName}";
@@ -424,6 +447,23 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         if (job is null) return false;
         LatestJob = job;
         PipelineText = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)} · {job.Progress}%";
+        var completed = await _services.JobTracker.WaitForTerminalAsync(job, current =>
+        {
+            LatestJob = current;
+            PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
+        }, cancellationToken);
+        if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
+        {
+            ErrorText = completed?.Error ?? "Повторная транскрибация завершилась ошибкой.";
+            return false;
+        }
+        Transcript = await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
+        TranscriptSegments.Clear();
+        if (Transcript is not null)
+            foreach (var segment in Transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
+        TranscriptVersions.Clear();
+        foreach (var version in await _services.Backend.GetTranscriptVersionsAsync(meetingId, cancellationToken)) TranscriptVersions.Add(version);
+        OnPropertyChanged(nameof(HasTranscript));
         return true;
     }
 

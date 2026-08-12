@@ -52,6 +52,7 @@ public sealed class BackendService : IBackendService
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
     public Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default) => _client.GetSystemStatusAsync(cancellationToken);
+    public Task<DesktopProcessingReadiness?> GetProcessingReadinessAsync(CancellationToken cancellationToken = default) => _client.GetProcessingReadinessAsync(cancellationToken);
     public Task<DesktopSystemVersion?> GetSystemVersionAsync(CancellationToken cancellationToken = default) => _client.GetSystemVersionAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsAsync(CancellationToken cancellationToken = default) => _client.GetMeetingsAsync(cancellationToken);
     public Task<IReadOnlyList<DesktopMeeting>> GetMeetingsPageAsync(int limit, int offset, CancellationToken cancellationToken = default) => _client.GetMeetingsPageAsync(limit, offset, cancellationToken);
@@ -69,6 +70,7 @@ public sealed class BackendService : IBackendService
     public Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default) => _client.CreateAssistantQueryAsync(query, meetingId, cancellationToken);
     public Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default) => _client.GetAssistantQueryAsync(queryId, cancellationToken);
     public Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetJobsAsync(meetingId, cancellationToken);
+    public Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default) => _client.GetJobAsync(jobId, cancellationToken);
     public Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default) => _client.WaitForJobEventsAsync(jobId, cancellationToken);
     public Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default) => _client.RetryJobAsync(jobId, cancellationToken);
     public Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.CancelMeetingAsync(meetingId, cancellationToken);
@@ -82,6 +84,7 @@ public sealed class BackendService : IBackendService
     public Task<bool> MergeSpeakersAsync(Guid meetingId, Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default) => _client.MergeSpeakersAsync(meetingId, sourceSpeakerId, targetSpeakerId, cancellationToken);
     public Task<IReadOnlyList<DesktopMedia>> GetMediaAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetMediaAsync(meetingId, cancellationToken);
     public Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetSummaryAsync(meetingId, cancellationToken);
+    public Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.QueueSummaryRebuildAsync(meetingId, cancellationToken);
     public Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.RebuildSummaryAsync(meetingId, cancellationToken);
     public Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetDecisionsAsync(meetingId, cancellationToken);
     public Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetTasksAsync(meetingId, cancellationToken);
@@ -121,6 +124,8 @@ public sealed class BackendService : IBackendService
         _client.LinkLocalAgentAsync(installationId, agentId, name, cancellationToken);
     public Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync(Guid installationId, Guid? agentId, string name, CancellationToken cancellationToken = default) =>
         _client.BootstrapLocalAgentAsync(installationId, agentId, name, cancellationToken);
+    public Task<DesktopAgentEnrollment> ReenrollAgentAsync(Guid agentId, CancellationToken cancellationToken = default) =>
+        _client.ReenrollAgentAsync(agentId, cancellationToken);
 
     public Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default) =>
         _client.CreateMeetingAsync(title, description, cancellationToken);

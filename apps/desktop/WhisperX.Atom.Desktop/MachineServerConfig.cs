@@ -22,5 +22,5 @@ public sealed record MachineServerConfig(int SchemaVersion, string ServerOrigin,
     }
 
     public static string? ServerOriginOrNull() => Load()?.ServerOrigin;
+    public static string? ManagedServerOriginOrNull() => Load() is { Managed: true } config ? config.ServerOrigin : null;
 }
-

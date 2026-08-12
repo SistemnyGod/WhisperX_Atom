@@ -19,7 +19,7 @@ Start the LAN server:
 .\run_whisperx_lan_server.bat
 ```
 
-The launcher uses `.env.lan`, forces project name `whisperx-atom`, preserves volumes and stops only preserved legacy `whisperx-atom-lan-*` containers. It never runs `down -v`, deletes containers, clears PostgreSQL/NATS, or resumes cancelled/failed jobs.
+The launcher uses `.env.lan`, forces project name `whisperx-atom`, preserves volumes and stops only preserved legacy `whisperx-atom-lan-*` containers. It never runs `down -v`, deletes containers, or clears PostgreSQL/NATS. On startup it recovers durable `QUEUED` work and expired `RUNNING` leases within the attempt limit; `FAILED`, `CANCELLED`, and `READY` records stay terminal.
 
 Stop without deleting data:
 
@@ -71,6 +71,16 @@ The launcher writes non-sensitive evidence to `artifacts/acceptance/lan-server/`
 The doctor additionally writes `doctor.json`. Without credentials, the doctor
 reports authenticated worker readiness as `AUTH_REQUIRED`; this does not make a
 healthy LAN core fail. Do not pass passwords or tokens on a command line.
+
+Readiness is intentionally split into `SERVER_CORE_READY` (API, PostgreSQL,
+NATS, storage and gateway) and `PROCESSING_READY` (workers, fresh heartbeats,
+GPU lease/queue state). A GPU worker that is processing is reported as `BUSY`,
+not as a failure. Qwen is `DISABLED` while `AUTO_SUMMARY_ENABLED=false`.
+
+The Recorder installer uses only the verified `ffmpeg.exe`/`ffprobe.exe`
+payload staged under `vendor\ffmpeg\win-x64`; use
+`scripts\stage-ffmpeg-payload.ps1` before publishing an installer. The build
+does not silently take a binary from the build host PATH.
 
 LAN-профиль предназначен для изолированной доверенной сети. Development остаётся loopback HTTP, а Production использует отдельный HTTPS gateway.
 

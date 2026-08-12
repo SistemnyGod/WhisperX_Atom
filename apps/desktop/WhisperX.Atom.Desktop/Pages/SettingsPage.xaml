@@ -36,6 +36,8 @@
                         <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" />
                         <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
                         <Button Content="Подключить или восстановить Agent" Style="{StaticResource PrimaryButtonStyle}" Click="ReconnectAgentButton_Click" IsEnabled="{Binding IsLoggedIn}" />
+                        <Button Content="Запустить Recorder Service" Style="{StaticResource SecondaryButtonStyle}" Click="StartRecorderButton_Click" />
+                        <Button Content="Сохранить диагностику" Style="{StaticResource SecondaryButtonStyle}" Click="SaveDiagnosticsButton_Click" />
                         <Button Content="Выйти из API" Style="{StaticResource SecondaryButtonStyle}" Click="LogoutButton_Click" />
                         <TextBlock Text="{Binding LoginStatusText}" Foreground="{StaticResource MutedTextBrush}" />
                         <TextBlock Text="{Binding SessionExpiryText}" Foreground="{StaticResource MutedTextBrush}" />

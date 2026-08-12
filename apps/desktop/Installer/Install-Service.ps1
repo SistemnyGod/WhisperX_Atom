@@ -13,9 +13,13 @@ if ([string]::IsNullOrWhiteSpace($AllowedUserSid) -and -not [string]::IsNullOrWh
     $AllowedUserSid = (Get-Content -LiteralPath $AllowedUserSidFile -Raw).Trim()
 }
 if ([string]::IsNullOrWhiteSpace($AllowedUserSid)) { throw "Installer user SID is required." }
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($null -eq $ffmpeg) { throw "FFmpeg is required for FLAC chunk encoding. Install FFmpeg and rerun the installer." }
-[Environment]::SetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH", $ffmpeg.Source, "Machine")
+$ffmpeg = Join-Path $ServiceDirectory "ffmpeg.exe"
+$ffprobe = Join-Path $ServiceDirectory "ffprobe.exe"
+if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
+    throw "Pinned FFmpeg payload is missing. Include ffmpeg.exe and ffprobe.exe in the Service directory and rerun the installer."
+}
+[Environment]::SetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH", $ffmpeg, "Machine")
+[Environment]::SetEnvironmentVariable("ATOM_AGENT_FFPROBE_PATH", $ffprobe, "Machine")
 try { [void][System.Security.Principal.SecurityIdentifier]::new($AllowedUserSid) } catch { throw "Invalid installer user SID: $AllowedUserSid" }
 [Environment]::SetEnvironmentVariable("ATOM_AGENT_ALLOWED_SID", $AllowedUserSid, "Machine")
 $agentDataRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\Agent"
@@ -38,7 +42,7 @@ if (-not (Test-Path -LiteralPath $agentConfigPath -PathType Leaf)) {
 }
 $machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
 if (-not (Test-Path -LiteralPath $machineConfigPath -PathType Leaf)) {
-    $machineConfig = [ordered]@{ schemaVersion = 1; serverOrigin = $serverOrigin.TrimEnd('/'); managed = $false } | ConvertTo-Json
+    $machineConfig = [ordered]@{ schemaVersion = 1; serverOrigin = $serverOrigin.TrimEnd('/'); managed = $true } | ConvertTo-Json
     $machineConfigPart = "$machineConfigPath.part"
     Set-Content -LiteralPath $machineConfigPart -Value $machineConfig -Encoding utf8
     Move-Item -LiteralPath $machineConfigPart -Destination $machineConfigPath -Force
@@ -50,5 +54,7 @@ if ($null -ne $existing) {
     Start-Sleep -Seconds 1
 }
 New-Service -Name $serviceName -DisplayName $displayName -Description "Local-first WhisperX Atom recording service" -BinaryPathName "`"$serviceExe`"" -StartupType Automatic | Out-Null
+sc.exe config $serviceName start= delayed-auto | Out-Null
+sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
 Start-Service -Name $serviceName
 Write-Host "Installed and started $displayName"

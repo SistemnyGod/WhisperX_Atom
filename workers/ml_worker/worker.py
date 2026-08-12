@@ -91,6 +91,8 @@ class GpuWorker:
                     self._heartbeat.set_job(None)
                     self._heartbeat.set_state("READY")
                 if state is not None and state[0] not in ("READY", "FAILED", "CANCELLED"):
+                    if self._heartbeat:
+                        self._heartbeat.set_state("READY", "MESSAGE_ALREADY_CLAIMED")
                     raise RuntimeError("message_claimed_by_active_worker")
                 return None
             state = self._repository.job_state(job_id)
@@ -107,6 +109,7 @@ class GpuWorker:
                 LOGGER.info("job=%s stage=%s progress=%s", job_id, stage, value)
                 self._repository.update_job(job_id, "RUNNING", stage, value)
 
+            failure_code: str | None = None
             try:
                 if await resident_llm_detected():
                     raise ResidentLlmConflict("resident_llama_server_must_be_stopped_before_transcription")
@@ -128,6 +131,7 @@ class GpuWorker:
                 return payload
             except ResidentLlmConflict as exc:
                 LOGGER.warning("job=%s waiting: %s", job_id, exc)
+                failure_code = "GPU_RESIDENT_LLM_CONFLICT"
                 self._repository.release_message(str(message.get("message_id", "")))
                 self._repository.update_job(job_id, "QUEUED", "WAITING_FOR_GPU", 0, str(exc), "GPU_RESIDENT_LLM_CONFLICT")
                 if self._heartbeat:
@@ -135,15 +139,16 @@ class GpuWorker:
                 raise
             except Exception as exc:
                 LOGGER.exception("job=%s failed", job_id)
+                failure_code = error_code_for(exc)
                 self._repository.release_message(str(message.get("message_id", "")))
-                self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), error_code_for(exc))
+                self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), failure_code)
                 if self._heartbeat:
-                    self._heartbeat.set_state("READY", error_code_for(exc))
+                    self._heartbeat.set_state("READY", failure_code)
                 raise
             finally:
                 if self._heartbeat:
                     self._heartbeat.set_job(None)
-                    self._heartbeat.set_state("READY")
+                    self._heartbeat.set_state("READY", failure_code)
 
 
 async def run() -> None:
@@ -174,7 +179,10 @@ async def run() -> None:
         return capabilities
 
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
-    heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: {**gpu_capabilities(), "natsConnected": True})
+    # CUDA/model capability discovery is intentionally done once at startup.
+    # It must not be repeated on every heartbeat tick while ASR is running.
+    startup_capabilities = {**gpu_capabilities(), "natsConnected": True}
+    heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
     await heartbeat.start()
     heartbeat.set_state("READY")
     worker = GpuWorker(heartbeat)

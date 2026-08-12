@@ -88,3 +88,31 @@ def test_disabled_owner_keeps_delivery_retryable_without_changing_local_archive(
     agent = read("apps/recorder-agent/AgentApiClient.cs")
     assert "OWNER_AUTHORIZATION_REJECTED" in store
     assert "OWNER_AUTHORIZATION_REJECTED" in agent
+
+
+def test_gpu_readiness_distinguishes_busy_from_unavailable():
+    program = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert 'gpuStatus = !cuda' in program
+    assert '"BUSY"' in program
+    compose = read("compose.dev.yml")
+    healthcheck = read("workers/ml_worker/healthcheck.py")
+    assert "GPU_WORKER_MODE" in compose
+    assert "capabilities.get(\"cudaAvailable\")" in healthcheck
+    assert "torch.cuda.is_available" not in healthcheck
+
+
+def test_installer_requires_pinned_ffmpeg_payload_and_manifest():
+    installer = read("apps/desktop/Installer/Install-Service.ps1")
+    publish = read("scripts/publish-desktop.ps1")
+    staging = read("scripts/stage-ffmpeg-payload.ps1")
+    assert 'Join-Path $ServiceDirectory "ffmpeg.exe"' in installer
+    assert "ffmpeg-manifest.json" in publish
+    assert "Get-FileHash" in publish
+    assert "sha256" in staging
+
+
+def test_firewall_allows_private_lan_and_blocks_public_profile():
+    firewall = read("scripts/configure-whisperx-lan-firewall.ps1")
+    assert "Profile Domain,Private" in firewall
+    assert "Profile Public" in firewall
+    assert '"$RuleName (Public block)"' in firewall

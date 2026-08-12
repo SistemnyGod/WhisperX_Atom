@@ -63,7 +63,10 @@ def test_recorder_offline_session_does_not_fabricate_meeting_id():
 def test_desktop_uses_chunked_tus_resume_and_partial_transcript():
     client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
     vm = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    tracker = read("apps/desktop/WhisperX.Atom.Desktop/Services/ProcessingJobTracker.cs")
     assert "16 * 1024 * 1024" in client
     assert "GetTusOffsetAsync" in client and "HttpMethod.Head" in client
     assert "PARTIAL_READY" in vm
     assert "WaitForJobEventsAsync" in client
+    assert 'api/jobs/{jobId}' in client
+    assert "backend.GetJobAsync" in tracker and "AddMinutes(30)" in tracker

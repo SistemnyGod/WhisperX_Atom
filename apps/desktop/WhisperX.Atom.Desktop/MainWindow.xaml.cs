@@ -151,13 +151,16 @@ public sealed partial class MainWindow : Window
         SetSystemStatus("Проверка системы", "NeutralStatusBrush");
         var backendTask = _services.Backend.CheckReadyAsync(cancellationToken);
         var versionTask = _services.Backend.GetSystemVersionAsync(cancellationToken);
+        var processingTask = _services.Backend.GetProcessingReadinessAsync(cancellationToken);
         var recorderTask = _services.Recorder.GetHealthAsync(cancellationToken);
 
         var backendAvailable = false;
         DesktopSystemVersion? serverVersion = null;
         var recorderAvailable = false;
+        DesktopProcessingReadiness? processingReadiness = null;
         try { backendAvailable = await backendTask; } catch (OperationCanceledException) { throw; } catch { }
         try { serverVersion = await versionTask; } catch (OperationCanceledException) { throw; } catch { }
+        try { processingReadiness = await processingTask; } catch (OperationCanceledException) { throw; } catch { }
         try { recorderAvailable = (await recorderTask).Ok; } catch (OperationCanceledException) { throw; } catch { }
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
@@ -167,8 +170,13 @@ public sealed partial class MainWindow : Window
             SetSystemStatus("Время ПК отличается от времени сервера более чем на 5 минут", "WarningBrush");
             return;
         }
+        var agentReady = authenticated && recorderAvailable && _services.AgentBootstrap.IsReady;
+        var processingReady = processingReadiness?.Ready == true;
         var status = backendAvailable && !authenticated ? ("Требуется вход", "WarningBrush") :
-            backendAvailable && recorderAvailable ? ("Система готова", "SuccessBrush") :
+            backendAvailable && recorderAvailable && !agentReady ? ("Recorder доступен; требуется привязка к пользователю", "WarningBrush") :
+            backendAvailable && agentReady && processingReadiness is null ? ("WhisperX: readiness недоступна", "WarningBrush") :
+            backendAvailable && agentReady && !processingReady ? ("WhisperX / GPU недоступны", "DangerBrush") :
+            backendAvailable && agentReady ? ("Система готова · Qwen отключена", "SuccessBrush") :
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");

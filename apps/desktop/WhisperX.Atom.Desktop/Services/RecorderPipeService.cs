@@ -42,6 +42,9 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> ConfigureAgentAsync(string serverUrl, Guid agentId, string token, string archiveRoot, string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("CONFIGURE", new { serverUrl, agentId, token, archiveRoot, microphoneDeviceId, systemAudioDeviceId }, cancellationToken);
 
+    public Task<AgentIpcResponse> UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("UPDATE_SERVER_URL", new { serverUrl }, cancellationToken);
+
     public Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("SET_AUDIO_DEVICES", new { microphoneDeviceId, systemAudioDeviceId }, cancellationToken);
 

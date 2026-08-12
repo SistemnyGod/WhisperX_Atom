@@ -128,6 +128,11 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             // created later by BindSessionAsync and persisted back into the spool.
             await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
+            // Publish the local session id before starting WASAPI. A first callback
+            // can fail immediately; the failure handler must still be able to
+            // persist the error and stop the session instead of silently returning
+            // a successful START response.
+            lock (_gate) _sessionId = sessionId;
 
             CaptureTrack? microphone = null;
             CaptureTrack? systemAudio = null;
@@ -204,8 +209,11 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 {
                     throw new IOException("AUDIO_CALLBACK_TIMEOUT");
                 }
+                if (microphone.IsFailed)
+                    throw new IOException("AUDIO_SOURCE_FAILED");
             }
-            _sessionId = sessionId;
+            if (profile == "SYSTEM_ONLY" && systemAudio?.IsFailed == true)
+                throw new IOException("AUDIO_SOURCE_FAILED");
             Interlocked.Exchange(ref _fatalCaptureFailureStarted, 0);
             if (microphoneWarning is not null || systemWarning is not null)
                 await _spool.AddEventAsync(sessionId, "AUDIO_SOURCE_WARNING", payloadJson: JsonSerializer.Serialize(new { microphone = microphoneWarning, systemAudio = systemWarning }), cancellationToken: cancellationToken);
@@ -217,7 +225,8 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             await StopTracksAsync();
             _sessionId = null;
             _state.Restore(RecorderState.Idle, "recording-start-failed");
-            await _spool.SetSessionStateAsync(sessionId, "FAILED", cancellationToken);
+            try { await _spool.SetSessionStateAsync(sessionId, "FAILED", CancellationToken.None); }
+            catch (Exception stateError) { _logger.LogWarning(stateError, "Could not persist failed start state. Session={SessionId}", sessionId); }
             throw;
         }
     }

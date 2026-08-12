@@ -174,8 +174,10 @@ services:
       COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
       REQUIRE_CUDA: ${REQUIRE_CUDA:-true}
       GPU_CONCURRENCY: "1"
+      GPU_WORKER_MODE: ${GPU_WORKER_MODE:-container}
       GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+      WORKER_INSTANCE_ID: ${GPU_WORKER_INSTANCE_ID:-gpu-worker}
       # pyannote 3.3.2 checkpoints are trusted local/HF artifacts and require the pre-2.6 torch.load behavior.
       # Do not share the GPU with the manually started diagnostic LLM server.
       GPU_ENFORCE_NO_RESIDENT_LLM: "true"
@@ -202,10 +204,11 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import torch; assert torch.cuda.is_available()\""]
+      test: ["CMD", "python", "-m", "workers.ml_worker.healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
 
   llama-server:
     profiles: ["llm-diagnostic"]

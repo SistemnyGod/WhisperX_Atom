@@ -340,6 +340,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     }
 
     var workers = postgres ? await store.ListWorkerRuntimeAsync() : Array.Empty<WorkerRuntimeRow>();
+    var operations = postgres ? await store.GetOperationsSnapshotAsync() : null;
     var fresh = workers
         .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
         .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastSeenAt).First(), StringComparer.OrdinalIgnoreCase);
@@ -396,6 +397,11 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy" }
             : new { status = "READY", reason = "summary_worker_ready" };
     }
+    var gpuStatus = !cuda
+        ? "UNAVAILABLE"
+        : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
+            ? "BUSY"
+            : "READY";
     var ready = postgres && nats && requiredWorkersReady && cuda;
 
     return Results.Ok(new
@@ -407,10 +413,20 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             postgres = new { status = postgres ? "READY" : "UNAVAILABLE" },
             nats = new { status = nats ? "READY" : "UNAVAILABLE" },
             workers = workerReady,
-            cuda = new { status = cuda ? "READY" : "UNAVAILABLE" },
+            cuda = new { status = gpuStatus },
             hfDiarization = new { status = hf },
             recorder = new { status = "OPTIONAL" },
             qwen
+        },
+        queue = operations is null ? null : new
+        {
+            queuedJobs = operations.QueuedJobs,
+            runningJobs = operations.RunningJobs,
+            staleLeases = operations.StaleLeases,
+            pendingOutbox = operations.PendingOutbox,
+            activeGpuJobs = operations.ActiveGpuJobs,
+            failedJobs24h = operations.FailedJobs24h,
+            staleRecordingSessions = operations.StaleRecordingSessions
         }
     });
 });
@@ -917,8 +933,17 @@ app.MapPost("/api/agents/bootstrap", async (AgentBootstrapRequest request, HttpC
     var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
     var result = await store.BootstrapAgentAsync(request.InstallationId, userId, string.IsNullOrWhiteSpace(request.Name) ? "WhisperX Atom Recorder" : request.Name.Trim(), request.AgentId, token, request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"));
     if (result is null) return Results.BadRequest(new { error = "agent_bootstrap_rejected" });
-    if (result.ReenrollRequired) return Results.Conflict(new { error = "REENROLL_REQUIRED", agentId = result.Agent.Id });
-    return Results.Ok(new { agentId = result.Agent.Id, agent = result.Agent, token = result.Token });
+    if (result.ReenrollRequired)
+        return Results.Conflict(new { error = "REENROLL_REQUIRED", state = "REENROLL_REQUIRED", linked = false, reenrollRequired = true, agentId = result.Agent.Id });
+    return Results.Ok(new
+    {
+        state = result.Linked ? "AGENT_READY" : "AGENT_LINK_PENDING",
+        agentId = result.Agent.Id,
+        agent = result.Agent,
+        linked = result.Linked,
+        reenrollRequired = false,
+        token = result.Token
+    });
 });
 
 app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
@@ -1466,6 +1491,73 @@ public sealed class Database(IConfiguration configuration)
                 await insert.ExecuteNonQueryAsync();
             }
         }
+
+        // Reopen only interrupted, bounded work after an API restart. Terminal
+        // jobs and READY assets remain terminal; the client/server spool and
+        // outbox continue to provide durable idempotency for recovery.
+        await RecoverInterruptedWorkAsync(connection);
+    }
+
+    private static async Task RecoverInterruptedWorkAsync(NpgsqlConnection connection)
+    {
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var jobs = new NpgsqlCommand("""
+            UPDATE jobs
+            SET status='QUEUED',
+                stage=CASE
+                    WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY'
+                    WHEN stage IN ('READY_FOR_ASR','TRANSCRIBING','ALIGNING','DIARIZING','QUALITY_CHECK','PERSISTING') THEN 'READY_FOR_ASR'
+                    ELSE 'UPLOADED'
+                END,
+                worker_id=NULL,
+                lease_expires_at=NULL,
+                last_heartbeat=now(),
+                error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
+                updated_at=now()
+            WHERE status='RUNNING'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+              AND attempt < 1
+            """, connection, transaction))
+        {
+            await jobs.ExecuteNonQueryAsync();
+        }
+        await using (var exhausted = new NpgsqlCommand("""
+            UPDATE jobs
+            SET status='FAILED', stage='FAILED', worker_id=NULL,
+                lease_expires_at=NULL, last_heartbeat=now(),
+                error_code='RETRY_LIMIT_EXCEEDED',
+                error_message=COALESCE(error_message,'Worker lease expired after retry limit'),
+                updated_at=now()
+            WHERE status='RUNNING'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+              AND attempt >= 1
+            """, connection, transaction))
+        {
+            await exhausted.ExecuteNonQueryAsync();
+        }
+        await using (var sessions = new NpgsqlCommand("""
+            UPDATE recording_sessions AS session
+            SET state='AWAITING_AGENT_RECONNECT'
+            FROM recorder_agents AS agent
+            WHERE session.agent_id=agent.id
+              AND session.state='RECORDING'
+              AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+            """, connection, transaction))
+        {
+            await sessions.ExecuteNonQueryAsync();
+        }
+        await using (var review = new NpgsqlCommand("""
+            UPDATE recording_sessions
+            SET state='ADMIN_REVIEW'
+            WHERE state='AWAITING_AGENT_RECONNECT'
+              AND created_at < now() - interval '24 hours'
+            """, connection, transaction))
+        {
+            await review.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
     }
 
     private static async Task ApplyMigrationsAsync(NpgsqlConnection connection)

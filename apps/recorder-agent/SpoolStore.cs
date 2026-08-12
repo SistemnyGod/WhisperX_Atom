@@ -891,15 +891,14 @@ public sealed class SpoolStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<string>> SessionsNeedingRecoveryAsync(bool includeLegacyArchiveFailures = false, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<string>> SessionsNeedingRecoveryAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)) OR (next_retry_at IS NULL AND state='FAILED' AND local_finalize_state<>'LOCAL_FAILED'))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY') AND (next_retry_at IS NULL OR next_retry_at <= $now)) OR ($includeLegacy=1 AND state='FAILED' AND local_finalize_state='LOCAL_FAILED' AND last_error_code IN ('LOCAL_ENCODING_FAILED','LOCAL_ARCHIVE_FAILED'))) ORDER BY started_at";
+        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)) OR (next_retry_at IS NULL AND state='FAILED' AND local_finalize_state<>'LOCAL_FAILED'))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY') AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
         command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddMinutes(-2).ToString("O"));
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
-        command.Parameters.AddWithValue("$includeLegacy", includeLegacyArchiveFailures ? 1 : 0);
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) result.Add(reader.GetString(0));
@@ -1115,7 +1114,10 @@ public sealed class SpoolStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<RecordingChunk>> PendingChunksAsync(int limit = 100, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<RecordingChunk>> PendingChunksAsync(int limit = 100, CancellationToken cancellationToken = default) =>
+        PendingChunksAsync(null, limit, cancellationToken);
+
+    public async Task<IReadOnlyList<RecordingChunk>> PendingChunksAsync(string? sessionId, int limit = 100, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -1129,6 +1131,7 @@ public sealed class SpoolStore
                 JOIN recording_sessions s ON s.id=c.session_id
                 WHERE c.status NOT IN ('CONFIRMED','CANCELLED')
                   AND s.state<>'CANCELLED'
+                  AND ($session IS NULL OR c.session_id=$session)
                   AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= $now)
             )
             SELECT id,session_id,track_id,sequence,local_path,start_sample,sample_count,sample_rate,channels,track_type,size_bytes,sha256,status,attempts,last_attempt_at,next_attempt_at,last_error_code
@@ -1138,6 +1141,7 @@ public sealed class SpoolStore
             """;
         command.Parameters.AddWithValue("$limit", limit);
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", (object?)sessionId ?? DBNull.Value);
         var result = new List<RecordingChunk>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) result.Add(new RecordingChunk(

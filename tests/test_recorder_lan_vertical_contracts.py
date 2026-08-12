@@ -18,6 +18,28 @@ def test_start_is_local_first_and_pipe_is_parallel():
     assert "MaxServerInstances" in security
     assert "MaxServerInstances = 8" in protocol
     assert "SemaphoreSlim _commandGate" in host
+    assert "ConcurrentBag<Task>" not in host
+    assert "ConcurrentDictionary<Task, byte>" in host
+    assert "_connections.TryRemove" in host
+
+
+def test_new_ipc_session_requires_owner_but_legacy_reconnect_can_use_meeting_id():
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    start = host.split('case "START":', 1)[1].split('case "PAUSE":', 1)[0]
+    assert 'if (meetingId is null && ownerUserId is null)' in start
+    assert 'return Error("OWNER_REQUIRED")' in start
+    assert "legacy/reconnect" in start
+    assert start.index('if (meetingId is null && ownerUserId is null)') < start.index("recorder.StartAsync")
+
+
+def test_start_publishes_local_session_before_capture_callback_can_fail():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    start = coordinator.split("public async Task<string> StartAsync", 1)[1].split("private void EnsureStorageAvailable", 1)[0]
+    assert "Publish the local session id before starting WASAPI" in start
+    assert start.index("lock (_gate) _sessionId = sessionId") < start.index("microphone.Start()")
+    assert "SetSessionStateAsync(sessionId, \"FAILED\", CancellationToken.None)" in start
+    assert 'if (microphone.IsFailed)' in start
+    assert 'profile == "SYSTEM_ONLY" && systemAudio?.IsFailed == true' in start
 
 
 def test_typed_ownership_errors_are_preserved():
@@ -78,10 +100,13 @@ def test_lan_doctor_checks_core_processing_legacy_and_qwen_state():
     assert 'processing-readiness.json' in doctor
 
 
-def test_lan_start_guards_inherited_runnable_work_before_gpu_workers():
+def test_lan_start_recovers_inherited_runnable_work_before_gpu_workers():
     startup = read("scripts/start-whisperx-lan-server.ps1")
-    assert "STARTUP_QUEUE_GUARD_BLOCKED" in startup
-    assert "outbox_messages WHERE published_at IS NULL" in startup
+    assert "STARTUP_RECOVERY_FAILED" in startup
+    assert "WORKER_RESTART_RECOVERY" in startup
+    assert "RETRY_LIMIT_EXCEEDED" in startup
+    assert "ADMIN_REVIEW" in startup
+    assert "STARTUP_QUEUE_GUARD_BLOCKED" not in startup
     assert 'postgres", "nats", "api", "tusd", "lan-gateway' in startup
     assert 'media-worker", "gpu-worker' in startup
 
@@ -89,8 +114,20 @@ def test_lan_start_guards_inherited_runnable_work_before_gpu_workers():
 def test_existing_bootstrap_does_not_rotate_agent_token():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     bootstrap = store.split("public async Task<AgentBootstrapResult?> BootstrapAgentAsync", 1)[1].split("public async Task<bool> AgentUserLinkedAsync", 1)[0]
+    assert "if (existing is null)" in bootstrap
+    assert "enrollment_hash" in bootstrap
+    assert "repeat bootstrap is a link refresh, not token rotation" in bootstrap
     assert "return new AgentBootstrapResult(result, existing is null ? token : null)" in bootstrap
     assert "enrollment_hash=excluded.enrollment_hash" not in bootstrap
+
+
+def test_bootstrap_exposes_explicit_agent_state_without_token_rotation():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+    assert 'state = result.Linked ? "AGENT_READY" : "AGENT_LINK_PENDING"' in api
+    assert "linked = result.Linked" in api
+    assert "reenrollRequired = false" in api
+    assert '"AGENT_LINK_PENDING"' in client
 
 
 def test_desktop_blocks_deterministic_bootstrap_errors_but_allows_network_fallback():
@@ -98,5 +135,62 @@ def test_desktop_blocks_deterministic_bootstrap_errors_but_allows_network_fallba
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     assert "class DesktopApiException" in client
     assert "retryable" in client
-    assert 'ex.StatusCode != 0 && !ex.Retryable' in view_model
+    assert "LastStatus" in view_model
+    assert "OfflineEligible" in view_model
     assert '"AGENT_USER_LINK_REQUIRED"' in view_model
+
+
+def test_existing_agent_origin_update_preserves_identity_and_token():
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    coordinator = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
+    assert "UpdateServerUrlAsync" in api
+    assert '"UPDATE_SERVER_URL"' in host
+    assert "Existing Agents keep their token" in coordinator
+
+
+def test_offline_capture_requires_previous_bootstrap_owner():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    coordinator = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
+    assert "OfflineEligible" in view_model
+    assert "services.Backend.CanUseOffline" in coordinator
+
+
+def test_recorder_uses_separate_long_upload_timeout():
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "CreateHttpClient(TimeSpan.FromSeconds(8))" in api
+    assert "CreateHttpClient(TimeSpan.FromSeconds(120))" in api
+    assert "Timeout.InfiniteTimeSpan" in api
+
+
+def test_missing_chunk_probe_preserves_typed_auth_errors():
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    probe = api.split("private async Task<IReadOnlyList<int>?> ReadMissingChunksAsync", 1)[1].split("private async Task<HttpResponseMessage> SendWithRetryAsync", 1)[0]
+    assert 'await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE")' in probe
+    assert "if (!response.IsSuccessStatusCode) return null" not in probe
+
+
+def test_desktop_processing_tracks_transcript_reprocess_jobs():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "private static bool IsTranscriptJob(DesktopJob job)" in view_model
+    assert 'string.Equals(job.Type, "TRANSCRIBE_REPROCESS"' in view_model
+    assert view_model.count("jobs.Where(IsTranscriptJob)") >= 2
+
+
+def test_summary_rebuild_is_blocked_explicitly_when_qwen_is_disabled():
+    mapper = read("apps/desktop/WhisperX.Atom.Desktop/Services/UiStatusMapper.cs")
+    meetings = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/MeetingsViewModel.cs")
+    summaries = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/SummariesViewModel.cs")
+    assert "IsQwenDisabled" in mapper
+    assert "SummaryDisabledMessage" in mapper
+    assert meetings.count("UiStatusMapper.IsQwenDisabled(readiness)") == 1
+    assert summaries.count("UiStatusMapper.IsQwenDisabled(readiness)") >= 2
+    assert "QueueSummaryRebuildAsync" in meetings and "QueueSummaryRebuildAsync" in summaries
+
+
+def test_recorder_ipc_has_bounded_control_response_timeout():
+    client = read("apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs")
+    assert "ControlRequestTimeout = TimeSpan.FromSeconds(8)" in client
+    assert "timeout.CancelAfter(ControlRequestTimeout)" in client
+    assert "ReadLineAsync(requestCancellation)" in client
+    assert 'RecorderIpcException("RECORDER_IPC_TIMEOUT"' in client

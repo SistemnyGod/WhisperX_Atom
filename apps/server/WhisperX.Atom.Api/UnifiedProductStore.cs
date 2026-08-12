@@ -4,7 +4,7 @@ using System.Text.Json;
 using Npgsql;
 
 public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
-public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false);
+public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false, bool Linked = true);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
 public sealed record RecordingSessionCreateResult(RecordingSessionRow? Session, string? ErrorCode = null, bool Retryable = false);
@@ -19,7 +19,7 @@ public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Titl
 public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt);
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
-public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, DateTimeOffset CheckedAt);
+public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, long StaleRecordingSessions, DateTimeOffset CheckedAt);
 public sealed record WorkerRuntimeRow(string WorkerName, string InstanceId, string Status, DateTime LastSeenAt, Guid? CurrentJobId, string Version, JsonDocument Capabilities, string? LastErrorCode);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
 public enum ActionItemUpdateResult { NotFound, InvalidTransition, Updated }
@@ -124,19 +124,36 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
 
         agentId ??= Guid.NewGuid();
-        await using (var upsert = new NpgsqlCommand("""
-            INSERT INTO recorder_agents(id,installation_id,name,enrollment_hash,version,status,last_seen_at,capabilities)
-            VALUES(@id,@installation,@name,@hash,@version,'ONLINE',now(),@capabilities::jsonb)
-            ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,version=excluded.version,status='ONLINE',last_seen_at=now(),capabilities=excluded.capabilities
-            """, connection, transaction))
+        if (existing is null)
         {
-            upsert.Parameters.AddWithValue("id", agentId.Value);
-            upsert.Parameters.AddWithValue("installation", installationId);
-            upsert.Parameters.AddWithValue("name", name.Trim());
-            upsert.Parameters.AddWithValue("hash", Hash(token));
-            upsert.Parameters.AddWithValue("version", version);
-            upsert.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
-            await upsert.ExecuteNonQueryAsync();
+            await using var insert = new NpgsqlCommand("""
+                INSERT INTO recorder_agents(id,installation_id,name,enrollment_hash,version,status,last_seen_at,capabilities)
+                VALUES(@id,@installation,@name,@hash,@version,'ONLINE',now(),@capabilities::jsonb)
+                """, connection, transaction);
+            insert.Parameters.AddWithValue("id", agentId.Value);
+            insert.Parameters.AddWithValue("installation", installationId);
+            insert.Parameters.AddWithValue("name", name.Trim());
+            insert.Parameters.AddWithValue("hash", Hash(token));
+            insert.Parameters.AddWithValue("version", version);
+            insert.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
+            await insert.ExecuteNonQueryAsync();
+        }
+        else
+        {
+            // A repeat bootstrap is a link refresh, not token rotation. The
+            // Recorder may still be using the original DPAPI-protected token.
+            await using var update = new NpgsqlCommand("""
+                UPDATE recorder_agents
+                SET installation_id=@installation,name=@name,version=@version,
+                    status='ONLINE',last_seen_at=now(),capabilities=@capabilities::jsonb
+                WHERE id=@id
+                """, connection, transaction);
+            update.Parameters.AddWithValue("id", agentId.Value);
+            update.Parameters.AddWithValue("installation", installationId);
+            update.Parameters.AddWithValue("name", name.Trim());
+            update.Parameters.AddWithValue("version", version);
+            update.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
+            await update.ExecuteNonQueryAsync();
         }
         await using (var link = new NpgsqlCommand("INSERT INTO agent_user_links(agent_id,user_id,is_active,last_used_at) VALUES(@agent,@user,true,now()) ON CONFLICT(agent_id,user_id) DO UPDATE SET is_active=true,last_used_at=now()", connection, transaction))
         {
@@ -260,7 +277,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             link.Parameters.AddWithValue("agent", authenticatedAgent);
             link.Parameters.AddWithValue("user", owner);
             if (!((bool)(await link.ExecuteScalarAsync())!))
-                return new RecordingSessionCreateResult(null, "AGENT_USER_LINK_REQUIRED", true);
+                // Ownership/link configuration errors are deterministic. The
+                // desktop must repair the Agent↔User link instead of retrying
+                // the same request forever.
+                return new RecordingSessionCreateResult(null, "AGENT_USER_LINK_REQUIRED", false);
         }
         var resolvedTitle = string.IsNullOrWhiteSpace(title) ? "Meeting " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") : title.Trim();
         await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status) VALUES(@id,@owner,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
@@ -942,7 +962,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var pendingOutbox = await ScalarLongAsync("SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL");
         var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
         var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");
-        return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, DateTimeOffset.UtcNow);
+        var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions WHERE state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND created_at < now()-interval '5 minutes'");
+        return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
     }
 
     public async Task<IReadOnlyList<WorkerRuntimeRow>> ListWorkerRuntimeAsync()

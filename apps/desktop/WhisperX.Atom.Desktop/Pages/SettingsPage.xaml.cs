@@ -61,7 +61,31 @@ public sealed partial class SettingsPage : Page
     private async void ReconnectAgentButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
+        var confirmation = new ContentDialog
+        {
+            Title = "Переподключить Recorder Agent?",
+            Content = "Токен будет перевыпущен только для этого явного действия администратора. Текущий токен Agent перестанет работать.",
+            PrimaryButtonText = "Переподключить",
+            CloseButtonText = "Отмена",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = Content.XamlRoot
+        };
+        if (await confirmation.ShowAsync() != ContentDialogResult.Primary) return;
         await ViewModel.ReconnectAgentAsync();
+        UpdateStatus();
+    }
+
+    private async void StartRecorderButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.StartRecorderServiceAsync();
+        UpdateStatus();
+    }
+
+    private async void SaveDiagnosticsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.SaveDiagnosticsAsync();
         UpdateStatus();
     }
 

@@ -19,7 +19,9 @@ public sealed class AgentPipeHost(
     private readonly ConcurrentDictionary<string, Task> _finalizations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _finalizationErrors = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _commandGate = new(1, 1);
-    private readonly ConcurrentBag<Task> _connections = new();
+    // Keep only active IPC tasks. HEALTH polling is frequent and retaining every
+    // completed connection task would make service memory grow forever.
+    private readonly ConcurrentDictionary<Task, byte> _connections = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -32,7 +34,12 @@ public sealed class AgentPipeHost(
             {
                 await pipe.WaitForConnectionAsync(stoppingToken);
                 var connection = HandleConnectionAsync(pipe, stoppingToken);
-                _connections.Add(connection);
+                _connections.TryAdd(connection, 0);
+                _ = connection.ContinueWith(
+                    completed => _connections.TryRemove(completed, out _),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -46,7 +53,7 @@ public sealed class AgentPipeHost(
             }
         }
 
-        try { await Task.WhenAll(_connections.ToArray()); }
+        try { await Task.WhenAll(_connections.Keys.ToArray()); }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
@@ -105,6 +112,11 @@ public sealed class AgentPipeHost(
                     if (HasProperty(request.Payload, "microphoneDeviceId") || HasProperty(request.Payload, "systemAudioDeviceId"))
                         await api.SetAudioDevicesAsync(ReadString(request.Payload, "microphoneDeviceId"), ReadString(request.Payload, "systemAudioDeviceId"), cancellationToken);
                     return Status();
+                case "UPDATE_SERVER_URL":
+                    var updatedServerUrl = ReadString(request.Payload, "serverUrl");
+                    if (string.IsNullOrWhiteSpace(updatedServerUrl)) return Error("server_url_required");
+                    await api.UpdateServerUrlAsync(updatedServerUrl, cancellationToken);
+                    return Status();
                 case "SET_ARCHIVE_ROOT":
                     var archiveRoot = ReadString(request.Payload, "archiveRoot");
                     if (string.IsNullOrWhiteSpace(archiveRoot)) return Error("archive_root_required");
@@ -143,6 +155,12 @@ public sealed class AgentPipeHost(
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
                     var ownerUserId = ReadGuid(request.Payload, "ownerUserId");
+                    // A new local-first session must have an immutable owner. A
+                    // legacy/reconnect request may omit it only when it names an
+                    // already existing server meeting whose owner can be checked
+                    // during reconciliation.
+                    if (meetingId is null && ownerUserId is null)
+                        return Error("OWNER_REQUIRED");
                     var title = ReadString(request.Payload, "title");
                     var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId);
                     var boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);
@@ -186,7 +204,7 @@ public sealed class AgentPipeHost(
     }
 
     private static bool IsMutatingCommand(string command) => command is
-        "CONFIGURE" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
+        "CONFIGURE" or "UPDATE_SERVER_URL" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
         "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "MARKER" or "DECISION" or
         "ACTION_ITEM" or "VOICE_EVENT";
 

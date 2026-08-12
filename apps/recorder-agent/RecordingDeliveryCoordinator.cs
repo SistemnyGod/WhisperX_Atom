@@ -113,7 +113,7 @@ public sealed class RecordingDeliveryCoordinator(
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "UPLOADING",
                 cancellationToken: cancellationToken);
-            await api.UploadPendingChunksAsync(spool, cancellationToken);
+            await api.UploadPendingChunksAsync(spool, localSessionId, cancellationToken);
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
 
             await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", cancellationToken: cancellationToken);

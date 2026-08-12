@@ -76,6 +76,15 @@ def test_new_recording_detaches_previous_session_trackers_before_resetting_ui():
     assert "private async Task StopSessionTrackingAsync()" in view_model
 
 
+def test_start_does_not_replay_configuration_commands_in_capture_critical_path():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
+    assert "SyncConfigurationAsync" not in start
+    assert "await RefreshAsync();" in start
+    assert "var preflight = await _services.Recorder.PreflightAsync();" in start
+    assert "_services.Recorder.StartAsync(title, serverMeetingId, ownerUserId)" in start
+
+
 def test_recovery_has_bounded_backoff_and_skips_cancelled_sessions():
     spool = read("apps/recorder-agent/SpoolStore.cs")
     worker = read("apps/recorder-agent/Program.cs") + read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")

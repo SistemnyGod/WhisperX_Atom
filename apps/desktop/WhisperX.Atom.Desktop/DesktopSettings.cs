@@ -36,7 +36,7 @@ public sealed record DesktopSettings(
         catch (JsonException) { return CreateDefault(); }
     }
 
-    public static string DefaultApiUrl() => MachineServerConfig.ServerOriginOrNull()
+    public static string DefaultApiUrl() => MachineServerConfig.ManagedServerOriginOrNull()
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? FallbackLanApiUrl;
 

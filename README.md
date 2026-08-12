@@ -1,5 +1,19 @@
 # WhisperX Atom
 
+## Canonical LAN server
+
+For the shared server runtime use only `compose.dev.yml + compose.lan.yml`
+with Compose project `whisperx-atom` and origin
+`http://192.168.2.194:8080`. Start it with
+`.\scripts\start-whisperx-lan-server.ps1` (or
+`run_whisperx_lan_server.bat`). This publishes only the Caddy gateway; API,
+PostgreSQL, NATS and tusd stay on the Docker network. Qwen remains disabled
+until the transcript gates pass.
+
+`compose.dev.yml` by itself is Development-only and loopback-bound. Production
+uses the separate HTTPS profile. `run_app.bat` is the Desktop client launcher;
+it does not start a second server.
+
 WhisperX Atom — локальная система записи совещаний, доставки аудио, транскрибации WhisperX и последующего анализа. Рабочий пользовательский интерфейс — нативное Windows-приложение WinUI 3. Запись и CUDA выполняются на Windows-хосте, а серверные сервисы работают в Docker.
 
 ## Быстрый старт

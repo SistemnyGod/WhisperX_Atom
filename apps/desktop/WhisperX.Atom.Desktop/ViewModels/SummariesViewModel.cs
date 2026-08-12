@@ -114,6 +114,15 @@ public sealed class SummariesViewModel : ObservableObject
                 return;
             }
 
+            try
+            {
+                var readiness = await _services.Backend.GetProcessingReadinessAsync(cancellationToken);
+                if (UiStatusMapper.IsQwenDisabled(readiness))
+                    WarningText = "Саммари отключено настройками сервера. После включения Qwen новая сборка появится здесь автоматически.";
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { }
+
             var meetings = await LoadAllMeetingsAsync(cancellationToken);
             var loaded = new List<SummaryRegistryItem>();
             var failures = 0;
@@ -164,12 +173,26 @@ public sealed class SummariesViewModel : ObservableObject
         ErrorText = string.Empty;
         try
         {
-            if (!await _services.Backend.RebuildSummaryAsync(parsedMeetingId, cancellationToken))
+            var readiness = await _services.Backend.GetProcessingReadinessAsync(cancellationToken);
+            if (UiStatusMapper.IsQwenDisabled(readiness))
             {
-                ErrorText = "API не принял запрос на пересборку саммари.";
+                ErrorText = UiStatusMapper.SummaryDisabledMessage;
+                StatusText = "Саммари отключено настройками сервера";
                 return false;
             }
-
+            var job = await _services.Backend.QueueSummaryRebuildAsync(parsedMeetingId, cancellationToken);
+            if (job is null)
+            {
+                ErrorText = "Саммари не поставлено в очередь. Проверьте, что Qwen включена и стенограмма готова.";
+                return false;
+            }
+            var completed = await _services.JobTracker.WaitForTerminalAsync(job, current =>
+                StatusText = $"{UiStatusMapper.Text(current.Status)} · {UiStatusMapper.Text(current.Stage)} · {current.Progress}%", cancellationToken);
+            if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
+            {
+                ErrorText = completed?.Error ?? "Пересборка саммари завершилась ошибкой.";
+                return false;
+            }
             var summary = await _services.Backend.GetSummaryAsync(parsedMeetingId, cancellationToken);
             item.ReplaceSummary(summary);
             OnPropertyChanged(nameof(SelectedItem));
@@ -220,4 +243,5 @@ public sealed class SummariesViewModel : ObservableObject
     }
 
     private static string SafeError(Exception ex, string fallback) => UiErrorFormatter.Format(ex, fallback);
+
 }
