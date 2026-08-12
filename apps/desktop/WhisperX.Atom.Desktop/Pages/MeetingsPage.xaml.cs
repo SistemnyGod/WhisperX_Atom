@@ -28,6 +28,10 @@ public sealed partial class MeetingsPage : Page
     private bool _suppressMeetingSelection;
     private bool _workspaceExpanded;
     private MeetingNavigationTarget? _pendingTarget;
+    private IReadOnlyList<DesktopTranscriptSegment> _searchMatches = [];
+    private int _searchMatchIndex = -1;
+    private bool _suppressSegmentSeek;
+    private bool _transcriptPlaybackSubscribed;
 
     public MeetingsPage()
     {
@@ -97,6 +101,7 @@ public sealed partial class MeetingsPage : Page
         _workspaceCts = null;
         _workspace?.ClearSelection();
         PreviewPlayer.Source = null;
+        TranscriptPlayer.Source = null;
         base.OnNavigatedFrom(e);
     }
 
@@ -124,6 +129,7 @@ public sealed partial class MeetingsPage : Page
             _workspaceCts?.Cancel();
             _workspace.ClearSelection();
             PreviewPlayer.Source = null;
+            TranscriptPlayer.Source = null;
             UpdateWorkspaceState();
             UpdateWorkspaceText();
             return;
@@ -171,11 +177,17 @@ public sealed partial class MeetingsPage : Page
             if (media is not null)
             {
                 var path = await _workspace.LoadPreviewAsync(media, _pageCts.Token);
-                if (!string.IsNullOrWhiteSpace(path)) PreviewPlayer.Source = MediaSource.CreateFromUri(new Uri(path));
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    var source = MediaSource.CreateFromUri(new Uri(path));
+                    PreviewPlayer.Source = source;
+                    TranscriptPlayer.Source = MediaSource.CreateFromUri(new Uri(path));
+                    AttachTranscriptPlayback();
+                }
             }
         }
-        if (PreviewPlayer.MediaPlayer is not null)
-            PreviewPlayer.MediaPlayer.PlaybackSession.Position = TimeSpan.FromMilliseconds(Math.Max(0, startMs.Value));
+        var player = TranscriptPlayer.MediaPlayer ?? PreviewPlayer.MediaPlayer;
+        if (player is not null) player.PlaybackSession.Position = TimeSpan.FromMilliseconds(Math.Max(0, startMs.Value));
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -218,6 +230,7 @@ public sealed partial class MeetingsPage : Page
             _workspaceExpanded = false;
             MeetingsList.SelectedItem = null;
             PreviewPlayer.Source = null;
+            TranscriptPlayer.Source = null;
             await _viewModel.RefreshAsync(_pageCts.Token);
             UpdateListState();
             UpdateWorkspaceState();
@@ -403,6 +416,8 @@ public sealed partial class MeetingsPage : Page
                 return;
             }
             PreviewPlayer.Source = MediaSource.CreateFromUri(new Uri(path));
+            TranscriptPlayer.Source = MediaSource.CreateFromUri(new Uri(path));
+            AttachTranscriptPlayback();
             PreviewStatusText.Text = path;
         }
         catch (OperationCanceledException) { }
@@ -414,10 +429,95 @@ public sealed partial class MeetingsPage : Page
         ApplyTranscriptFilter();
     }
 
-    private void TranscriptList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void TranscriptList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (TranscriptList.SelectedItem is not DesktopTranscriptSegment segment || PreviewPlayer.MediaPlayer is null) return;
-        PreviewPlayer.MediaPlayer.PlaybackSession.Position = TimeSpan.FromMilliseconds(segment.StartMs);
+        EditSegmentButton.IsEnabled = TranscriptList.SelectedItem is DesktopTranscriptSegment;
+        if (_suppressSegmentSeek || TranscriptList.SelectedItem is not DesktopTranscriptSegment segment || _workspace is null || _pageCts is null) return;
+        var player = TranscriptPlayer.MediaPlayer ?? PreviewPlayer.MediaPlayer;
+        if (player is null)
+        {
+            var media = _workspace.Media.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.PreviewStorageKey));
+            if (media is not null)
+            {
+                var path = await _workspace.LoadPreviewAsync(media, _pageCts.Token);
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    TranscriptPlayer.Source = MediaSource.CreateFromUri(new Uri(path));
+                    AttachTranscriptPlayback();
+                    player = TranscriptPlayer.MediaPlayer;
+                }
+            }
+        }
+        if (player is not null) player.PlaybackSession.Position = TimeSpan.FromMilliseconds(segment.StartMs);
+    }
+
+    private void AttachTranscriptPlayback()
+    {
+        if (_transcriptPlaybackSubscribed || TranscriptPlayer.MediaPlayer is null) return;
+        _transcriptPlaybackSubscribed = true;
+        TranscriptPlayer.MediaPlayer.PlaybackSession.PositionChanged += (_, _) =>
+        {
+            var positionMs = (long)TranscriptPlayer.MediaPlayer.PlaybackSession.Position.TotalMilliseconds;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_workspace is null) return;
+                var segment = _workspace.TranscriptSegments.FirstOrDefault(item => positionMs >= item.StartMs && positionMs < item.EndMs);
+                if (segment is null || Equals(TranscriptList.SelectedItem, segment)) return;
+                _suppressSegmentSeek = true;
+                try
+                {
+                    TranscriptList.SelectedItem = segment;
+                    if (TranscriptAutoScrollCheckBox.IsChecked == true) TranscriptList.ScrollIntoView(segment);
+                }
+                finally { _suppressSegmentSeek = false; }
+            });
+        };
+    }
+
+    private async void ReprocessTranscriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace is null || _pageCts is null) return;
+        try
+        {
+            if (!await _workspace.ReprocessTranscriptAsync(_pageCts.Token)) ShowError("Не удалось поставить новую версию стенограммы в очередь.");
+            UpdateWorkspaceText();
+        }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось запустить повторную обработку стенограммы.")); }
+    }
+
+    private async void EditSegmentButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace is null || _pageCts is null || TranscriptList.SelectedItem is not DesktopTranscriptSegment segment) return;
+        var editor = new TextBox { Text = segment.Text, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinWidth = 520, MaxLength = 8000 };
+        var dialog = new ContentDialog
+        {
+            Title = "Редактирование сегмента",
+            Content = editor,
+            PrimaryButtonText = "Сохранить версию",
+            CloseButtonText = "Отмена",
+            XamlRoot = this.XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            if (!Guid.TryParse(segment.Id, out var segmentId) || !await _workspace.EditTranscriptSegmentAsync(segmentId, editor.Text, _pageCts.Token))
+                ShowError("Не удалось создать новую пользовательскую версию стенограммы.");
+            else UpdateWorkspaceText();
+        }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось сохранить сегмент.")); }
+    }
+
+    private void PreviousTranscriptMatchButton_Click(object sender, RoutedEventArgs e) => SelectTranscriptMatch(-1);
+    private void NextTranscriptMatchButton_Click(object sender, RoutedEventArgs e) => SelectTranscriptMatch(1);
+
+    private void SelectTranscriptMatch(int direction)
+    {
+        if (_searchMatches.Count == 0) return;
+        _searchMatchIndex = (_searchMatchIndex + direction + _searchMatches.Count) % _searchMatches.Count;
+        var match = _searchMatches[_searchMatchIndex];
+        TranscriptList.SelectedItem = match;
+        TranscriptList.ScrollIntoView(match);
+        TranscriptSearchStatus.Text = $"{_searchMatchIndex + 1} / {_searchMatches.Count}";
     }
 
     private void WorkspaceTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -543,6 +643,9 @@ public sealed partial class MeetingsPage : Page
                     || (segment.Speaker?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
                 .ToList();
         TranscriptList.ItemsSource = visible;
+        _searchMatches = visible;
+        _searchMatchIndex = visible.Count == 0 ? -1 : Math.Clamp(_searchMatchIndex, 0, visible.Count - 1);
+        TranscriptSearchStatus.Text = string.IsNullOrWhiteSpace(query) ? $"Сегментов: {visible.Count}" : $"Совпадений: {visible.Count}";
         TranscriptEmptyState.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TranscriptEmptyTitle.Text = _workspace.Transcript is null
             ? "Стенограмма ещё не готова"

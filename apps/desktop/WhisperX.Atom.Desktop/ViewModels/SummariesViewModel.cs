@@ -32,11 +32,7 @@ public sealed class SummaryRegistryItem
 
     private static string FormatSummary(DesktopSummary? summary)
     {
-        if (summary is null) return "Саммари пока не готово.";
-        var root = summary.Content.RootElement;
-        if (root.TryGetProperty("summary", out var summaryText) && summaryText.ValueKind == JsonValueKind.String)
-            return summaryText.GetString() ?? "Саммари готово, но текст отсутствует.";
-        return root.ToString();
+        return MeetingProtocolParser.Parse(summary?.Content).DisplayText;
     }
 
     private static string FormatReview(DesktopSummary? summary)

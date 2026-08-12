@@ -136,7 +136,7 @@
 
                                 <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20" RowDefinitions="Auto,*" RowSpacing="12">
-                                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
                                             <StackPanel Spacing="2">
                                                 <TextBlock Text="Стенограмма встречи" Style="{StaticResource SectionTitleStyle}" />
                                                 <TextBlock x:Name="TranscriptMetaText" Text="Стенограмма ещё не готова" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
@@ -145,11 +145,20 @@
                                             </StackPanel>
                                             <Button Grid.Column="1" Content="Скачать TXT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptTextButton_Click" />
                                             <Button Grid.Column="2" Content="Скачать SRT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptSrtButton_Click" />
+                                            <Button Grid.Column="3" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="ReprocessTranscriptButton_Click" />
                                         </Grid>
                                         <Grid Grid.Row="1" ColumnDefinitions="*,260" ColumnSpacing="16">
-                                            <Grid RowDefinitions="Auto,*" RowSpacing="10">
-                                                <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
-                                                <Grid Grid.Row="1">
+                                            <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
+                                                <MediaPlayerElement x:Name="TranscriptPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
+                                                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+                                                    <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" Width="260" />
+                                                    <Button Content="Пред." Style="{StaticResource SecondaryButtonStyle}" Click="PreviousTranscriptMatchButton_Click" />
+                                                    <Button Content="След." Style="{StaticResource SecondaryButtonStyle}" Click="NextTranscriptMatchButton_Click" />
+                                                    <TextBlock x:Name="TranscriptSearchStatus" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                    <CheckBox x:Name="TranscriptAutoScrollCheckBox" Content="Автопрокрутка" IsChecked="True" VerticalAlignment="Center" />
+                                                    <Button x:Name="EditSegmentButton" Content="Изменить сегмент" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="EditSegmentButton_Click" />
+                                                </StackPanel>
+                                                <Grid Grid.Row="2">
                                                     <ListView x:Name="TranscriptList" ItemsSource="{Binding TranscriptSegments}" SelectionMode="Single" SelectionChanged="TranscriptList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                                         <ListView.ItemTemplate>
                                                             <DataTemplate>

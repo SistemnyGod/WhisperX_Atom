@@ -185,6 +185,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     public ObservableCollection<DesktopMedia> Media { get; } = [];
     public ObservableCollection<DesktopDecision> Decisions { get; } = [];
     public ObservableCollection<DesktopTask> Tasks { get; } = [];
+    public ObservableCollection<DesktopTranscriptVersion> TranscriptVersions { get; } = [];
 
     public DesktopTranscript? Transcript
     {
@@ -326,8 +327,9 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             var summaryTask = LoadPartAsync(() => _services.Backend.GetSummaryAsync(meetingId, cancellationToken), "саммари", errors);
             var decisionsTask = LoadPartAsync(() => _services.Backend.GetDecisionsAsync(meetingId, cancellationToken), "решения", errors);
             var tasksTask = LoadPartAsync(() => _services.Backend.GetTasksAsync(meetingId, cancellationToken), "поручения", errors);
+            var versionsTask = LoadPartAsync(() => _services.Backend.GetTranscriptVersionsAsync(meetingId, cancellationToken), "версии стенограммы", errors);
 
-            await Task.WhenAll(jobsTask, transcriptTask, speakersTask, mediaTask, summaryTask, decisionsTask, tasksTask);
+            await Task.WhenAll(jobsTask, transcriptTask, speakersTask, mediaTask, summaryTask, decisionsTask, tasksTask, versionsTask);
 
             var jobs = await jobsTask;
             foreach (var job in jobs ?? []) Jobs.Add(job);
@@ -345,6 +347,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             foreach (var media in await mediaTask ?? []) Media.Add(media);
             foreach (var decision in await decisionsTask ?? []) Decisions.Add(decision);
             foreach (var item in await tasksTask ?? []) Tasks.Add(item);
+            foreach (var version in await versionsTask ?? []) TranscriptVersions.Add(version);
             Summary = await summaryTask;
             SummaryText = FormatSummary(Summary);
             SummaryMetaText = Summary is null ? string.Empty : $"Версия {Summary.Version} · {Summary.ModelName}";
@@ -397,6 +400,60 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     public async Task<bool> UpdateTaskAsync(DesktopTask item, CancellationToken cancellationToken = default) =>
         await _services.Backend.UpdateTaskAsync(item, cancellationToken);
 
+    public async Task<bool> EditTranscriptSegmentAsync(Guid segmentId, string text, CancellationToken cancellationToken = default)
+    {
+        if (Meeting is null || string.IsNullOrWhiteSpace(text) || !Guid.TryParse(Meeting.Id, out var meetingId)) return false;
+        var version = await _services.Backend.EditTranscriptSegmentAsync(meetingId, segmentId, text.Trim(), cancellationToken);
+        if (version is null) return false;
+        var transcript = await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
+        if (transcript is not null)
+        {
+            Transcript = transcript;
+            TranscriptSegments.Clear();
+            foreach (var segment in transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
+        }
+        TranscriptVersions.Clear();
+        foreach (var item in await _services.Backend.GetTranscriptVersionsAsync(meetingId, cancellationToken)) TranscriptVersions.Add(item);
+        return true;
+    }
+
+    public async Task<bool> ReprocessTranscriptAsync(CancellationToken cancellationToken = default)
+    {
+        if (Meeting is null || !Guid.TryParse(Meeting.Id, out var meetingId)) return false;
+        var job = await _services.Backend.ReprocessTranscriptAsync(meetingId, cancellationToken);
+        if (job is null) return false;
+        LatestJob = job;
+        PipelineText = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)} · {job.Progress}%";
+        return true;
+    }
+
+    public async Task<bool> RenameSpeakerAsync(Guid speakerId, string displayName, CancellationToken cancellationToken = default)
+    {
+        if (Meeting is null || !Guid.TryParse(Meeting.Id, out var meetingId)) return false;
+        if (!await _services.Backend.RenameSpeakerAsync(meetingId, speakerId, displayName.Trim(), cancellationToken)) return false;
+        await ReloadTranscriptAndSpeakersAsync(meetingId, cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> MergeSpeakersAsync(Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default)
+    {
+        if (Meeting is null || !Guid.TryParse(Meeting.Id, out var meetingId)) return false;
+        if (!await _services.Backend.MergeSpeakersAsync(meetingId, sourceSpeakerId, targetSpeakerId, cancellationToken)) return false;
+        await ReloadTranscriptAndSpeakersAsync(meetingId, cancellationToken);
+        return true;
+    }
+
+    private async Task ReloadTranscriptAndSpeakersAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        var transcript = await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
+        Transcript = transcript;
+        TranscriptSegments.Clear();
+        if (transcript is not null)
+            foreach (var segment in transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
+        Speakers.Clear();
+        foreach (var speaker in await _services.Backend.GetSpeakersAsync(meetingId, cancellationToken)) Speakers.Add(speaker);
+    }
+
     public async Task<string?> LoadPreviewAsync(DesktopMedia media, CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(media.Id, out var mediaId)) return null;
@@ -412,6 +469,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         Media.Clear();
         Decisions.Clear();
         Tasks.Clear();
+        TranscriptVersions.Clear();
         Transcript = null;
         Summary = null;
         LatestJob = null;
@@ -434,11 +492,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
 
     private static string FormatSummary(DesktopSummary? summary)
     {
-        if (summary is null) return "Саммари пока не готово.";
-        var root = summary.Content.RootElement;
-        if (root.TryGetProperty("summary", out var summaryText) && summaryText.ValueKind == System.Text.Json.JsonValueKind.String)
-            return summaryText.GetString() ?? "Саммари готово, но текст отсутствует.";
-        return root.ToString();
+        return MeetingProtocolParser.Parse(summary?.Content).DisplayText;
     }
 
     private static string FormatDuration(long durationMs) => durationMs <= 0
