@@ -1,10 +1,13 @@
 using Microsoft.UI.Xaml;
+using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX_Atom_Desktop;
 
 public partial class App : Application
 {
     private MainWindow? _window;
+    private LoginWindow? _loginWindow;
+    private FrontendServices? _services;
     private static readonly string StartupLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "WhisperXAtom", "desktop-startup.log");
@@ -31,22 +34,93 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        _ = LaunchAsync();
+    }
+
+    private async Task LaunchAsync()
+    {
         try
         {
             WriteStartupLog("LAUNCH_STARTED", null);
-            _window = new MainWindow();
-            WriteStartupLog("MAIN_WINDOW_CREATED", null);
-            _window.Activate();
-            WriteStartupLog("MAIN_WINDOW_ACTIVATED", null);
-            _window.NavigateTo("home");
-            _window.StartBackgroundPolling();
-            WriteStartupLog("BACKGROUND_POLLING_STARTED", null);
+            var settingsStore = new WhisperX_Atom_Desktop.Services.DesktopSettingsStore();
+            var settings = settingsStore.Load();
+            _services = new WhisperX_Atom_Desktop.Services.FrontendServices(
+                new WhisperX_Atom_Desktop.Services.RecorderPipeService(),
+                new WhisperX_Atom_Desktop.Services.BackendService(settings),
+                settingsStore);
+            _services.LoggedOut += HandleLoggedOut;
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var authenticated = await _services.Backend.EnsureAuthenticatedAsync(timeout.Token);
+            if (authenticated)
+            {
+                AgentBootstrapStatus bootstrap;
+                try { bootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync(timeout.Token); }
+                catch (Exception exception)
+                {
+                    WriteStartupLog("AGENT_BOOTSTRAP_DEFERRED", exception);
+                    bootstrap = new(false, false, _services.Backend.CanUseOffline, "SERVER_UNAVAILABLE", "LAN-сервер временно недоступен.");
+                }
+
+                if (bootstrap.Code == "SERVER_UNAVAILABLE" && !_services.Backend.CanUseOffline)
+                    ShowLoginWindow("Первый вход должен быть выполнен при доступном LAN-сервере.");
+                else
+                    ShowMainWindow();
+            }
+            else if (_services.Backend.CanUseOffline)
+            {
+                ShowMainWindow();
+            }
+            else
+            {
+                ShowLoginWindow("Требуется вход в LAN-сервер.");
+            }
         }
         catch (Exception exception)
         {
             WriteStartupLog("LAUNCH_FAILED", exception);
-            throw;
+            if (_services is not null && _services.Backend.CanUseOffline)
+                ShowMainWindow();
+            else if (_services is not null)
+                ShowLoginWindow("Сервер пока недоступен. Выполните вход после восстановления LAN.");
         }
+    }
+
+    private void ShowLoginWindow(string? message = null)
+    {
+        if (_services is null) return;
+        if (_loginWindow is not null) return;
+        _loginWindow = new LoginWindow(_services, OnAuthenticatedAsync, message);
+        _loginWindow.Closed += (_, _) => _loginWindow = null;
+        _loginWindow.Activate();
+    }
+
+    private Task OnAuthenticatedAsync(AgentBootstrapStatus status)
+    {
+        ShowMainWindow();
+        return Task.CompletedTask;
+    }
+
+    private void ShowMainWindow()
+    {
+        if (_services is null || _window is not null) return;
+        _window = new MainWindow(_services);
+        _window.Closed += (_, _) => _window = null;
+        _window.Activate();
+        WriteStartupLog("MAIN_WINDOW_ACTIVATED", null);
+        _window.NavigateTo("home");
+        _window.StartBackgroundPolling();
+        WriteStartupLog("BACKGROUND_POLLING_STARTED", null);
+    }
+
+    private void HandleLoggedOut()
+    {
+        if (_window is not null)
+        {
+            _window.Close();
+            _window = null;
+        }
+        ShowLoginWindow("Выполнен выход. Требуется повторный вход.");
     }
 
     internal static void WriteStartupLog(string eventName, Exception? exception)

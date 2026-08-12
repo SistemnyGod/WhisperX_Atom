@@ -48,6 +48,7 @@ public interface IBackendService : IDisposable
     string? SessionCookie { get; }
     DesktopAuthState AuthState { get; }
     DateTimeOffset? SessionExpiresAtUtc { get; }
+    bool CanUseOffline { get; }
     void ApplySettings(DesktopSettings settings);
     Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);
@@ -155,13 +156,22 @@ public sealed record AudioDeviceOption(string Id, string Name, bool IsDefault, s
 
 public sealed record RecordingProfileOption(string Code, string DisplayName);
 
-public sealed class FrontendServices(
-    IRecorderService recorder,
-    IBackendService backend,
-    ISettingsStore settings)
+public sealed class FrontendServices
 {
-    public IRecorderService Recorder { get; } = recorder;
-    public IBackendService Backend { get; } = backend;
-    public ISettingsStore Settings { get; } = settings;
+    public FrontendServices(IRecorderService recorder, IBackendService backend, ISettingsStore settings)
+    {
+        Recorder = recorder;
+        Backend = backend;
+        Settings = settings;
+        AgentBootstrap = new AgentBootstrapCoordinator(this);
+    }
+
+    public IRecorderService Recorder { get; }
+    public IBackendService Backend { get; }
+    public ISettingsStore Settings { get; }
     public FrontendNavigationState Navigation { get; } = new();
+    public AgentBootstrapCoordinator AgentBootstrap { get; }
+    public event Action? LoggedOut;
+
+    public void RaiseLoggedOut() => LoggedOut?.Invoke();
 }

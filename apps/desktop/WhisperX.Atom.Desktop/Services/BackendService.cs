@@ -16,6 +16,16 @@ public sealed class BackendService : IBackendService
     public string? SessionCookie => _client.GetSessionCookie();
     public DesktopAuthState AuthState => _client.AuthState;
     public DateTimeOffset? SessionExpiresAtUtc => _client.SessionExpiresAtUtc;
+    public bool CanUseOffline
+    {
+        get
+        {
+            var settings = new DesktopSettingsStore().Load();
+            return !string.IsNullOrWhiteSpace(settings.ProtectedSessionCookie)
+                && settings.OwnerUserId is not null
+                && settings.AgentBootstrapConfirmed;
+        }
+    }
 
     public void ApplySettings(DesktopSettings settings)
     {
@@ -37,7 +47,7 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
@@ -93,7 +103,8 @@ public sealed class BackendService : IBackendService
             var currentSettings = new DesktopSettingsStore().Load();
             DesktopSettings.Save(ApiUrl, currentSettings.Username, SessionCookie, currentSettings.ArchiveRoot,
                 currentSettings.MicrophoneDeviceId, currentSettings.SystemAudioDeviceId, SessionExpiresAtUtc,
-                currentSettings.RecordingProfile, currentUser?.Id);
+                currentSettings.RecordingProfile, currentUser?.Id,
+                currentUser?.Id == currentSettings.OwnerUserId && currentSettings.AgentBootstrapConfirmed);
             return true;
         }
         catch

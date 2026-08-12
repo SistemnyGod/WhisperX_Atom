@@ -45,11 +45,13 @@ def test_user_bootstrap_and_owner_propagation_are_explicit():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     migration = read("apps/server/WhisperX.Atom.Api/Migrations/024_lan_users_agent_ownership.sql")
     desktop = read("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs")
+    bootstrap = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
     recorder = read("apps/recorder-agent/AgentPipeHost.cs") + read("apps/recorder-agent/SpoolStore.cs")
     assert 'app.MapPost("/api/agents/bootstrap"' in api
     assert "REENROLL_REQUIRED" in api and "agent_user_links" in store
     assert "must_change_password" in migration and "owner_user_id" in migration
-    assert "BootstrapLocalAgentAsync" in desktop
+    assert "EnsureAgentReadyAsync" in desktop
+    assert "BootstrapLocalAgentAsync" in bootstrap
     assert 'ReadGuid(request.Payload, "ownerUserId")' in recorder
     assert "OwnerUserId" in recorder
 

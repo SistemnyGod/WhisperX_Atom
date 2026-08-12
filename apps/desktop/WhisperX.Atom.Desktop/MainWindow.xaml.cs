@@ -15,12 +15,10 @@ public sealed partial class MainWindow : Window
     private readonly FrontendServices _services;
     private readonly DispatcherQueue _uiDispatcherQueue = DispatcherQueue.GetForCurrentThread();
     private readonly CancellationTokenSource _statusCts = new();
-    private readonly SemaphoreSlim _agentRecoveryGate = new(1, 1);
     private Task? _statusTask;
     private bool _suppressNavigation;
-    private DateTimeOffset _lastAgentRecoveryAttempt = DateTimeOffset.MinValue;
 
-    public MainWindow()
+    public MainWindow(FrontendServices services)
     {
         InitializeComponent();
         try
@@ -38,8 +36,8 @@ public sealed partial class MainWindow : Window
         if (File.Exists(iconPath))
             AppWindow.SetIcon(iconPath);
 
-        var settingsStore = new DesktopSettingsStore();
-        var settings = settingsStore.Load();
+        _services = services;
+        var settings = services.Settings.Load();
         HomeNavItem.Content = "Главная";
         RecordingNavItem.Content = "Запись";
         MeetingsNavItem.Content = "Совещания";
@@ -56,11 +54,6 @@ public sealed partial class MainWindow : Window
         SettingsNavItem.Content = "Настройки";
         SystemStatusText.Text = "Система";
         ProfileText.Text = string.IsNullOrWhiteSpace(settings.Username) ? "Локальная сессия" : settings.Username;
-        _services = new FrontendServices(
-            new RecorderPipeService(),
-            new BackendService(settings),
-            settingsStore);
-
         Closed += MainWindow_Closed;
         Closed += (_, _) => App.WriteStartupLog("MAIN_WINDOW_CLOSED", null);
     }
@@ -159,11 +152,13 @@ public sealed partial class MainWindow : Window
         var backendTask = _services.Backend.CheckReadyAsync(cancellationToken);
         var versionTask = _services.Backend.GetSystemVersionAsync(cancellationToken);
         var recorderTask = _services.Recorder.GetHealthAsync(cancellationToken);
-        await Task.WhenAll(backendTask, versionTask, recorderTask);
 
-        var backendAvailable = await backendTask;
-        var serverVersion = await versionTask;
-        var recorderAvailable = (await recorderTask).Ok;
+        var backendAvailable = false;
+        DesktopSystemVersion? serverVersion = null;
+        var recorderAvailable = false;
+        try { backendAvailable = await backendTask; } catch (OperationCanceledException) { throw; } catch { }
+        try { serverVersion = await versionTask; } catch (OperationCanceledException) { throw; } catch { }
+        try { recorderAvailable = (await recorderTask).Ok; } catch (OperationCanceledException) { throw; } catch { }
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
             QueueAgentRecovery(cancellationToken);
@@ -172,71 +167,22 @@ public sealed partial class MainWindow : Window
             SetSystemStatus("Время ПК отличается от времени сервера более чем на 5 минут", "WarningBrush");
             return;
         }
-        SetSystemStatus(
-            backendAvailable && !authenticated ? "Требуется вход" :
-            backendAvailable && recorderAvailable ? "Система готова" :
-            backendAvailable || recorderAvailable ? "Частично доступна" :
-            "Сервисы недоступны",
-            backendAvailable && !authenticated ? "WarningBrush" :
-            backendAvailable && recorderAvailable ? "SuccessBrush" :
-            backendAvailable || recorderAvailable ? "WarningBrush" :
-            "DangerBrush");
+        var status = backendAvailable && !authenticated ? ("Требуется вход", "WarningBrush") :
+            backendAvailable && recorderAvailable ? ("Система готова", "SuccessBrush") :
+            backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
+            recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
+            ("LAN-сервер и Recorder недоступны", "DangerBrush");
+        SetSystemStatus(status.Item1, status.Item2);
     }
 
     private void QueueAgentRecovery(CancellationToken cancellationToken)
     {
         _ = Task.Run(async () =>
         {
-            try { await RecoverAgentIfNeededAsync(cancellationToken); }
+            try { await _services.AgentBootstrap.EnsureAgentReadyAsync(cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (Exception) { }
         }, CancellationToken.None);
-    }
-
-    private async Task RecoverAgentIfNeededAsync(CancellationToken cancellationToken)
-    {
-        if (DateTimeOffset.UtcNow - _lastAgentRecoveryAttempt < TimeSpan.FromSeconds(30)) return;
-        if (!await _agentRecoveryGate.WaitAsync(0, cancellationToken)) return;
-        _lastAgentRecoveryAttempt = DateTimeOffset.UtcNow;
-        try
-        {
-            var user = await _services.Backend.GetCurrentUserAsync(cancellationToken);
-            if (user is null) return;
-
-            var healthResponse = await _services.Recorder.GetHealthAsync(cancellationToken);
-            var health = healthResponse.Health;
-            if (health is null) return;
-            if (string.Equals(healthResponse.State, "Recording", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(healthResponse.State, "Paused", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(healthResponse.State, "Finalizing", StringComparison.OrdinalIgnoreCase)) return;
-            var installationId = health.InstallationId ?? Guid.NewGuid();
-            var enrollment = await _services.Backend.BootstrapLocalAgentAsync(installationId, health.AgentId, "WhisperX Atom Desktop", cancellationToken);
-            if (enrollment.ReenrollRequired)
-            {
-                SetSystemStatus("Требуется повторная регистрация Recorder Agent", "WarningBrush");
-                return;
-            }
-            // Existing active Agents intentionally return no token. The bootstrap
-            // call still refreshes the current user's agent_user_links row.
-            if (string.IsNullOrWhiteSpace(enrollment.Token)) return;
-            var settings = _services.Settings.Load();
-            await _services.Recorder.ConfigureAgentAsync(
-                _services.Backend.ApiUrl,
-                Guid.Parse(enrollment.AgentId),
-                enrollment.Token,
-                settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(),
-                settings.MicrophoneDeviceId,
-                settings.SystemAudioDeviceId,
-                cancellationToken);
-        }
-        catch (DesktopApiException)
-        {
-            // The next status poll retries after the backoff window. Local recording remains available.
-        }
-        catch (Exception)
-        {
-            // Agent recovery is best effort and must never block the desktop shell or local recording.
-        }
-        finally { _agentRecoveryGate.Release(); }
     }
 
     private void SetSystemStatus(string text, string brushKey)
@@ -258,7 +204,5 @@ public sealed partial class MainWindow : Window
     {
         _statusCts.Cancel();
         _statusCts.Dispose();
-        _agentRecoveryGate.Dispose();
-        _services.Backend.Dispose();
     }
 }

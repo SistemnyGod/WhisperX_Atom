@@ -496,7 +496,7 @@ app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IC
 {
     var user = await db.FindUserAsync(request.Username);
     if (user is null || !PasswordService.Verify(request.Password, user.PasswordHash))
-        return Results.Unauthorized();
+        return Results.Json(new { error = "INVALID_CREDENTIALS", retryable = false }, statusCode: StatusCodes.Status401Unauthorized);
 
     await IssueAuthCookiesAsync(http, configuration, user);
     return Results.Ok(new { user = new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = user.MustChangePassword } });

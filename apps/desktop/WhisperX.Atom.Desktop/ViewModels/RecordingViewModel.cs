@@ -327,10 +327,14 @@ public sealed class RecordingViewModel : ObservableObject
             {
                 try
                 {
-                    var currentUser = await _services.Backend.GetCurrentUserAsync(CancellationToken.None);
-                    var agentHealth = await _services.Recorder.GetHealthAsync(CancellationToken.None);
-                    if (currentUser is not null && agentHealth.Health?.AgentId is Guid agentId)
+                    var bootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync(CancellationToken.None);
+                    if (!bootstrap.Ready && !bootstrap.IsTransient)
                     {
+                        State = RecordingState.Error;
+                        ErrorMessage = MapRecordingError(bootstrap.Code);
+                        StatusMessage = bootstrap.Message;
+                        return false;
+#if false // Retained as a migration reference; AgentBootstrapCoordinator owns this path.
                         var enrollment = await _services.Backend.BootstrapLocalAgentAsync(
                             agentHealth.Health.InstallationId ?? Guid.NewGuid(), agentId, "WhisperX Atom Desktop", CancellationToken.None);
                         if (enrollment.ReenrollRequired)
@@ -345,7 +349,9 @@ public sealed class RecordingViewModel : ObservableObject
                             await _services.Recorder.ConfigureAgentAsync(_services.Backend.ApiUrl, Guid.Parse(enrollment.AgentId), enrollment.Token,
                                 settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(), settings.MicrophoneDeviceId, settings.SystemAudioDeviceId, CancellationToken.None);
                         }
+#endif
                     }
+                    if (!bootstrap.Ready) WarningMessage = bootstrap.Message;
                     var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
                     if (Guid.TryParse(meeting.Id, out var parsedMeetingId)) serverMeetingId = parsedMeetingId;
                 }

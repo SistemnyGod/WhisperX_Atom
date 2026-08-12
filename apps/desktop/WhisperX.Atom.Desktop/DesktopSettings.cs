@@ -13,7 +13,8 @@ public sealed record DesktopSettings(
     string? SystemAudioDeviceId = null,
     DateTimeOffset? SessionExpiresAtUtc = null,
     string? RecordingProfile = "ROOM",
-    Guid? OwnerUserId = null)
+    Guid? OwnerUserId = null,
+    bool AgentBootstrapConfirmed = false)
 {
     private const string FallbackLanApiUrl = "http://192.168.2.194:8080";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -39,7 +40,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? FallbackLanApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -50,7 +51,8 @@ public sealed record DesktopSettings(
             NormalizeDeviceId(systemAudioDeviceId),
             sessionExpiresAtUtc,
             NormalizeRecordingProfile(recordingProfile),
-            ownerUserId);
+            ownerUserId,
+            agentBootstrapConfirmed);
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -109,7 +111,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed);
             }
         }
         catch

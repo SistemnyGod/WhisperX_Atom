@@ -39,6 +39,31 @@ The Desktop client is separate:
 .\run_app.bat
 ```
 
+## Первый вход Desktop
+
+Для изолированной LAN-установки пароль администратора задаётся один раз
+локальным скриптом. Скрипт принимает `PSCredential`, проверяет наличие ровно
+одной учётной записи `admin`, сохраняет только PBKDF2-SHA256 hash и отзывает
+старые сессии. Пароль не передаётся в командной строке и не записывается в
+репозиторий, `.env.lan` или логи:
+
+```powershell
+$credential = Get-Credential -UserName admin
+.\scripts\set-lan-admin-password.ps1 -Credential $credential
+```
+
+После запуска `run_app.bat` открывает отдельное окно входа. Успешный вход
+проверяет Recorder Service, выполняет идемпотентный Agent bootstrap и передаёт
+новый Agent token в Recorder только один раз. Существующий Agent token не
+ротируется. Cookie-сессия хранится через DPAPI CurrentUser, пароль не
+сохраняется.
+
+Если сервер временно недоступен, первый запуск без подтверждённого bootstrap
+остаётся заблокирован. После одного успешного online bootstrap Desktop может
+создавать local-first ROOM-записи с неизменяемым `OwnerUserId`; доставка будет
+повторена после восстановления LAN. Если Recorder Service не запущен, вход
+разрешён, но запись остаётся недоступной до запуска службы через UAC.
+
 Qwen remains disabled until the 60-second and 5-minute transcript gates pass. Enable it only with the explicit `-EnableQwen` launcher option.
 
 The launcher writes non-sensitive evidence to `artifacts/acceptance/lan-server/`:

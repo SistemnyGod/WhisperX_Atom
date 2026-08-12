@@ -122,6 +122,8 @@ public sealed class SettingsViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+#if false
+    // The coordinator below is the only active bootstrap/reconnect path.
     public async Task<bool> ReconnectAgentAsync()
     {
         try
@@ -161,15 +163,34 @@ public sealed class SettingsViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+#endif
+    public async Task<bool> ReconnectAgentAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            var result = await _services.AgentBootstrap.EnsureAgentReadyAsync();
+            StatusText = result.Message;
+            return result.Ready;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
     public async Task LogoutAsync()
     {
         await _services.Backend.LogoutAsync();
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with { ProtectedSessionCookie = null, SessionExpiresAtUtc = null });
+        _services.Settings.Save(current with { ProtectedSessionCookie = null, SessionExpiresAtUtc = null, OwnerUserId = null, AgentBootstrapConfirmed = false });
         StatusText = "Выход из API выполнен.";
         OnPropertyChanged(nameof(IsLoggedIn));
         OnPropertyChanged(nameof(LoginStatusText));
         OnPropertyChanged(nameof(SessionExpiryText));
+        _services.RaiseLoggedOut();
     }
 
     public async Task SetArchiveRootAsync(string path)
@@ -191,7 +212,8 @@ public sealed class SettingsViewModel : ObservableObject
         var current = _services.Settings.Load();
         var effectiveCookie = string.IsNullOrWhiteSpace(cookie) ? current.UnprotectSessionCookie() : cookie;
         DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc,
+            current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed);
     }
 
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось выполнить операцию с настройками.");
