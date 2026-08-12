@@ -29,10 +29,9 @@ Invoke-Step "Recorder Service build" {
     dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj --no-restore --nologo
 }
 Invoke-Step "Python tests" {
-    # Some managed Windows installations protect the profile TEMP directory
-    # from child processes such as ffmpeg. Keep test-only files in the project
-    # artifacts directory, without changing the user's persistent environment.
-    $testTemp = Join-Path $repo "artifacts\test-tmp"
+    # Keep test-only files in a fresh system temp directory. Child processes
+    # such as ffmpeg may be denied by repository ACLs on managed desktops.
+    $testTemp = Join-Path ([IO.Path]::GetTempPath()) ("whisperx-acceptance-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
     $savedTemp = @{
         TEMP = [Environment]::GetEnvironmentVariable("TEMP", "Process")
@@ -43,7 +42,7 @@ Invoke-Step "Python tests" {
         $env:TEMP = $testTemp
         $env:TMP = $testTemp
         $env:TMPDIR = $testTemp
-        py -m unittest discover -s tests -q
+        py -3.12 -m unittest discover -s tests -q
     }
     finally {
         foreach ($name in $savedTemp.Keys) {
@@ -53,6 +52,9 @@ Invoke-Step "Python tests" {
             else {
                 Set-Item "Env:$name" $savedTemp[$name]
             }
+        }
+        if (Test-Path -LiteralPath $testTemp) {
+            Remove-Item -LiteralPath $testTemp -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
