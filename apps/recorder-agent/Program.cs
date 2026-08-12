@@ -203,10 +203,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                     var meetingId = ReadMeetingId(command.Payload) ?? ReadEnvironmentMeetingId();
                     var title = ReadTitle(command.Payload);
                     var session = await recorder.StartAsync(meetingId, title, cancellationToken);
-                    Guid? serverSession = null;
-                    try { serverSession = await api.BindSessionAsync(session, meetingId, title, recorder.ActiveTracks, spool, cancellationToken); }
-                    catch (Exception ex) { logger.LogWarning(ex, "Server session binding failed; recording continues locally. Session={SessionId}", session); }
-                    return ("COMPLETED", new { ok = true, sessionId = session, serverSessionId = serverSession, state = state.State.ToString() });
+                    return ("COMPLETED", new { ok = true, sessionId = session, serverSessionId = (Guid?)null, binding = "PENDING", state = state.State.ToString() });
                 case "PAUSE":
                 case "PAUSE_RECORDING":
                     await recorder.PauseAsync(cancellationToken);

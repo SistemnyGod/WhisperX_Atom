@@ -466,7 +466,7 @@ app.MapGet("/api/admin/meetings/{id:guid}/diagnostics", async (Guid id, HttpCont
     {
         meeting = new { meeting.Id, meeting.Status, meeting.CreatedAt },
         media = media.Select(item => new { item.Id, item.Status, item.DurationMs, item.SizeBytes }),
-        recordingTracks = recordingTracks.Select(track => new { track.Id, track.SessionId, track.TrackType, track.DeviceId, track.DeviceName, track.SelectionMode, track.RecordingProfile, track.SampleRate, track.Channels, track.Encoding, track.BitsPerSample }),
+        recordingTracks = recordingTracks.Select(track => new { track.Id, track.SessionId, track.TrackType, track.DeviceId, track.DeviceName, track.SelectionMode, track.RecordingProfile, track.SampleRate, track.Channels, track.Encoding, track.BitsPerSample, track.SourceEncoding, track.SourceSubFormat, track.ValidBitsPerSample }),
         jobs = jobs.Select(item => new { item.Id, item.Type, item.Status, item.Stage, item.Progress, item.Attempt, item.Error }),
         transcript = transcript is null ? null : new
         {
@@ -925,14 +925,27 @@ app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest r
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var correlationId = request.PipelineCorrelationId ?? context.Request.Headers["X-Correlation-Id"].ToString();
-    var session = await store.CreateRecordingSessionAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId);
-    return session is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{session.Id}", session);
+    var result = await store.CreateRecordingSessionWithResultAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId);
+    if (result.Session is null)
+    {
+        var status = result.ErrorCode switch
+        {
+            "MEETING_NOT_FOUND" => StatusCodes.Status404NotFound,
+            "OWNER_REQUIRED" => StatusCodes.Status422UnprocessableEntity,
+            "AGENT_USER_LINK_REQUIRED" => StatusCodes.Status403Forbidden,
+            "MEETING_OWNER_MISMATCH" or "MEETING_CANCELLED" => StatusCodes.Status409Conflict,
+            "AGENT_AUTH_REJECTED" => StatusCodes.Status401Unauthorized,
+            _ => StatusCodes.Status503ServiceUnavailable
+        };
+        return Results.Json(new { error = result.ErrorCode ?? "SERVER_STORAGE_ERROR", retryable = result.Retryable, traceId = context.Response.Headers["X-Trace-Id"].ToString() }, statusCode: status);
+    }
+    return Results.Created($"/api/v1/recording-sessions/{result.Session.Id}", result.Session);
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
-    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample);
+    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample);
     return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
 });
 
@@ -1300,7 +1313,7 @@ public record AgentBootstrapRequest(Guid InstallationId, Guid? AgentId, string? 
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
 public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null);
-public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null);
+public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId);

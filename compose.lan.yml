@@ -17,18 +17,18 @@ services:
       SERVER_ORIGIN: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
       CORS_ALLOWED_ORIGINS: "${SERVER_ORIGIN:?Set SERVER_ORIGIN in .env.lan}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.lan}"
-      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_ENABLED: "${AUTO_SUMMARY_ENABLED:-false}"
       AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
     ports: !reset []
 
   gpu-worker:
     environment:
-      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_ENABLED: "${AUTO_SUMMARY_ENABLED:-false}"
       AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
 
   summary-worker:
     environment:
-      AUTO_SUMMARY_ENABLED: "true"
+      AUTO_SUMMARY_ENABLED: "${AUTO_SUMMARY_ENABLED:-false}"
       AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
 
   lan-gateway:

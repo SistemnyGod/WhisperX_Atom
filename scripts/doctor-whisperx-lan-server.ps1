@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$EnvFile = "")
+param([string]$EnvFile = "", [PSCredential]$Credential)
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -59,6 +59,23 @@ Check "gatewayReady" {
 Check "gatewayPort" {
     $address = Read-EnvValue "LAN_BIND_ADDRESS"
     if (-not (Test-NetConnection -ComputerName $address -Port 8080 -InformationLevel Quiet)) { throw "TCP 8080 unavailable" }
+    "READY"
+}
+Check "processingServices" {
+    $psArgs = @("compose", "--env-file", $EnvFile, "-f", (Join-Path $repo "compose.dev.yml"), "-f", (Join-Path $repo "compose.lan.yml"), "--profile", "core", "--profile", "gpu", "--profile", "lan", "ps", "--format", "{{.Service}} {{.State}}")
+    $states = (& docker @psArgs | Out-String)
+    $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
+    $missing = @($required | Where-Object { $states -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
+    if ($missing.Count -gt 0) { throw "PROCESSING_SERVICES_UNAVAILABLE:$($missing -join ',')" }
+    "RUNNING"
+}
+Check "processingReadiness" {
+    if (-not $Credential) { "AUTH_REQUIRED"; return }
+    $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $body = @{ username = $Credential.UserName; password = $Credential.GetNetworkCredential().Password } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri "$origin/api/auth/login" -Body $body -ContentType "application/json" -WebSession $web | Out-Null
+    $readiness = Invoke-RestMethod -Uri "$origin/api/system/readiness" -WebSession $web -TimeoutSec 10
+    if (-not $readiness.ready) { throw "PROCESSING_READINESS_DEGRADED" }
     "READY"
 }
 

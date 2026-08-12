@@ -13,7 +13,10 @@ public sealed record RecordingTrackInfo(
     string SelectionMode = "DEFAULT",
     string Profile = "ROOM",
     string Encoding = "IeeeFloat",
-    int BitsPerSample = 32);
+    int BitsPerSample = 32,
+    string? SourceEncoding = null,
+    string? SourceSubFormat = null,
+    int? ValidBitsPerSample = null);
 
 public sealed record RecordingChunk(
     string Id,
@@ -51,7 +54,10 @@ public sealed record RawRecordingChunk(
     string Status,
     long RawSizeBytes,
     string? RawSha256,
-    string? Error);
+    string? Error,
+    string? SourceEncoding = null,
+    string? SourceSubFormat = null,
+    int? ValidBitsPerSample = null);
 
 public sealed record RawChunkBacklog(
     int Pending,
@@ -90,7 +96,9 @@ public sealed record RecordingSessionInfo(
     DateTimeOffset? TransportPurgeAfterUtc = null,
     DateTimeOffset? LocalArchivePurgeAfterUtc = null,
     DateTimeOffset? LocalArchivePurgedAtUtc = null,
-    Guid? OwnerUserId = null);
+    Guid? OwnerUserId = null,
+    int? LastErrorHttpStatus = null,
+    bool? LastErrorRetryable = null);
 public sealed record RecordingArchiveChunk(string TrackId, string TrackType, int Sequence, string LocalPath, long StartSample, long SampleCount, int SampleRate, int Channels, long SizeBytes, string Sha256);
 public sealed record ChunkDeliveryMetrics(int Total, int Ready, int Uploading, int Confirmed, int Failed, long BytesPending, double? OldestPendingAgeSeconds);
 public sealed record RetentionCandidate(string SessionId, string Category, IReadOnlyList<string> Paths, long Bytes, DateTimeOffset PurgeAfterUtc);
@@ -120,8 +128,8 @@ public sealed class SpoolStore
             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_STARTED', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
-            CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
-            CREATE TABLE IF NOT EXISTS recording_track_info(track_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_type TEXT NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, endpoint_id TEXT, device_name TEXT, selection_mode TEXT NOT NULL DEFAULT 'DEFAULT', profile TEXT NOT NULL DEFAULT 'ROOM', encoding TEXT NOT NULL DEFAULT 'IeeeFloat', bits_per_sample INTEGER NOT NULL DEFAULT 32, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
+            CREATE TABLE IF NOT EXISTS recording_track_info(track_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_type TEXT NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, endpoint_id TEXT, device_name TEXT, selection_mode TEXT NOT NULL DEFAULT 'DEFAULT', profile TEXT NOT NULL DEFAULT 'ROOM', encoding TEXT NOT NULL DEFAULT 'IeeeFloat', bits_per_sample INTEGER NOT NULL DEFAULT 32, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS server_bindings(local_session_id TEXT NOT NULL, local_track_id TEXT NOT NULL, server_session_id TEXT NOT NULL, server_track_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(local_session_id, local_track_id));
             CREATE TABLE IF NOT EXISTS agent_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agent_command_results(command_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL, status TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -161,7 +169,9 @@ public sealed class SpoolStore
             "ALTER TABLE recording_sessions ADD COLUMN transport_purge_after TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN local_archive_purge_after TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN local_archive_purged_at TEXT",
-            "ALTER TABLE recording_sessions ADD COLUMN owner_user_id TEXT"
+            "ALTER TABLE recording_sessions ADD COLUMN owner_user_id TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN last_error_http_status INTEGER",
+            "ALTER TABLE recording_sessions ADD COLUMN last_error_retryable INTEGER"
         })
         {
             await using var stateMigration = connection.CreateCommand();
@@ -191,7 +201,13 @@ public sealed class SpoolStore
         foreach (var column in new[]
         {
             "ALTER TABLE recording_track_info ADD COLUMN encoding TEXT NOT NULL DEFAULT 'IeeeFloat'",
-            "ALTER TABLE recording_track_info ADD COLUMN bits_per_sample INTEGER NOT NULL DEFAULT 32"
+            "ALTER TABLE recording_track_info ADD COLUMN bits_per_sample INTEGER NOT NULL DEFAULT 32",
+            "ALTER TABLE recording_track_info ADD COLUMN source_encoding TEXT",
+            "ALTER TABLE recording_track_info ADD COLUMN source_sub_format TEXT",
+            "ALTER TABLE recording_track_info ADD COLUMN valid_bits_per_sample INTEGER",
+            "ALTER TABLE recording_raw_chunks ADD COLUMN source_encoding TEXT",
+            "ALTER TABLE recording_raw_chunks ADD COLUMN source_sub_format TEXT",
+            "ALTER TABLE recording_raw_chunks ADD COLUMN valid_bits_per_sample INTEGER"
         })
         {
             await using var trackMigration = connection.CreateCommand();
@@ -255,7 +271,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO recording_track_info(track_id,session_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample,created_at) VALUES($track,$session,$type,$rate,$channels,$endpoint,$name,$mode,$profile,$encoding,$bits,$created) ON CONFLICT(track_id) DO UPDATE SET endpoint_id=excluded.endpoint_id,device_name=excluded.device_name,selection_mode=excluded.selection_mode,profile=excluded.profile,encoding=excluded.encoding,bits_per_sample=excluded.bits_per_sample";
+        command.CommandText = "INSERT INTO recording_track_info(track_id,session_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample,created_at) VALUES($track,$session,$type,$rate,$channels,$endpoint,$name,$mode,$profile,$encoding,$bits,$sourceEncoding,$sourceSubFormat,$validBits,$created) ON CONFLICT(track_id) DO UPDATE SET endpoint_id=excluded.endpoint_id,device_name=excluded.device_name,selection_mode=excluded.selection_mode,profile=excluded.profile,encoding=excluded.encoding,bits_per_sample=excluded.bits_per_sample,source_encoding=excluded.source_encoding,source_sub_format=excluded.source_sub_format,valid_bits_per_sample=excluded.valid_bits_per_sample";
         command.Parameters.AddWithValue("$track", track.TrackId);
         command.Parameters.AddWithValue("$session", sessionId);
         command.Parameters.AddWithValue("$type", track.TrackType);
@@ -267,6 +283,9 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$profile", track.Profile);
         command.Parameters.AddWithValue("$encoding", track.Encoding);
         command.Parameters.AddWithValue("$bits", track.BitsPerSample);
+        command.Parameters.AddWithValue("$sourceEncoding", (object?)track.SourceEncoding ?? DBNull.Value);
+        command.Parameters.AddWithValue("$sourceSubFormat", (object?)track.SourceSubFormat ?? DBNull.Value);
+        command.Parameters.AddWithValue("$validBits", (object?)track.ValidBitsPerSample ?? DBNull.Value);
         command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -280,12 +299,15 @@ public sealed class SpoolStore
         string? errorDetail = null,
         int? retryCount = null,
         DateTimeOffset? nextRetryAtUtc = null,
+        int? errorHttpStatus = null,
+        bool? errorRetryable = null,
+        string? traceId = null,
         CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE recording_sessions SET local_finalize_state=COALESCE($local,local_finalize_state), delivery_state=COALESCE($delivery,delivery_state), archive_path=COALESCE($archive,archive_path), last_error_code=$code, last_error_detail=$detail, retry_count=COALESCE($retry,retry_count), next_retry_at=$next WHERE id=$id";
+        command.CommandText = "UPDATE recording_sessions SET local_finalize_state=COALESCE($local,local_finalize_state), delivery_state=COALESCE($delivery,delivery_state), archive_path=COALESCE($archive,archive_path), last_error_code=$code, last_error_detail=$detail, retry_count=COALESCE($retry,retry_count), next_retry_at=$next, last_error_http_status=$httpStatus, last_error_retryable=$retryable, trace_id=COALESCE($trace,trace_id) WHERE id=$id";
         command.Parameters.AddWithValue("$local", (object?)localFinalizeState ?? DBNull.Value);
         command.Parameters.AddWithValue("$delivery", (object?)deliveryState ?? DBNull.Value);
         command.Parameters.AddWithValue("$archive", (object?)archivePath ?? DBNull.Value);
@@ -293,6 +315,9 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$detail", (object?)errorDetail ?? DBNull.Value);
         command.Parameters.AddWithValue("$retry", (object?)retryCount ?? DBNull.Value);
         command.Parameters.AddWithValue("$next", (object?)nextRetryAtUtc?.ToString("O") ?? DBNull.Value);
+        command.Parameters.AddWithValue("$httpStatus", (object?)errorHttpStatus ?? DBNull.Value);
+        command.Parameters.AddWithValue("$retryable", (object?)(errorRetryable.HasValue ? (errorRetryable.Value ? 1 : 0) : null) ?? DBNull.Value);
+        command.Parameters.AddWithValue("$trace", (object?)traceId ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -302,7 +327,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id FROM recording_sessions WHERE id=$session";
+        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable FROM recording_sessions WHERE id=$session";
         command.Parameters.AddWithValue("$session", sessionId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -317,6 +342,8 @@ public sealed class SpoolStore
         DateTimeOffset? localArchivePurgeAfter = reader.IsDBNull(18) ? null : DateTimeOffset.TryParse(reader.GetString(18), out var archivePurgeAfter) ? archivePurgeAfter : null;
         DateTimeOffset? localArchivePurgedAt = reader.IsDBNull(19) ? null : DateTimeOffset.TryParse(reader.GetString(19), out var archivePurgedAt) ? archivePurgedAt : null;
         Guid? ownerUserId = reader.IsDBNull(20) ? null : Guid.TryParse(reader.GetString(20), out var parsedOwner) ? parsedOwner : null;
+        int? lastErrorHttpStatus = reader.IsDBNull(21) ? null : reader.GetInt32(21);
+        bool? lastErrorRetryable = reader.IsDBNull(22) ? null : reader.GetInt32(22) != 0;
         return new RecordingSessionInfo(
             sessionId,
             meetingId,
@@ -339,7 +366,9 @@ public sealed class SpoolStore
             transportPurgeAfter,
             localArchivePurgeAfter,
             localArchivePurgedAt,
-            ownerUserId);
+            ownerUserId,
+            lastErrorHttpStatus,
+            lastErrorRetryable);
     }
 
     public async Task SetServerReceiptAsync(string sessionId, Guid? meetingId, Guid? mediaAssetId, Guid? processingJobId, string? traceId, CancellationToken cancellationToken = default)
@@ -428,8 +457,8 @@ public sealed class SpoolStore
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO recording_raw_chunks(id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,created_at,updated_at)
-            VALUES($id,$session,$track,$sequence,$raw,$output,$start,$count,$rate,$channels,$trackType,$encoding,$bits,'WRITING',$created,$created)
+            INSERT INTO recording_raw_chunks(id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample,status,created_at,updated_at)
+            VALUES($id,$session,$track,$sequence,$raw,$output,$start,$count,$rate,$channels,$trackType,$encoding,$bits,$sourceEncoding,$sourceSubFormat,$validBits,'WRITING',$created,$created)
             ON CONFLICT(track_id,sequence) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$id", chunk.Id);
@@ -445,6 +474,9 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$trackType", chunk.TrackType);
         command.Parameters.AddWithValue("$encoding", chunk.Encoding);
         command.Parameters.AddWithValue("$bits", chunk.BitsPerSample);
+        command.Parameters.AddWithValue("$sourceEncoding", (object?)chunk.SourceEncoding ?? DBNull.Value);
+        command.Parameters.AddWithValue("$sourceSubFormat", (object?)chunk.SourceSubFormat ?? DBNull.Value);
+        command.Parameters.AddWithValue("$validBits", (object?)chunk.ValidBitsPerSample ?? DBNull.Value);
         command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
         command.ExecuteNonQuery();
     }
@@ -501,13 +533,13 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error FROM recording_raw_chunks WHERE status IN ('WRITING','RAW_READY','ENCODING','ENCODE_FAILED') ORDER BY session_id,track_id,sequence LIMIT $limit";
+        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error,source_encoding,source_sub_format,valid_bits_per_sample FROM recording_raw_chunks WHERE status IN ('WRITING','RAW_READY','ENCODING','ENCODE_FAILED') ORDER BY session_id,track_id,sequence LIMIT $limit";
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
         var result = new List<RawRecordingChunk>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new RawRecordingChunk(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11), reader.GetInt32(12), reader.GetString(13), reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16)));
+            result.Add(new RawRecordingChunk(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11), reader.GetInt32(12), reader.GetString(13), reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16), reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetInt32(19)));
         }
         return result;
     }
@@ -747,10 +779,10 @@ public sealed class SpoolStore
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT track_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample
+            SELECT track_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample
             FROM recording_track_info WHERE session_id=$session
             UNION ALL
-            SELECT c.track_id,c.track_type,c.sample_rate,c.channels,NULL,NULL,'DEFAULT','ROOM','IeeeFloat',32
+            SELECT c.track_id,c.track_type,c.sample_rate,c.channels,NULL,NULL,'DEFAULT','ROOM','IeeeFloat',32,NULL,NULL,NULL
             FROM recording_chunks c
             WHERE c.session_id=$session AND NOT EXISTS (SELECT 1 FROM recording_track_info i WHERE i.track_id=c.track_id)
             GROUP BY c.track_id,c.track_type,c.sample_rate,c.channels
@@ -765,7 +797,8 @@ public sealed class SpoolStore
             result.Add(new RecordingTrackInfo(trackId, reader.GetString(1), reader.GetInt32(2), reader.GetInt32(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? "DEFAULT" : reader.GetString(6), reader.IsDBNull(7) ? "ROOM" : reader.GetString(7),
-                reader.IsDBNull(8) ? "IeeeFloat" : reader.GetString(8), reader.IsDBNull(9) ? 32 : reader.GetInt32(9)));
+                reader.IsDBNull(8) ? "IeeeFloat" : reader.GetString(8), reader.IsDBNull(9) ? 32 : reader.GetInt32(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetInt32(12)));
         }
         return result;
     }
@@ -775,15 +808,16 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT track_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample FROM recording_track_info WHERE track_id=$track";
+        command.CommandText = "SELECT track_id,track_type,sample_rate,channels,endpoint_id,device_name,selection_mode,profile,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample FROM recording_track_info WHERE track_id=$track";
         command.Parameters.AddWithValue("$track", trackId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
         return new RecordingTrackInfo(
             reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt32(3),
             reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? "DEFAULT" : reader.GetString(6), reader.IsDBNull(7) ? "ROOM" : reader.GetString(7),
-            reader.IsDBNull(8) ? "IeeeFloat" : reader.GetString(8), reader.IsDBNull(9) ? 32 : reader.GetInt32(9));
+            reader.IsDBNull(6) ? "DEFAULT" : reader.GetString(6), reader.IsDBNull(7) ? "ROOM" : reader.GetString(7),
+            reader.IsDBNull(8) ? "IeeeFloat" : reader.GetString(8), reader.IsDBNull(9) ? 32 : reader.GetInt32(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetInt32(12));
     }
 
     public async Task<long> GetNextTrackStartSampleAsync(string trackId, CancellationToken cancellationToken = default)

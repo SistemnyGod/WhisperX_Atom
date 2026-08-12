@@ -26,10 +26,29 @@ public sealed record ServerMediaStatus(
     string? JobStage,
     string? ErrorCode = null);
 
+public sealed class AgentApiException : Exception
+{
+    public AgentApiException(string errorCode, bool retryable, HttpStatusCode statusCode, string? traceId, string? detail = null)
+        : base(detail ?? errorCode)
+    {
+        ErrorCode = errorCode;
+        Retryable = retryable;
+        StatusCode = statusCode;
+        TraceId = traceId;
+    }
+
+    public string ErrorCode { get; }
+    public bool Retryable { get; }
+    public HttpStatusCode StatusCode { get; }
+    public string? TraceId { get; }
+}
+
 public sealed class AgentApiClient : IDisposable
 {
     private const string FallbackLanServerUrl = "http://192.168.2.194:8080";
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http = CreateHttpClient(TimeSpan.FromSeconds(8));
+    private readonly HttpClient _uploadHttp = CreateHttpClient(TimeSpan.FromSeconds(60));
+    private readonly HttpClient _streamHttp = CreateHttpClient(Timeout.InfiniteTimeSpan);
     private Uri _baseUri;
     private Guid _agentId;
     private Guid _installationId;
@@ -167,8 +186,8 @@ public sealed class AgentApiClient : IDisposable
         if (!IsConfigured) return Array.Empty<AgentCommandEnvelope>();
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, $"api/v1/agents/{_agentId}/commands/events?after={afterCursor}"));
         AddAuthentication(request);
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        using var response = await _streamHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream);
         var result = new List<AgentCommandEnvelope>();
@@ -227,6 +246,13 @@ public sealed class AgentApiClient : IDisposable
         catch (HttpRequestException ex)
         {
             _lastServerError = ex.GetType().Name;
+            _serverConnectionState = "SERVER_UNAVAILABLE";
+            ScheduleHeartbeatRetry();
+            return false;
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _lastServerError = "control_request_timeout";
             _serverConnectionState = "SERVER_UNAVAILABLE";
             ScheduleHeartbeatRetry();
             return false;
@@ -334,6 +360,7 @@ public sealed class AgentApiClient : IDisposable
 
     private static string ClassifyChunkUploadError(Exception exception)
     {
+        if (exception is AgentApiException api) return api.ErrorCode;
         if (exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
             return "AGENT_AUTH_REJECTED";
         if (exception is FileNotFoundException or DirectoryNotFoundException)
@@ -362,7 +389,7 @@ public sealed class AgentApiClient : IDisposable
             })
         });
         using var response = await _http.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         await spool.MarkEventsSyncedAsync(events.Select(item => item.Id), cancellationToken);
         return events.Count;
     }
@@ -505,7 +532,7 @@ public sealed class AgentApiClient : IDisposable
         AddAuthentication(request, pipelineCorrelationId);
         request.Content = JsonContent.Create(new { meetingId, ownerUserId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId });
         using var response = await _http.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         return (document.RootElement.GetProperty("id").GetGuid(), document.RootElement.GetProperty("meetingId").GetGuid());
     }
@@ -524,10 +551,13 @@ public sealed class AgentApiClient : IDisposable
             sampleRate = track.SampleRate,
             channels = track.Channels,
             encoding = track.Encoding,
-            bitsPerSample = track.BitsPerSample
+            bitsPerSample = track.BitsPerSample,
+            sourceEncoding = track.SourceEncoding,
+            sourceSubFormat = track.SourceSubFormat,
+            validBitsPerSample = track.ValidBitsPerSample
         });
         using var response = await _http.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         return document.RootElement.GetProperty("id").GetGuid();
     }
@@ -546,9 +576,9 @@ public sealed class AgentApiClient : IDisposable
             content.Headers.ContentType = new MediaTypeHeaderValue("audio/flac");
             content.Headers.ContentLength = chunk.SizeBytes;
             request.Content = content;
-            return await _http.SendAsync(request, cancellationToken);
+            return await _uploadHttp.SendAsync(request, cancellationToken);
         }, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, "CHUNK_UPLOAD_FAILED");
     }
 
     private async Task<bool> ReconcileMissingChunksAsync(Guid serverSessionId, string localSessionId, RecordingManifest manifest, SpoolStore spool, CancellationToken cancellationToken)
@@ -623,15 +653,49 @@ public sealed class AgentApiClient : IDisposable
         code is "recording_chunks_incomplete" or "SERVER_CHUNKS_MISSING" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "OWNER_AUTHORIZATION_REJECTED"
         || statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)statusCode >= 500;
 
+    private static HttpClient CreateHttpClient(TimeSpan timeout)
+    {
+        var handler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(3), AutomaticDecompression = DecompressionMethods.All };
+        return new HttpClient(handler) { Timeout = timeout };
+    }
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, string fallbackCode)
+    {
+        if (response.IsSuccessStatusCode) return;
+        var traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues) ? traceValues.FirstOrDefault() : null;
+        var errorCode = fallbackCode;
+        var retryable = IsTransient(response.StatusCode);
+        var detail = response.ReasonPhrase;
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+                errorCode = error.GetString() ?? fallbackCode;
+            if (document.RootElement.TryGetProperty("retryable", out var retry) && retry.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                retryable = retry.GetBoolean();
+            if (document.RootElement.TryGetProperty("traceId", out var trace) && trace.ValueKind == JsonValueKind.String)
+                traceId ??= trace.GetString();
+            detail = string.IsNullOrWhiteSpace(body) ? detail : body;
+        }
+        catch (JsonException) { }
+        if (string.Equals(errorCode, "AUTH_REJECTED", StringComparison.OrdinalIgnoreCase)) errorCode = "AGENT_AUTH_REJECTED";
+        throw new AgentApiException(errorCode, retryable, response.StatusCode, traceId, detail);
+    }
+
     private static string ResolveServerUrl(AgentConfiguration? config)
     {
+        var machine = MachineServerConfig.Load();
+        if (machine?.Managed == true && IsHttpUrl(machine.ServerOrigin))
+            return machine.ServerOrigin.TrimEnd('/') + "/";
+
         var explicitUrl = Environment.GetEnvironmentVariable("ATOM_AGENT_SERVER_URL")?.Trim();
         if (IsHttpUrl(explicitUrl)) return explicitUrl!.TrimEnd('/') + "/";
 
         var configuredUrl = config?.ServerUrl?.Trim();
         if (IsHttpUrl(configuredUrl) && !IsLoopbackUrl(configuredUrl)) return configuredUrl!.TrimEnd('/') + "/";
 
-        var machineUrl = MachineServerConfig.ServerOriginOrNull();
+        var machineUrl = machine?.ServerOrigin;
         if (IsHttpUrl(machineUrl)) return machineUrl!.TrimEnd('/') + "/";
 
         var runtimeUrl = Environment.GetEnvironmentVariable("WHISPERX_API_URL")?.Trim();
@@ -722,5 +786,7 @@ public sealed class AgentApiClient : IDisposable
     {
         _bindingGate.Dispose();
         _http.Dispose();
+        _uploadHttp.Dispose();
+        _streamHttp.Dispose();
     }
 }

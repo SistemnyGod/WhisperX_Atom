@@ -6,6 +6,7 @@ public static class AgentIpcProtocol
 {
     public const string PipeName = "WhisperXAtomAgent";
     public const int Version = 5;
+    public const int MaxServerInstances = 8;
 }
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload);
@@ -152,4 +153,5 @@ public sealed record FinalizationResult(
     string LocalArchiveState = "PENDING",
     string DeliveryState = "NOT_STARTED",
     string ServerFinalizeState = "NOT_STARTED",
-    string MediaState = "PENDING");
+    string MediaState = "PENDING",
+    int? ErrorHttpStatus = null);

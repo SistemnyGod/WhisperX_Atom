@@ -155,7 +155,8 @@ public sealed class RecordingDeliveryCoordinator(
         }
         catch (Exception ex)
         {
-            var result = new FinalizationResult(false, "DELIVERY", ClassifyDeliveryError(ex), IsRetryableDeliveryError(ex));
+            var apiError = ex as AgentApiException;
+            var result = new FinalizationResult(false, "DELIVERY", ClassifyDeliveryError(ex), IsRetryableDeliveryError(ex), TraceId: apiError?.TraceId, ErrorHttpStatus: apiError is null ? null : (int)apiError.StatusCode);
             return await PersistFailureAsync(localSessionId, result, ex.Message, cancellationToken);
         }
     }
@@ -172,6 +173,9 @@ public sealed class RecordingDeliveryCoordinator(
             errorDetail: detail,
             retryCount: retryCount,
             nextRetryAtUtc: nextRetry,
+            errorHttpStatus: result.ErrorHttpStatus,
+            errorRetryable: result.Retryable,
+            traceId: result.TraceId,
             cancellationToken: cancellationToken);
         return result with { NextRetryAtUtc = nextRetry };
     }
@@ -199,6 +203,13 @@ public sealed class RecordingDeliveryCoordinator(
         return "LOCAL_ENCODING_FAILED";
     }
 
-    private static bool IsRetryableDeliveryError(Exception ex) => !ex.ToString().Contains("401", StringComparison.OrdinalIgnoreCase) && !ex.ToString().Contains("403", StringComparison.OrdinalIgnoreCase);
-    private static string ClassifyDeliveryError(Exception ex) => ex.ToString().Contains("401", StringComparison.OrdinalIgnoreCase) || ex.ToString().Contains("403", StringComparison.OrdinalIgnoreCase) ? "AGENT_AUTH_REJECTED" : "SERVER_UNAVAILABLE";
+    private static bool IsRetryableDeliveryError(Exception ex) => ex is AgentApiException api
+        ? api.Retryable
+        : ex is HttpRequestException or TimeoutException or TaskCanceledException;
+
+    private static string ClassifyDeliveryError(Exception ex) => ex is AgentApiException api
+        ? api.ErrorCode
+        : ex is HttpRequestException or TimeoutException or TaskCanceledException
+            ? "SERVER_UNAVAILABLE"
+            : "SERVER_STORAGE_ERROR";
 }

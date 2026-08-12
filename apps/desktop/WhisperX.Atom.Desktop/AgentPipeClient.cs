@@ -5,6 +5,13 @@ using WhisperX.Atom.Recorder;
 
 namespace WhisperX.Atom.Desktop;
 
+public sealed class RecorderIpcException(string errorCode, bool transient, Exception? inner = null)
+    : IOException(errorCode, inner)
+{
+    public string ErrorCode { get; } = errorCode;
+    public bool Transient { get; } = transient;
+}
+
 public sealed class AgentPipeClient
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -12,7 +19,18 @@ public sealed class AgentPipeClient
     public async Task<AgentIpcResponse> SendAsync(string command, object? payload = null, CancellationToken cancellationToken = default)
     {
         await using var pipe = new NamedPipeClientStream(".", AgentIpcProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        await pipe.ConnectAsync(1500, cancellationToken);
+        try
+        {
+            await pipe.ConnectAsync(3000, cancellationToken);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_TIMEOUT", true, ex);
+        }
+        catch (IOException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_UNAVAILABLE", false, ex);
+        }
         using var reader = new StreamReader(pipe);
         await using var writer = new StreamWriter(pipe) { AutoFlush = true };
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload ?? new { }, _json));

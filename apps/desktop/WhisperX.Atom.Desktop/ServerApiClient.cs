@@ -70,15 +70,19 @@ public enum DesktopAuthState
 
 public sealed class DesktopApiException : Exception
 {
-    public DesktopApiException(int statusCode, string errorCode, string message, Exception? innerException = null)
+    public DesktopApiException(int statusCode, string errorCode, string message, Exception? innerException = null, bool retryable = false, string? traceId = null)
         : base(message, innerException)
     {
         StatusCode = statusCode;
         ErrorCode = errorCode;
+        Retryable = retryable;
+        TraceId = traceId;
     }
 
     public int StatusCode { get; }
     public string ErrorCode { get; }
+    public bool Retryable { get; }
+    public string? TraceId { get; }
 }
 
 public sealed class ServerApiClient : IDisposable
@@ -98,10 +102,13 @@ public sealed class ServerApiClient : IDisposable
         var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies };
         _http = new HttpClient(handler) { BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())) };
         _uploadHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        var serverOrigin = Environment.GetEnvironmentVariable("WHISPERX_TUS_URL")
-            ?? MachineServerConfig.ServerOriginOrNull()
-            ?? baseUrl
-            ?? DesktopSettings.DefaultApiUrl();
+        var machineConfig = MachineServerConfig.Load();
+        var serverOrigin = machineConfig?.Managed == true
+            ? machineConfig.ServerOrigin
+            : Environment.GetEnvironmentVariable("WHISPERX_TUS_URL")
+                ?? machineConfig?.ServerOrigin
+                ?? baseUrl
+                ?? DesktopSettings.DefaultApiUrl();
         TusBaseAddress = new Uri(NormalizeBaseUrl(serverOrigin));
     }
 
@@ -251,7 +258,19 @@ public sealed class ServerApiClient : IDisposable
         var root = document.RootElement;
         if (response.StatusCode == HttpStatusCode.Conflict && string.Equals(root.GetProperty("error").GetString(), "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase))
             return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), null, true);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorCode = root.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.String
+                ? errorElement.GetString() ?? "AGENT_BOOTSTRAP_FAILED"
+                : "AGENT_BOOTSTRAP_FAILED";
+            var retryable = root.TryGetProperty("retryable", out var retryElement)
+                && retryElement.ValueKind is JsonValueKind.True or JsonValueKind.False
+                && retryElement.GetBoolean();
+            var traceId = root.TryGetProperty("traceId", out var traceElement) && traceElement.ValueKind == JsonValueKind.String
+                ? traceElement.GetString()
+                : response.Headers.TryGetValues("X-Trace-Id", out var traceValues) ? traceValues.FirstOrDefault() : null;
+            throw new DesktopApiException((int)response.StatusCode, errorCode, errorCode, retryable: retryable, traceId: traceId);
+        }
         var token = root.TryGetProperty("token", out var tokenElement) && tokenElement.ValueKind == JsonValueKind.String
             ? tokenElement.GetString()
             : null;

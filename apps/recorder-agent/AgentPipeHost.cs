@@ -18,43 +18,70 @@ public sealed class AgentPipeHost(
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private readonly ConcurrentDictionary<string, Task> _finalizations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _finalizationErrors = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _commandGate = new(1, 1);
+    private readonly ConcurrentBag<Task> _connections = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Desktop IPC listening on named pipe {PipeName}", AgentIpcProtocol.PipeName);
         while (!stoppingToken.IsCancellationRequested)
         {
-            await using var pipe = AgentPipeSecurity.CreateServer();
+            var pipe = AgentPipeSecurity.CreateServer();
 
             try
             {
                 await pipe.WaitForConnectionAsync(stoppingToken);
-                using var reader = new StreamReader(pipe);
-                await using var writer = new StreamWriter(pipe) { AutoFlush = true };
-                var line = await reader.ReadLineAsync(stoppingToken);
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                var request = JsonSerializer.Deserialize<AgentIpcRequest>(line, _json);
-                var response = request is null
-                    ? Error("invalid_request")
-                    : await ExecuteAsync(request, stoppingToken);
-                await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json));
+                var connection = HandleConnectionAsync(pipe, stoppingToken);
+                _connections.Add(connection);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
+                await pipe.DisposeAsync();
                 break;
             }
             catch (Exception ex)
             {
+                await pipe.DisposeAsync();
                 logger.LogWarning(ex, "Desktop IPC request failed.");
+            }
+        }
+
+        try { await Task.WhenAll(_connections.ToArray()); }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+
+    private async Task HandleConnectionAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    {
+        await using (pipe)
+        {
+            try
+            {
+                using var reader = new StreamReader(pipe);
+                await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (string.IsNullOrWhiteSpace(line)) return;
+                var request = JsonSerializer.Deserialize<AgentIpcRequest>(line, _json);
+                var response = request is null
+                    ? Error("invalid_request")
+                    : await ExecuteAsync(request, cancellationToken);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Desktop IPC connection failed.");
             }
         }
     }
 
     private async Task<AgentIpcResponse> ExecuteAsync(AgentIpcRequest request, CancellationToken cancellationToken)
     {
+        var command = request.Command.Trim().ToUpperInvariant();
+        var gated = IsMutatingCommand(command);
+        if (gated) await _commandGate.WaitAsync(cancellationToken);
         try
         {
-            switch (request.Command.Trim().ToUpperInvariant())
+            switch (command)
             {
                 case "STATUS":
                     return Status();
@@ -118,19 +145,8 @@ public sealed class AgentPipeHost(
                     var ownerUserId = ReadGuid(request.Payload, "ownerUserId");
                     var title = ReadString(request.Payload, "title");
                     var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId);
-                    Guid? serverSessionId = null;
-                    string? bindingWarning = null;
-                    if (api.IsConfigured)
-                    {
-                        try { serverSessionId = await api.BindSessionAsync(sessionId, meetingId, title, recorder.ActiveTracks, spool, cancellationToken); }
-                        catch (Exception ex)
-                        {
-                            bindingWarning = "server_binding_pending";
-                            logger.LogWarning(ex, "Server session binding failed; recording continues locally. Session={SessionId}", sessionId);
-                        }
-                    }
                     var boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);
-                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, bindingWarning, null, boundMeetingId);
+                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, api.IsConfigured ? "server_binding_pending" : null, null, boundMeetingId);
                 case "PAUSE":
                     await recorder.PauseAsync(cancellationToken);
                     return Status();
@@ -163,7 +179,16 @@ public sealed class AgentPipeHost(
             logger.LogWarning(ex, "Desktop command {Command} failed", request.Command);
             return Error(MapError(ex));
         }
+        finally
+        {
+            if (gated) _commandGate.Release();
+        }
     }
+
+    private static bool IsMutatingCommand(string command) => command is
+        "CONFIGURE" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
+        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "MARKER" or "DECISION" or
+        "ACTION_ITEM" or "VOICE_EVENT";
 
     private void TrackFinalization(RecordingStopHandle stop, Guid? meetingId)
     {
@@ -375,6 +400,7 @@ public sealed class AgentPipeHost(
         InvalidOperationException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
         InvalidOperationException when exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase) => "recording_already_active",
         FileNotFoundException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
+        IOException when exception.Message.Contains("AUDIO_CALLBACK_TIMEOUT", StringComparison.OrdinalIgnoreCase) => "AUDIO_CALLBACK_TIMEOUT",
         IOException when exception.Message.Contains("storage", StringComparison.OrdinalIgnoreCase) => "recording_storage_unavailable",
         UnauthorizedAccessException => "recording_archive_access_denied",
         FileNotFoundException or DirectoryNotFoundException or PathTooLongException => "recording_archive_path_unavailable",
@@ -401,6 +427,7 @@ public sealed class AgentPipeHost(
             catch (TimeoutException) { logger.LogWarning("Timed out waiting for {Count} recording finalizations during service shutdown.", pending.Length); }
         }
         await base.StopAsync(cancellationToken);
+        _commandGate.Dispose();
     }
     private static string DataRoot() => Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");

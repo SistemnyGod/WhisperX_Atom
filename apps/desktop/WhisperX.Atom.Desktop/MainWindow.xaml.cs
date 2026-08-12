@@ -208,8 +208,6 @@ public sealed partial class MainWindow : Window
             if (string.Equals(healthResponse.State, "Recording", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(healthResponse.State, "Paused", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(healthResponse.State, "Finalizing", StringComparison.OrdinalIgnoreCase)) return;
-            if (string.Equals(health.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase)) return;
-
             var installationId = health.InstallationId ?? Guid.NewGuid();
             var enrollment = await _services.Backend.BootstrapLocalAgentAsync(installationId, health.AgentId, "WhisperX Atom Desktop", cancellationToken);
             if (enrollment.ReenrollRequired)
@@ -217,6 +215,8 @@ public sealed partial class MainWindow : Window
                 SetSystemStatus("Требуется повторная регистрация Recorder Agent", "WarningBrush");
                 return;
             }
+            // Existing active Agents intentionally return no token. The bootstrap
+            // call still refreshes the current user's agent_user_links row.
             if (string.IsNullOrWhiteSpace(enrollment.Token)) return;
             var settings = _services.Settings.Load();
             await _services.Recorder.ConfigureAgentAsync(

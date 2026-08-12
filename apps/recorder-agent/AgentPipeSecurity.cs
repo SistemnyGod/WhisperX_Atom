@@ -28,7 +28,7 @@ internal static class AgentPipeSecurity
         return NamedPipeServerStreamAcl.Create(
             AgentIpcProtocol.PipeName,
             PipeDirection.InOut,
-            1,
+            AgentIpcProtocol.MaxServerInstances,
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous,
             0,

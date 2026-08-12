@@ -2,6 +2,7 @@
 param(
     [string]$EnvFile = "",
     [switch]$Rebuild,
+    [switch]$EnableQwen,
     [switch]$InstallStartupTask,
     [switch]$ConfigureFirewall
 )
@@ -53,16 +54,60 @@ Push-Location $repo
 try {
     docker info | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "DOCKER_UNAVAILABLE: Docker Desktop is not ready." }
-    $compose = @("compose", "--env-file", $EnvFile, "-f", "compose.dev.yml", "-f", "compose.lan.yml", "--profile", "core", "--profile", "gpu", "--profile", "llm", "--profile", "lan", "up", "-d", "--pull", "never")
-    if ($Rebuild) { $compose += "--build" }
-    & docker @compose
-    if ($LASTEXITCODE -ne 0) { throw "LAN_COMPOSE_START_FAILED" }
+    $composeBase = @("compose", "--env-file", $EnvFile, "-f", "compose.dev.yml", "-f", "compose.lan.yml")
+    $coreCompose = $composeBase + @("--profile", "core", "--profile", "lan", "up", "-d", "--pull", "never")
+    if ($Rebuild) { $coreCompose += "--build" }
+    $coreCompose += @("postgres", "nats", "api", "tusd", "lan-gateway")
+    & docker @coreCompose
+    if ($LASTEXITCODE -ne 0) { throw "LAN_CORE_START_FAILED" }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(120)
+    $coreReady = $false
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        try {
+            $live = Invoke-WebRequest -UseBasicParsing -Uri "$serverOrigin/health/live" -TimeoutSec 5
+            $ready = Invoke-WebRequest -UseBasicParsing -Uri "$serverOrigin/health/ready" -TimeoutSec 5
+            if ($live.StatusCode -eq 200 -and $ready.StatusCode -eq 200) { $coreReady = $true; break }
+        } catch { }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $coreReady) { throw "SERVER_DEGRADED: core health did not become ready within 120 seconds." }
+
+    # Do not activate workers against an inherited backlog. Cancelled/failed
+    # historical records remain untouched; only runnable work blocks startup.
+    $guardCompose = $composeBase + @("--profile", "core", "exec", "-T", "postgres", "psql", "-U", "whisperx", "-d", "whisperx_atom", "-At", "-c", "SELECT (SELECT COUNT(*) FROM jobs WHERE status IN ('QUEUED','RUNNING','RETRY_WAIT','MEDIA_RETRY_WAIT')) || ' ' || (SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL);")
+    $guardText = (& docker @guardCompose | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $guardText -notmatch '^\d+\s+\d+$') { throw "STARTUP_QUEUE_GUARD_FAILED: could not inspect jobs/outbox state." }
+    $guardCounts = $guardText -split '\s+'
+    $runnableJobs = [int64]$guardCounts[0]
+    $pendingOutbox = [int64]$guardCounts[1]
+    if ($runnableJobs -gt 0 -or $pendingOutbox -gt 0) {
+        throw "STARTUP_QUEUE_GUARD_BLOCKED: runnable_jobs=$runnableJobs pending_outbox=$pendingOutbox. Resolve or explicitly cancel old work before enabling workers."
+    }
+
+    $workerCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
+    if ($EnableQwen) { $workerCompose += @("--profile", "llm") }
+    $workerCompose += @("up", "-d", "--pull", "never")
+    if ($Rebuild) { $workerCompose += "--build" }
+    $workerServices = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
+    if ($EnableQwen) { $workerServices += "summary-worker" }
+    $workerCompose += $workerServices
+    & docker @workerCompose
+    if ($LASTEXITCODE -ne 0) { throw "LAN_WORKER_START_FAILED" }
+
+    $requiredServices = if ($EnableQwen) { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "lan-gateway") } else { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "lan-gateway") }
+    $psArgs = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
+    if ($EnableQwen) { $psArgs += @("--profile", "llm") }
+    $psArgs += @("ps", "--format", "{{.Service}} {{.State}}")
+    $stateText = (& docker @psArgs | Out-String)
+    $degraded = @($requiredServices | Where-Object { $stateText -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
+    if ($degraded.Count -gt 0) { Write-Warning "SERVER_DEGRADED: services not running: $($degraded -join ', ')" }
     if ($ConfigureFirewall) {
         & (Join-Path $PSScriptRoot "configure-whisperx-lan-firewall.ps1") -Subnet (Read-EnvValue "LAN_SUBNET") -Port 8080
     }
     if ($InstallStartupTask) {
         & (Join-Path $PSScriptRoot "install-whisperx-lan-startup-task.ps1") -EnvFile $EnvFile
     }
-    Write-Host "WhisperX Atom LAN server started at $serverOrigin" -ForegroundColor Green
+    $qwenText = if ($EnableQwen) { "Qwen enabled" } else { "Qwen disabled; enable with -EnableQwen after transcript gates" }
+    Write-Host "WhisperX Atom LAN server core started at $serverOrigin ($qwenText)" -ForegroundColor Green
 }
 finally { Pop-Location }

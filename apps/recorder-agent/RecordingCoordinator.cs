@@ -192,6 +192,19 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 throw new IOException($"no_audio_source_available; microphone={microphoneWarning}; system={systemWarning}");
             _microphone = microphone;
             _systemAudio = systemAudio;
+            if (microphone is not null && (profile is "ROOM" or "ONLINE" or "MIC_ONLY"))
+            {
+                using var callbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                callbackTimeout.CancelAfter(TimeSpan.FromSeconds(1));
+                try
+                {
+                    await microphone.FirstAudio.WaitAsync(callbackTimeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new IOException("AUDIO_CALLBACK_TIMEOUT");
+                }
+            }
             _sessionId = sessionId;
             Interlocked.Exchange(ref _fatalCaptureFailureStarted, 0);
             if (microphoneWarning is not null || systemWarning is not null)
@@ -542,6 +555,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private readonly PcmFlacChunkWriter _writer;
         private readonly ILogger _logger;
         private readonly RecordingTrackInfo _info;
+        private readonly AudioSampleFormatDescriptor _sampleFormat;
         private readonly MMDevice? _device;
         private readonly Action<CaptureTrack, string, Exception>? _failureHandler;
         private readonly object _peakGate = new();
@@ -554,6 +568,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private bool _clipping;
         private DateTimeOffset? _lastAudioAtUtc;
         private DateTimeOffset? _silenceStartedAtUtc;
+        private readonly TaskCompletionSource<bool> _firstAudio = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null, Action<CaptureTrack, string, Exception>? failureHandler = null, string profile = "ROOM")
         {
@@ -563,6 +578,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             _logger = logger;
             _failureHandler = failureHandler;
             var trackId = Guid.NewGuid().ToString("N");
+            _sampleFormat = AudioSampleFormatResolver.Resolve(capture.WaveFormat);
             _info = new RecordingTrackInfo(
                 trackId,
                 trackType,
@@ -572,8 +588,11 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 device?.FriendlyName,
                 device is null ? "DEFAULT" : "FIXED",
                 profile,
-                capture.WaveFormat.Encoding.ToString(),
-                capture.WaveFormat.BitsPerSample);
+                _sampleFormat.CanonicalEncoding,
+                _sampleFormat.BitsPerSample,
+                _sampleFormat.SourceEncoding,
+                _sampleFormat.SourceSubFormat,
+                _sampleFormat.ValidBitsPerSample);
             var startSample = sessionClock.GetStartSample(capture.WaveFormat.SampleRate);
             _writer = new PcmFlacChunkWriter(sessionId, trackId, trackType, capture.WaveFormat, spool, dataRoot, ffmpegPath, logger, startSample);
             _capture.DataAvailable += OnDataAvailable;
@@ -581,6 +600,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
 
         public RecordingTrackInfo Info => _info;
+        public Task FirstAudio => _firstAudio.Task;
         public long MediaTimeMs => _writer.MediaTimeMs;
         public double? Peak { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _peak; } }
         public double? PeakDb { get { lock (_peakGate) return TelemetryStaleUnsafe() ? null : _peakDb; } }
@@ -613,6 +633,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             if (IsFailed) return;
             try
             {
+                _firstAudio.TrySetResult(true);
                 UpdatePeak(e.Buffer, e.BytesRecorded);
                 _writer.Append(e.Buffer.AsSpan(0, e.BytesRecorded));
             }
@@ -649,11 +670,14 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         internal static (double Peak, double Rms, bool Clipping)? CalculateTelemetry(byte[] buffer, int bytesRecorded, WaveFormat format)
         {
             if (bytesRecorded <= 0 || format.Channels <= 0) return null;
+            AudioSampleFormatDescriptor descriptor;
+            try { descriptor = AudioSampleFormatResolver.Resolve(format); }
+            catch (NotSupportedException) { return null; }
             var peak = 0d;
             var sumSquares = 0d;
             var samples = 0;
             var clippedSamples = 0;
-            if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+            if (descriptor.Kind == RawAudioSampleFormat.Float32)
             {
                 for (var offset = 0; offset + 4 <= bytesRecorded; offset += 4)
                 {
@@ -664,7 +688,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                     if (sample >= 0.995d) clippedSamples++;
                 }
             }
-            else if (format.BitsPerSample == 16)
+            else if (descriptor.Kind == RawAudioSampleFormat.Pcm16)
             {
                 for (var offset = 0; offset + 2 <= bytesRecorded; offset += 2)
                 {
@@ -739,6 +763,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private readonly string _trackId;
     private readonly string _trackType;
     private readonly WaveFormat _format;
+    private readonly AudioSampleFormatDescriptor _sampleFormat;
     private readonly SpoolStore _spool;
     private readonly string _root;
     private readonly string _ffmpegPath;
@@ -775,6 +800,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _trackId = trackId;
         _trackType = trackType;
         _format = format;
+        _sampleFormat = AudioSampleFormatResolver.Resolve(format);
         _spool = spool;
         _root = root;
         _ffmpegPath = ffmpegPath;
@@ -928,7 +954,8 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
                 chunk.Id, _sessionId, _trackId, chunk.Sequence, chunk.RawPath,
                 output, chunk.StartSample, chunk.SampleCount,
                 _format.SampleRate, _format.Channels, _trackType,
-                _format.Encoding.ToString(), _format.BitsPerSample, "WRITING", 0, null, null));
+                _sampleFormat.CanonicalEncoding, _sampleFormat.BitsPerSample, "WRITING", 0, null, null,
+                _sampleFormat.SourceEncoding, _sampleFormat.SourceSubFormat, _sampleFormat.ValidBitsPerSample));
             // The callback only closes the stream. The expensive durability
             // flush happens here, after the descriptor has left realtime code.
             await using (var raw = new FileStream(chunk.RawPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 4096, FileOptions.SequentialScan))

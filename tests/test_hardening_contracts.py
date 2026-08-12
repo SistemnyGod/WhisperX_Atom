@@ -60,7 +60,8 @@ def test_desktop_start_has_a_server_independent_title_path():
     agent = read(Path("apps/recorder-agent/AgentPipeHost.cs"))
     assert "CreateMeetingAsync(title" in view_model
     assert "StartAsync(title, serverMeetingId, ownerUserId)" in view_model
-    assert 'BindSessionAsync(sessionId, meetingId, title' in agent
+    assert 'BindSessionAsync(sessionId, meetingId, title' not in agent
+    assert 'server_binding_pending' in agent
     assert 'GetMeetingIdAsync(localSessionId' in agent
 
 def test_desktop_cancels_processing_and_hides_internal_errors():

@@ -10,15 +10,19 @@ internal sealed record MachineServerConfig(int SchemaVersion, string ServerOrigi
 
     public static string? ServerOriginOrNull()
     {
+        return Load()?.ServerOrigin;
+    }
+
+    public static MachineServerConfig? Load()
+    {
         try
         {
             if (!File.Exists(FilePath)) return null;
             var value = JsonSerializer.Deserialize<MachineServerConfig>(File.ReadAllText(FilePath));
             return value is not null && Uri.TryCreate(value.ServerOrigin, UriKind.Absolute, out var uri)
-                && uri.Scheme is "http" or "https" ? uri.ToString().TrimEnd('/') : null;
+                && uri.Scheme is "http" or "https" ? value with { ServerOrigin = uri.ToString().TrimEnd('/') } : null;
         }
         catch (IOException) { return null; }
         catch (JsonException) { return null; }
     }
 }
-

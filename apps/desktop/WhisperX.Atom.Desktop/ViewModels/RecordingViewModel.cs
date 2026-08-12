@@ -261,6 +261,10 @@ public sealed class RecordingViewModel : ObservableObject
             ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (RecorderIpcException ex) when (ex.Transient && (State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing))
+        {
+            WarningMessage = "Recorder Agent занят другой операцией; текущая запись продолжается.";
+        }
         catch (Exception ex)
         {
             State = RecordingState.Unavailable;
@@ -323,8 +327,39 @@ public sealed class RecordingViewModel : ObservableObject
             {
                 try
                 {
+                    var currentUser = await _services.Backend.GetCurrentUserAsync(CancellationToken.None);
+                    var agentHealth = await _services.Recorder.GetHealthAsync(CancellationToken.None);
+                    if (currentUser is not null && agentHealth.Health?.AgentId is Guid agentId)
+                    {
+                        var enrollment = await _services.Backend.BootstrapLocalAgentAsync(
+                            agentHealth.Health.InstallationId ?? Guid.NewGuid(), agentId, "WhisperX Atom Desktop", CancellationToken.None);
+                        if (enrollment.ReenrollRequired)
+                        {
+                            State = RecordingState.Error;
+                            ErrorMessage = "Recorder Agent требует повторной регистрации. Автоматическая ротация токена запрещена.";
+                            return false;
+                        }
+                        if (!string.IsNullOrWhiteSpace(enrollment.Token))
+                        {
+                            var settings = _services.Settings.Load();
+                            await _services.Recorder.ConfigureAgentAsync(_services.Backend.ApiUrl, Guid.Parse(enrollment.AgentId), enrollment.Token,
+                                settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(), settings.MicrophoneDeviceId, settings.SystemAudioDeviceId, CancellationToken.None);
+                        }
+                    }
                     var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
                     if (Guid.TryParse(meeting.Id, out var parsedMeetingId)) serverMeetingId = parsedMeetingId;
+                }
+                catch (DesktopApiException ex) when (ex.StatusCode != 0 && !ex.Retryable)
+                {
+                    State = RecordingState.Error;
+                    ErrorMessage = MapRecordingError(ex.ErrorCode);
+                    StatusMessage = ex.TraceId is null ? ex.Message : $"{ex.Message} (trace: {ex.TraceId})";
+                    return false;
+                }
+                catch (DesktopApiException ex) when (ex.StatusCode == 0 || ex.Retryable)
+                {
+                    WarningMessage = "API недоступен: запись сохранится локально, а отправка будет повторена позже.";
+                    StatusMessage = $"Запись запускается локально. Синхронизация: {SafeError(ex)}";
                 }
                 catch (Exception ex)
                 {
@@ -930,6 +965,11 @@ public sealed class RecordingViewModel : ObservableObject
             "RECORDING_ARCHIVE_ACCESS_DENIED" => "Нет доступа к папке локального архива.",
             "FFMPEG_UNAVAILABLE" => "Не найден FFmpeg для локальной сборки аудио.",
             "SESSION_REQUIRED" => "Не найдена локальная сессия записи для повторной отправки.",
+            "AGENT_USER_LINK_REQUIRED" => "Recorder Agent ещё не привязан к текущему пользователю. Повторите вход или обратитесь к администратору.",
+            "OWNER_REQUIRED" => "Для серверной записи не определён владелец. Выполните вход в приложение.",
+            "OWNER_AUTHORIZATION_REJECTED" => "Пользователь больше не может отправлять эту запись. Локальная копия сохранена.",
+            "MEETING_OWNER_MISMATCH" => "Запись принадлежит другому пользователю и не может быть отправлена из этого сеанса.",
+            "REENROLL_REQUIRED" => "Recorder Agent отозван. Требуется повторная регистрация устройства.",
             _ when code.Contains("401", StringComparison.OrdinalIgnoreCase) || code.Contains("403", StringComparison.OrdinalIgnoreCase) => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
             _ when code.Contains("RECORDING_FINALIZE_FAILED", StringComparison.OrdinalIgnoreCase) => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
             _ => "Recorder Agent не завершил операцию. Локальные данные сохранены; откройте диагностику Agent."

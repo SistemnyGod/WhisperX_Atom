@@ -49,18 +49,17 @@ internal static class FlacEncoder
 
     public static NAudio.Wave.WaveFormat RawFormat(RawRecordingChunk chunk)
     {
-        if (!Enum.TryParse<WaveFormatEncoding>(chunk.Encoding, ignoreCase: true, out var encoding))
-            throw new InvalidOperationException($"unsupported_audio_encoding:{chunk.Encoding}");
-        return encoding == WaveFormatEncoding.IeeeFloat && chunk.BitsPerSample == 32
+        var descriptor = AudioSampleFormatResolver.FromStored(
+            chunk.Encoding,
+            chunk.BitsPerSample,
+            chunk.SampleRate,
+            chunk.Channels,
+            chunk.SourceSubFormat,
+            chunk.ValidBitsPerSample);
+        return descriptor.Kind == RawAudioSampleFormat.Float32
             ? WaveFormat.CreateIeeeFloatWaveFormat(chunk.SampleRate, chunk.Channels)
             : new WaveFormat(chunk.SampleRate, chunk.BitsPerSample, chunk.Channels);
     }
 
-    private static string FfmpegFormat(WaveFormat format) => format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32 ? "f32le" : format.BitsPerSample switch
-    {
-        16 => "s16le",
-        24 => "s24le",
-        32 => "s32le",
-        _ => throw new NotSupportedException($"Unsupported audio format: {format.Encoding}/{format.BitsPerSample} bits")
-    };
+    private static string FfmpegFormat(WaveFormat format) => AudioSampleFormatResolver.Resolve(format).FfmpegInput;
 }
