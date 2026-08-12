@@ -85,8 +85,41 @@ $mediaReady = @($chains | Where-Object { $_.mediaReady }).Count -gt 0
 $transcriptReady = @($chains | Where-Object { $_.transcriptReady }).Count -gt 0
 $summaryReady = @($chains | Where-Object { $_.summaryReady }).Count -gt 0
 
+$requiredAcceptanceScenarios = @(
+    "e2e-5m",
+    "server-offline-recovery",
+    "recorder-crash-recovery",
+    "worker-crash-recovery",
+    "windows-reboot-recovery",
+    "endurance-30m",
+    "endurance-2h",
+    "backup-restore",
+    "rbac-isolation"
+)
+$acceptanceRoot = Join-Path $repo "artifacts\acceptance"
+$acceptanceBlockers = [System.Collections.Generic.List[string]]::new()
+foreach ($scenario in $requiredAcceptanceScenarios) {
+    $scenarioRoot = Join-Path $acceptanceRoot $scenario
+    $evidence = @(Get-ChildItem -LiteralPath $scenarioRoot -Recurse -File -Filter "*.json" -ErrorAction SilentlyContinue)
+    $scenarioReady = $false
+    foreach ($file in $evidence) {
+        try {
+            $json = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            if ($scenario -eq "backup-restore") {
+                $scenarioReady = ($json.backupVerified -eq $true -and $json.cleanRestore -eq $true)
+            } else {
+                $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
+            }
+            if ($scenarioReady) { break }
+        } catch { }
+    }
+    if (-not $scenarioReady) { $acceptanceBlockers.Add("ACCEPTANCE_$($scenario.ToUpperInvariant().Replace('-', '_'))_MISSING") }
+}
+$acceptanceReady = $acceptanceBlockers.Count -eq 0
+
 $reasons = [System.Collections.Generic.List[string]]::new()
 foreach ($reason in $runtimeReasons) { $reasons.Add($reason) }
+foreach ($reason in $acceptanceBlockers) { $reasons.Add($reason) }
 if (-not $recordingReady) { $reasons.Add("LOCAL_ARCHIVE_EVIDENCE_MISSING") }
 if (-not $deliveryReady) { $reasons.Add("DELIVERY_CONFIRMATION_MISSING") }
 if (-not $mediaReady) { $reasons.Add("MEDIA_READY_EVIDENCE_MISSING") }
@@ -122,6 +155,8 @@ $audit = [ordered]@{
         media = $mediaReady
         transcript = $transcriptReady
         summary = $summaryReady
+        acceptance = $acceptanceReady
+        requiredAcceptanceScenarios = $requiredAcceptanceScenarios
         uniqueChains = $uniqueChains
         chainCount = $chains.Count
     }

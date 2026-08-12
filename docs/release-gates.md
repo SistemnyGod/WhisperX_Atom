@@ -14,6 +14,6 @@ The following evidence is deliberately outside commit CI and must be recorded as
 - backup/restore acceptance;
 - RBAC isolation.
 
-Set `MVP_V1_READY=true` only after all eight records are available. Create a release tag only after the protected `main` merge is green.
+Set `MVP_V1_READY=true` only after all nine records are available. Create a release tag only after the protected `main` merge is green.
 
 If branch protection cannot be changed by automation, open `Settings` → `Rules` → `Rulesets` → `New branch ruleset` for `main` (or `Settings` → `Branches` on repositories using legacy protection). Require a pull request, require the four named checks above, require the branch to be up to date, and disallow force pushes and deletions.

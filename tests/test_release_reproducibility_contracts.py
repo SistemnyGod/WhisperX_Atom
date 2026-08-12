@@ -35,3 +35,21 @@ def test_core_release_images_do_not_use_latest_or_major_only_tags():
     assert "nats:2.11.6-alpine3.21" in compose
     assert "tusproject/tusd:v2.6.0" in compose
     assert '"rollForward": "disable"' in read("global.json")
+
+
+def test_release_gate_requires_all_live_acceptance_scenarios():
+    gate = read("scripts/release-gate.ps1")
+    for scenario in (
+        "e2e-5m",
+        "server-offline-recovery",
+        "recorder-crash-recovery",
+        "worker-crash-recovery",
+        "windows-reboot-recovery",
+        "endurance-30m",
+        "endurance-2h",
+        "backup-restore",
+        "rbac-isolation",
+    ):
+        assert scenario in gate
+    assert "ACCEPTANCE_" in gate
+    assert "backupVerified" in gate and "cleanRestore" in gate
