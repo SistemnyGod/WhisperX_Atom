@@ -51,7 +51,11 @@ async def run() -> None:
             row = connection.execute("SELECT id, topic, payload FROM outbox_messages WHERE published_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1").fetchone()
             if row:
                 message_id, topic, payload = row
-                await jetstream.publish(topic, json.dumps(payload).encode("utf-8"))
+                await jetstream.publish(
+                    topic,
+                    json.dumps(payload).encode("utf-8"),
+                    headers={"Nats-Msg-Id": str(message_id)},
+                )
                 connection.execute("UPDATE outbox_messages SET published_at=now() WHERE id=%s", (message_id,))
                 published = True
         if not published:

@@ -89,7 +89,7 @@ class SummaryRepository:
                 (error, job_id),
             )
             # The transcript remains usable even when the optional summary failed.
-            connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status NOT IN ('READY','CANCELLED')", (meeting_id,))
+            connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
     def load_segments(self, meeting_id: str, transcript_id: str | None = None) -> list[TranscriptSegment]:
         with psycopg.connect(self.conninfo) as connection:
             if transcript_id:
@@ -173,9 +173,10 @@ class SummaryRepository:
                 connection.execute("UPDATE jobs SET pipeline_correlation_id=%s WHERE id=%s", (correlation_id, job_id))
             existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
             if existing_summary is not None:
-                if str(existing_summary[1]) == "READY":
+                existing_status = str(existing_summary[1])
+                if existing_status in {"READY", "NEEDS_REVIEW", "FAILED"}:
                     connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
-                    connection.execute("UPDATE meetings SET status='READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+                    connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if existing_status == "READY" else "PARTIAL_READY", meeting_id))
                     return True
                 raise RuntimeError("summary_persist_incomplete")
             if transcript_id:
@@ -268,7 +269,7 @@ class SummaryRepository:
                 connection.execute("UPDATE jobs SET status='FAILED',stage='FAILED',progress=100,error_message=%s,error_code='SUMMARY_PROTOCOL_QUALITY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", ("Не удалось сформировать подтверждённый протокол", job_id))
             else:
                 connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
-            connection.execute("UPDATE meetings SET status='READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+            connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if summary_status == "READY" else "PARTIAL_READY", meeting_id))
             return True
 
 def parse_deadline(value: Any) -> datetime | None:

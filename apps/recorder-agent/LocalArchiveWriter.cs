@@ -304,7 +304,7 @@ public sealed class LocalArchiveWriter(
         DeleteIfExists(outputPart);
         var microphone = tracks.FirstOrDefault(track => track.TrackType.Contains("microphone", StringComparison.OrdinalIgnoreCase));
         var loopback = tracks.FirstOrDefault(track => track.TrackType.Contains("system", StringComparison.OrdinalIgnoreCase) || track.TrackType.Contains("loopback", StringComparison.OrdinalIgnoreCase));
-        var selectedTracks = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase)
+        IReadOnlyList<MasterTrackInput> selectedTracks = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase)
             ? tracks
             : recordingProfile.Equals("SYSTEM_ONLY", StringComparison.OrdinalIgnoreCase) ? (loopback is null ? tracks.Take(1).ToArray() : [loopback])
             : microphone is null ? tracks.Take(1).ToArray() : [microphone];
@@ -317,8 +317,23 @@ public sealed class LocalArchiveWriter(
             timeline.Add(new MasterTrackTimeline(track.TrackType, Math.Round((track.FirstStartSample - baseStart) * 1000d / Math.Max(1, track.SampleRate)), Math.Round(expected), actual, Math.Round(actual - expected)));
         }
         var tolerance = int.TryParse(Environment.GetEnvironmentVariable("AUDIO_TRACK_DRIFT_TOLERANCE_MS"), out var configuredTolerance) ? configuredTolerance : 250;
-        var warnings = timeline.Where(item => Math.Abs(item.DriftMs) > tolerance).Select(_ => "AUDIO_TRACK_DRIFT_HIGH").Distinct().ToArray();
-        var result = new MasterAssemblyResult(recordingProfile, selectedTracks.Count == 1 ? (recordingProfile.Equals("SYSTEM_ONLY", StringComparison.OrdinalIgnoreCase) ? "loopback" : "microphone") : "controlled_mix", selectedTracks.Count, recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && selectedTracks.Count > 1 ? "controlled_online_mix" : "single_original_track", tolerance, timeline, warnings);
+        var warningsList = timeline.Where(item => Math.Abs(item.DriftMs) > tolerance).Select(_ => "AUDIO_TRACK_DRIFT_HIGH").Distinct().ToList();
+        var degradedOnline = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && warningsList.Count > 0;
+        var selectedAsrSource = selectedTracks.Count == 1
+            ? (recordingProfile.Equals("SYSTEM_ONLY", StringComparison.OrdinalIgnoreCase) ? "loopback" : "microphone")
+            : "controlled_mix";
+        var mixStrategy = recordingProfile.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && selectedTracks.Count > 1 ? "controlled_online_mix" : "single_original_track";
+        if (degradedOnline)
+        {
+            var fallback = microphone ?? loopback ?? tracks.FirstOrDefault();
+            if (fallback is null) throw new InvalidOperationException("recording_source_unavailable");
+            selectedTracks = [fallback];
+            selectedAsrSource = fallback == microphone ? "microphone" : fallback == loopback ? "loopback" : "single_track";
+            mixStrategy = "online_single_track_fallback";
+            warningsList.Add("ONLINE_MIX_DEGRADED");
+        }
+        var warnings = warningsList.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var result = new MasterAssemblyResult(recordingProfile, selectedAsrSource, tracks.Count, mixStrategy, tolerance, timeline, warnings);
         if (selectedTracks.Count == 1)
         {
             try
@@ -328,7 +343,7 @@ public sealed class LocalArchiveWriter(
                 File.Move(outputPart, output, true);
             }
             finally { DeleteIfExists(outputPart); }
-            if (warnings.Length > 0) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
+            if (warnings.Length > 0 && !degradedOnline) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
             return result;
         }
 
@@ -348,7 +363,7 @@ public sealed class LocalArchiveWriter(
             File.Move(outputPart, output, true);
         }
         finally { DeleteIfExists(outputPart); }
-        if (warnings.Length > 0) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
+        if (warnings.Length > 0 && !degradedOnline) throw new InvalidOperationException("AUDIO_TRACK_DRIFT_HIGH");
         return result;
     }
 

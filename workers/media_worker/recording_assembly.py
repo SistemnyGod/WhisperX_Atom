@@ -170,25 +170,39 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
     timeline = [_timeline_metadata(track, path, first_start) for track, path in zip(tracks, assembled)]
     drift_tolerance = int(os.getenv("AUDIO_TRACK_DRIFT_TOLERANCE_MS", "250"))
     warnings = ["AUDIO_TRACK_DRIFT_HIGH" for item in timeline if abs(item["drift_ms"]) > drift_tolerance]
-    assembly_result = {
-        "recording_profile": profile,
-        "track_count": len(tracks),
-        "selected_asr_source": "microphone" if profile in {"ROOM", "MIC_ONLY"} and microphone else "loopback" if profile == "SYSTEM_ONLY" and system else "controlled_mix" if profile == "ONLINE" else "single_track",
-        "mix_strategy": "controlled_online_mix" if profile == "ONLINE" and len(assembled) > 1 else "single_original_track",
-        "drift_tolerance_ms": drift_tolerance,
-        "tracks": timeline,
-        "warnings": sorted(set(warnings)),
-    }
-    (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
-    if warnings:
-        raise ValueError("AUDIO_TRACK_DRIFT_HIGH")
-    if profile in {"ROOM", "MIC_ONLY"} and microphone is not None:
+    high_drift_online = profile == "ONLINE" and bool(warnings)
+    selected_asr_source = "microphone" if profile in {"ROOM", "MIC_ONLY"} and microphone else "loopback" if profile == "SYSTEM_ONLY" and system else "controlled_mix" if profile == "ONLINE" else "single_track"
+    mix_strategy = "controlled_online_mix" if profile == "ONLINE" and len(assembled) > 1 else "single_original_track"
+    source: Path | None = None
+    if high_drift_online:
+        # Drift makes a synchronized mix unsafe. Keep the original tracks and
+        # continue with the first valid preferred source instead of losing the
+        # transcript entirely.
+        source = microphone or system or next((path for path in assembled if path.is_file()), None)
+        if source is None:
+            raise ValueError("recording_source_unavailable")
+        selected_asr_source = "microphone" if source == microphone else "loopback" if source == system else "single_track"
+        mix_strategy = "online_single_track_fallback"
+        warnings.append("ONLINE_MIX_DEGRADED")
+    elif profile in {"ROOM", "MIC_ONLY"} and microphone is not None:
         source = microphone
     elif profile == "SYSTEM_ONLY" and system is not None:
         source = system
     elif len(assembled) == 1:
         source = assembled[0]
-    else:
+    assembly_result = {
+        "recording_profile": profile,
+        "track_count": len(tracks),
+        "selected_asr_source": selected_asr_source,
+        "mix_strategy": mix_strategy,
+        "drift_tolerance_ms": drift_tolerance,
+        "tracks": timeline,
+        "warnings": sorted(set(warnings)),
+    }
+    if warnings and not high_drift_online:
+        (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise ValueError("AUDIO_TRACK_DRIFT_HIGH")
+    if source is None:
         source = output_dir / "mixed.flac"
         inputs: list[str] = []
         for path in assembled:
@@ -207,4 +221,5 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
             temporary.replace(source)
         finally:
             temporary.unlink(missing_ok=True)
+    (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
     return source
