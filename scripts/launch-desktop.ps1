@@ -12,12 +12,12 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repoRoot
 if (-not $SkipRecorder) {
-    $recorderService = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
-    if ($null -eq $recorderService) {
-        try { & (Join-Path $PSScriptRoot "start-recorder-host.ps1") }
-        catch { Write-Warning ("RECORDER_UNAVAILABLE: {0}. Desktop will still open for diagnostics." -f $_.Exception.Message) }
-    } elseif ($recorderService.Status -ne "Running") {
-        Start-Service -Name "WhisperXAtomRecorder"
+    try {
+        & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
+    }
+    catch {
+        Write-Warning ("RECORDER_UNAVAILABLE: {0}. Desktop will still open for diagnostics." -f $_.Exception.Message)
     }
 }
 $project = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\WhisperX.Atom.Desktop.csproj"

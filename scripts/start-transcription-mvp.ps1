@@ -51,10 +51,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "API_NOT_READY: Transcript MVP readiness check failed." }
 
     if (-not $SkipRecorder) {
-        $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
-        if ($service) {
-            if ($service.Status -ne "Running") { Start-Service -Name "WhisperXAtomRecorder" }
-        } else {
+        try {
+            & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
+        }
+        catch {
+            $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
+            if ($null -ne $service) { throw "RECORDER_UNAVAILABLE: Recorder Service did not start. $($_.Exception.Message)" }
             & (Join-Path $PSScriptRoot "start-recorder-host.ps1")
             if ($LASTEXITCODE -ne 0) { throw "RECORDER_UNAVAILABLE: Recorder Service is not installed and host fallback did not start." }
         }
