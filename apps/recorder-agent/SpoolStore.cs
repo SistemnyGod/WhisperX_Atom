@@ -107,6 +107,7 @@ public sealed record RecordingManifest(Guid ServerSessionId, IReadOnlyList<Recor
 
 public sealed class SpoolStore
 {
+    private const int UploadStaleAfterSeconds = 300;
     private readonly string _connectionString;
 
     private static DateTimeOffset? ParseDate(SqliteDataReader reader, int ordinal)
@@ -216,6 +217,26 @@ public sealed class SpoolStore
             catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
         }
 
+        await RecoverStaleUploadingChunksAsync(cancellationToken);
+    }
+
+    public async Task<int> RecoverStaleUploadingChunksAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        var now = DateTimeOffset.UtcNow;
+        command.CommandText = """
+            UPDATE recording_chunks
+            SET status='FAILED',
+                next_attempt_at=$now,
+                last_error_code='RECORDER_CRASH_DURING_UPLOAD'
+            WHERE status='UPLOADING'
+              AND (last_attempt_at IS NULL OR last_attempt_at <= $cutoff)
+            """;
+        command.Parameters.AddWithValue("$now", now.ToString("O"));
+        command.Parameters.AddWithValue("$cutoff", now.AddSeconds(-UploadStaleAfterSeconds).ToString("O"));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task CreateSessionAsync(string sessionId, Guid? meetingId = null, string? title = null, string? pipelineCorrelationId = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null)
@@ -429,7 +450,11 @@ public sealed class SpoolStore
             {
                 case "CONFIRMED": confirmed += count; break;
                 case "UPLOADING": uploading += count; bytesPending += reader.GetInt64(2); break;
-                case "FAILED": failed += count; bytesPending += reader.GetInt64(2); break;
+                case "FAILED":
+                case "BLOCKED":
+                    failed += count;
+                    bytesPending += reader.GetInt64(2);
+                    break;
                 default: ready += count; bytesPending += reader.GetInt64(2); break;
             }
             if (!reader.IsDBNull(3) && DateTimeOffset.TryParse(reader.GetString(3), out var created) && (oldest is null || created < oldest)) oldest = created;
@@ -896,7 +921,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)) OR (next_retry_at IS NULL AND state='FAILED' AND local_finalize_state<>'LOCAL_FAILED'))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY') AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
+        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL AND next_retry_at <= $now)) AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY') AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
         command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddMinutes(-2).ToString("O"));
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         var result = new List<string>();
@@ -910,7 +935,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state IN ('FINALIZING','FAILED') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED'))";
+        command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (state IN ('FINALIZING') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED'))";
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -924,8 +949,10 @@ public sealed class SpoolStore
             FROM recording_sessions
             WHERE state NOT IN ('CANCELLED','FINALIZED')
               AND ($active IS NULL OR id <> $active)
+              AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL))
+              AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL))
               AND (
-                    state IN ('FINALIZING','FAILED')
+                    state IN ('FINALIZING')
                     OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED')
                     OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED')
                   )
@@ -1129,7 +1156,7 @@ public sealed class SpoolStore
                        ROW_NUMBER() OVER (PARTITION BY c.session_id ORDER BY c.track_id,c.sequence) AS session_rank
                 FROM recording_chunks c
                 JOIN recording_sessions s ON s.id=c.session_id
-                WHERE c.status NOT IN ('CONFIRMED','CANCELLED')
+                WHERE c.status NOT IN ('CONFIRMED','CANCELLED','BLOCKED','UPLOADING')
                   AND s.state<>'CANCELLED'
                   AND ($session IS NULL OR c.session_id=$session)
                   AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= $now)
@@ -1174,13 +1201,52 @@ public sealed class SpoolStore
         var baseSeconds = retryNumber switch { 1 => 2, 2 => 5, 3 => 15, 4 => 30, _ => 60 };
         var delay = Math.Min(300, baseSeconds) + Random.Shared.NextDouble() * Math.Max(1, baseSeconds * 0.2);
         var next = DateTimeOffset.UtcNow.AddSeconds(delay);
-        command.CommandText = "UPDATE recording_chunks SET status='FAILED',next_attempt_at=$next,last_error_code=$error WHERE track_id=$track AND sequence=$sequence AND status='UPLOADING'";
-        command.Parameters.AddWithValue("$next", next.ToString("O"));
+        var terminal = IsTerminalChunkError(errorCode);
+        command.CommandText = "UPDATE recording_chunks SET status=$status,next_attempt_at=$next,last_error_code=$error WHERE track_id=$track AND sequence=$sequence AND status IN ('UPLOADING','READY','FAILED')";
+        command.Parameters.AddWithValue("$status", terminal ? "BLOCKED" : "FAILED");
+        command.Parameters.AddWithValue("$next", terminal ? DBNull.Value : next.ToString("O"));
         command.Parameters.AddWithValue("$error", errorCode);
         command.Parameters.AddWithValue("$track", chunk.TrackId);
         command.Parameters.AddWithValue("$sequence", chunk.Sequence);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    public async Task<int> UnblockTerminalUploadsAsync(string? sessionId = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_chunks SET status='READY',next_attempt_at=NULL,last_error_code=NULL WHERE status='BLOCKED' AND ($session IS NULL OR session_id=$session)";
+        command.Parameters.AddWithValue("$session", (object?)sessionId ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<string?> GetBlockedChunkErrorAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT last_error_code FROM recording_chunks WHERE session_id=$session AND status='BLOCKED' ORDER BY track_id,sequence LIMIT 1";
+        command.Parameters.AddWithValue("$session", sessionId);
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is null or DBNull ? null : Convert.ToString(value);
+    }
+
+    private static bool IsTerminalChunkError(string errorCode) => errorCode.ToUpperInvariant() switch
+    {
+        "AGENT_AUTH_REJECTED" or
+        "AGENT_USER_LINK_REQUIRED" or
+        "OWNER_REQUIRED" or
+        "OWNER_AUTHORIZATION_REJECTED" or
+        "MEETING_OWNER_MISMATCH" or
+        "MEETING_NOT_FOUND" or
+        "MEETING_CANCELLED" or
+        "LOCAL_CHUNK_MISSING" or
+        "LOCAL_CHUNK_INVALID" or
+        "RECORDING_ARCHIVE_ACCESS_DENIED" or
+        "FFMPEG_UNAVAILABLE" => true,
+        _ => false
+    };
 
     public async Task MarkConfirmedAsync(string trackId, int sequence, CancellationToken cancellationToken = default)
     {

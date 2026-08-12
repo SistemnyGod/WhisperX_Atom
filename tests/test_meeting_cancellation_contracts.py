@@ -42,7 +42,7 @@ def test_server_cancellation_reaches_recorder_and_excludes_local_spool():
     assert "CANCEL_LOCAL_SESSION" in agent
     assert "CancelServerSessionAsync" in spool
     assert "CancelLocalSessionAsync" in spool
-    assert "c.status NOT IN ('CONFIRMED','CANCELLED')" in spool
+    assert "c.status NOT IN ('CONFIRMED','CANCELLED','BLOCKED','UPLOADING')" in spool
     assert "s.state<>'CANCELLED'" in spool
     assert "SELECT status FROM meetings WHERE id=@id FOR UPDATE" in store
 

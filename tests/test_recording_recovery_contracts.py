@@ -172,6 +172,41 @@ def test_upload_queue_prioritizes_active_sessions_and_persists_chunk_backoff():
     assert "await Task.WhenAll(uploads)" in api
 
 
+def test_upload_recovery_resets_stale_chunks_and_blocks_terminal_errors():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "UploadStaleAfterSeconds = 300" in spool
+    assert "RecoverStaleUploadingChunksAsync" in spool
+    assert "RECORDER_CRASH_DURING_UPLOAD" in spool
+    assert "status NOT IN ('CONFIRMED','CANCELLED','BLOCKED','UPLOADING')" in spool
+    assert "status IN ('UPLOADING','READY','FAILED')" in spool
+    assert "status=$status" in spool and "BLOCKED" in spool
+    assert "next_attempt_at=$next" in spool
+    assert "UnblockTerminalUploadsAsync" in spool
+    assert "GetBlockedChunkErrorAsync" in spool
+    assert "blockedChunkError" in coordinator
+    assert "Chunk delivery is blocked" in coordinator
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    assert "configureSessionId" in host
+    assert "UnblockTerminalUploadsAsync(configureSessionId, cancellationToken)" in host
+
+
+def test_failed_sessions_need_explicit_retry_marker_for_startup_recovery():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert "state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL" in spool
+    assert "next_retry_at IS NULL AND state='FAILED'" not in spool
+
+
+def test_retry_upload_is_queued_and_deduplicated_over_ipc():
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    retry = host.split('case "RETRY_UPLOAD":', 1)[1].split('case "START":', 1)[0]
+    assert "QueueFinalization(retrySessionId)" in retry
+    assert "new AgentIpcResponse(true, RecorderState.Finalizing.ToString()" in retry
+    assert "FinalizeAsync(retrySessionId, cancellationToken)" not in retry
+    assert "TaskCompletionSource<FinalizationResult>" in host
+    assert "if (_finalizations.ContainsKey(sessionId)) return;" in host
+
+
 def test_active_capture_has_priority_over_background_delivery_error_in_status():
     host = read("apps/recorder-agent/AgentPipeHost.cs")
     visible = host.split("private (RecorderState State, string? SessionId, string? Error) VisibleStatus()", 1)[1]

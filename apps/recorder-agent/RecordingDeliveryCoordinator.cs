@@ -114,6 +114,14 @@ public sealed class RecordingDeliveryCoordinator(
                 deliveryState: "UPLOADING",
                 cancellationToken: cancellationToken);
             await api.UploadPendingChunksAsync(spool, localSessionId, cancellationToken);
+            var blockedChunkError = await spool.GetBlockedChunkErrorAsync(localSessionId, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(blockedChunkError))
+            {
+                return await PersistFailureAsync(localSessionId,
+                    new FinalizationResult(false, "DELIVERY", blockedChunkError, false, ErrorHttpStatus: null),
+                    "Chunk delivery is blocked until Agent authorization or local storage is repaired",
+                    cancellationToken);
+            }
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
 
             await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", cancellationToken: cancellationToken);

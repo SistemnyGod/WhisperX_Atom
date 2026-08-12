@@ -107,6 +107,9 @@ public sealed class AgentPipeHost(
                     if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(agentToken) || agentId is not Guid configuredAgent)
                         return Error("agent_configuration_invalid");
                     await api.ConfigureAsync(serverUrl, configuredAgent, agentToken, cancellationToken);
+                    var configureSessionId = ReadString(request.Payload, "sessionId");
+                    if (!string.IsNullOrWhiteSpace(configureSessionId))
+                        await spool.UnblockTerminalUploadsAsync(configureSessionId, cancellationToken);
                     var configuredArchiveRoot = ReadString(request.Payload, "archiveRoot");
                     if (!string.IsNullOrWhiteSpace(configuredArchiveRoot)) await api.SetArchiveRootAsync(configuredArchiveRoot, cancellationToken);
                     if (HasProperty(request.Payload, "microphoneDeviceId") || HasProperty(request.Payload, "systemAudioDeviceId"))
@@ -116,6 +119,9 @@ public sealed class AgentPipeHost(
                     var updatedServerUrl = ReadString(request.Payload, "serverUrl");
                     if (string.IsNullOrWhiteSpace(updatedServerUrl)) return Error("server_url_required");
                     await api.UpdateServerUrlAsync(updatedServerUrl, cancellationToken);
+                    var updateSessionId = ReadString(request.Payload, "sessionId");
+                    if (!string.IsNullOrWhiteSpace(updateSessionId))
+                        await spool.UnblockTerminalUploadsAsync(updateSessionId, cancellationToken);
                     return Status();
                 case "SET_ARCHIVE_ROOT":
                     var archiveRoot = ReadString(request.Payload, "archiveRoot");
@@ -146,11 +152,11 @@ public sealed class AgentPipeHost(
                 case "RETRY_UPLOAD":
                     var retrySessionId = ReadString(request.Payload, "sessionId");
                     if (string.IsNullOrWhiteSpace(retrySessionId)) return Error("session_required");
-                    var retryResult = await FinalizeAsync(retrySessionId, cancellationToken);
-                    if (retryResult.Success) _finalizationErrors.TryRemove(retrySessionId, out _);
-                    else _finalizationErrors[retrySessionId] = retryResult.ErrorCode ?? "server_finalize_pending";
-                    return new AgentIpcResponse(retryResult.Success, retryResult.Success ? RecorderState.Idle.ToString() : RecorderState.Error.ToString(), retrySessionId,
-                        retryResult.Success ? null : retryResult.ErrorCode, null, null, null, AgentIpcProtocol.Version, null,
+                    if (await spool.GetSessionInfoAsync(retrySessionId, cancellationToken) is null) return Error("session_not_found");
+                    await spool.UnblockTerminalUploadsAsync(retrySessionId, cancellationToken);
+                    QueueFinalization(retrySessionId);
+                    return new AgentIpcResponse(true, RecorderState.Finalizing.ToString(), retrySessionId,
+                        null, null, null, null, AgentIpcProtocol.Version, null,
                         await BuildSessionStatusAsync(retrySessionId, cancellationToken));
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
@@ -215,6 +221,35 @@ public sealed class AgentPipeHost(
         var task = CompleteFinalizationAsync(stop, meetingId);
         _finalizations[stop.SessionId] = task;
         _ = task.ContinueWith(completed => _finalizations.TryRemove(stop.SessionId, out _), TaskScheduler.Default);
+    }
+
+    private void QueueFinalization(string sessionId)
+    {
+        if (_finalizations.ContainsKey(sessionId)) return;
+        var completion = new TaskCompletionSource<FinalizationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_finalizations.TryAdd(sessionId, completion.Task)) return;
+        _ = CompleteQueuedFinalizationAsync(sessionId, completion);
+    }
+
+    private async Task CompleteQueuedFinalizationAsync(string sessionId, TaskCompletionSource<FinalizationResult> completion)
+    {
+        try
+        {
+            var result = await FinalizeAsync(sessionId, CancellationToken.None);
+            if (result.Success) _finalizationErrors.TryRemove(sessionId, out _);
+            else _finalizationErrors[sessionId] = result.ErrorCode ?? "server_finalize_pending";
+            completion.TrySetResult(result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Queued recording finalization failed. Session={SessionId}", sessionId);
+            _finalizationErrors[sessionId] = "SERVER_FINALIZE_FAILED";
+            completion.TrySetResult(new FinalizationResult(false, "DELIVERY", "SERVER_FINALIZE_FAILED", true));
+        }
+        finally
+        {
+            _finalizations.TryRemove(sessionId, out _);
+        }
     }
 
     private async Task CompleteFinalizationAsync(RecordingStopHandle stop, Guid? meetingId)
