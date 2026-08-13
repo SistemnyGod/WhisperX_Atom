@@ -11,7 +11,7 @@ public sealed class RawChunkRecovery(
     SpoolStore spool,
     ILogger<RawChunkRecovery> logger)
 {
-    private readonly string _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
+    private readonly string _ffmpegPath = RecorderToolPaths.Ffmpeg();
 
     public async Task<bool> RecoverAsync(string? activeSessionId, CancellationToken cancellationToken = default)
     {

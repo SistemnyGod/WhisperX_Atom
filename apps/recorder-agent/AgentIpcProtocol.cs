@@ -5,11 +5,33 @@ namespace WhisperX.Atom.Recorder;
 public static class AgentIpcProtocol
 {
     public const string PipeName = "WhisperXAtomAgent";
-    public const int Version = 5;
+    public const int Version = 6;
+    public const int LegacyVersion = 5;
+    public const int MinimumSupportedVersion = 5;
     public const int MaxServerInstances = 8;
 }
 
-public sealed record AgentIpcRequest(string Command, JsonElement Payload);
+public static class RecorderPipeNames
+{
+    public const string LegacyService = AgentIpcProtocol.PipeName;
+    public const string AudioGraphHost = "WhisperXAtomRecorderHost";
+
+    public static string ForCurrentProcess() =>
+        string.Equals(Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE"), "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase)
+            ? AudioGraphHost
+            : LegacyService;
+}
+
+public static class RecorderRuntimeMode
+{
+    public static bool IsAudioGraph =>
+        string.Equals(Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE"), "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase);
+}
+
+public sealed record AgentIpcRequest(string Command, JsonElement Payload)
+{
+    public int ProtocolVersion { get; init; } = AgentIpcProtocol.LegacyVersion;
+}
 
 public sealed record AudioSourceTestResult(
     bool Success,
@@ -54,7 +76,10 @@ public sealed record AgentIpcResponse(
     int ProtocolVersion = AgentIpcProtocol.Version,
     AgentPreflightResult? Preflight = null,
     RecordingSessionStatus? SessionStatus = null,
-    AudioSourceTestResult? AudioSourceTest = null);
+    AudioSourceTestResult? AudioSourceTest = null,
+    AudioDeviceProbeResult? AudioGraphProbe = null,
+    int MinimumSupportedProtocolVersion = AgentIpcProtocol.MinimumSupportedVersion,
+    int CurrentProtocolVersion = AgentIpcProtocol.Version);
 
 public sealed record AgentIpcHealth(
     bool Microphone,
@@ -115,7 +140,12 @@ public sealed record AgentIpcHealth(
     bool? MicrophoneCaptureReady = null,
     bool? SystemAudioCaptureReady = null,
     string? MicrophoneCaptureState = null,
-    string? SystemAudioCaptureState = null);
+    string? SystemAudioCaptureState = null,
+    string CaptureEngine = "LEGACY_WASAPI",
+    string RecorderProcessModel = "WINDOWS_SERVICE",
+    bool DeviceWatcherReady = false,
+    bool AudioGraphReady = false,
+    bool FirstFrameConfirmed = false);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

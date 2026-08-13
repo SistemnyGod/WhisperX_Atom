@@ -23,7 +23,7 @@ public sealed class RecordingDeliveryCoordinator(
         // on, the master/preview archive is optional and must not gate upload.
         await spool.SetFinalizationStateAsync(localSessionId,
             localFinalizeState: "FINALIZING_LOCAL",
-            deliveryState: "BINDING",
+            deliveryState: "NOT_REQUESTED",
             cancellationToken: cancellationToken);
 
         var archiveTask = CreateLocalArchiveAsync(localSessionId, cancellationToken);
@@ -32,13 +32,22 @@ public sealed class RecordingDeliveryCoordinator(
 
         var archiveResult = await archiveTask;
         var deliveryResult = await deliveryTask;
+        var persisted = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
+        var deliveryState = persisted?.DeliveryState switch
+        {
+            "PENDING_SERVER" => "PENDING_SERVER",
+            "WAITING_FOR_API" => "WAITING_FOR_API",
+            "NOT_REQUESTED" => "NOT_REQUESTED",
+            "CONFIRMED" => "CONFIRMED",
+            _ => deliveryResult.Success ? "CONFIRMED" : "DELIVERY_FAILED"
+        };
         return deliveryResult with
         {
             ArchivePath = archiveResult.ArchivePath,
             LocalArchiveState = archiveResult.State,
-            DeliveryState = deliveryResult.Success ? "CONFIRMED" : "DELIVERY_FAILED",
+            DeliveryState = deliveryState,
             ServerFinalizeState = deliveryResult.Stage,
-            MediaState = deliveryResult.Success ? "ACCEPTED" : "PENDING"
+            MediaState = deliveryState == "CONFIRMED" ? "ACCEPTED" : "PENDING"
         };
     }
 
@@ -80,13 +89,15 @@ public sealed class RecordingDeliveryCoordinator(
 
     private async Task<FinalizationResult> DeliverToServerAsync(string localSessionId, CancellationToken cancellationToken)
     {
+        var sessionInfo = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
         var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+        if (string.Equals(sessionInfo?.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase))
+            return new FinalizationResult(true, "LOCAL_ONLY", null, false, DeliveryState: "NOT_REQUESTED");
         if (!api.IsConfigured)
         {
-            return await PersistFailureAsync(localSessionId,
-                new FinalizationResult(false, "DELIVERY", "SERVER_UNAVAILABLE", true),
-                "API is not configured",
-                cancellationToken);
+            return sessionInfo?.MeetingId is null
+                ? await PersistPendingServerAsync(localSessionId, "API is not configured", cancellationToken)
+                : await PersistFailureAsync(localSessionId, new FinalizationResult(false, "DELIVERY", "SERVER_UNAVAILABLE", true), "API is not configured", cancellationToken);
         }
 
         try
@@ -165,8 +176,29 @@ public sealed class RecordingDeliveryCoordinator(
         {
             var apiError = ex as AgentApiException;
             var result = new FinalizationResult(false, "DELIVERY", ClassifyDeliveryError(ex), IsRetryableDeliveryError(ex), TraceId: apiError?.TraceId, ErrorHttpStatus: apiError is null ? null : (int)apiError.StatusCode);
+            if (sessionInfo?.MeetingId is null && IsServerUnavailable(ex))
+                return await PersistPendingServerAsync(localSessionId, ex.Message, cancellationToken);
             return await PersistFailureAsync(localSessionId, result, ex.Message, cancellationToken);
         }
+    }
+
+    private async Task<FinalizationResult> PersistPendingServerAsync(string sessionId, string detail, CancellationToken cancellationToken)
+    {
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken);
+        var retryCount = (info?.RetryCount ?? 0) + 1;
+        var nextRetry = DateTimeOffset.UtcNow.Add(GetRetryDelay(retryCount));
+        await spool.SetFinalizationStateAsync(sessionId,
+            deliveryState: "PENDING_SERVER",
+            errorCode: "SERVER_UNAVAILABLE",
+            errorDetail: detail,
+            retryCount: retryCount,
+            nextRetryAtUtc: nextRetry,
+            errorRetryable: true,
+            cancellationToken: cancellationToken);
+        // Local recording is complete and remains a successful local gate. The
+        // background retry is represented by PENDING_SERVER, not a delivery
+        // failure visible to the local acceptance gate.
+        return new FinalizationResult(true, "DELIVERY_PENDING", null, true, NextRetryAtUtc: nextRetry, DeliveryState: "PENDING_SERVER");
     }
 
     private async Task<FinalizationResult> PersistFailureAsync(string sessionId, FinalizationResult result, string detail, CancellationToken cancellationToken)
@@ -213,6 +245,10 @@ public sealed class RecordingDeliveryCoordinator(
 
     private static bool IsRetryableDeliveryError(Exception ex) => ex is AgentApiException api
         ? api.Retryable
+        : ex is HttpRequestException or TimeoutException or TaskCanceledException;
+
+    private static bool IsServerUnavailable(Exception ex) => ex is AgentApiException api
+        ? string.Equals(api.ErrorCode, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
         : ex is HttpRequestException or TimeoutException or TaskCanceledException;
 
     private static string ClassifyDeliveryError(Exception ex) => ex is AgentApiException api

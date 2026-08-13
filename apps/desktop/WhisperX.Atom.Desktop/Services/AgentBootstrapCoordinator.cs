@@ -66,6 +66,14 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
         if (user is null)
             return new(false, false, false, "AUTH_REQUIRED", "Требуется вход в сервер.") { Authenticated = false };
 
+        if (RecorderRuntimeMode.IsAudioGraph)
+        {
+            var host = await services.RecorderService.StartAsync(cancellationToken);
+            if (!host.PipeReachable)
+                return new(false, false, offlineEligible, host.Error ?? "RECORDER_HOST_UNAVAILABLE",
+                    "Recorder Host AudioGraph не запущен или Named Pipe недоступен.") { Authenticated = true };
+        }
+
         AgentIpcResponse health;
         try
         {

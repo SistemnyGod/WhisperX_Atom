@@ -28,7 +28,12 @@ public sealed record AudioPeakSnapshot(
     bool MicrophoneTelemetryStale = true,
     bool SystemAudioTelemetryStale = true);
 
-public sealed class RecordingCoordinator : IAsyncDisposable
+/// <summary>
+/// Transitional legacy coordinator. Its implementation is intentionally kept
+/// behind the neutral RecordingCoordinator facade until AudioGraph gates A–E
+/// pass. No Desktop or transport code should depend on this type directly.
+/// </summary>
+public sealed class LegacyRecordingCoordinator : IAsyncDisposable
 {
     private readonly SpoolStore _spool;
     private readonly AgentStorageSettings _storage;
@@ -44,7 +49,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     private AudioSourceTestResult? _lastMicrophoneProbe;
     private AudioSourceTestResult? _lastSystemAudioProbe;
 
-    public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
+    public LegacyRecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
     {
         _spool = spool;
         _state = state;
@@ -52,7 +57,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         _logger = logger;
         _dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
-        _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
+        _ffmpegPath = RecorderToolPaths.Ffmpeg();
     }
 
     public string? SessionId => _sessionId;
@@ -125,7 +130,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         }
     }
 
-    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null)
+    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false)
     {
         EnsureStorageAvailable();
         EnsureFfmpegAvailable();
@@ -143,7 +148,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         {
             // Offline sessions deliberately keep meeting_id NULL. The server meeting is
             // created later by BindSessionAsync and persisted back into the spool.
-            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId);
+            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId, localOnly);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
             // Publish the local session id before starting WASAPI. A first callback
             // can fail immediately; the failure handler must still be able to
@@ -997,7 +1002,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
             var rawSha = FlacEncoder.ComputeSha256(chunk.RawPath);
             _spool.MarkRawChunkReady(_sessionId, _trackId, chunk.Sequence, chunk.SampleCount, rawSize, rawSha);
             await _spool.SetRawChunkStateAsync(_sessionId, _trackId, chunk.Sequence, "ENCODING");
-            FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, outputPart, _format);
+            FlacEncoder.Encode(_ffmpegPath, chunk.RawPath, outputPart, _sampleFormat.ToNeutral());
             File.Move(outputPart, output, true);
             var size = new FileInfo(output).Length;
             var sha = FlacEncoder.ComputeSha256(output);

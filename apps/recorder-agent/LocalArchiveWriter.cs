@@ -21,9 +21,9 @@ public sealed class LocalArchiveWriter(
 {
     private readonly ConcurrentDictionary<string, Lazy<Task<string>>> _writes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, object> _manifestGates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _ffmpegPath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH") ?? "ffmpeg";
+    private readonly string _ffmpegPath = RecorderToolPaths.Ffmpeg();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
-    private readonly string _ffprobePath = Environment.GetEnvironmentVariable("ATOM_AGENT_FFPROBE_PATH") ?? "ffprobe";
+    private readonly string _ffprobePath = RecorderToolPaths.Ffprobe();
 
     public Task<string> CreateAsync(string sessionId, CancellationToken cancellationToken = default)
     {

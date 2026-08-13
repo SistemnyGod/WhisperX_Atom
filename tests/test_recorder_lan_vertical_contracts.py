@@ -14,7 +14,8 @@ def test_start_is_local_first_and_pipe_is_parallel():
     protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
     start = host.split('case "START":', 1)[1].split('case "PAUSE":', 1)[0]
     assert "BindSessionAsync" not in start
-    assert '"server_binding_pending"' in start
+    assert '"server_binding_pending"' not in start
+    assert 'return new AgentIpcResponse(true, state.State.ToString(), sessionId, null' in start
     assert "MaxServerInstances" in security
     assert "MaxServerInstances = 8" in protocol
     assert "SemaphoreSlim _commandGate" in host
@@ -23,13 +24,12 @@ def test_start_is_local_first_and_pipe_is_parallel():
     assert "_connections.TryRemove" in host
 
 
-def test_new_ipc_session_requires_owner_but_legacy_reconnect_can_use_meeting_id():
+def test_offline_local_session_can_start_without_server_owner_or_meeting():
     host = read("apps/recorder-agent/AgentPipeHost.cs")
     start = host.split('case "START":', 1)[1].split('case "PAUSE":', 1)[0]
-    assert 'if (meetingId is null && ownerUserId is null)' in start
-    assert 'return Error("OWNER_REQUIRED")' in start
-    assert "legacy/reconnect" in start
-    assert start.index('if (meetingId is null && ownerUserId is null)') < start.index("recorder.StartAsync")
+    assert "Offline/local-first capture is deliberately allowed" in start
+    assert 'return Error("OWNER_REQUIRED")' not in start
+    assert "recorder.StartAsync(meetingId, title" in start
 
 
 def test_start_publishes_local_session_before_capture_callback_can_fail():

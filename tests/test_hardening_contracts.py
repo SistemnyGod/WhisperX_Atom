@@ -60,12 +60,12 @@ def test_desktop_start_has_a_server_independent_title_path():
     agent = read(Path("apps/recorder-agent/AgentPipeHost.cs"))
     start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
     assert "StartAsync(title, serverMeetingId, ownerUserId)" in start
-    assert "RecorderWorker creates/binds the server session in the background" in start
-    assert "CreateMeetingAsync(title" not in start
+    assert "Online intent gets a real server Meeting" in start
+    assert "CreateMeetingAsync(title" in start
     assert "EnsureAgentReadyAsync" not in start
     assert "GetCurrentUserAsync" not in start
     assert 'BindSessionAsync(sessionId, meetingId, title' not in agent
-    assert 'server_binding_pending' in agent
+    assert 'server_binding_pending' not in agent
     assert 'GetMeetingIdAsync(localSessionId' in agent
 
 def test_desktop_cancels_processing_and_hides_internal_errors():

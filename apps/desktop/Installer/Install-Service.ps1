@@ -24,25 +24,65 @@ try { [void][System.Security.Principal.SecurityIdentifier]::new($AllowedUserSid)
 [Environment]::SetEnvironmentVariable("ATOM_AGENT_ALLOWED_SID", $AllowedUserSid, "Machine")
 $agentDataRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\Agent"
 New-Item -ItemType Directory -Force -Path $agentDataRoot | Out-Null
+# The user-session Recorder Host shares the canonical spool with the Legacy
+# Service. Grant only the installing user's Modify access; do not make the
+# durable audio root globally writable.
+$userAcl = "*$($AllowedUserSid):(OI)(CI)M"
+$aclOutput = @(& icacls.exe $agentDataRoot /grant $userAcl /T /C 2>&1)
+$aclText = ($aclOutput -join "`n")
+if ($LASTEXITCODE -ne 0 -or $aclText -match "Failed processing [1-9][0-9]* files") {
+    throw "AGENT_DATA_ROOT_ACL_FAILED: $agentDataRoot`n$aclText"
+}
+try {
+    $acl = Get-Acl -LiteralPath $agentDataRoot
+    $hasUserModify = @($acl.Access | Where-Object {
+        $_.IdentityReference.Value -eq $AllowedUserSid -and $_.FileSystemRights.ToString().IndexOf("Modify", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    }).Count -gt 0
+    if (-not $hasUserModify) { throw "user SID Modify ACE was not found" }
+}
+catch { throw "AGENT_DATA_ROOT_ACL_FAILED: $agentDataRoot ($($_.Exception.Message))" }
 Set-Content -LiteralPath (Join-Path $agentDataRoot "allowed-user.sid") -Value $AllowedUserSid -Encoding ascii -NoNewline
 $agentConfigPath = Join-Path $agentDataRoot "agent-config.json"
 $serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://192.168.2.194:8080" } else { $env:WHISPERX_API_URL }
+$machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
+$installationId = [Guid]::NewGuid()
+foreach ($candidatePath in @($machineConfigPath, $agentConfigPath)) {
+    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+        try {
+            $candidate = Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json
+            $candidateValue = if ($candidate.installationId) { $candidate.installationId } else { $candidate.InstallationId }
+            $parsed = [Guid]::Empty
+            if ([Guid]::TryParse([string]$candidateValue, [ref]$parsed) -and $parsed -ne [Guid]::Empty) { $installationId = $parsed; break }
+        } catch { }
+    }
+}
 if (-not (Test-Path -LiteralPath $agentConfigPath -PathType Leaf)) {
     $agentConfig = [ordered]@{
         ServerUrl = $serverOrigin.TrimEnd('/')
         AgentId = ""
         Token = ""
         Encrypted = $false
-        InstallationId = [Guid]::NewGuid()
+        InstallationId = $installationId
         RecordingProfile = "ROOM"
     } | ConvertTo-Json
     $agentConfigPart = "$agentConfigPath.part"
     Set-Content -LiteralPath $agentConfigPart -Value $agentConfig -Encoding utf8
     Move-Item -LiteralPath $agentConfigPart -Destination $agentConfigPath -Force
 }
-$machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
 if (-not (Test-Path -LiteralPath $machineConfigPath -PathType Leaf)) {
-    $machineConfig = [ordered]@{ schemaVersion = 1; serverOrigin = $serverOrigin.TrimEnd('/'); managed = $true } | ConvertTo-Json
+    $machineConfig = [ordered]@{
+        schemaVersion = 2
+        serverOrigin = $serverOrigin.TrimEnd('/')
+        managed = $true
+        installationId = $installationId
+        audioConfiguration = [ordered]@{
+            audioConfigurationVersion = 2
+            captureEngine = "LEGACY_WASAPI"
+            microphone = [ordered]@{ selectionMode = "DEFAULT"; deviceId = $null }
+            systemAudio = [ordered]@{ selectionMode = "DEFAULT"; deviceId = $null }
+            userReselectRequired = $false
+        }
+    } | ConvertTo-Json -Depth 8
     $machineConfigPart = "$machineConfigPath.part"
     Set-Content -LiteralPath $machineConfigPart -Value $machineConfig -Encoding utf8
     Move-Item -LiteralPath $machineConfigPart -Destination $machineConfigPath -Force

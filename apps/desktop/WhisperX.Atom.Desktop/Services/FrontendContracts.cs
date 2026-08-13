@@ -183,6 +183,17 @@ public sealed class FrontendServices
     public ProcessingJobTracker JobTracker { get; }
     public RecorderServiceController RecorderService { get; }
     public ClientRuntimeDiagnostics Diagnostics { get; }
+
+    public async Task<ProductRuntimeSnapshot> GetRuntimeSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        AgentIpcResponse? recorder = null;
+        DesktopSystemStatus? backend = null;
+        DesktopProcessingReadiness? processing = null;
+        try { recorder = await Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false); } catch { }
+        try { backend = await Backend.GetSystemStatusAsync(cancellationToken).ConfigureAwait(false); } catch { }
+        try { processing = await Backend.GetProcessingReadinessAsync(cancellationToken).ConfigureAwait(false); } catch { }
+        return ProductRuntimeSnapshot.From(Backend.AuthState, recorder, backend, processing);
+    }
     public event Action? LoggedOut;
 
     public void RaiseLoggedOut() => LoggedOut?.Invoke();

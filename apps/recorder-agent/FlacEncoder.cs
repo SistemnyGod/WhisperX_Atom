@@ -1,12 +1,16 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
-using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder;
 
+/// <summary>
+/// FFmpeg is still the Phase 1 client encoder, but it consumes the neutral
+/// AudioStreamFormat contract. Platform WaveFormat types must not cross this
+/// boundary.
+/// </summary>
 internal static class FlacEncoder
 {
-    public static void Encode(string ffmpegPath, string input, string output, WaveFormat format)
+    public static void Encode(string ffmpegPath, string input, string output, AudioStreamFormat format)
     {
         using var process = new Process
         {
@@ -20,7 +24,7 @@ internal static class FlacEncoder
         };
         process.StartInfo.ArgumentList.Add("-hide_banner");
         process.StartInfo.ArgumentList.Add("-loglevel"); process.StartInfo.ArgumentList.Add("error");
-        process.StartInfo.ArgumentList.Add("-f"); process.StartInfo.ArgumentList.Add(FfmpegFormat(format));
+        process.StartInfo.ArgumentList.Add("-f"); process.StartInfo.ArgumentList.Add(format.FfmpegInput);
         process.StartInfo.ArgumentList.Add("-ar"); process.StartInfo.ArgumentList.Add(format.SampleRate.ToString());
         process.StartInfo.ArgumentList.Add("-ac"); process.StartInfo.ArgumentList.Add(format.Channels.ToString());
         process.StartInfo.ArgumentList.Add("-i"); process.StartInfo.ArgumentList.Add(input);
@@ -41,25 +45,43 @@ internal static class FlacEncoder
         }
     }
 
+    public static AudioStreamFormat RawFormat(RawRecordingChunk chunk) => new(
+        chunk.SampleRate,
+        chunk.Channels,
+        chunk.BitsPerSample,
+        chunk.ValidBitsPerSample ?? chunk.BitsPerSample,
+        ParseSampleType(chunk.Encoding, chunk.BitsPerSample, chunk.SourceSubFormat));
+
     public static string ComputeSha256(string path)
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    public static NAudio.Wave.WaveFormat RawFormat(RawRecordingChunk chunk)
+    private static AudioSampleType ParseSampleType(string encoding, int bitsPerSample, string? sourceSubFormat)
     {
-        var descriptor = AudioSampleFormatResolver.FromStored(
-            chunk.Encoding,
-            chunk.BitsPerSample,
-            chunk.SampleRate,
-            chunk.Channels,
-            chunk.SourceSubFormat,
-            chunk.ValidBitsPerSample);
-        return descriptor.Kind == RawAudioSampleFormat.Float32
-            ? WaveFormat.CreateIeeeFloatWaveFormat(chunk.SampleRate, chunk.Channels)
-            : new WaveFormat(chunk.SampleRate, chunk.BitsPerSample, chunk.Channels);
+        if (string.Equals(encoding, "FLOAT32", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(encoding, "IEEEFLOAT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(encoding, "IEEE_FLOAT", StringComparison.OrdinalIgnoreCase))
+            return AudioSampleType.Float32;
+        if (string.Equals(encoding, "PCM_S16LE", StringComparison.OrdinalIgnoreCase) || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 16))
+            return AudioSampleType.Pcm16;
+        if (string.Equals(encoding, "PCM_S24LE", StringComparison.OrdinalIgnoreCase) || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 24))
+            return AudioSampleType.Pcm24;
+        if (string.Equals(encoding, "PCM_S32LE", StringComparison.OrdinalIgnoreCase) || string.Equals(encoding, "EXTENSIBLE", StringComparison.OrdinalIgnoreCase) || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 32))
+            return AudioSampleType.Pcm32;
+        if (Guid.TryParse(sourceSubFormat, out var subFormat) && subFormat == new Guid("00000003-0000-0010-8000-00aa00389b71"))
+            return AudioSampleType.Float32;
+        throw new NotSupportedException($"unsupported_audio_encoding:{encoding}/{bitsPerSample}");
     }
+}
 
-    private static string FfmpegFormat(WaveFormat format) => AudioSampleFormatResolver.Resolve(format).FfmpegInput;
+internal sealed class FfmpegAudioChunkEncoder(string ffmpegPath) : IAudioChunkEncoder
+{
+    public Task EncodeAsync(string inputPath, string outputPath, AudioStreamFormat format, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        FlacEncoder.Encode(ffmpegPath, inputPath, outputPath, format);
+        return Task.CompletedTask;
+    }
 }

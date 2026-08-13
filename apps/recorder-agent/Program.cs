@@ -20,6 +20,8 @@ try
     builder.Services.AddSingleton(new SpoolStore(dataRoot));
     builder.Services.AddSingleton<DeviceHealthMonitor>();
     builder.Services.AddSingleton<AgentStorageSettings>();
+    builder.Services.AddSingleton<IAudioDeviceProbe, LegacyWasapiDeviceProbe>();
+    builder.Services.AddSingleton<IAudioCaptureEngineFactory, LegacyWasapiCaptureEngineFactory>();
     builder.Services.AddSingleton<AgentStateMachine>();
     builder.Services.AddSingleton<RecordingCoordinator>();
     builder.Services.AddSingleton<AgentApiClient>();

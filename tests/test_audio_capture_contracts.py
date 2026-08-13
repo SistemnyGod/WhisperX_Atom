@@ -64,6 +64,53 @@ def test_controlled_probe_has_interactive_and_service_modes_without_sensitive_ar
     assert "UNDECIDED" in script
 
 
+def test_service_probe_passes_include_service_as_a_switch_not_output_root():
+    script = read("scripts/probe-recorder-service.ps1")
+    assert "probeParameters = @{" in script
+    assert "IncludeService = $true" in script
+    assert "& $probeScript @probeParameters" in script
+    assert "$probeArgs = @(" not in script
+
+
+def test_service_probe_emits_safe_json_when_named_pipe_is_unavailable():
+    runner = read("apps/recorder-agent/AudioRuntimeProbeRunner.cs")
+    assert "RECORDER_SERVICE_PROBE_UNAVAILABLE" in runner
+    assert "GetType().Name" in runner
+    assert "catch (Exception ex) when" in runner
+
+
+def test_audio_comparison_derives_capture_architecture_from_service_stream_evidence():
+    script = read("scripts/probe-audio-runtime.ps1")
+    assert "KEEP_SERVICE_CAPTURE" in script
+    assert "USER_CAPTURE_HOST" in script
+    for evidence in ("streamOpened", "streamStarted", "packetCount", "bytesReceived", "endpointActive", "formatResolved"):
+        assert evidence in script
+
+
+def test_local_recording_acceptance_is_offline_and_checks_first_packet_archive_and_flac():
+    script = read("scripts/acceptance-local-recording.ps1")
+    assert "serverUsed = $false" in script
+    assert 'Invoke-AgentCommand "START"' in script
+    assert 'Invoke-AgentCommand "STOP"' in script
+    assert "firstPacketConfirmed" in script
+    assert "flacFileCount" in script
+    assert "LOCAL_RECORDING_GATE_FAILED" in script
+
+
+def test_recorder_uses_bundled_ffmpeg_when_service_environment_is_stale():
+    paths = read("apps/recorder-agent/RecorderToolPaths.cs")
+    assert "AppContext.BaseDirectory" in paths
+    assert "ffmpeg.exe" in paths and "ffprobe.exe" in paths
+    for source in ("apps/recorder-agent/RecordingCoordinator.cs", "apps/recorder-agent/RawChunkRecovery.cs", "apps/recorder-agent/LocalArchiveWriter.cs"):
+        assert "RecorderToolPaths." in read(source)
+
+
+def test_no_build_installer_refuses_a_stale_recorder_publish():
+    script = read("scripts/install-recorder-runtime.ps1")
+    assert "RECORDER_PUBLISH_STALE" in script
+    assert "Rerun without -NoBuild" in script
+
+
 def test_desktop_reconciliation_does_not_clear_device_collection_or_write_back_selection():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml.cs")
@@ -81,3 +128,5 @@ def test_standalone_recorder_install_stages_pinned_ffmpeg_payload():
     assert "ffmpeg-manifest.json" in script
     assert "FFMPEG_CHECKSUM_MISMATCH" in script
     assert "Join-Path $publishRoot $name" in script
+    assert "FFMPEG_TARGET_COPY_FAILED" in script
+    assert "Join-Path $target $name" in script

@@ -98,7 +98,9 @@ public sealed record RecordingSessionInfo(
     DateTimeOffset? LocalArchivePurgedAtUtc = null,
     Guid? OwnerUserId = null,
     int? LastErrorHttpStatus = null,
-    bool? LastErrorRetryable = null);
+    bool? LastErrorRetryable = null,
+    string MeetingBindState = "UNBOUND",
+    string DeliveryMode = "AUTO");
 public sealed record RecordingArchiveChunk(string TrackId, string TrackType, int Sequence, string LocalPath, long StartSample, long SampleCount, int SampleRate, int Channels, long SizeBytes, string Sha256);
 public sealed record ChunkDeliveryMetrics(int Total, int Ready, int Uploading, int Confirmed, int Failed, long BytesPending, double? OldestPendingAgeSeconds);
 public sealed record RetentionCandidate(string SessionId, string Category, IReadOnlyList<string> Paths, long Bytes, DateTimeOffset PurgeAfterUtc);
@@ -126,7 +128,7 @@ public sealed class SpoolStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_STARTED', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT);
+             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
@@ -172,7 +174,9 @@ public sealed class SpoolStore
             "ALTER TABLE recording_sessions ADD COLUMN local_archive_purged_at TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN owner_user_id TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN last_error_http_status INTEGER",
-            "ALTER TABLE recording_sessions ADD COLUMN last_error_retryable INTEGER"
+            "ALTER TABLE recording_sessions ADD COLUMN last_error_retryable INTEGER",
+            "ALTER TABLE recording_sessions ADD COLUMN meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND'",
+            "ALTER TABLE recording_sessions ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'AUTO'"
         })
         {
             await using var stateMigration = connection.CreateCommand();
@@ -239,17 +243,18 @@ public sealed class SpoolStore
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task CreateSessionAsync(string sessionId, Guid? meetingId = null, string? title = null, string? pipelineCorrelationId = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null)
+    public async Task CreateSessionAsync(string sessionId, Guid? meetingId = null, string? title = null, string? pipelineCorrelationId = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT OR IGNORE INTO recording_sessions(id,meeting_id,title,owner_user_id,state,started_at,local_finalize_state,delivery_state,pipeline_correlation_id) VALUES($id,$meeting,$title,$owner,'RECORDING',$started,'PENDING','NOT_STARTED',$correlation)";
+        command.CommandText = "INSERT OR IGNORE INTO recording_sessions(id,meeting_id,title,owner_user_id,state,started_at,local_finalize_state,delivery_state,meeting_bind_state,delivery_mode,pipeline_correlation_id) VALUES($id,$meeting,$title,$owner,'RECORDING',$started,'PENDING','NOT_REQUESTED','UNBOUND',$mode,$correlation)";
         command.Parameters.AddWithValue("$id", sessionId);
         command.Parameters.AddWithValue("$meeting", (object?)meetingId?.ToString() ?? DBNull.Value);
         command.Parameters.AddWithValue("$title", (object?)title ?? DBNull.Value);
         command.Parameters.AddWithValue("$owner", (object?)ownerUserId?.ToString() ?? DBNull.Value);
         command.Parameters.AddWithValue("$started", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$mode", localOnly ? "LOCAL_ONLY" : "AUTO");
         command.Parameters.AddWithValue("$correlation", pipelineCorrelationId ?? Guid.NewGuid().ToString("N"));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -259,7 +264,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE recording_sessions SET meeting_id=$meeting WHERE id=$session";
+        command.CommandText = "UPDATE recording_sessions SET meeting_id=$meeting,meeting_bind_state='BOUND' WHERE id=$session";
         command.Parameters.AddWithValue("$meeting", meetingId.ToString()); command.Parameters.AddWithValue("$session", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -284,6 +289,17 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$state", state);
         command.Parameters.AddWithValue("$finished", DateTimeOffset.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$id", sessionId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task SetMeetingBindStateAsync(string sessionId, string state, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET meeting_bind_state=$state WHERE id=$session";
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$session", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -348,7 +364,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable FROM recording_sessions WHERE id=$session";
+        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable,meeting_bind_state,delivery_mode FROM recording_sessions WHERE id=$session";
         command.Parameters.AddWithValue("$session", sessionId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -365,6 +381,8 @@ public sealed class SpoolStore
         Guid? ownerUserId = reader.IsDBNull(20) ? null : Guid.TryParse(reader.GetString(20), out var parsedOwner) ? parsedOwner : null;
         int? lastErrorHttpStatus = reader.IsDBNull(21) ? null : reader.GetInt32(21);
         bool? lastErrorRetryable = reader.IsDBNull(22) ? null : reader.GetInt32(22) != 0;
+        var meetingBindState = reader.IsDBNull(23) ? "UNBOUND" : reader.GetString(23);
+        var deliveryMode = reader.IsDBNull(24) ? "AUTO" : reader.GetString(24);
         return new RecordingSessionInfo(
             sessionId,
             meetingId,
@@ -389,7 +407,9 @@ public sealed class SpoolStore
             localArchivePurgedAt,
             ownerUserId,
             lastErrorHttpStatus,
-            lastErrorRetryable);
+            lastErrorRetryable,
+            meetingBindState,
+            deliveryMode);
     }
 
     public async Task SetServerReceiptAsync(string sessionId, Guid? meetingId, Guid? mediaAssetId, Guid? processingJobId, string? traceId, CancellationToken cancellationToken = default)
@@ -921,7 +941,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL AND next_retry_at <= $now)) AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY') AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
+         command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL AND next_retry_at <= $now)) AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state='RECORDING') OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER') AND (next_retry_at IS NULL OR next_retry_at <= $now)) OR (local_finalize_state='LOCAL_READY' AND delivery_state='PENDING_SERVER' AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
         command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddMinutes(-2).ToString("O"));
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         var result = new List<string>();
@@ -935,7 +955,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (state IN ('FINALIZING') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED'))";
+         command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (state IN ('FINALIZING') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER','DELIVERY_ERROR','DELIVERY_FAILED'))";
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -954,7 +974,7 @@ public sealed class SpoolStore
               AND (
                     state IN ('FINALIZING')
                     OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED')
-                    OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED')
+                    OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER','DELIVERY_ERROR','DELIVERY_FAILED')
                   )
             """;
         command.Parameters.AddWithValue("$active", (object?)activeSessionId ?? DBNull.Value);

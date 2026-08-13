@@ -344,11 +344,6 @@ public sealed class RecordingViewModel : ObservableObject
             }
 
             var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
-            // START is deliberately local-first. Creating a server Meeting here
-            // would put network latency back into the capture critical path and
-            // would leave empty server meetings when the microphone fails.
-            // RecorderWorker creates/binds the server session in the background
-            // after the local session has been accepted.
             Guid? serverMeetingId = null;
             var bootstrap = _services.AgentBootstrap.LastStatus;
             if (!bootstrap.Ready && !bootstrap.OfflineEligible)
@@ -363,12 +358,49 @@ public sealed class RecordingViewModel : ObservableObject
                 WarningMessage = bootstrap.Message;
             }
 
-            _serverProcessingExpected = _services.Backend.HasSession;
             var ownerUserId = _services.Settings.Load().OwnerUserId;
+
+            // Online intent gets a real server Meeting before START. The Agent
+            // only receives this server-issued id; it never invents one. If the
+            // server is unavailable, retain the local-first path with a null id.
+            if (bootstrap.Ready && bootstrap.ServerConnected && _services.Backend.HasSession)
+            {
+                try
+                {
+                    var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
+                    if (Guid.TryParse(meeting.Id, out var createdMeetingId))
+                    {
+                        serverMeetingId = createdMeetingId;
+                        MeetingId = createdMeetingId;
+                        _serverProcessingExpected = true;
+                    }
+                    else
+                    {
+                        WarningMessage = "Сервер не вернул корректный MeetingId. Запись продолжится локально.";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!bootstrap.OfflineEligible)
+                    {
+                        State = RecordingState.Error;
+                        ErrorMessage = MapRecordingError("SERVER_UNAVAILABLE");
+                        StatusMessage = SafeError(ex);
+                        return false;
+                    }
+                    WarningMessage = "Сервер недоступен. Запись сохранится локально и будет отправлена после восстановления связи.";
+                }
+            }
+
             var response = await _services.Recorder.StartAsync(title, serverMeetingId, ownerUserId);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
-            if (serverMeetingId is Guid createdMeetingId && MeetingId is null) MeetingId = createdMeetingId;
+            if (!response.Ok && serverMeetingId.HasValue)
+            {
+                try { await _services.Backend.CancelMeetingAsync(serverMeetingId.Value, CancellationToken.None); } catch { }
+                MeetingId = null;
+            }
+            if (response.Ok && MeetingId is null) MeetingId = serverMeetingId;
             if (response.Ok && response.MeetingId is Guid agentMeetingId)
             {
                 MeetingId ??= agentMeetingId;

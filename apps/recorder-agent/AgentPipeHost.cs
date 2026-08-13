@@ -71,7 +71,12 @@ public sealed class AgentPipeHost(
                 var request = JsonSerializer.Deserialize<AgentIpcRequest>(line, _json);
                 var response = request is null
                     ? Error("invalid_request")
-                    : await ExecuteAsync(request, cancellationToken);
+                    : !IsCompatible(request.ProtocolVersion)
+                        ? new AgentIpcResponse(false, "ERROR", null, "IPC_VERSION_INCOMPATIBLE", null,
+                            ProtocolVersion: AgentIpcProtocol.Version,
+                            MinimumSupportedProtocolVersion: AgentIpcProtocol.MinimumSupportedVersion,
+                            CurrentProtocolVersion: AgentIpcProtocol.Version)
+                        : await ExecuteAsync(request, cancellationToken);
                 await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -95,6 +100,21 @@ public sealed class AgentPipeHost(
                     return Status();
                 case "HEALTH":
                     return await StatusAsync(cancellationToken);
+                case "LIST_AUDIO_DEVICES":
+                    return await StatusAsync(cancellationToken);
+                case "SUBSCRIBE_AUDIO_DEVICE_EVENTS":
+                    // v6 keeps device notifications on the watcher-backed status
+                    // channel. A future long-lived subscription can reuse this
+                    // command without making HEALTH the device polling source.
+                    return await StatusAsync(cancellationToken);
+                case "SELECT_AUDIO_DEVICE":
+                    await api.SetAudioDevicesAsync(ReadString(request.Payload, "deviceId"), null, cancellationToken);
+                    return await StatusAsync(cancellationToken);
+                case "TEST_AUDIO_DEVICE":
+                    var selectedTestDevice = ReadString(request.Payload, "deviceId");
+                    var selectedTest = await recorder.TestAudioSourceAsync(selectedTestDevice, false, TimeSpan.FromSeconds(3), cancellationToken);
+                    return new AgentIpcResponse(selectedTest.Success, "IDLE", null, selectedTest.Success ? null : selectedTest.ErrorCode, null, null,
+                        null, AgentIpcProtocol.Version, null, null, selectedTest);
                 case "PREFLIGHT":
                     return await PreflightAsync(cancellationToken);
                 case "GET_SESSION_STATUS":
@@ -167,16 +187,15 @@ public sealed class AgentPipeHost(
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
                     var ownerUserId = ReadGuid(request.Payload, "ownerUserId");
-                    // A new local-first session must have an immutable owner. A
-                    // legacy/reconnect request may omit it only when it names an
-                    // already existing server meeting whose owner can be checked
-                    // during reconciliation.
-                    if (meetingId is null && ownerUserId is null)
-                        return Error("OWNER_REQUIRED");
+                    var localOnly = request.Payload.TryGetProperty("localOnly", out var localOnlyValue)
+                        && localOnlyValue.ValueKind == JsonValueKind.True;
+                    // Offline/local-first capture is deliberately allowed without
+                    // a server meeting and without a cached owner. The server
+                    // resolves the linked user when the spool is later bound.
                     var title = ReadString(request.Payload, "title");
-                    var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId);
+                    var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly);
                     var boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);
-                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, api.IsConfigured ? "server_binding_pending" : null, null, boundMeetingId);
+                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, null, null, boundMeetingId);
                 case "PAUSE":
                     await recorder.PauseAsync(cancellationToken);
                     return Status();
@@ -214,6 +233,9 @@ public sealed class AgentPipeHost(
             if (gated) _commandGate.Release();
         }
     }
+
+    private static bool IsCompatible(int version)
+        => version is AgentIpcProtocol.LegacyVersion or AgentIpcProtocol.Version;
 
     private static bool IsMutatingCommand(string command) => command is
         "CONFIGURE" or "UPDATE_SERVER_URL" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
@@ -263,7 +285,7 @@ public sealed class AgentPipeHost(
         var stage = "LOCAL_FINALIZATION";
         try
         {
-            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "FINALIZING_LOCAL", deliveryState: "NOT_STARTED");
+            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "FINALIZING_LOCAL", deliveryState: "NOT_REQUESTED");
             await stop.LocalFinalization;
             stage = "LOCAL_ARCHIVE";
             var result = await FinalizeAsync(stop.SessionId, CancellationToken.None);
@@ -274,7 +296,7 @@ public sealed class AgentPipeHost(
         {
             logger.LogError(ex, "Recording finalization failed after local stop. Session={SessionId}, Meeting={MeetingId}", stop.SessionId, meetingId);
             var code = stage == "LOCAL_FINALIZATION" ? "LOCAL_ENCODING_FAILED" : "LOCAL_ARCHIVE_FAILED";
-            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "LOCAL_FAILED", deliveryState: "NOT_STARTED", errorCode: code, errorDetail: ex.Message, retryCount: 0, nextRetryAtUtc: null, cancellationToken: CancellationToken.None);
+            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "LOCAL_FAILED", deliveryState: "NOT_REQUESTED", errorCode: code, errorDetail: ex.Message, retryCount: 0, nextRetryAtUtc: null, cancellationToken: CancellationToken.None);
             _finalizationErrors[stop.SessionId!] = code;
         }
     }
@@ -403,12 +425,14 @@ public sealed class AgentPipeHost(
             };
         var delivery = info.DeliveryState switch
         {
+            "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" && info.MeetingId is null => "NOT_REQUESTED",
             "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" && !api.IsConfigured => "WAITING_FOR_API",
             "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" => "BINDING",
+            "PENDING_SERVER" => "PENDING_SERVER",
             "CONFIRMED" => "COMPLETED",
             _ => info.DeliveryState
         };
-        if (string.IsNullOrWhiteSpace(delivery)) delivery = serverSessionId is null ? (api.IsConfigured ? "BINDING" : "WAITING_FOR_API") : counts.Pending > 0 ? "SYNCING" : "WAITING_SERVER";
+        if (string.IsNullOrWhiteSpace(delivery)) delivery = serverSessionId is null ? (info.MeetingId is null ? "NOT_REQUESTED" : api.IsConfigured ? "BINDING" : "WAITING_FOR_API") : counts.Pending > 0 ? "SYNCING" : "WAITING_SERVER";
         var errorCode = _finalizationErrors.TryGetValue(sessionId, out var finalizationError) ? finalizationError : info.ErrorCode;
         var error = errorCode is null ? null : SafeErrorText(errorCode);
         return new RecordingSessionStatus(sessionId, info.MeetingId, capture, delivery,

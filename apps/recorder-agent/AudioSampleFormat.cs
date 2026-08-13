@@ -19,6 +19,20 @@ public sealed record AudioSampleFormatDescriptor(
     string SourceEncoding,
     string? SourceSubFormat)
 {
+    public AudioStreamFormat ToNeutral() => new(
+        SampleRate,
+        Channels,
+        BitsPerSample,
+        ValidBitsPerSample,
+        Kind switch
+        {
+            RawAudioSampleFormat.Pcm16 => AudioSampleType.Pcm16,
+            RawAudioSampleFormat.Pcm24 => AudioSampleType.Pcm24,
+            RawAudioSampleFormat.Pcm32 => AudioSampleType.Pcm32,
+            RawAudioSampleFormat.Float32 => AudioSampleType.Float32,
+            _ => throw new ArgumentOutOfRangeException()
+        });
+
     public string CanonicalEncoding => Kind switch
     {
         RawAudioSampleFormat.Pcm16 => "PCM_S16LE",

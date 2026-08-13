@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("LegacyWasapi", "AudioGraph")]
+    [string]$CaptureEngine = "LegacyWasapi",
     [string]$DeviceId,
     [switch]$SystemAudio,
     [ValidateRange(1, 10)]
@@ -10,6 +12,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+if ($CaptureEngine -eq "AudioGraph") {
+    $outputPath = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+        Join-Path $repo "artifacts\audio-runtime\audiograph-report.json"
+    } else {
+        Join-Path $OutputRoot "audiograph-report.json"
+    }
+    & (Join-Path $repo "scripts\probe-audiograph-runtime.ps1") -DeviceId $DeviceId -Seconds $Seconds -OutputPath $outputPath
+    exit $LASTEXITCODE
+}
 $project = Join-Path $repo "apps\recorder-agent\AudioRuntimeProbe\WhisperX.Atom.Recorder.AudioRuntimeProbe.csproj"
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repo "artifacts\audio-runtime-probe"
@@ -57,7 +68,20 @@ $comparison = [ordered]@{
     probe = [ordered]@{ systemAudio = $SystemAudio; requestedDeviceId = $DeviceId; seconds = $Seconds }
     interactive = $interactive.Result
     service = if ($service) { $service.Result } else { [ordered]@{ status = "NOT_RUN"; reason = "Pass -IncludeService only when Recorder Service is intentionally running." } }
-    decision = if (-not $service) { "UNDECIDED_SERVICE_PROBE_NOT_RUN" } else { "UNDECIDED_REVIEW_COMPARISON" }
+    decision = if (-not $service) {
+        "UNDECIDED_SERVICE_PROBE_NOT_RUN"
+    } elseif ($service.Result.success -eq $true -and
+        $service.Result.streamOpened -eq $true -and
+        $service.Result.streamStarted -eq $true -and
+        [int]$service.Result.packetCount -gt 0 -and
+        [long]$service.Result.bytesReceived -gt 0 -and
+        $service.Result.endpointFound -eq $true -and
+        $service.Result.endpointActive -eq $true -and
+        $service.Result.formatResolved -eq $true) {
+        "KEEP_SERVICE_CAPTURE"
+    } else {
+        "USER_CAPTURE_HOST"
+    }
     safety = [ordered]@{ secretsIncluded = $false; audioBytesIncluded = $false; transcriptIncluded = $false }
 }
 $comparison | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $OutputRoot "comparison.json") -Encoding utf8
@@ -66,4 +90,3 @@ Write-Host "Audio runtime probe artifacts: $OutputRoot"
 if (-not $IncludeService) { Write-Host "Service probe was not run; architecture decision remains UNDECIDED." -ForegroundColor Yellow }
 if ($interactive.ExitCode -ne 0) { exit $interactive.ExitCode }
 if ($service -and $service.ExitCode -ne 0) { exit $service.ExitCode }
-

@@ -33,6 +33,17 @@ if (-not $isAdministrator) {
     }
 }
 
+if ($NoBuild -and (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
+    $publishedAt = (Get-Item -LiteralPath $sourceExe).LastWriteTimeUtc
+    $newestSource = Get-ChildItem -LiteralPath (Join-Path $repo "apps\recorder-agent") -Recurse -File |
+        Where-Object { $_.FullName -notmatch "\\(bin|obj)\\" -and $_.Extension -in @(".cs", ".csproj", ".props", ".targets") } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -ne $newestSource -and $newestSource.LastWriteTimeUtc -gt $publishedAt) {
+        throw "RECORDER_PUBLISH_STALE: $($newestSource.FullName) is newer than $sourceExe. Rerun without -NoBuild."
+    }
+}
+
 if (-not $NoBuild -or -not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     New-Item -ItemType Directory -Force -Path $publishRoot | Out-Null
     & dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:NuGetAudit=false -o $publishRoot --no-restore
@@ -82,6 +93,18 @@ if ($null -ne $existingService -and $existingService.Status -ne "Stopped") {
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Get-ChildItem -LiteralPath $publishRoot -File | Where-Object { $_.Extension -in @(".exe", ".pdb", ".dll") } |
     Copy-Item -Destination $target -Force
+# Copy the pinned tools directly into the installation target as well. This
+# explicit step keeps an existing AgentUpdate directory from retaining a
+# stale service payload when the publish folder was prepared by another run.
+foreach ($name in @("ffmpeg.exe", "ffprobe.exe")) {
+    Copy-Item -LiteralPath (Join-Path $ffmpegSourceRoot $name) -Destination (Join-Path $target $name) -Force
+}
+Copy-Item -LiteralPath $ffmpegManifestPath -Destination (Join-Path $target "ffmpeg-manifest.json") -Force
+foreach ($name in @("ffmpeg.exe", "ffprobe.exe")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $target $name) -PathType Leaf)) {
+        throw "FFMPEG_TARGET_COPY_FAILED: $(Join-Path $target $name)"
+    }
+}
 $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 & $installer -ServiceDirectory $target -AllowedUserSid $sid
 if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_INSTALL_FAILED" }

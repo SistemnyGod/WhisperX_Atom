@@ -9,8 +9,14 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioRuntimeProbe\**" />
+    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioContracts.cs;AudioConfigurationV2.cs;RecorderRuntimeLease.cs;LegacyWasapiCaptureEngine.cs;LegacyWasapiDeviceProbe.cs;AudioRuntimeProbe\**" />
     <ProjectReference Include="WhisperX.Atom.Recorder.Core.csproj" />
+    <!-- NAudio is isolated to the legacy Windows adapter and probe. It is not
+         part of Recorder.Core or the AudioGraph Host. -->
+    <Compile Include="AudioSampleFormat.cs" />
+    <Compile Include="LegacyWasapiCaptureEngine.cs" />
+    <Compile Include="LegacyWasapiDeviceProbe.cs" />
+    <Compile Include="AudioRuntimeProbe.cs" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="9.0.0" />

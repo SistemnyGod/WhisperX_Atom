@@ -19,7 +19,12 @@ public sealed class AgentPipeClient
 
     public async Task<AgentIpcResponse> SendAsync(string command, object? payload = null, CancellationToken cancellationToken = default)
     {
-        await using var pipe = new NamedPipeClientStream(".", AgentIpcProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        // The server owns the security boundary and grants the exact user SID
+        // (or the configured legacy SID). Do not combine that ACL with the
+        // client-side CurrentUserOnly flag: on Windows it can reject a valid
+        // elevated/non-elevated client pair even when both resolve to the same
+        // interactive user.
+        await using var pipe = new NamedPipeClientStream(".", RecorderPipeNames.ForCurrentProcess(), PipeDirection.InOut, PipeOptions.Asynchronous);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ControlRequestTimeout);
         var requestCancellation = timeout.Token;
@@ -42,14 +47,17 @@ public sealed class AgentPipeClient
         using var reader = new StreamReader(pipe);
         await using var writer = new StreamWriter(pipe) { AutoFlush = true };
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload ?? new { }, _json));
-        var request = new AgentIpcRequest(command, document.RootElement.Clone());
+        var request = new AgentIpcRequest(command, document.RootElement.Clone()) { ProtocolVersion = AgentIpcProtocol.Version };
         try
         {
             await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), requestCancellation);
             var line = await reader.ReadLineAsync(requestCancellation);
             if (string.IsNullOrWhiteSpace(line)) throw new IOException("Recorder Service returned an empty IPC response.");
-            return JsonSerializer.Deserialize<AgentIpcResponse>(line, _json)
+            var response = JsonSerializer.Deserialize<AgentIpcResponse>(line, _json)
                 ?? throw new IOException("Recorder Service returned an invalid IPC response.");
+            if (response.Error == "IPC_VERSION_INCOMPATIBLE")
+                throw new RecorderIpcException("IPC_VERSION_INCOMPATIBLE", false);
+            return response;
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {

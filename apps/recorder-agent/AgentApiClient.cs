@@ -64,6 +64,10 @@ public sealed class AgentApiClient : IDisposable
     private readonly object _configurationGate = new();
     private readonly SemaphoreSlim _bindingGate = new(1, 1);
     private readonly AgentStorageSettings _storage;
+    private static readonly JsonSerializerOptions ConfigJson = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public AgentApiClient(AgentStorageSettings storage)
     {
@@ -80,6 +84,7 @@ public sealed class AgentApiClient : IDisposable
         _storage.SetAudioDevices(
             Environment.GetEnvironmentVariable("ATOM_AGENT_MICROPHONE_DEVICE_ID") ?? config?.MicrophoneDeviceId,
             Environment.GetEnvironmentVariable("ATOM_AGENT_SYSTEM_AUDIO_DEVICE_ID") ?? config?.SystemAudioDeviceId);
+        _storage.SetUserReselectRequired(config?.AudioConfiguration?.UserReselectRequired == true);
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE")) && config?.RecordingProfile is not null)
         {
             try { _storage.SetRecordingProfile(config.RecordingProfile); }
@@ -122,7 +127,8 @@ public sealed class AgentApiClient : IDisposable
         var temporary = _configPath + ".part";
         await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true,
             _installationId,
-            _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile), cancellationToken);
+            _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile,
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired)), cancellationToken);
         File.Move(temporary, _configPath, true);
     }
 
@@ -141,7 +147,8 @@ public sealed class AgentApiClient : IDisposable
         var configuration = new AgentConfiguration(
             uri.ToString().TrimEnd('/'), _agentId.ToString(), ProtectToken(_token), true,
             _installationId, _storage.ArchiveRoot, _storage.MicrophoneDeviceId,
-            _storage.SystemAudioDeviceId, _storage.RecordingProfile);
+            _storage.SystemAudioDeviceId, _storage.RecordingProfile,
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -160,7 +167,8 @@ public sealed class AgentApiClient : IDisposable
             normalized,
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
-            _storage.RecordingProfile);
+            _storage.RecordingProfile,
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -179,7 +187,8 @@ public sealed class AgentApiClient : IDisposable
             _storage.ArchiveRoot,
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
-            _storage.RecordingProfile);
+            _storage.RecordingProfile,
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -198,7 +207,8 @@ public sealed class AgentApiClient : IDisposable
             _storage.ArchiveRoot,
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
-            _storage.RecordingProfile);
+            _storage.RecordingProfile,
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -308,7 +318,9 @@ public sealed class AgentApiClient : IDisposable
             var sessionInfo = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
             var correlationId = sessionInfo?.PipelineCorrelationId;
             var ownerUserId = sessionInfo?.OwnerUserId;
-            var created = existingServerSession is null ? await CreateServerSessionAsync(meetingId, title, localSessionId, correlationId, ownerUserId, cancellationToken) : (existingServerSession.Value, meetingId ?? await spool.GetMeetingIdAsync(localSessionId, cancellationToken) ?? Guid.Empty);
+            var effectiveMeetingId = meetingId ?? sessionInfo?.MeetingId;
+            await spool.SetMeetingBindStateAsync(localSessionId, "BIND_PENDING", cancellationToken);
+            var created = existingServerSession is null ? await CreateServerSessionAsync(effectiveMeetingId, title, localSessionId, correlationId, ownerUserId, cancellationToken) : (existingServerSession.Value, effectiveMeetingId ?? Guid.Empty);
             var serverSessionId = created.Item1;
             if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
             foreach (var track in tracks)
@@ -318,7 +330,13 @@ public sealed class AgentApiClient : IDisposable
                 var serverTrackId = await CreateServerTrackAsync(serverSessionId, track, correlationId, cancellationToken);
                 await spool.UpsertServerBindingAsync(new ServerBinding(localSessionId, track.TrackId, serverSessionId, serverTrackId), cancellationToken);
             }
+            await spool.SetMeetingBindStateAsync(localSessionId, "BOUND", cancellationToken);
             return serverSessionId;
+        }
+        catch
+        {
+            try { await spool.SetMeetingBindStateAsync(localSessionId, "BIND_FAILED", CancellationToken.None); } catch { }
+            throw;
         }
         finally
         {
@@ -753,7 +771,7 @@ public sealed class AgentApiClient : IDisposable
                 Token = ProtectToken(config.Token),
                 Encrypted = true
             };
-            File.WriteAllText(temporary, JsonSerializer.Serialize(migrated));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(migrated, ConfigJson));
             File.Move(temporary, _configPath, true);
         }
         catch
@@ -785,12 +803,12 @@ public sealed class AgentApiClient : IDisposable
         try
         {
             if (!File.Exists(path)) return null;
-            var config = JsonSerializer.Deserialize<AgentConfiguration>(File.ReadAllText(path));
+            var config = JsonSerializer.Deserialize<AgentConfiguration>(File.ReadAllText(path), ConfigJson);
             if (config is null || !config.Encrypted) return config;
             var token = Encoding.UTF8.GetString(ProtectedData.Unprotect(
                 Convert.FromBase64String(config.Token),
                 Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
-                DataProtectionScope.LocalMachine));
+                GetProtectionScope()));
             return config with { Token = token };
         }
         catch
@@ -800,23 +818,29 @@ public sealed class AgentApiClient : IDisposable
     }
 
     private sealed record AgentConfiguration(
-        string ServerUrl,
-        string AgentId,
-        string Token,
-        bool Encrypted = false,
-        Guid InstallationId = default,
-        string? ArchiveRoot = null,
-        string? MicrophoneDeviceId = null,
-        string? SystemAudioDeviceId = null,
-        string? RecordingProfile = "ROOM");
+        [property: System.Text.Json.Serialization.JsonPropertyName("serverUrl")] string ServerUrl,
+        [property: System.Text.Json.Serialization.JsonPropertyName("agentId")] string AgentId,
+        [property: System.Text.Json.Serialization.JsonPropertyName("token")] string Token,
+        [property: System.Text.Json.Serialization.JsonPropertyName("encrypted")] bool Encrypted = false,
+        [property: System.Text.Json.Serialization.JsonPropertyName("installationId")] Guid InstallationId = default,
+        [property: System.Text.Json.Serialization.JsonPropertyName("archiveRoot")] string? ArchiveRoot = null,
+        [property: System.Text.Json.Serialization.JsonPropertyName("microphoneDeviceId")] string? MicrophoneDeviceId = null,
+        [property: System.Text.Json.Serialization.JsonPropertyName("systemAudioDeviceId")] string? SystemAudioDeviceId = null,
+        [property: System.Text.Json.Serialization.JsonPropertyName("recordingProfile")] string? RecordingProfile = "ROOM",
+        [property: System.Text.Json.Serialization.JsonPropertyName("audioConfiguration")] AudioConfigurationV2? AudioConfiguration = null);
 
     private static string ProtectToken(string token) => Convert.ToBase64String(ProtectedData.Protect(
         Encoding.UTF8.GetBytes(token),
         Encoding.UTF8.GetBytes("WhisperXAtom.AgentToken.v1"),
-        DataProtectionScope.LocalMachine));
+        GetProtectionScope()));
+
+    private static DataProtectionScope GetProtectionScope() =>
+        string.Equals(Environment.GetEnvironmentVariable("ATOM_AGENT_DPAPI_SCOPE"), "CURRENT_USER", StringComparison.OrdinalIgnoreCase)
+            ? DataProtectionScope.CurrentUser
+            : DataProtectionScope.LocalMachine;
 
     private static Task PersistConfigurationAsync(string path, AgentConfiguration configuration, CancellationToken cancellationToken) =>
-        File.WriteAllTextAsync(path, JsonSerializer.Serialize(configuration), cancellationToken);
+        File.WriteAllTextAsync(path, JsonSerializer.Serialize(configuration, ConfigJson), cancellationToken);
 
     public void Dispose()
     {

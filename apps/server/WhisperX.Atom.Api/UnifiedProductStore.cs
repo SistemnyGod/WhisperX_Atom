@@ -7,7 +7,7 @@ public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status,
 public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false, bool Linked = true);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
-public sealed record RecordingSessionCreateResult(RecordingSessionRow? Session, string? ErrorCode = null, bool Retryable = false);
+public sealed record RecordingSessionCreateResult(RecordingSessionRow? Session, string? ErrorCode = null, bool Retryable = false, bool Created = true);
 public sealed record RecordingCorrelationRow(Guid ServerSessionId, string? LocalSessionId, string? PipelineCorrelationId, JsonDocument Timings);
 public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
@@ -251,6 +251,40 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
+
+        // The Agent may retry the same bind after a timeout. Resolve the
+        // existing server session before creating a Meeting or recording row.
+        // This is the server-side idempotency key for offline recovery.
+        if (agentId is Guid lookupAgent && (!string.IsNullOrWhiteSpace(localSessionId) || !string.IsNullOrWhiteSpace(pipelineCorrelationId)))
+        {
+            var lookupSql = !string.IsNullOrWhiteSpace(localSessionId)
+                ? "SELECT id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id,owner_user_id FROM recording_sessions WHERE agent_id=@agent AND local_session_id=@local FOR UPDATE"
+                : "SELECT id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id,owner_user_id FROM recording_sessions WHERE agent_id=@agent AND pipeline_correlation_id=@correlation FOR UPDATE";
+            await using var existing = new NpgsqlCommand(lookupSql, connection, transaction);
+            existing.Parameters.AddWithValue("agent", lookupAgent);
+            if (!string.IsNullOrWhiteSpace(localSessionId)) existing.Parameters.AddWithValue("local", localSessionId.Trim());
+            else existing.Parameters.AddWithValue("correlation", pipelineCorrelationId!.Trim());
+            await using var existingReader = await existing.ExecuteReaderAsync();
+            if (await existingReader.ReadAsync())
+            {
+                var existingSession = new RecordingSessionRow(
+                    existingReader.GetGuid(0),
+                    existingReader.GetGuid(1),
+                    existingReader.IsDBNull(2) ? null : existingReader.GetGuid(2),
+                    existingReader.GetString(3),
+                    existingReader.IsDBNull(4) ? null : existingReader.GetDateTime(4),
+                    existingReader.IsDBNull(5) ? null : existingReader.GetDateTime(5),
+                    existingReader.IsDBNull(6) ? null : existingReader.GetString(6),
+                    existingReader.IsDBNull(7) ? null : existingReader.GetString(7));
+                var existingOwner = existingReader.IsDBNull(8) ? (Guid?)null : existingReader.GetGuid(8);
+                if (meetingId is Guid requestedMeeting && existingSession.MeetingId != requestedMeeting)
+                    return new RecordingSessionCreateResult(null, "MEETING_BINDING_CONFLICT");
+                if (ownerUserId is Guid requestedOwner && existingOwner is Guid boundOwner && requestedOwner != boundOwner)
+                    return new RecordingSessionCreateResult(null, "MEETING_OWNER_MISMATCH");
+                return new RecordingSessionCreateResult(existingSession, Created: false);
+            }
+        }
+
         var resolvedMeetingId = meetingId ?? Guid.NewGuid();
         Guid? resolvedOwnerUserId = ownerUserId;
         if (meetingId is Guid existingMeetingId)
@@ -267,6 +301,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 return new RecordingSessionCreateResult(null, "MEETING_CANCELLED");
             if (existingOwner.HasValue && ownerUserId.HasValue && ownerUserId != existingOwner)
                 return new RecordingSessionCreateResult(null, "MEETING_OWNER_MISMATCH");
+        }
+        if (resolvedOwnerUserId is null && agentId is Guid linkedAgent)
+        {
+            await using var linkedOwner = new NpgsqlCommand("SELECT l.user_id FROM agent_user_links l JOIN users u ON u.id=l.user_id WHERE l.agent_id=@agent AND l.is_active AND u.is_active ORDER BY l.last_used_at DESC NULLS LAST LIMIT 1", connection, transaction);
+            linkedOwner.Parameters.AddWithValue("agent", linkedAgent);
+            var linkedValue = await linkedOwner.ExecuteScalarAsync();
+            if (linkedValue is Guid linkedUser) resolvedOwnerUserId = linkedUser;
         }
         if (resolvedOwnerUserId is not Guid owner)
             return new RecordingSessionCreateResult(null, "OWNER_REQUIRED");

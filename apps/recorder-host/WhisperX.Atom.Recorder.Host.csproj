@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>WhisperX.Atom.Recorder.Host</AssemblyName>
+    <RootNamespace>WhisperX.Atom.Recorder.Host</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\recorder-agent\WhisperX.Atom.Recorder.Core.csproj" />
+    <Compile Include="..\recorder-agent\AgentApiClient.cs" Link="RecorderCore\AgentApiClient.cs" />
+    <Compile Include="..\recorder-agent\FlacEncoder.cs" Link="RecorderCore\FlacEncoder.cs" />
+    <Compile Include="..\recorder-agent\LocalArchiveWriter.cs" Link="RecorderCore\LocalArchiveWriter.cs" />
+    <Compile Include="..\recorder-agent\RawChunkRecovery.cs" Link="RecorderCore\RawChunkRecovery.cs" />
+    <Compile Include="..\recorder-agent\RecordingDeliveryCoordinator.cs" Link="RecorderCore\RecordingDeliveryCoordinator.cs" />
+    <Compile Include="..\recorder-agent\RecorderToolPaths.cs" Link="RecorderCore\RecorderToolPaths.cs" />
+    <Compile Include="..\recorder-agent\SessionFinalizationCoordinator.cs" Link="RecorderCore\SessionFinalizationCoordinator.cs" />
+    <Compile Include="..\recorder-agent\RawChunkFileName.cs" Link="RecorderCore\RawChunkFileName.cs" />
+    <Compile Include="..\recorder-agent\MachineServerConfig.cs" Link="RecorderCore\MachineServerConfig.cs" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
+  </ItemGroup>
+</Project>

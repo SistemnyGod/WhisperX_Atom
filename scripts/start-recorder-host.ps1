@@ -2,7 +2,8 @@
 param(
     [string]$ExecutablePath = "",
     [switch]$Rebuild,
-    [int]$ReadyTimeoutSeconds = 20
+    [int]$ReadyTimeoutSeconds = 20,
+    [string]$DataRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,13 +14,16 @@ $runtimeRoot = Get-WhisperXRuntimeRoot -RepoPath $repo
 $pidPath = Join-Path $runtimeRoot "recorder-host.pid"
 $stdoutPath = Join-Path $runtimeRoot "recorder-host.stdout.log"
 $stderrPath = Join-Path $runtimeRoot "recorder-host.stderr.log"
-$publishedRoot = Join-Path $repo "artifacts\recorder-current"
-$defaultExe = Join-Path $publishedRoot "WhisperX.Atom.Recorder.Service.exe"
-$project = Join-Path $repo "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj"
+$audioGraph = [string]::Equals($env:AUDIO_CAPTURE_ENGINE, "AUDIOGRAPH", [StringComparison]::OrdinalIgnoreCase)
+$publishedRoot = if ($audioGraph) { Join-Path $repo "artifacts\recorder-host-current" } else { Join-Path $repo "artifacts\recorder-current" }
+$defaultExe = if ($audioGraph) { Join-Path $publishedRoot "WhisperX.Atom.Recorder.Host.exe" } else { Join-Path $publishedRoot "WhisperX.Atom.Recorder.Service.exe" }
+$project = if ($audioGraph) { Join-Path $repo "apps\recorder-host\WhisperX.Atom.Recorder.Host.csproj" } else { Join-Path $repo "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj" }
+$processName = if ($audioGraph) { "WhisperX.Atom.Recorder.Host" } else { "WhisperX.Atom.Recorder.Service" }
+$pipeName = if ($audioGraph) { "WhisperXAtomRecorderHost" } else { "WhisperXAtomAgent" }
 
 function Get-RecorderProcess([string]$path) {
     $fullPath = [IO.Path]::GetFullPath($path)
-    @(Get-Process -Name "WhisperX.Atom.Recorder.Service" -ErrorAction SilentlyContinue | Where-Object {
+    @(Get-Process -Name $processName -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and [IO.Path]::GetFullPath($_.Path) -eq $fullPath } catch { $false }
     }) | Select-Object -First 1
 }
@@ -27,7 +31,7 @@ function Get-RecorderProcess([string]$path) {
 function Test-RecorderPipe {
     $pipe = $null
     try {
-        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "WhisperXAtomAgent", [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
         $pipe.Connect(1000)
         return $pipe.IsConnected
     }
@@ -39,7 +43,8 @@ if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { $ExecutablePath = $defaultE
 $publishRequired = $Rebuild -or -not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)
 if (-not $publishRequired) {
     $binaryStamp = (Get-Item -LiteralPath $ExecutablePath).LastWriteTimeUtc
-    $latestSource = Get-ChildItem -LiteralPath (Join-Path $repo "apps\recorder-agent") -Recurse -File |
+    $sourceRoot = Split-Path -Parent $project
+    $latestSource = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
         Where-Object { $_.FullName -notmatch "\\(bin|obj)\\" -and $_.Extension -in @(".cs", ".csproj", ".props", ".targets", ".json") } |
         Sort-Object LastWriteTimeUtc -Descending |
         Select-Object -First 1
@@ -65,16 +70,50 @@ if ($null -ne $existing -and (Test-RecorderPipe)) {
 }
 if ($null -ne $existing) { Stop-Process -Id $existing.Id -Force -ErrorAction SilentlyContinue }
 
-$dataRoot = "C:\ProgramData\WhisperXAtom\Agent"
-$configPath = Join-Path $dataRoot "agent-config.json"
-if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "RECORDER_CONFIG_NOT_FOUND: $configPath" }
+$dataRoot = if ([string]::IsNullOrWhiteSpace($DataRoot)) { "C:\ProgramData\WhisperXAtom\Agent" } else { [IO.Path]::GetFullPath($DataRoot) }
+$dataRoot = New-Item -ItemType Directory -Force -Path $dataRoot | Select-Object -ExpandProperty FullName
+$machineConfigPath = Join-Path $dataRoot "..\client-config.json"
+$machineConfig = if (Test-Path -LiteralPath $machineConfigPath -PathType Leaf) { try { Get-Content -LiteralPath $machineConfigPath -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+$configPath = if ($audioGraph) {
+    Join-Path (Join-Path $env:LOCALAPPDATA "WhisperXAtom") "Agent\agent-config.json"
+} else {
+    Join-Path $dataRoot "agent-config.json"
+}
+if (-not $audioGraph -and -not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "RECORDER_CONFIG_NOT_FOUND: $configPath" }
+$configDirectory = Split-Path -Parent $configPath
+New-Item -ItemType Directory -Force -Path $configDirectory | Out-Null
 $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+$machineInstallationId = $null
+if ($null -ne $machineConfig) {
+    $installationProperty = $machineConfig.PSObject.Properties["installationId"]
+    if ($null -ne $installationProperty) { $machineInstallationId = [string]$installationProperty.Value }
+    if ([string]::IsNullOrWhiteSpace($machineInstallationId)) {
+        $installationProperty = $machineConfig.PSObject.Properties["InstallationId"]
+        if ($null -ne $installationProperty) { $machineInstallationId = [string]$installationProperty.Value }
+    }
+}
+$env:AUDIO_CAPTURE_ENGINE = if ($audioGraph) { "AUDIOGRAPH" } else { "LEGACY_WASAPI" }
 $env:ATOM_AGENT_CONFIG_PATH = $configPath
 $env:ATOM_AGENT_DATA_ROOT = $dataRoot
+$env:ATOM_AGENT_INSTALLATION_ID = $machineInstallationId
 $env:ATOM_AGENT_ALLOWED_SID = $sid
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($null -eq $ffmpeg) { throw "FFMPEG_UNAVAILABLE" }
-$env:ATOM_AGENT_FFMPEG_PATH = $ffmpeg.Source
+$env:ATOM_AGENT_DPAPI_SCOPE = if ($audioGraph) { "CURRENT_USER" } else { "LOCAL_MACHINE" }
+$toolDirectory = if (-not [string]::IsNullOrWhiteSpace($env:WHISPERX_FFMPEG_DIR)) { $env:WHISPERX_FFMPEG_DIR } else { Join-Path $repo "vendor\ffmpeg\win-x64" }
+$bundledFfmpeg = Join-Path (Split-Path -Parent $ExecutablePath) "ffmpeg.exe"
+$bundledFfprobe = Join-Path (Split-Path -Parent $ExecutablePath) "ffprobe.exe"
+if (-not (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf)) {
+    $sourceFfmpeg = Join-Path $toolDirectory "ffmpeg.exe"
+    $sourceFfprobe = Join-Path $toolDirectory "ffprobe.exe"
+    if ((Test-Path -LiteralPath $sourceFfmpeg -PathType Leaf) -and (Test-Path -LiteralPath $sourceFfprobe -PathType Leaf)) {
+        Copy-Item -LiteralPath $sourceFfmpeg -Destination $bundledFfmpeg -Force
+        Copy-Item -LiteralPath $sourceFfprobe -Destination $bundledFfprobe -Force
+    }
+}
+if (-not (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $bundledFfprobe -PathType Leaf)) {
+    throw "FFMPEG_UNAVAILABLE: bundled ffmpeg.exe and ffprobe.exe are required beside the Recorder executable."
+}
+$env:ATOM_AGENT_FFMPEG_PATH = $bundledFfmpeg
+$env:ATOM_AGENT_FFPROBE_PATH = $bundledFfprobe
 
 $process = Start-Process -FilePath $ExecutablePath -WorkingDirectory (Split-Path -Parent $ExecutablePath) -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
@@ -83,7 +122,9 @@ do {
     Start-Sleep -Milliseconds 500
     $alive = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
     if ($null -eq $alive) {
-        $tail = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n" } else { "" }
+        $stderrTail = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n" } else { "" }
+        $stdoutTail = if (Test-Path -LiteralPath $stdoutPath) { (Get-Content -LiteralPath $stdoutPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n" } else { "" }
+        $tail = (@($stderrTail, $stdoutTail) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
         throw "RECORDER_HOST_EXITED: $tail"
     }
     if (Test-RecorderPipe) {

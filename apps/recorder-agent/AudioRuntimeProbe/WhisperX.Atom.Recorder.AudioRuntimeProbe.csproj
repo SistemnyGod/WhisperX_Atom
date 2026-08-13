@@ -8,6 +8,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\AudioRuntimeProbeRunner.cs" Link="AudioRuntimeProbeRunner.cs" />
+    <Compile Include="..\AudioRuntimeProbe.cs" Link="AudioRuntimeProbe.cs" />
+    <Compile Include="..\AudioSampleFormat.cs" Link="AudioSampleFormat.cs" />
     <ProjectReference Include="..\WhisperX.Atom.Recorder.Core.csproj" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 </Project>

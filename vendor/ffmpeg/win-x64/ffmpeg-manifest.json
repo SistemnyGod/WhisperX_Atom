@@ -6,14 +6,14 @@
     "files":  [
                   {
                       "file":  "ffmpeg.exe",
-                      "size":  392704,
-                      "sha256":  "59a7411acb45f228d0226def05df24a47a71b523d65fe872c4df94cc37af95b4"
+                      "size":  101060096,
+                      "sha256":  "1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705"
                   },
                   {
                       "file":  "ffprobe.exe",
-                      "size":  392704,
-                      "sha256":  "10ec38609ecbd425b23a04d97b022109d91809df308a50a7a1a1fa6e14ea4529"
+                      "size":  100853248,
+                      "sha256":  "54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c"
                   }
               ],
-    "stagedAtUtc":  "\/Date(1786537690436)\/"
+    "stagedAtUtc":  "\/Date(1786598198036)\/"
 }

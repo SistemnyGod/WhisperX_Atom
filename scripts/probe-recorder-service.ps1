@@ -19,9 +19,12 @@ if ($null -eq $serviceConfig) {
 
 $previousStartMode = $serviceConfig.StartMode
 $wasRunning = $serviceConfig.State -eq "Running"
-$probeArgs = @("-Seconds", $Seconds, "-IncludeService")
+$probeParameters = @{
+    Seconds = $Seconds
+    IncludeService = $true
+}
 if (-not [string]::IsNullOrWhiteSpace($OutputRoot)) {
-    $probeArgs += @("-OutputRoot", $OutputRoot)
+    $probeParameters.OutputRoot = $OutputRoot
 }
 
 try {
@@ -36,7 +39,7 @@ try {
     (Get-Service -Name $serviceName).WaitForStatus("Running", [TimeSpan]::FromSeconds(15))
 
     Write-Host "Running controlled service audio probe..."
-    & $probeScript @probeArgs
+    & $probeScript @probeParameters
     if ($LASTEXITCODE -ne 0) {
         throw "RECORDER_AUDIO_PROBE_FAILED: exit code $LASTEXITCODE"
     }

@@ -11,6 +11,7 @@ public sealed class AgentStorageSettings
     private string? _microphoneDeviceId;
     private string? _systemAudioDeviceId;
     private string _recordingProfile;
+    private bool _userReselectRequired;
 
     public AgentStorageSettings()
     {
@@ -19,6 +20,7 @@ public sealed class AgentStorageSettings
         _microphoneDeviceId = NormalizeDeviceId(Environment.GetEnvironmentVariable("ATOM_AGENT_MICROPHONE_DEVICE_ID"));
         _systemAudioDeviceId = NormalizeDeviceId(Environment.GetEnvironmentVariable("ATOM_AGENT_SYSTEM_AUDIO_DEVICE_ID"));
         _recordingProfile = NormalizeRecordingProfile(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE"));
+        _userReselectRequired = string.Equals(Environment.GetEnvironmentVariable("ATOM_AGENT_USER_RESELECT_REQUIRED"), "true", StringComparison.OrdinalIgnoreCase);
     }
 
     public string ArchiveRoot
@@ -46,6 +48,16 @@ public sealed class AgentStorageSettings
     public string RecordingProfile
     {
         get { lock (_gate) return _recordingProfile; }
+    }
+
+    public bool UserReselectRequired
+    {
+        get { lock (_gate) return _userReselectRequired; }
+    }
+
+    public void SetUserReselectRequired(bool required)
+    {
+        lock (_gate) _userReselectRequired = required;
     }
 
     public bool RecordingProfileManaged => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_RECORDING_PROFILE"));

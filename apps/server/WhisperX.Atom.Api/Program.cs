@@ -958,13 +958,16 @@ app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest r
             "MEETING_NOT_FOUND" => StatusCodes.Status404NotFound,
             "OWNER_REQUIRED" => StatusCodes.Status422UnprocessableEntity,
             "AGENT_USER_LINK_REQUIRED" => StatusCodes.Status403Forbidden,
-            "MEETING_OWNER_MISMATCH" or "MEETING_CANCELLED" => StatusCodes.Status409Conflict,
+            "MEETING_OWNER_MISMATCH" or "MEETING_CANCELLED" or "MEETING_BINDING_CONFLICT" => StatusCodes.Status409Conflict,
             "AGENT_AUTH_REJECTED" => StatusCodes.Status401Unauthorized,
             _ => StatusCodes.Status503ServiceUnavailable
         };
         return Results.Json(new { error = result.ErrorCode ?? "SERVER_STORAGE_ERROR", retryable = result.Retryable, traceId = context.Response.Headers["X-Trace-Id"].ToString() }, statusCode: status);
     }
-    return Results.Created($"/api/v1/recording-sessions/{result.Session.Id}", result.Session);
+    var payload = new { result.Session.Id, result.Session.MeetingId, result.Session.AgentId, result.Session.State, result.Session.StartedAt, result.Session.FinishedAt, result.Session.PipelineCorrelationId, result.Session.LocalSessionId, created = result.Created };
+    return result.Created
+        ? Results.Created($"/api/v1/recording-sessions/{result.Session.Id}", payload)
+        : Results.Ok(payload);
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
