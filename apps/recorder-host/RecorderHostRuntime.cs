@@ -183,10 +183,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         finally { _gate.Release(); }
     }
 
-    public async Task<AgentIpcResponse> ProbeAsync(string? deviceId, CancellationToken cancellationToken)
+    public async Task<AgentIpcResponse> ProbeAsync(string? deviceId, CancellationToken cancellationToken, int durationMs = 3000)
     {
         var mode = string.IsNullOrWhiteSpace(deviceId) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed;
-        var result = await _engine.ProbeAsync(mode, deviceId, TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
+        var boundedDurationMs = Math.Clamp(durationMs, 1000, 10000);
+        var result = await _engine.ProbeAsync(mode, deviceId, TimeSpan.FromMilliseconds(boundedDurationMs), cancellationToken).ConfigureAwait(false);
         var legacyCompatible = new AudioSourceTestResult(
             result.Ready,
             result.DeviceId,
@@ -595,28 +596,90 @@ public sealed class RecorderHostPipeServer : BackgroundService
         }
         while (!stoppingToken.IsCancellationRequested)
         {
-            await using var pipe = RecorderHostPipeSecurity.CreateServer();
-            await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
-            await HandleAsync(pipe, stoppingToken).ConfigureAwait(false);
+            try
+            {
+                await using var pipe = RecorderHostPipeSecurity.CreateServer();
+                await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                await HandleAsync(pipe, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (IOException exception)
+            {
+                _logger.LogDebug(exception, "Recorder Host IPC client disconnected or pipe failed; listener remains active.");
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Recorder Host IPC connection failed; listener remains active.");
+            }
+
+            if (!stoppingToken.IsCancellationRequested)
+            {
+                try { await Task.Delay(100, stoppingToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
         }
     }
 
     private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
         using var reader = new StreamReader(pipe);
-        await using var writer = new StreamWriter(pipe) { AutoFlush = true };
-        var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(line)) return;
-        var request = JsonSerializer.Deserialize<AgentIpcRequest>(line, _json);
-            var response = request is null
-                ? new AgentIpcResponse(false, "ERROR", null, "invalid_request", null)
-                : request.ProtocolVersion != AgentIpcProtocol.Version
-                ? new AgentIpcResponse(false, "ERROR", null, "IPC_VERSION_INCOMPATIBLE", null,
-                    ProtocolVersion: AgentIpcProtocol.Version,
-                    MinimumSupportedProtocolVersion: AgentIpcProtocol.Version,
-                    CurrentProtocolVersion: AgentIpcProtocol.Version)
-                : await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
-        await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json)).ConfigureAwait(false);
+        string? line;
+        try
+        {
+            line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException exception)
+        {
+            _logger.LogDebug(exception, "Recorder Host IPC client disconnected before sending a request.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            _logger.LogDebug("Recorder Host IPC client disconnected without a request.");
+            return;
+        }
+
+        AgentIpcRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<AgentIpcRequest>(line, _json);
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogDebug(exception, "Recorder Host IPC client sent malformed JSON.");
+            return;
+        }
+
+        if (request is null)
+        {
+            _logger.LogDebug("Recorder Host IPC client sent an empty request object.");
+            return;
+        }
+
+        var response = request.ProtocolVersion != AgentIpcProtocol.Version
+            ? new AgentIpcResponse(false, "ERROR", null, "IPC_VERSION_INCOMPATIBLE", null,
+                ProtocolVersion: AgentIpcProtocol.Version,
+                MinimumSupportedProtocolVersion: AgentIpcProtocol.Version,
+                CurrentProtocolVersion: AgentIpcProtocol.Version)
+            : await ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json)).ConfigureAwait(false);
+        }
+        catch (IOException exception)
+        {
+            _logger.LogDebug(exception, "Recorder Host IPC client disconnected before the response was written.");
+        }
+        catch (ObjectDisposedException exception)
+        {
+            _logger.LogDebug(exception, "Recorder Host IPC pipe was disposed before the response was written.");
+        }
     }
 
     private async Task<AgentIpcResponse> ExecuteAsync(AgentIpcRequest request, CancellationToken cancellationToken)
@@ -633,11 +696,11 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 "PREFLIGHT" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
                 "TEST_AUDIO_SOURCE" or "MICROPHONE_TEST" => ReadBool(request.Payload, "systemAudio")
                     ? new AgentIpcResponse(false, "DISABLED", null, "AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", null)
-                    : await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken).ConfigureAwait(false),
+                    : await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false),
                 "SET_AUDIO_DEVICES" or "SELECT_AUDIO_DEVICE" => await _runtime.SetAudioDevicesAsync(
                     ReadString(request.Payload, "microphoneDeviceId") ?? ReadString(request.Payload, "deviceId"),
                     ReadString(request.Payload, "systemAudioDeviceId"), cancellationToken).ConfigureAwait(false),
-                "TEST_AUDIO_DEVICE" => await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken).ConfigureAwait(false),
+                "TEST_AUDIO_DEVICE" => await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false),
                 "CONFIGURE" => await _runtime.ConfigureAsync(
                     ReadString(request.Payload, "serverUrl") ?? throw new InvalidOperationException("server_url_required"),
                     ReadGuid(request.Payload, "agentId") ?? throw new InvalidOperationException("agent_id_required"),
@@ -680,4 +743,11 @@ public sealed class RecorderHostPipeServer : BackgroundService
 
     private static bool ReadBool(JsonElement payload, string name)
         => payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+
+    private static int ReadDurationMs(JsonElement payload)
+        => payload.TryGetProperty("durationMs", out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetInt32(out var durationMs)
+            ? Math.Clamp(durationMs, 1000, 10000)
+            : 3000;
 }

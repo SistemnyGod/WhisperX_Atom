@@ -6,6 +6,7 @@ using Windows.Media.Audio;
 using Windows.Media.Capture;
 using Windows.Media.MediaProperties;
 using Windows.Media.Render;
+using WinRT;
 
 namespace WhisperX.Atom.Recorder.Host;
 
@@ -28,6 +29,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private AudioDeviceInputNode? _inputNode;
     private AudioFrameOutputNode? _outputNode;
     private AudioEncodingProperties? _encodingProperties;
+    private AudioEncodingProperties? _outputEncodingProperties;
     private AudioDeviceDescriptor? _selectedDevice;
     private AudioSelectionMode _selectionMode = AudioSelectionMode.Default;
     private string? _requestedDeviceId;
@@ -43,6 +45,8 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private DateTimeOffset? _lastAudioAtUtc;
     private DateTimeOffset? _silenceStartedAtUtc;
     private int _failureRaised;
+    private AudioGraphAttemptDiagnostics _attempt = new();
+    private volatile bool _probeMode;
 
     public AudioGraphCaptureEngine(AudioGraphDeviceCatalog catalog)
     {
@@ -81,6 +85,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
     public event EventHandler<AudioCaptureFailureEventArgs>? CaptureFailed;
 
+    public AudioGraphAttemptDiagnostics LastAttemptDiagnostics
+    {
+        get { lock (_gate) return _attempt.Clone(); }
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         await _catalog.InitializeAsync(cancellationToken).ConfigureAwait(false);
@@ -96,23 +105,30 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
+        lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
         await SelectDeviceAsync(selectionMode, deviceId, cancellationToken).ConfigureAwait(false);
+        _probeMode = true;
         var started = Stopwatch.GetTimestamp();
+        AudioDeviceProbeResult? result = null;
         try
         {
             await StartAsync(cancellationToken).ConfigureAwait(false);
             await Task.Delay(duration <= TimeSpan.Zero ? TimeSpan.FromSeconds(2) : duration, cancellationToken).ConfigureAwait(false);
-            return BuildProbeResult(ElapsedMilliseconds(started), null, null);
+            result = BuildProbeResult(ElapsedMilliseconds(started), null, null);
         }
         catch (Exception ex)
         {
             var code = ex is OperationCanceledException ? "AUDIO_TEST_CANCELLED" : AudioGraphErrorMapper.Map(ex);
-            return BuildProbeResult(ElapsedMilliseconds(started), code, ex.Message);
+            result = BuildProbeResult(ElapsedMilliseconds(started), code, ex.Message);
         }
         finally
         {
             try { await StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            _probeMode = false;
+            if (result is not null)
+                result = result with { AttemptDiagnostics = LastAttemptDiagnostics };
         }
+        return result ?? BuildProbeResult(ElapsedMilliseconds(started), "AUDIO_TEST_FAILED", "AudioGraph probe did not produce a result.");
     }
 
     public Task SelectDeviceAsync(AudioSelectionMode selectionMode, string? deviceId, CancellationToken cancellationToken = default)
@@ -156,42 +172,64 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
         await DisposeGraphAsync().ConfigureAwait(false);
         ResetTelemetry();
+        lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
         _frames = CreateChannel();
         _failureRaised = 0;
         SetState(AudioCaptureState.Starting);
 
-        _encodingProperties = AudioEncodingProperties.CreatePcm(SampleRate, Channels, BitsPerSample);
-        var settings = new AudioGraphSettings(AudioRenderCategory.Media)
-        {
-            EncodingProperties = _encodingProperties,
-            DesiredSamplesPerQuantum = SampleRate / 100
-        };
-        var creation = await AudioGraph.CreateAsync(settings);
-        if (creation.Status != AudioGraphCreationStatus.Success || creation.Graph is null)
-            throw new InvalidOperationException($"AUDIOGRAPH_CREATE_FAILED:{creation.Status}");
-        _graph = creation.Graph;
-
-        var inputResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _encodingProperties, information);
-        if (!string.Equals(inputResult.Status.ToString(), "Success", StringComparison.OrdinalIgnoreCase) || inputResult.DeviceInputNode is null)
-            throw new InvalidOperationException($"AUDIO_DEVICE_CREATE_FAILED:{inputResult.Status}:{inputResult.ExtendedError?.HResult}");
-        _inputNode = inputResult.DeviceInputNode;
-        _outputNode = _graph.CreateFrameOutputNode(_encodingProperties);
-        _inputNode.AddOutgoingConnection(_outputNode);
-        _graph.QuantumStarted += OnQuantumStarted;
-        _graph.UnrecoverableErrorOccurred += OnUnrecoverableError;
-        _captureClock.Restart();
-        _graph.Start();
-
         try
         {
+            _encodingProperties = AudioEncodingProperties.CreatePcm(SampleRate, Channels, BitsPerSample);
+            var settings = new AudioGraphSettings(AudioRenderCategory.Media)
+            {
+                EncodingProperties = _encodingProperties,
+                DesiredSamplesPerQuantum = SampleRate / 100
+            };
+            lock (_gate) _attempt.GraphSamplesPerQuantum = SampleRate / 100;
+            lock (_gate) _attempt.GraphCreateAttempted = true;
+            var creation = await AudioGraph.CreateAsync(settings);
+            lock (_gate)
+            {
+                _attempt.GraphCreationStatus = creation.Status.ToString();
+                _attempt.GraphExtendedErrorHResult = creation.ExtendedError?.HResult;
+            }
+            if (creation.Status != AudioGraphCreationStatus.Success || creation.Graph is null)
+                throw new InvalidOperationException($"AUDIOGRAPH_CREATE_FAILED:{creation.Status}");
+            _graph = creation.Graph;
+            lock (_gate) _attempt.GraphCreated = true;
+
+            lock (_gate) _attempt.InputNodeCreateAttempted = true;
+            var inputResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _encodingProperties, information);
+            lock (_gate)
+            {
+                _attempt.InputNodeCreationStatus = inputResult.Status.ToString();
+                _attempt.InputNodeExtendedErrorHResult = inputResult.ExtendedError?.HResult;
+            }
+            if (!string.Equals(inputResult.Status.ToString(), "Success", StringComparison.OrdinalIgnoreCase) || inputResult.DeviceInputNode is null)
+                throw new InvalidOperationException($"AUDIO_INPUT_NODE_CREATE_FAILED:{inputResult.Status}:{inputResult.ExtendedError?.HResult}");
+            _inputNode = inputResult.DeviceInputNode;
+            lock (_gate) _attempt.InputNodeCreated = true;
+            _outputNode = _graph.CreateFrameOutputNode(_encodingProperties);
+            lock (_gate) _attempt.OutputNodeCreated = true;
+            CaptureOutputFormat(_outputNode.EncodingProperties);
+            _inputNode.AddOutgoingConnection(_outputNode);
+            lock (_gate) _attempt.ConnectionCreated = true;
+            _graph.QuantumStarted += OnQuantumStarted;
+            _graph.UnrecoverableErrorOccurred += OnUnrecoverableError;
+            _captureClock.Restart();
+            lock (_gate) _attempt.GraphStartCalled = true;
+            _graph.Start();
             await WaitForFirstFrameAsync(cancellationToken).ConfigureAwait(false);
+            SetState(AudioCaptureState.Recording);
         }
-        catch
+        catch (Exception ex)
         {
-            await StopAsync(CancellationToken.None).ConfigureAwait(false);
+            var code = AudioGraphErrorMapper.Map(ex);
+            RaiseFailure(code, ex.Message, true);
+            SetState(AudioCaptureState.Failed);
+            try { await StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
         }
-        SetState(AudioCaptureState.Recording);
     }
 
     public Task PauseAsync(CancellationToken cancellationToken = default)
@@ -236,6 +274,15 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            string? failureCode;
+            string? failureDetail;
+            lock (_gate)
+            {
+                failureCode = _attempt.FinalErrorCode;
+                failureDetail = _attempt.FinalErrorDetail;
+            }
+            if (!string.IsNullOrWhiteSpace(failureCode))
+                throw new InvalidOperationException($"{failureCode}:{failureDetail}");
             if (Volatile.Read(ref _frameCount) > 0 && Volatile.Read(ref _bytesReceived) > 0) return;
             await Task.Delay(20, cancellationToken).ConfigureAwait(false);
         }
@@ -247,35 +294,76 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     {
         try
         {
+            lock (_gate)
+            {
+                _attempt.QuantumStartedCount++;
+                _attempt.FirstQuantumLatencyMs ??= _captureClock.ElapsedMilliseconds;
+            }
             var output = _outputNode;
             if (output is null) return;
+            lock (_gate) _attempt.GetFrameCallCount++;
             using var frame = output.GetFrame();
             using var buffer = frame.LockBuffer(AudioBufferAccessMode.Read);
             using var reference = buffer.CreateReference();
             unsafe
             {
-                ((IMemoryBufferByteAccess)reference).GetBuffer(out var data, out var capacity);
-                if (data is null || capacity == 0) return;
-                var bytes = new byte[capacity];
-                Marshal.Copy((IntPtr)data, bytes, 0, checked((int)capacity));
-                var metrics = Measure(bytes);
-                var sampleCount = bytes.Length / 2;
-                var audioFrame = new AudioFrame(Interlocked.Read(ref _sampleCursor), sampleCount, DateTimeOffset.UtcNow, bytes, metrics.Rms, metrics.Peak, metrics.Clipping, AudioStreamFormats.Phase1Microphone);
-                if (!_frames.Writer.TryWrite(audioFrame))
+                var validLength = buffer.Length;
+                lock (_gate)
                 {
-                    RaiseFailure("AUDIO_PIPELINE_OVERRUN", "Audio frame queue is full; stopping capture to avoid silent loss.", false);
-                    SetState(AudioCaptureState.Failed);
-                    _frames.Writer.TryComplete(new InvalidOperationException("AUDIO_PIPELINE_OVERRUN"));
-                    _graph?.Stop();
+                    _attempt.AudioBufferLengthLast = checked((int)Math.Min(validLength, (uint)int.MaxValue));
+                    _attempt.AudioBufferCapacityLast = null;
+                }
+                if (validLength == 0)
+                {
+                    lock (_gate) _attempt.EmptyFrameCount++;
                     return;
+                }
+
+                // AudioBuffer references are WinRT IInspectable objects. A
+                // direct CLR cast is invalid under CsWinRT; As<T>() performs
+                // the required QueryInterface for IMemoryBufferByteAccess.
+                var byteAccess = reference.As<IMemoryBufferByteAccess>();
+                byteAccess.GetBuffer(out var data, out var capacity);
+                lock (_gate)
+                {
+                    _attempt.AudioBufferCapacityLast = checked((int)Math.Min(capacity, int.MaxValue));
+                }
+                var bytesToCopy = Math.Min(validLength, capacity);
+                if (data is null || bytesToCopy == 0) return;
+                var nativeBytes = new byte[checked((int)bytesToCopy)];
+                Marshal.Copy((IntPtr)data, nativeBytes, 0, checked((int)bytesToCopy));
+                var normalizedBytes = NormalizeToPcm16(nativeBytes, _outputEncodingProperties);
+                lock (_gate)
+                {
+                    _attempt.NonEmptyFrameCount++;
+                    _attempt.NativeFrameBytes += nativeBytes.Length;
+                    _attempt.NormalizedFrameBytes += normalizedBytes.Length;
+                    _attempt.NormalizationMode ??= ResolveNormalizationMode(_outputEncodingProperties);
+                }
+
+                var metrics = Measure(normalizedBytes);
+                var sampleCount = normalizedBytes.Length / 2;
+                if (!_probeMode)
+                {
+                    var audioFrame = new AudioFrame(Interlocked.Read(ref _sampleCursor), sampleCount, DateTimeOffset.UtcNow, normalizedBytes, metrics.Rms, metrics.Peak, metrics.Clipping, AudioStreamFormats.Phase1Microphone);
+                    if (!_frames.Writer.TryWrite(audioFrame))
+                    {
+                        RaiseFailure("AUDIO_PIPELINE_OVERRUN", "Audio frame queue is full; stopping capture to avoid silent loss.", false);
+                        SetState(AudioCaptureState.Failed);
+                        _frames.Writer.TryComplete(new InvalidOperationException("AUDIO_PIPELINE_OVERRUN"));
+                        _graph?.Stop();
+                        return;
+                    }
                 }
 
                 Interlocked.Add(ref _sampleCursor, sampleCount);
                 Interlocked.Increment(ref _frameCount);
-                Interlocked.Add(ref _bytesReceived, bytes.Length);
+                Interlocked.Add(ref _bytesReceived, normalizedBytes.Length);
                 lock (_gate)
                 {
+                    _attempt.BytesReceived = _bytesReceived;
                     _firstFrameLatencyMs ??= _captureClock.ElapsedMilliseconds;
+                    _attempt.FirstFrameLatencyMs ??= _firstFrameLatencyMs;
                     _rmsSum += metrics.Rms;
                     _peak = Math.Max(_peak, metrics.Peak);
                     _clipping |= metrics.Clipping;
@@ -292,6 +380,16 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
     private void OnUnrecoverableError(AudioGraph _, object __)
     {
+        lock (_gate)
+        {
+            _attempt.UnrecoverableErrorOccurred = true;
+            _attempt.UnrecoverableErrorHResult = __ switch
+            {
+                Exception exception => exception.HResult,
+                int hresult => hresult,
+                _ => null
+            };
+        }
         SetState(AudioCaptureState.Failed);
         RaiseFailure("AUDIO_GRAPH_UNRECOVERABLE", "AudioGraph reported an unrecoverable error.", false);
     }
@@ -315,15 +413,19 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     {
         var selected = SelectedDevice;
         var telemetry = Telemetry;
+        var attempt = LastAttemptDiagnostics;
+        attempt.FinalErrorCode ??= errorCode;
+        attempt.FinalErrorDetail ??= errorDetail;
+        attempt.FinalCaptureState ??= State.ToString();
         return new AudioDeviceProbeResult(
             selected?.Id,
             selected?.Name,
             selected is not null,
             selected?.State == "Active",
             errorCode != "AUDIO_DEVICE_ACCESS_DENIED",
-            true,
-            _graph is not null,
-            telemetry.FrameCount > 0,
+            attempt.NormalizationMode is "FLOAT32_TO_PCM16" or "PCM16_COPY",
+            attempt.InputNodeCreated,
+            attempt.GraphStartCalled,
             checked((int)Math.Min(int.MaxValue, telemetry.FrameCount)),
             telemetry.BytesReceived,
             telemetry.FirstFrameLatencyMs,
@@ -336,8 +438,68 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
             "PCM_S16",
             errorCode,
             errorDetail,
-            errorCode is null ? telemetry.FrameCount > 0 ? "READY" : "NO_PACKETS" : "FAILED");
+            errorCode is null ? telemetry.FrameCount > 0 ? "READY" : "NO_PACKETS" : "FAILED",
+            attempt);
     }
+
+    private void CaptureOutputFormat(AudioEncodingProperties properties)
+    {
+        _outputEncodingProperties = properties;
+        lock (_gate)
+        {
+            _attempt.OutputSubtype = properties.Subtype;
+            _attempt.OutputBitsPerSample = checked((int)properties.BitsPerSample);
+            _attempt.OutputSampleRate = checked((int)properties.SampleRate);
+            _attempt.OutputChannelCount = checked((int)properties.ChannelCount);
+        }
+    }
+
+    private static string ResolveNormalizationMode(AudioEncodingProperties? properties)
+    {
+        if (properties is null) return "UNKNOWN";
+        if (IsFloat(properties) && properties.BitsPerSample == 32) return "FLOAT32_TO_PCM16";
+        if (IsPcm(properties) && properties.BitsPerSample == 16) return "PCM16_COPY";
+        return "UNSUPPORTED";
+    }
+
+    private static byte[] NormalizeToPcm16(byte[] nativeBytes, AudioEncodingProperties? properties)
+    {
+        if (properties is null)
+            throw new InvalidOperationException("AUDIO_FORMAT_UNSUPPORTED:output_properties_missing");
+        if (properties.SampleRate != SampleRate || properties.ChannelCount != Channels)
+            throw new InvalidOperationException($"AUDIO_FORMAT_UNSUPPORTED:{properties.SampleRate}Hz:{properties.ChannelCount}ch");
+
+        if (IsPcm(properties) && properties.BitsPerSample == BitsPerSample)
+        {
+            var usableLength = nativeBytes.Length - nativeBytes.Length % 2;
+            return usableLength == nativeBytes.Length ? nativeBytes : nativeBytes[..usableLength];
+        }
+
+        if (IsFloat(properties) && properties.BitsPerSample == 32)
+        {
+            var sampleCount = nativeBytes.Length / sizeof(float);
+            var normalized = new byte[sampleCount * sizeof(short)];
+            for (var index = 0; index < sampleCount; index++)
+            {
+                var sample = Math.Clamp(BitConverter.ToSingle(nativeBytes, index * sizeof(float)), -1f, 1f);
+                var pcm = sample <= -1f
+                    ? short.MinValue
+                    : (short)Math.Round(sample * short.MaxValue, MidpointRounding.AwayFromZero);
+                BitConverter.TryWriteBytes(normalized.AsSpan(index * sizeof(short), sizeof(short)), pcm);
+            }
+            return normalized;
+        }
+
+        throw new InvalidOperationException($"AUDIO_FORMAT_UNSUPPORTED:{properties.Subtype}:{properties.BitsPerSample}");
+    }
+
+    private static bool IsFloat(AudioEncodingProperties properties)
+        => string.Equals(properties.Subtype, MediaEncodingSubtypes.Float, StringComparison.OrdinalIgnoreCase)
+           || properties.Subtype.Contains("Float", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPcm(AudioEncodingProperties properties)
+        => string.Equals(properties.Subtype, MediaEncodingSubtypes.Pcm, StringComparison.OrdinalIgnoreCase)
+           || properties.Subtype.Contains("Pcm", StringComparison.OrdinalIgnoreCase);
 
     private async Task DisposeGraphAsync()
     {
@@ -375,12 +537,21 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
     private void SetState(AudioCaptureState state)
     {
-        lock (_gate) _state = state;
+        lock (_gate)
+        {
+            _state = state;
+            _attempt.FinalCaptureState = state.ToString();
+        }
     }
 
     private void RaiseFailure(string code, string? detail, bool retryable)
     {
         if (Interlocked.Exchange(ref _failureRaised, 1) != 0) return;
+        lock (_gate)
+        {
+            _attempt.FinalErrorCode = code;
+            _attempt.FinalErrorDetail = detail;
+        }
         CaptureFailed?.Invoke(this, new AudioCaptureFailureEventArgs(code, detail, retryable, DateTimeOffset.UtcNow));
     }
 
@@ -428,6 +599,13 @@ internal static class AudioGraphErrorMapper
     public static string Map(Exception exception)
     {
         var message = exception.ToString();
+        if (exception is InvalidCastException
+            || message.Contains("AUDIO_BUFFER_INTEROP_FAILED", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("IMemoryBufferByteAccess", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("WinRT.IInspectable", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_BUFFER_INTEROP_FAILED";
+        if (exception is COMException comException && unchecked((uint)comException.HResult) == 0x80070005u)
+            return "AUDIO_DEVICE_ACCESS_DENIED";
         if (message.Contains("AUDIO_INPUT_NODE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase)
             || message.Contains("AUDIO_DEVICE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_INPUT_NODE_CREATE_FAILED";
@@ -435,10 +613,11 @@ internal static class AudioGraphErrorMapper
             || message.Contains("AUDIO_GRAPH_CREATE_FAILED", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_GRAPH_CREATE_FAILED";
         if (message.Contains("AUDIO_DEVICE_LOST", StringComparison.OrdinalIgnoreCase)) return "AUDIO_DEVICE_LOST";
+        if (message.Contains("AUDIO_FORMAT_UNSUPPORTED", StringComparison.OrdinalIgnoreCase)) return "AUDIO_FORMAT_UNSUPPORTED";
         if (message.Contains("AUDIO_STORAGE_WRITE_FAILED", StringComparison.OrdinalIgnoreCase)
             || exception is IOException)
             return "AUDIO_STORAGE_WRITE_FAILED";
-        if (message.Contains("access", StringComparison.OrdinalIgnoreCase) || exception is UnauthorizedAccessException)
+        if (exception is UnauthorizedAccessException)
             return "AUDIO_DEVICE_ACCESS_DENIED";
         if (message.Contains("not found", StringComparison.OrdinalIgnoreCase)) return "AUDIO_DEVICE_NOT_FOUND";
         if (message.Contains("inactive", StringComparison.OrdinalIgnoreCase)) return "AUDIO_DEVICE_INACTIVE";

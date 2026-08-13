@@ -121,10 +121,94 @@ public sealed record AudioDeviceProbeResult(
     string NormalizedSampleFormat,
     string? ErrorCode = null,
     string? ErrorDetail = null,
-    string CaptureState = "UNKNOWN")
+    string CaptureState = "UNKNOWN",
+    AudioGraphAttemptDiagnostics? AttemptDiagnostics = null)
 {
     public bool Ready => EndpointFound && EndpointActive && AccessGranted && FormatResolved
         && StreamOpened && StreamStarted && FrameCount > 0 && BytesReceived > 0;
+}
+
+/// <summary>
+/// Persistent diagnostics for one AudioGraph attempt. This is deliberately a
+/// platform-neutral DTO: it contains no Windows Audio objects and remains
+/// available after the graph and nodes have been disposed.
+/// </summary>
+public sealed class AudioGraphAttemptDiagnostics
+{
+    public bool GraphCreateAttempted { get; set; }
+    public string? GraphCreationStatus { get; set; }
+    public bool GraphCreated { get; set; }
+    public int? GraphExtendedErrorHResult { get; set; }
+
+    public bool InputNodeCreateAttempted { get; set; }
+    public string? InputNodeCreationStatus { get; set; }
+    public bool InputNodeCreated { get; set; }
+    public int? InputNodeExtendedErrorHResult { get; set; }
+
+    public bool OutputNodeCreated { get; set; }
+    public bool ConnectionCreated { get; set; }
+    public bool GraphStartCalled { get; set; }
+
+    public long QuantumStartedCount { get; set; }
+    public long GetFrameCallCount { get; set; }
+    public long EmptyFrameCount { get; set; }
+    public long NonEmptyFrameCount { get; set; }
+    public int? AudioBufferLengthLast { get; set; }
+    public int? AudioBufferCapacityLast { get; set; }
+    public string? OutputSubtype { get; set; }
+    public int? OutputBitsPerSample { get; set; }
+    public int? OutputSampleRate { get; set; }
+    public int? OutputChannelCount { get; set; }
+    public int? GraphSamplesPerQuantum { get; set; }
+    public long NativeFrameBytes { get; set; }
+    public long NormalizedFrameBytes { get; set; }
+    public string? NormalizationMode { get; set; }
+    public long BytesReceived { get; set; }
+    public long? FirstQuantumLatencyMs { get; set; }
+    public long? FirstFrameLatencyMs { get; set; }
+
+    public bool UnrecoverableErrorOccurred { get; set; }
+    public int? UnrecoverableErrorHResult { get; set; }
+    public string? FinalCaptureState { get; set; }
+    public string? FinalErrorCode { get; set; }
+    public string? FinalErrorDetail { get; set; }
+
+    public AudioGraphAttemptDiagnostics Clone() => new()
+    {
+        GraphCreateAttempted = GraphCreateAttempted,
+        GraphCreationStatus = GraphCreationStatus,
+        GraphCreated = GraphCreated,
+        GraphExtendedErrorHResult = GraphExtendedErrorHResult,
+        InputNodeCreateAttempted = InputNodeCreateAttempted,
+        InputNodeCreationStatus = InputNodeCreationStatus,
+        InputNodeCreated = InputNodeCreated,
+        InputNodeExtendedErrorHResult = InputNodeExtendedErrorHResult,
+        OutputNodeCreated = OutputNodeCreated,
+        ConnectionCreated = ConnectionCreated,
+        GraphStartCalled = GraphStartCalled,
+        QuantumStartedCount = QuantumStartedCount,
+        GetFrameCallCount = GetFrameCallCount,
+        EmptyFrameCount = EmptyFrameCount,
+        NonEmptyFrameCount = NonEmptyFrameCount,
+        AudioBufferLengthLast = AudioBufferLengthLast,
+        AudioBufferCapacityLast = AudioBufferCapacityLast,
+        OutputSubtype = OutputSubtype,
+        OutputBitsPerSample = OutputBitsPerSample,
+        OutputSampleRate = OutputSampleRate,
+        OutputChannelCount = OutputChannelCount,
+        GraphSamplesPerQuantum = GraphSamplesPerQuantum,
+        NativeFrameBytes = NativeFrameBytes,
+        NormalizedFrameBytes = NormalizedFrameBytes,
+        NormalizationMode = NormalizationMode,
+        BytesReceived = BytesReceived,
+        FirstQuantumLatencyMs = FirstQuantumLatencyMs,
+        FirstFrameLatencyMs = FirstFrameLatencyMs,
+        UnrecoverableErrorOccurred = UnrecoverableErrorOccurred,
+        UnrecoverableErrorHResult = UnrecoverableErrorHResult,
+        FinalCaptureState = FinalCaptureState,
+        FinalErrorCode = FinalErrorCode,
+        FinalErrorDetail = FinalErrorDetail
+    };
 }
 
 public sealed record AudioTelemetrySnapshot(

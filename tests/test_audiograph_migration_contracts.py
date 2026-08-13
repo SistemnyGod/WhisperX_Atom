@@ -83,6 +83,37 @@ def test_audiograph_diagnostics_and_acceptance_scripts_are_redacted():
     assert "ffmpeg.exe" in installer and "ffprobe.exe" in installer
 
 
+def test_audiograph_probe_preserves_attempt_diagnostics_and_duration_mapping():
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    contracts = read("apps/recorder-agent/AudioContracts.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    probe = read("scripts/probe-audiograph-runtime.ps1")
+
+    assert "AudioGraphAttemptDiagnostics" in contracts
+    assert "AttemptDiagnostics = LastAttemptDiagnostics" in engine
+    assert "GraphCreateAttempted" in engine and "InputNodeCreateAttempted" in engine
+    assert "buffer.Length" in engine
+    assert "reference.As<IMemoryBufferByteAccess>()" in engine
+    assert "((IMemoryBufferByteAccess)reference)" not in engine
+    assert "AUDIO_BUFFER_INTEROP_FAILED" in engine
+    assert "InvalidCastException" in engine
+    assert "_attempt.EmptyFrameCount++" in engine
+    assert "_attempt.NonEmptyFrameCount++" in engine
+    assert "if (!_probeMode)" in engine
+    assert "NormalizeToPcm16" in engine
+    assert "FLOAT32_TO_PCM16" in engine
+    assert "AUDIO_FORMAT_UNSUPPORTED" in engine
+    assert "TimeSpan.FromMilliseconds(boundedDurationMs)" in runtime
+    assert "durationMs = $Seconds * 1000" in probe
+    assert "AUDIOGRAPH_QUANTUM_READY" in probe
+    assert "AUDIOGRAPH_FIRST_FRAME_READY" in probe
+
+    acceptance = read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert "[string]$DeviceId = \"\"" in acceptance
+    assert "AUDIOGRAPH_FIXED_DEVICE_MISMATCH" in acceptance
+    assert "probePayload.deviceId = $DeviceId" in acceptance
+
+
 def test_shared_spool_acl_is_granted_to_installing_user():
     installer = read("apps/desktop/Installer/Install-Service.ps1")
     assert "AGENT_DATA_ROOT_ACL_FAILED" in installer

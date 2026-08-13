@@ -30,13 +30,42 @@ function Get-RecorderProcess([string]$path) {
 
 function Test-RecorderPipe {
     $pipe = $null
+    $reader = $null
+    $writer = $null
     try {
         $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
         $pipe.Connect(1000)
-        return $pipe.IsConnected
+        if (-not $pipe.IsConnected) { return $false }
+
+        $reader = [System.IO.StreamReader]::new($pipe, [Text.Encoding]::UTF8, $false, 4096, $true)
+        $writer = [System.IO.StreamWriter]::new($pipe, [Text.Encoding]::UTF8, 4096, $true)
+        $writer.AutoFlush = $true
+        $protocolVersion = if ($audioGraph) { 6 } else { 5 }
+        $request = [ordered]@{
+            command = "HEALTH"
+            protocolVersion = $protocolVersion
+            payload = @{}
+        }
+        $writer.WriteLine(($request | ConvertTo-Json -Compress -Depth 8))
+        $readTask = $reader.ReadLineAsync()
+        if (-not $readTask.Wait(1000)) { return $false }
+        $line = $readTask.GetAwaiter().GetResult()
+        if ([string]::IsNullOrWhiteSpace($line)) { return $false }
+        $response = $line | ConvertFrom-Json
+        if ($null -eq $response) { return $false }
+
+        $minimum = if ($null -ne $response.minimumSupportedProtocolVersion) { [int]$response.minimumSupportedProtocolVersion } else { 0 }
+        $current = if ($null -ne $response.currentProtocolVersion) { [int]$response.currentProtocolVersion } else { [int]$response.protocolVersion }
+        if ($minimum -gt $protocolVersion -or $current -lt $protocolVersion) { return $false }
+        if ([string]$response.error -eq "IPC_VERSION_INCOMPATIBLE") { return $false }
+        return $true
     }
     catch { return $false }
-    finally { if ($null -ne $pipe) { $pipe.Dispose() } }
+    finally {
+        if ($null -ne $writer) { try { $writer.Dispose() } catch { } }
+        if ($null -ne $reader) { try { $reader.Dispose() } catch { } }
+        if ($null -ne $pipe) { try { $pipe.Dispose() } catch { } }
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { $ExecutablePath = $defaultExe }

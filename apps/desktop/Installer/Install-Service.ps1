@@ -7,6 +7,45 @@ $ErrorActionPreference = "Stop"
 $serviceName = "WhisperXAtomRecorder"
 $displayName = "WhisperX Atom Recorder Service"
 $serviceExe = Join-Path $ServiceDirectory "WhisperX.Atom.Recorder.Service.exe"
+
+# ACL display names are localized and are not stable identifiers. Windows can
+# return DESKTOP\user here even when the installer was given the corresponding
+# S-1-5-* SID. Resolve every rule to a SID before comparing it. Likewise,
+# FileSystemRights is a flags enum; Modify is commonly displayed as
+# "Modify, Synchronize", so validate the required bits instead of parsing text.
+function Test-ModifyAccessForSid {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Sid
+    )
+
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $modify = [System.Security.AccessControl.FileSystemRights]::Modify
+    $acl = Get-Acl -LiteralPath $Path
+
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne $allow) { continue }
+
+        try {
+            $ruleSid = $rule.IdentityReference.Translate($sidType).Value
+        }
+        catch {
+            continue
+        }
+
+        if ($ruleSid -ne $Sid) { continue }
+
+        $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
+        if (($rights -band $modify) -eq $modify) { return $true }
+    }
+
+    return $false
+}
+
 if (-not (Test-Path -LiteralPath $serviceExe)) { throw "Service binary not found: $serviceExe" }
 if ([string]::IsNullOrWhiteSpace($AllowedUserSid) -and -not [string]::IsNullOrWhiteSpace($AllowedUserSidFile)) {
     if (-not (Test-Path -LiteralPath $AllowedUserSidFile -PathType Leaf)) { throw "Installer user SID file not found." }
@@ -33,14 +72,19 @@ $aclText = ($aclOutput -join "`n")
 if ($LASTEXITCODE -ne 0 -or $aclText -match "Failed processing [1-9][0-9]* files") {
     throw "AGENT_DATA_ROOT_ACL_FAILED: $agentDataRoot`n$aclText"
 }
-try {
-    $acl = Get-Acl -LiteralPath $agentDataRoot
-    $hasUserModify = @($acl.Access | Where-Object {
-        $_.IdentityReference.Value -eq $AllowedUserSid -and $_.FileSystemRights.ToString().IndexOf("Modify", [StringComparison]::OrdinalIgnoreCase) -ge 0
-    }).Count -gt 0
-    if (-not $hasUserModify) { throw "user SID Modify ACE was not found" }
+if (-not (Test-ModifyAccessForSid -Path $agentDataRoot -Sid $AllowedUserSid)) {
+    throw "AGENT_DATA_ROOT_ACL_FAILED: $agentDataRoot (user SID Modify ACE was not found)"
 }
-catch { throw "AGENT_DATA_ROOT_ACL_FAILED: $agentDataRoot ($($_.Exception.Message))" }
+$agentDbPath = Join-Path $agentDataRoot "agent.db"
+$agentDbAclReady = $true
+if (Test-Path -LiteralPath $agentDbPath -PathType Leaf) {
+    $agentDbAclReady = Test-ModifyAccessForSid -Path $agentDbPath -Sid $AllowedUserSid
+    if (-not $agentDbAclReady) {
+        throw "AGENT_DB_ACL_FAILED: $agentDbPath (user SID Modify ACE was not found)"
+    }
+}
+Write-Host "AGENT_DATA_ROOT_ACL_READY=true"
+Write-Host "AGENT_DB_ACL_READY=$($agentDbAclReady.ToString().ToLowerInvariant())"
 Set-Content -LiteralPath (Join-Path $agentDataRoot "allowed-user.sid") -Value $AllowedUserSid -Encoding ascii -NoNewline
 $agentConfigPath = Join-Path $agentDataRoot "agent-config.json"
 $serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://192.168.2.194:8080" } else { $env:WHISPERX_API_URL }

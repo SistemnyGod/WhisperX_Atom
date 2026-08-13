@@ -3,7 +3,8 @@ param(
     [ValidateRange(10, 300)]
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]
-    [int]$FinalizeTimeoutSeconds = 90
+    [int]$FinalizeTimeoutSeconds = 90,
+    [string]$DeviceId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,8 +40,14 @@ try {
 
     $health = Invoke-HostCommand "HEALTH"
     if ($health.ok -ne $true) { throw "AUDIOGRAPH_HEALTH_FAILED: $($health.error)" }
-    $probe = Invoke-HostCommand "TEST_AUDIO_SOURCE"
+    $probePayload = @{}
+    if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $probePayload.deviceId = $DeviceId }
+    $probe = Invoke-HostCommand "TEST_AUDIO_SOURCE" $probePayload
     if ($probe.ok -ne $true) { throw "AUDIOGRAPH_PROBE_FAILED: $($probe.error)" }
+    $probeResult = if ($null -ne $probe.audioGraphProbe) { $probe.audioGraphProbe } else { $probe.audioSourceTest }
+    if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and [string]$probeResult.deviceId -ne $DeviceId) {
+        throw "AUDIOGRAPH_FIXED_DEVICE_MISMATCH: requested=$DeviceId selected=$($probeResult.deviceId)"
+    }
     $start = Invoke-HostCommand "START" @{ title = "AUDIOGRAPH_LOCAL_GATE"; localOnly = $true }
     if ($start.ok -ne $true) { throw "AUDIOGRAPH_START_FAILED: $($start.error)" }
     $localSessionId = [string]$start.sessionId
@@ -72,6 +79,12 @@ try {
         generatedAtUtc = [DateTimeOffset]::UtcNow
         engine = "AUDIOGRAPH"
         processModel = "CURRENT_USER_HOST"
+        selection = [ordered]@{
+            selectionMode = if ([string]::IsNullOrWhiteSpace($DeviceId)) { "DEFAULT" } else { "FIXED" }
+            requestedDeviceId = if ([string]::IsNullOrWhiteSpace($DeviceId)) { $null } else { $DeviceId }
+            selectedDeviceId = [string]$probeResult.deviceId
+            selectedDeviceName = [string]$probeResult.deviceName
+        }
         session = [ordered]@{ localSessionId = $localSessionId; requestedSeconds = $Seconds; startState = [string]$start.state; stopState = [string]$stop.state }
         result = [ordered]@{
             firstFrameConfirmed = ([string]$start.state -match "RECORDING")
