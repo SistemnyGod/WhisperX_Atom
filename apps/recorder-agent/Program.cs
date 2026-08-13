@@ -43,6 +43,17 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // The Service remains installed as an explicit Legacy WASAPI fallback.
+        // When the machine/runtime selection is AudioGraph it must not recover,
+        // upload or finalize the canonical spool in parallel with Recorder Host.
+        if (RecorderRuntimeMode.IsAudioGraph)
+        {
+            logger.LogInformation("Legacy Recorder Service is in standby because AudioGraph Recorder Host owns the runtime.");
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            return;
+        }
+
         await spool.InitializeAsync(stoppingToken);
         logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.ChunkDurationSeconds, api.IsConfigured);
         await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);

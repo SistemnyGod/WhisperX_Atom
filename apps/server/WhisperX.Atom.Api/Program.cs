@@ -1080,13 +1080,21 @@ app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext contex
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
 });
-app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store) =>
+app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store, Database database) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     if (request?.Profile is { Length: > 40 } || request?.PromptVersion is { Length: > 120 } || request?.Reason is { Length: > 500 })
         return Results.BadRequest(new { error = "summary_options_too_long" });
     var jobId = await store.QueueSummaryAsync(id, CurrentUserId(context), request);
-    return jobId is null ? Results.Conflict(new { error = "transcript_required" }) : Results.Accepted($"/api/jobs/{jobId}", new { jobId });
+    if (jobId is null) return Results.Conflict(new { error = "transcript_required" });
+
+    // The Desktop job tracker requires the same durable contract as transcript
+    // reprocessing.  Returning only { jobId } made it treat a queued summary
+    // as an incomplete object and never observe its terminal state.
+    var job = await database.GetJobAsync(jobId.Value);
+    return job is null
+        ? Results.Conflict(new { error = "summary_job_not_found" })
+        : Results.Accepted($"/api/jobs/{job.Id}", job);
 });
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1380,7 +1388,17 @@ public sealed record AdminUserRow(Guid Id, string Username, string Role, bool Is
 public sealed record TemporaryPasswordResult(AdminUserRow User, string TemporaryPassword);
 public sealed record RefreshRotation(UserRow User, string RefreshToken);
 public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
-public sealed record JobRow(Guid Id, Guid MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error);
+public sealed record JobRow(
+    Guid Id,
+    Guid MeetingId,
+    string Type,
+    string Status,
+    string Stage,
+    int Progress,
+    int Attempt,
+    string? Error,
+    string? ErrorCode = null,
+    string? PipelineCorrelationId = null);
 public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
 public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
@@ -2045,7 +2063,7 @@ public sealed class Database(IConfiguration configuration)
     public async Task<JobRow?> GetJobAsync(Guid id)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message FROM jobs WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id FROM jobs WHERE id=@id", connection);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null : ReadJob(reader);
@@ -2055,7 +2073,7 @@ public sealed class Database(IConfiguration configuration)
     {
         var result = new List<JobRow>();
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
         command.Parameters.AddWithValue("id", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadJob(reader));
@@ -2187,7 +2205,7 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
         await using var command = new NpgsqlCommand(
-            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message", connection, tx);
+            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
@@ -2349,7 +2367,17 @@ public sealed class Database(IConfiguration configuration)
     }
 
     private static JobRow ReadJob(NpgsqlDataReader reader) =>
-        new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt32(5), reader.GetInt32(6), reader.IsDBNull(7) ? null : reader.GetString(7));
+        new(
+            reader.GetGuid(0),
+            reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.GetInt32(5),
+            reader.GetInt32(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.FieldCount > 8 && !reader.IsDBNull(8) ? reader.GetString(8) : null,
+            reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : null);
 
     private static MediaAssetRow ReadMedia(NpgsqlDataReader reader) =>
         new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10));

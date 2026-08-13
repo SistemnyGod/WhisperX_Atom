@@ -4,7 +4,8 @@ param(
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]
     [int]$FinalizeTimeoutSeconds = 90,
-    [string]$DeviceId = ""
+    [string]$DeviceId = "",
+    [switch]$StopHost
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +48,10 @@ try {
     $probeResult = if ($null -ne $probe.audioGraphProbe) { $probe.audioGraphProbe } else { $probe.audioSourceTest }
     if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and [string]$probeResult.deviceId -ne $DeviceId) {
         throw "AUDIOGRAPH_FIXED_DEVICE_MISMATCH: requested=$DeviceId selected=$($probeResult.deviceId)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DeviceId)) {
+        $selection = Invoke-HostCommand "SELECT_AUDIO_DEVICE" @{ deviceId = $DeviceId }
+        if ($selection.ok -ne $true) { throw "AUDIOGRAPH_FIXED_DEVICE_SELECT_FAILED: $($selection.error)" }
     }
     $start = Invoke-HostCommand "START" @{ title = "AUDIOGRAPH_LOCAL_GATE"; localOnly = $true }
     if ($start.ok -ne $true) { throw "AUDIOGRAPH_START_FAILED: $($start.error)" }
@@ -104,7 +109,7 @@ try {
     }
 }
 finally {
-    if ($hostWasStarted) {
+    if ($hostWasStarted -and $StopHost) {
         $pidPath = Join-Path $repo "artifacts\runtime\recorder-host.pid"
         if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
             $hostPid = [int](Get-Content -LiteralPath $pidPath -Raw)

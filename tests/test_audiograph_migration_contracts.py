@@ -55,10 +55,11 @@ def test_device_discovery_is_incremental_and_not_clear_add_polling():
 
 def test_feature_flag_and_user_scoped_host_configuration_are_present():
     protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    resolver = read("apps/recorder-agent/RecorderRuntimeResolver.cs")
     desktop = read("apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs")
     api = read("apps/recorder-agent/AgentApiClient.cs")
     script = read("scripts/start-recorder-host.ps1")
-    assert "AUDIO_CAPTURE_ENGINE" in protocol
+    assert "AUDIO_CAPTURE_ENGINE" in resolver
     assert "ForCurrentProcess" in desktop
     assert "DataProtectionScope.CurrentUser" in api
     assert "ATOM_AGENT_DPAPI_SCOPE" in script and "CURRENT_USER" in script
@@ -67,6 +68,73 @@ def test_feature_flag_and_user_scoped_host_configuration_are_present():
     host_runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     assert "RecorderHostPipeSecurity.CreateServer" in host_runtime
     assert "PipeAccessRights.FullControl" in read("apps/recorder-host/RecorderHostPipeSecurity.cs")
+
+
+def test_desktop_runtime_resolver_defaults_to_audiograph_and_keeps_legacy_explicit():
+    resolver = read("apps/recorder-agent/RecorderRuntimeResolver.cs")
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    app = read("apps/desktop/WhisperX.Atom.Desktop/App.xaml.cs")
+
+    assert 'return new RecorderRuntimeSelection(AudioGraph, "RELEASE_DEFAULT")' in resolver
+    assert 'environmentOverride ?? Environment.GetEnvironmentVariable(EnvironmentVariable)' in resolver
+    assert 'ReadConfiguredEngine(machineConfigPath ?? MachineConfigPath)' in resolver
+    assert "InitializeForDesktop" in app
+    assert "RecorderRuntimeResolver.Current.PipeName" in protocol
+    assert "LEGACY_WASAPI" in resolver
+
+
+def test_release_package_contains_recorder_host_and_pinned_tools():
+    publish = read("scripts/publish-desktop.ps1")
+    installer = read("apps/desktop/Installer/WhisperXAtom.iss")
+    install_service = read("apps/desktop/Installer/Install-Service.ps1")
+    host_user_config = read("apps/desktop/Installer/Configure-RecorderHostUser.ps1")
+
+    assert "WhisperX.Atom.Recorder.Host.csproj" in publish
+    assert '$recorderHostOut = Join-Path $output "RecorderHost"' in publish
+    assert "ffmpeg-manifest.json" in publish
+    assert "RecorderHost\\*" in installer
+    assert "Configure-RecorderHostUser.ps1" in installer
+    assert "-RecorderHostDirectory" in installer
+    assert 'captureEngine = "AUDIOGRAPH"' in install_service
+    assert "StartupType Manual" in install_service
+    assert "Test-PinnedFfmpegPayload" in install_service
+    assert "PINNED_FFMPEG_CHECKSUM_MISMATCH" in install_service
+    assert "WHISPERX_RECORDER_HOST_EXE" in host_user_config
+
+
+def test_desktop_local_first_start_and_profile_migration_are_explicit():
+    contracts = read("apps/desktop/WhisperX.Atom.Desktop/Services/FrontendContracts.cs")
+    pipe = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderPipeService.cs")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+
+    assert "bool localOnly = false" in contracts
+    assert "new { title, meetingId, ownerUserId, localOnly }" in pipe
+    assert "localOnly: false" in view_model
+    assert "CreateMeetingAsync" not in view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
+    assert 'normalized is "ONLINE" or "SYSTEM_ONLY"' in view_model
+    assert 'ErrorMessage = "AUDIO_SYSTEM_AUDIO_DEFERRED"' in view_model
+    assert 'SetRecordingProfileAsync("ROOM"' in host
+
+
+def test_desktop_start_uses_host_preflight_default_and_background_delivery():
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+
+    assert "public async Task<AgentIpcResponse> PreflightAsync" in host
+    assert '"PREFLIGHT" => await _runtime.PreflightAsync' in host
+    assert "new AgentPreflightResult" in host
+    assert "BACKEND_NOT_CONFIGURED_RECORDING_CAN_START_OFFLINE" in host
+    assert "SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE" in host
+    assert "await _engine.SelectDeviceAsync(selectionMode, _storage.MicrophoneDeviceId" in host
+    assert "EffectiveMicrophoneDeviceId" in protocol
+    assert "MicrophoneCaptureReady: ready" in host
+    assert "health.DeviceWatcherReady && health.AudioGraphReady" in view_model
+    assert 'health.CaptureEngine, "LEGACY_WASAPI"' in view_model
+    start = view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
+    assert "StartAsync(title, null, ownerUserId, localOnly: false)" in start
+    assert "CreateMeetingAsync" not in start and "CancelMeetingAsync" not in start
 
 
 def test_audiograph_diagnostics_and_acceptance_scripts_are_redacted():
@@ -114,8 +182,132 @@ def test_audiograph_probe_preserves_attempt_diagnostics_and_duration_mapping():
     assert "probePayload.deviceId = $DeviceId" in acceptance
 
 
+def test_audiograph_writer_propagates_failures_and_keeps_encoding_off_capture_consumer():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    contracts = read("apps/recorder-agent/AudioContracts.cs")
+    probe = read("scripts/probe-audiograph-runtime.ps1")
+
+    writer = runtime.split("internal sealed class AudioGraphSessionWriter", 1)[1]
+    append = writer.split("private async Task AppendAsync", 1)[1].split("private Task EnsureChunkAsync", 1)[0]
+    complete = writer.split("private async Task CompleteChunkAsync", 1)[1].split("private async Task EncodeChunkAsync", 1)[0]
+
+    assert "catch (Exception ex)" in writer
+    assert "throw;" in writer
+    assert "ProcessEncodingAsync" in writer
+    assert "RawChunkWorkItem" in writer
+    assert "FlacEncoder.Encode" not in complete
+    assert "Stopwatch.GetTimestamp() - _lastDurabilityCheckpointTimestamp" in append
+    assert "FileOptions.WriteThrough" not in writer
+    assert "Flush(flushToDisk: true)" in writer
+    assert "await writer.StartAsync(cancellationToken)" in runtime
+    assert "Prepare the first durable raw chunk before AudioGraph" in writer
+    assert "QueueCapacity = 256" in engine
+    assert 'message.Contains("AUDIO_DEVICE_UNAVAILABLE"' in engine
+    assert 'return "AUDIO_DEVICE_UNAVAILABLE"' in engine
+    assert '"PCM_S16LE", 16, "WRITING"' in writer
+    assert '"PCM_S16LE", 16, "RAW_READY"' in writer
+    encoder = read("apps/recorder-agent/FlacEncoder.cs")
+    assert 'string.Equals(encoding, "PCM16"' in encoder
+    assert 'var trackId = $"room-microphone-{sessionId}"' in runtime
+    assert 'UNIQUE(track_id, sequence)' in runtime
+    assert "RequestedSamplesPerQuantum" in contracts
+    assert "_attempt.RequestedSamplesPerQuantum" in engine
+    assert "_graph.SamplesPerQuantum" in engine
+    assert "requestedSamplesPerQuantum" in probe
+
+
+def test_audiograph_stop_is_local_first_and_delivery_is_backgrounded():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    delivery = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    acceptance = read("scripts/acceptance-audiograph-local-recording.ps1")
+
+    stop = runtime.split("public async Task<AgentIpcResponse> StopAsync", 1)[1].split("public async Task<AgentIpcResponse> ProbeAsync", 1)[0]
+    assert "FinalizeLocalAsync" in stop
+    assert "_delivery.RunAsync(sessionId" not in stop
+    assert "LOCAL_READY" in delivery
+    assert "PENDING_SERVER" in delivery
+    assert 'Invoke-HostCommand "SELECT_AUDIO_DEVICE"' in acceptance
+    assert "[switch]$StopHost" in acceptance
+    assert "if ($hostWasStarted -and $StopHost)" in acceptance
+
+
+def test_recorder_host_syncs_real_pinned_ffmpeg_over_stale_stub():
+    start_script = read("scripts/start-recorder-host.ps1")
+    assert "function Sync-PinnedTool" in start_script
+    assert "$destinationInfo.Length -ne $sourceInfo.Length" in start_script
+    assert "Sync-PinnedTool $sourceFfmpeg $bundledFfmpeg" in start_script
+
+
 def test_shared_spool_acl_is_granted_to_installing_user():
     installer = read("apps/desktop/Installer/Install-Service.ps1")
     assert "AGENT_DATA_ROOT_ACL_FAILED" in installer
     assert "(OI)(CI)M" in installer
     assert "icacls.exe" in installer
+
+
+def test_installer_keeps_the_existing_user_host_installation_id():
+    installer = read("apps/desktop/Installer/Install-Service.ps1")
+    assert "Get-UserAgentConfigPathForSid" in installer
+    assert "Get-InstallationIdFromConfig -Paths @($userAgentConfigPath, $machineConfigPath, $agentConfigPath)" in installer
+    assert "ProfileList\\$Sid" in installer
+
+
+def test_runtime_config_and_legacy_standby_preserve_the_audiograph_default():
+    resolver = read("apps/recorder-agent/RecorderRuntimeResolver.cs")
+    config_writer = read("scripts/write-client-config.ps1")
+    bootstrap = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
+    service = read("apps/recorder-agent/Program.cs")
+    script_resolver = read("scripts/Resolve-RecorderRuntime.ps1")
+
+    assert "environmentOverride ?? Environment.GetEnvironmentVariable(EnvironmentVariable)" in resolver
+    assert "MachineServerConfig.Load(path)?.AudioConfiguration?.CaptureEngine" in resolver
+    assert "schemaVersion = 2" in config_writer
+    assert "installationId = $installationId" in config_writer
+    assert "audioConfigurationVersion = 2" in config_writer
+    assert "services.RecorderService.StartAsync" in bootstrap
+    assert "Start/verify the current-user Host before asking" in bootstrap
+    assert "Legacy Recorder Service is in standby" in service
+    assert "RELEASE_DEFAULT" in script_resolver
+    assert "WhisperXAtomRecorderHost" in script_resolver
+
+
+def test_recorder_host_health_exposes_identity_for_desktop_bootstrap():
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "InstallationId: _api.InstallationId" in host
+    assert "AgentId: _api.AgentId" in host
+    assert "ServerConnectionState: _api.ServerConnectionState" in host
+    assert "LastHeartbeatAtUtc: _api.LastHeartbeatAtUtc" in host
+
+
+def test_desktop_does_not_open_a_recording_shell_without_a_recorder_host():
+    login = read("apps/desktop/WhisperX.Atom.Desktop/LoginWindow.xaml.cs")
+    app = read("apps/desktop/WhisperX.Atom.Desktop/App.xaml.cs")
+    assert "if (!bootstrap.RecorderAvailable)" in login
+    assert "if (!bootstrap.RecorderAvailable)" in app
+
+
+def test_summary_rebuild_returns_a_full_job_for_terminal_tracking():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+
+    rebuild = api.split('app.MapPost("/api/meetings/{id:guid}/summary/rebuild"', 1)[1].split('app.MapGet("/api/meetings/{id:guid}/decisions"', 1)[0]
+    assert "database.GetJobAsync(jobId.Value)" in rebuild
+    assert "Results.Accepted($\"/api/jobs/{job.Id}\", job)" in rebuild
+    assert "new { jobId }" not in rebuild
+    assert "string? ErrorCode = null" in api
+    assert "pipeline_correlation_id" in api
+    assert "string? ErrorCode = null" in client
+    assert "bool Retryable" in client
+
+
+def test_host_process_guard_uses_the_user_installation_identity_and_script_reuses_any_live_host():
+    guard = read("apps/recorder-host/RecorderHostProcessGuard.cs")
+    launcher = read("scripts/start-recorder-host.ps1")
+
+    assert "TryReadUserInstallationId" in guard
+    assert "ATOM_AGENT_CONFIG_PATH" in guard
+    assert '"WhisperXAtom", "Agent", "agent-config.json"' in guard
+    assert "$anyHost" in launcher
+    assert "which artifact" in launcher
+    assert "hostInstallation" in launcher

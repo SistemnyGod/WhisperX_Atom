@@ -82,7 +82,7 @@ def test_start_does_not_replay_configuration_commands_in_capture_critical_path()
     assert "SyncConfigurationAsync" not in start
     assert "await RefreshAsync();" in start
     assert "var preflight = await _services.Recorder.PreflightAsync();" in start
-    assert "_services.Recorder.StartAsync(title, serverMeetingId, ownerUserId)" in start
+    assert "_services.Recorder.StartAsync(title, null, ownerUserId, localOnly: false)" in start
 
 
 def test_recovery_has_bounded_backoff_and_skips_cancelled_sessions():

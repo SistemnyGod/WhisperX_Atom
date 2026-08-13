@@ -10,11 +10,21 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repoRoot
 if (-not $SkipRecorder) {
     try {
-        & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
-        if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
+        $engine = (Resolve-RecorderRuntime).CaptureEngine
+        if ($engine.Trim().ToUpperInvariant() -eq "AUDIOGRAPH") {
+            $env:AUDIO_CAPTURE_ENGINE = "AUDIOGRAPH"
+            & (Join-Path $PSScriptRoot "start-recorder-host.ps1") -ReadyTimeoutSeconds 20
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_HOST_START_FAILED: exit code $LASTEXITCODE" }
+        }
+        else {
+            $env:AUDIO_CAPTURE_ENGINE = "LEGACY_WASAPI"
+            & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
+        }
     }
     catch {
         Write-Warning ("RECORDER_UNAVAILABLE: {0}. Desktop will still open for diagnostics." -f $_.Exception.Message)

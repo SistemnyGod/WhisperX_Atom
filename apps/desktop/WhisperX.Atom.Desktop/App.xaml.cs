@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using WhisperX.Atom.Recorder;
 using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX_Atom_Desktop;
@@ -42,6 +43,8 @@ public partial class App : Application
         try
         {
             WriteStartupLog("LAUNCH_STARTED", null);
+            var recorderRuntime = RecorderRuntimeResolver.InitializeForDesktop();
+            WriteStartupLog($"RECORDER_RUNTIME_{recorderRuntime.CaptureEngine}_{recorderRuntime.Source}", null);
             var settingsStore = new WhisperX_Atom_Desktop.Services.DesktopSettingsStore();
             var settings = settingsStore.Load();
             _services = new WhisperX_Atom_Desktop.Services.FrontendServices(
@@ -49,6 +52,25 @@ public partial class App : Application
                 new WhisperX_Atom_Desktop.Services.BackendService(settings),
                 settingsStore);
             _services.LoggedOut += HandleLoggedOut;
+
+            // AudioGraph runs in the current-user Recorder Host. Make its
+            // lifecycle independent of login/server reachability so an already
+            // authorised user can still make a local-first recording while LAN
+            // is temporarily unavailable.
+            if (recorderRuntime.IsAudioGraph)
+            {
+                try
+                {
+                    using var hostTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                    var host = await _services.RecorderService.StartAsync(hostTimeout.Token);
+                    if (!host.PipeReachable)
+                        WriteStartupLog(host.Error ?? "RECORDER_HOST_UNAVAILABLE", null);
+                }
+                catch (Exception exception)
+                {
+                    WriteStartupLog("RECORDER_HOST_START_DEFERRED", exception);
+                }
+            }
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             var authenticated = await _services.Backend.EnsureAuthenticatedAsync(timeout.Token);
@@ -62,7 +84,9 @@ public partial class App : Application
                     bootstrap = new(false, false, _services.Backend.CanUseOffline, "SERVER_UNAVAILABLE", "LAN-сервер временно недоступен.");
                 }
 
-                if (bootstrap.Code == "SERVER_UNAVAILABLE" && !_services.Backend.CanUseOffline)
+                if (!bootstrap.RecorderAvailable)
+                    ShowLoginWindow($"{bootstrap.Code}: {bootstrap.Message}");
+                else if (bootstrap.Code == "SERVER_UNAVAILABLE" && !_services.Backend.CanUseOffline)
                     ShowLoginWindow("Первый вход должен быть выполнен при доступном LAN-сервере.");
                 else
                     ShowMainWindow();

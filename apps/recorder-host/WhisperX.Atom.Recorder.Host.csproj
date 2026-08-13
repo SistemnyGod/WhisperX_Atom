@@ -24,7 +24,6 @@
     <Compile Include="..\recorder-agent\RecorderToolPaths.cs" Link="RecorderCore\RecorderToolPaths.cs" />
     <Compile Include="..\recorder-agent\SessionFinalizationCoordinator.cs" Link="RecorderCore\SessionFinalizationCoordinator.cs" />
     <Compile Include="..\recorder-agent\RawChunkFileName.cs" Link="RecorderCore\RawChunkFileName.cs" />
-    <Compile Include="..\recorder-agent\MachineServerConfig.cs" Link="RecorderCore\MachineServerConfig.cs" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
   </ItemGroup>

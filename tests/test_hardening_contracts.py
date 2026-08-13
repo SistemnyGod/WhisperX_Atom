@@ -59,9 +59,9 @@ def test_desktop_start_has_a_server_independent_title_path():
     view_model = read(Path("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs"))
     agent = read(Path("apps/recorder-agent/AgentPipeHost.cs"))
     start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
-    assert "StartAsync(title, serverMeetingId, ownerUserId)" in start
-    assert "Online intent gets a real server Meeting" in start
-    assert "CreateMeetingAsync(title" in start
+    assert "StartAsync(title, null, ownerUserId, localOnly: false)" in start
+    assert "Meeting creation and binding belong to the background delivery" in start
+    assert "CreateMeetingAsync" not in start
     assert "EnsureAgentReadyAsync" not in start
     assert "GetCurrentUserAsync" not in start
     assert 'BindSessionAsync(sessionId, meetingId, title' not in agent
@@ -236,7 +236,8 @@ def test_recorder_host_fallback_is_idempotent_and_uses_existing_agent_state():
     assert "recorder-host.pid" in host
     assert "agent-config.json" in host and "ATOM_AGENT_DATA_ROOT" in host
     assert "start-recorder-host.ps1" in start
-    assert "Get-Service -Name \"WhisperXAtomRecorder\"" in start
+    assert "Resolve-RecorderRuntime.ps1" in start
+    assert '"AUDIOGRAPH"' in start and '"LEGACY_WASAPI"' in start
     assert "recorder-host.pid" in stop
     assert "Test-RecorderHostPipe" in doctor
     installer = read(Path("scripts/install-recorder-runtime.ps1"))

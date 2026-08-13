@@ -63,6 +63,21 @@ public sealed record ProductRuntimeSnapshot(
                 "Recorder",
                 recorder is null ? ProductRuntimeStatus.Unavailable : recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed,
                 recorder?.Error, recorder?.State, now, true),
+            ["RecorderHost"] = new(
+                "RecorderHost",
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
+                    ? recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
+                    : ProductRuntimeStatus.Disabled,
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST" ? recorder?.Error : null,
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST" ? "AUDIOGRAPH" : "not selected", now,
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"),
+            ["LegacyServiceFallback"] = new(
+                "LegacyServiceFallback",
+                recorder?.Health?.RecorderProcessModel == "WINDOWS_SERVICE"
+                    ? recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
+                    : ProductRuntimeStatus.Disabled,
+                recorder?.Health?.RecorderProcessModel == "WINDOWS_SERVICE" ? recorder?.Error : null,
+                "LEGACY_WASAPI fallback", now, false),
             ["CaptureRuntime"] = new(
                 "CaptureRuntime",
                 recorder?.Health?.MicrophoneCaptureReady == true || recorder?.Health?.AudioGraphReady == true

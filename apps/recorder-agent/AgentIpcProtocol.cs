@@ -16,16 +16,12 @@ public static class RecorderPipeNames
     public const string LegacyService = AgentIpcProtocol.PipeName;
     public const string AudioGraphHost = "WhisperXAtomRecorderHost";
 
-    public static string ForCurrentProcess() =>
-        string.Equals(Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE"), "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase)
-            ? AudioGraphHost
-            : LegacyService;
+    public static string ForCurrentProcess() => RecorderRuntimeResolver.Current.PipeName;
 }
 
 public static class RecorderRuntimeMode
 {
-    public static bool IsAudioGraph =>
-        string.Equals(Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE"), "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase);
+    public static bool IsAudioGraph => RecorderRuntimeResolver.Current.IsAudioGraph;
 }
 
 public sealed record AgentIpcRequest(string Command, JsonElement Payload)
@@ -145,7 +141,11 @@ public sealed record AgentIpcHealth(
     string RecorderProcessModel = "WINDOWS_SERVICE",
     bool DeviceWatcherReady = false,
     bool AudioGraphReady = false,
-    bool FirstFrameConfirmed = false);
+    bool FirstFrameConfirmed = false,
+    // The confirmed configuration remains SelectedMicrophoneDeviceId. For
+    // DEFAULT selection that value is null, while this value identifies the
+    // endpoint Windows resolved for the current Host runtime.
+    string? EffectiveMicrophoneDeviceId = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

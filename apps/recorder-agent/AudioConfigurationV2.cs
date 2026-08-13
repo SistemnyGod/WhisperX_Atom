@@ -16,7 +16,7 @@ public sealed record AudioConfigurationV2(
     public static AudioConfigurationV2 FromCurrent(string? microphoneId, string? systemAudioId, string engine, bool userReselectRequired = false)
         => new(
             2,
-            string.IsNullOrWhiteSpace(engine) ? "LEGACY_WASAPI" : engine.Trim().ToUpperInvariant(),
+            string.IsNullOrWhiteSpace(engine) ? RecorderRuntimeResolver.AudioGraph : engine.Trim().ToUpperInvariant(),
             new(string.IsNullOrWhiteSpace(microphoneId) ? "DEFAULT" : "FIXED", Normalize(microphoneId)),
             new(string.IsNullOrWhiteSpace(systemAudioId) ? "DEFAULT" : "FIXED", Normalize(systemAudioId)),
             userReselectRequired);

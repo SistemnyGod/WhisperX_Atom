@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("LegacyWasapi", "AudioGraph")]
-    [string]$CaptureEngine = "LegacyWasapi",
+    [string]$CaptureEngine = "",
     [string]$DeviceId,
     [switch]$SystemAudio,
     [ValidateRange(1, 10)]
@@ -12,6 +11,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
+if ([string]::IsNullOrWhiteSpace($CaptureEngine)) {
+    $CaptureEngine = if ((Resolve-RecorderRuntime).CaptureEngine -eq "AUDIOGRAPH") { "AudioGraph" } else { "LegacyWasapi" }
+}
+if ($CaptureEngine -notin @("LegacyWasapi", "AudioGraph")) { throw "CAPTURE_ENGINE_INVALID" }
 if ($CaptureEngine -eq "AudioGraph") {
     $outputPath = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
         Join-Path $repo "artifacts\audio-runtime\audiograph-report.json"

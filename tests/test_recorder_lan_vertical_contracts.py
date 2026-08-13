@@ -61,8 +61,9 @@ def test_extensible_float_format_is_normalized_before_ffmpeg():
     assert "IeeeFloatSubFormat" in resolver
     assert '"FLOAT32"' in resolver
     assert '"f32le"' in resolver
-    assert "AudioSampleFormatResolver.Resolve(format).FfmpegInput" in encoder
-    assert "AudioSampleFormatResolver.Resolve(capture.WaveFormat)" in coordinator
+    assert "AudioStreamFormat contract" in encoder
+    assert "format.FfmpegInput" in encoder
+    assert "AudioSampleFormatResolver.Resolve(format)" in read("apps/recorder-agent/LegacyWasapiCaptureEngine.cs")
 
 
 def test_lan_start_keeps_qwen_off_until_explicit_flag():

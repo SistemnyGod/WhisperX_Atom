@@ -9,11 +9,63 @@ public sealed class RecordingDeliveryCoordinator(
     SessionFinalizationCoordinator sessionLocks,
     ILogger<RecordingDeliveryCoordinator> logger)
 {
+    public Task<FinalizationResult> FinalizeLocalAsync(string? localSessionId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(localSessionId))
+            return Task.FromResult(new FinalizationResult(false, "LOCAL_FINALIZE", "LOCAL_SESSION_REQUIRED", false));
+        return sessionLocks.RunAsync(localSessionId, ct => FinalizeLocalCoreAsync(localSessionId, ct), cancellationToken);
+    }
+
     public Task<FinalizationResult> RunAsync(string? localSessionId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(localSessionId))
             return Task.FromResult(new FinalizationResult(false, "DELIVERY", "LOCAL_SESSION_REQUIRED", false));
         return sessionLocks.RunAsync(localSessionId, ct => RunCoreAsync(localSessionId, ct), cancellationToken);
+    }
+
+    private async Task<FinalizationResult> FinalizeLocalCoreAsync(string localSessionId, CancellationToken cancellationToken)
+    {
+        var info = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
+        if (info is null)
+            return new FinalizationResult(false, "LOCAL_FINALIZE", "LOCAL_SESSION_NOT_FOUND", false);
+
+        var deliveryState = string.Equals(info.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase)
+            ? "NOT_REQUESTED"
+            : "PENDING_SERVER";
+        await spool.SetSessionStateAsync(localSessionId, "FINALIZING", cancellationToken);
+        await spool.SetFinalizationStateAsync(localSessionId,
+            localFinalizeState: "FINALIZING_LOCAL",
+            deliveryState: deliveryState,
+            errorCode: null,
+            errorDetail: null,
+            cancellationToken: cancellationToken);
+
+        var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken);
+        if (archiveResult.State == "LOCAL_READY")
+        {
+            return new FinalizationResult(
+                true,
+                "LOCAL_READY",
+                ArchivePath: archiveResult.ArchivePath,
+                LocalArchiveState: "LOCAL_READY",
+                DeliveryState: deliveryState,
+                ServerFinalizeState: "PENDING",
+                MediaState: "PENDING");
+        }
+
+        var failed = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
+        await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken);
+        return new FinalizationResult(
+            false,
+            "LOCAL_FINALIZE",
+            failed?.ErrorCode ?? "LOCAL_FINALIZE_FAILED",
+            false,
+            ArchivePath: failed?.ArchivePath,
+            ErrorMessage: failed?.ErrorDetail,
+            LocalArchiveState: "LOCAL_FAILED",
+            DeliveryState: deliveryState,
+            ServerFinalizeState: "NOT_REQUESTED",
+            MediaState: "PENDING");
     }
 
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)

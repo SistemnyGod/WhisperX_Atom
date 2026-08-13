@@ -106,13 +106,14 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         {
             var response = await recorder.GetHealthAsync(cancellationToken);
             var health = response.Health;
+            var executable = ResolveHostExecutable();
             return new RecorderServiceSnapshot(
                 RecorderPipeNames.AudioGraphHost,
                 response.Ok ? "RUNNING" : "UNKNOWN",
                 Exists: response.Ok,
                 PipeReachable: response.Ok,
-                BinaryPath: null,
-                Version: null,
+                BinaryPath: executable,
+                Version: GetFileVersion(executable),
                 Error: response.Ok ? null : response.Error ?? "RECORDER_HOST_UNAVAILABLE");
         }
         catch (Exception exception) when (exception is RecorderIpcException or IOException or TimeoutException)
@@ -133,7 +134,7 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         var before = await GetHostSnapshotAsync(cancellationToken);
         if (before.PipeReachable) return before;
 
-        var executable = Environment.GetEnvironmentVariable("WHISPERX_RECORDER_HOST_EXE");
+        var executable = ResolveHostExecutable();
         if (!string.IsNullOrWhiteSpace(executable) && File.Exists(executable))
         {
             var directStart = new ProcessStartInfo
@@ -212,14 +213,33 @@ public sealed class RecorderServiceController(IRecorderService recorder)
     {
         try
         {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "client-config.json");
-            if (!File.Exists(path)) return null;
-            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-            if (document.RootElement.TryGetProperty("installationId", out var value)) return value.GetString();
-            if (document.RootElement.TryGetProperty("InstallationId", out value)) return value.GetString();
+            return WhisperX.Atom.Desktop.MachineServerConfig.Load()?.InstallationId?.ToString();
         }
         catch { }
         return null;
+    }
+
+    internal static string? ResolveHostExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("WHISPERX_RECORDER_HOST_EXE");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+            return Path.GetFullPath(configured);
+
+        // Installed layout: {app}\Desktop\WhisperX.Atom.Desktop.exe and
+        // {app}\RecorderHost\WhisperX.Atom.Recorder.Host.exe. This fallback
+        // makes the package self-contained even when a user environment block
+        // was not refreshed after installation.
+        var adjacent = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "RecorderHost", "WhisperX.Atom.Recorder.Host.exe"));
+        if (File.Exists(adjacent)) return adjacent;
+
+        return null;
+    }
+
+    private static string? GetFileVersion(string? path)
+    {
+        try { return !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? FileVersionInfo.GetVersionInfo(path).FileVersion : null; }
+        catch { return null; }
     }
 
     private static string ParseState(string output)

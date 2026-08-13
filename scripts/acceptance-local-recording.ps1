@@ -1,8 +1,7 @@
-#requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [ValidateSet("LegacyWasapi", "AudioGraph")]
-    [string]$CaptureEngine = "LegacyWasapi",
+    [string]$CaptureEngine = "AudioGraph",
     [ValidateRange(10, 300)]
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]

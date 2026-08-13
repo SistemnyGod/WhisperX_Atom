@@ -1,13 +1,17 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("LegacyWasapi", "AudioGraph")]
-    [string]$CaptureEngine = "LegacyWasapi",
+    [string]$CaptureEngine = "",
     [switch]$ProbeAudio,
     [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
+if ([string]::IsNullOrWhiteSpace($CaptureEngine)) {
+    $CaptureEngine = if ((Resolve-RecorderRuntime).CaptureEngine -eq "AUDIOGRAPH") { "AudioGraph" } else { "LegacyWasapi" }
+}
+if ($CaptureEngine -notin @("LegacyWasapi", "AudioGraph")) { throw "CAPTURE_ENGINE_INVALID" }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repo ("artifacts\diagnostics\runtime-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 }

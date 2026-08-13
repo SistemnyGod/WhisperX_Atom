@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" } }
 if ([string]::IsNullOrWhiteSpace($Password)) { $Password = $env:BOOTSTRAP_ADMIN_PASSWORD }
@@ -55,9 +56,10 @@ function Get-RunningWhisperXServiceNames {
 }
 
 function Test-RecorderHostPipe {
+    $pipeName = (Resolve-RecorderRuntime).PipeName
     $pipe = $null
     try {
-        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "WhisperXAtomAgent", [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
         $pipe.Connect(1000)
         return $pipe.IsConnected
     }
@@ -164,6 +166,7 @@ Check "transcriptOnly" {
     }
 }
 Check "recorder" {
+    if (Test-RecorderHostPipe) { return "ready" }
     $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
     if ($service -and $service.Status -eq "Running") { return "ready" }
     $runtimeRoot = Join-Path $repo "artifacts\runtime"

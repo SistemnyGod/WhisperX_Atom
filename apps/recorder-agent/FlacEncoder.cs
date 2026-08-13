@@ -64,7 +64,9 @@ internal static class FlacEncoder
             || string.Equals(encoding, "IEEEFLOAT", StringComparison.OrdinalIgnoreCase)
             || string.Equals(encoding, "IEEE_FLOAT", StringComparison.OrdinalIgnoreCase))
             return AudioSampleType.Float32;
-        if (string.Equals(encoding, "PCM_S16LE", StringComparison.OrdinalIgnoreCase) || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 16))
+        if (string.Equals(encoding, "PCM_S16LE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(encoding, "PCM16", StringComparison.OrdinalIgnoreCase)
+            || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 16))
             return AudioSampleType.Pcm16;
         if (string.Equals(encoding, "PCM_S24LE", StringComparison.OrdinalIgnoreCase) || (string.Equals(encoding, "PCM", StringComparison.OrdinalIgnoreCase) && bitsPerSample == 24))
             return AudioSampleType.Pcm24;

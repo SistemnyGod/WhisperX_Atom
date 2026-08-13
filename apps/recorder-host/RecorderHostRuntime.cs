@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -57,15 +58,30 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
         await _engine.InitializeAsync(cancellationToken).ConfigureAwait(false);
 
+        // Phase 1 supports ROOM/MIC_ONLY. Migrate an existing legacy profile
+        // before advertising readiness; system audio is never dropped silently.
+        if (_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
+            await _api.SetRecordingProfileAsync("ROOM", cancellationToken).ConfigureAwait(false);
+
         // Device IDs are opaque endpoint identities. A legacy ID is migrated
         // only on an exact DeviceInformation.Id match; friendly-name matching
         // is intentionally forbidden. The user must reselect when it vanished.
-        if (!string.IsNullOrWhiteSpace(_storage.MicrophoneDeviceId)
-            && _engine.DeviceCatalog.Resolve(AudioSelectionMode.Fixed, _storage.MicrophoneDeviceId) is null)
+        var selectionMode = string.IsNullOrWhiteSpace(_storage.MicrophoneDeviceId)
+            ? AudioSelectionMode.Default
+            : AudioSelectionMode.Fixed;
+        try
         {
-            _storage.SetAudioDevices(null, _storage.SystemAudioDeviceId);
+            // Selecting DEFAULT only resolves a descriptor. It deliberately
+            // does not open an AudioGraph until the user starts recording.
+            await _engine.SelectDeviceAsync(selectionMode, _storage.MicrophoneDeviceId, cancellationToken).ConfigureAwait(false);
+            _storage.SetUserReselectRequired(false);
+        }
+        catch (Exception ex) when (selectionMode == AudioSelectionMode.Fixed)
+        {
+            // Keep the explicit Fixed intent. Falling back to another microphone
+            // would silently record a different source.
             _storage.SetUserReselectRequired(true);
-            await _api.SetAudioDevicesAsync(null, _storage.SystemAudioDeviceId, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning(ex, "Configured fixed microphone is unavailable and requires user reselect.");
         }
     }
 
@@ -76,7 +92,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var archiveRoot = _storage.ArchiveRoot;
         var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(archiveRoot))!);
         var telemetry = _engine.Telemetry;
-        var ready = _engine.SelectedDevice is not null && _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed;
+        var effectiveDevice = _engine.SelectedDevice;
+        var ready = effectiveDevice is not null && _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed;
         var systemAudioDeferred = _storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY";
         var health = new AgentIpcHealth(
             Microphone: ready,
@@ -103,13 +120,83 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             MicrophoneSilenceDurationMs: telemetry.SilenceDurationMs,
             MicrophoneTelemetryStale: telemetry.IsStale,
             ActiveSessionId: _sessionId,
+            InstallationId: _api.InstallationId,
+            AgentId: _api.AgentId,
+            ServerConnectionState: _api.ServerConnectionState,
+            LastHeartbeatAtUtc: _api.LastHeartbeatAtUtc,
             CaptureEngine: "AUDIOGRAPH",
             RecorderProcessModel: "CURRENT_USER_HOST",
             DeviceWatcherReady: _engine.DeviceCatalog.IsReady,
-            AudioGraphReady: _engine.DeviceCatalog.IsReady && _engine.SelectedDevice is not null && _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed,
-            FirstFrameConfirmed: telemetry.FrameCount > 0);
+            AudioGraphReady: _engine.DeviceCatalog.IsReady && ready,
+            FirstFrameConfirmed: telemetry.FrameCount > 0,
+            EffectiveMicrophoneDeviceId: effectiveDevice?.Id,
+            MicrophoneCaptureReady: ready,
+            MicrophoneCaptureState: _engine.State.ToString());
         return new AgentIpcResponse(!systemAudioDeferred, _engine.State.ToString(), _sessionId,
             systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null, health);
+    }
+
+    public async Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default)
+    {
+        var healthResponse = await HealthAsync(cancellationToken).ConfigureAwait(false);
+        var health = healthResponse.Health!;
+        var errors = new List<string>();
+        var warnings = new List<string>();
+        var ffmpegReady = File.Exists(RecorderToolPaths.Ffmpeg());
+        var ffprobeReady = File.Exists(RecorderToolPaths.Ffprobe());
+        var archiveReady = true;
+        var spoolReady = true;
+        var watermark = StorageRetentionPolicy.FromEnvironment().Evaluate(health.FreeBytes, health.TotalBytes);
+
+        try
+        {
+            Directory.CreateDirectory(_storage.ArchiveRoot);
+            var probePath = Path.Combine(_storage.ArchiveRoot, $".whisperx-preflight-{Guid.NewGuid():N}.tmp");
+            using (new FileStream(probePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
+        }
+        catch (Exception ex)
+        {
+            archiveReady = false;
+            _logger.LogDebug(ex, "Recorder Host archive preflight failed.");
+            errors.Add("RECORDING_ARCHIVE_ACCESS_DENIED");
+        }
+
+        try { _ = await _spool.PendingUploadSessionCountAsync(cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            spoolReady = false;
+            _logger.LogDebug(ex, "Recorder Host spool preflight failed.");
+            errors.Add("SPOOL_UNAVAILABLE");
+        }
+
+        if (!health.DeviceWatcherReady) errors.Add("AUDIO_DEVICE_DISCOVERY_FAILED");
+        if (!health.MicrophoneCaptureReady.GetValueOrDefault())
+            errors.Add(_storage.UserReselectRequired ? "AUDIO_DEVICE_UNAVAILABLE" : "AUDIO_DEFAULT_ENDPOINT_MISSING");
+        if (!ffmpegReady || !ffprobeReady) errors.Add("FFMPEG_UNAVAILABLE");
+        if (!watermark.AllowsRecording) errors.Add("STORAGE_LOW_SPACE");
+        if (_sessionId is not null) errors.Add("RECORDING_ALREADY_ACTIVE");
+        if (!_api.IsConfigured) warnings.Add("BACKEND_NOT_CONFIGURED_RECORDING_CAN_START_OFFLINE");
+        else if (!string.Equals(_api.ServerConnectionState, "READY", StringComparison.OrdinalIgnoreCase)) warnings.Add("SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE");
+
+        var ready = !(_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
+            && errors.Count == 0;
+        if (_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY") errors.Add("AUDIO_SYSTEM_AUDIO_DEFERRED");
+        var preflight = new AgentPreflightResult(
+            ready,
+            health.MicrophoneCaptureReady.GetValueOrDefault(),
+            false,
+            ffmpegReady && ffprobeReady,
+            spoolReady,
+            archiveReady,
+            health.FreeBytes,
+            watermark.BlockFreeBytes,
+            _api.ServerConnectionState,
+            warnings,
+            errors,
+            watermark.State.ToString(),
+            watermark.FreePercent,
+            watermark.Reason);
+        return healthResponse with { Ok = true, Error = null, Preflight = preflight };
     }
 
     public async Task<AgentIpcResponse> StartAsync(Guid? meetingId, Guid? ownerUserId, string? title, bool localOnly, CancellationToken cancellationToken)
@@ -122,10 +209,20 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             if (_sessionId is not null) return Error("RECORDING_ALREADY_ACTIVE");
             _runtimeLease = RecorderRuntimeLease.Acquire(_api.InstallationId);
             var sessionId = Guid.NewGuid().ToString("N");
-            var selected = _engine.SelectedDevice ?? _engine.DeviceCatalog.Resolve(AudioSelectionMode.Default, null)
-                ?? throw new InvalidOperationException("AUDIO_DEVICE_NOT_FOUND");
+            var selectionMode = string.IsNullOrWhiteSpace(_storage.MicrophoneDeviceId)
+                ? AudioSelectionMode.Default
+                : AudioSelectionMode.Fixed;
+            // Re-resolve DEFAULT immediately before capture. FIXED is never
+            // allowed to fall through to DEFAULT when its endpoint disappeared.
+            await _engine.SelectDeviceAsync(selectionMode, _storage.MicrophoneDeviceId, cancellationToken).ConfigureAwait(false);
+            var selected = _engine.SelectedDevice ?? throw new InvalidOperationException(
+                selectionMode == AudioSelectionMode.Fixed ? "AUDIO_DEVICE_UNAVAILABLE" : "AUDIO_DEVICE_NOT_FOUND");
             await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", Guid.NewGuid().ToString("N"), cancellationToken, ownerUserId, localOnly).ConfigureAwait(false);
-            var trackId = "room-microphone";
+            // The existing spool schema enforces UNIQUE(track_id, sequence)
+            // without session_id. Keep the semantic TrackType stable, but make
+            // the local track identity session-scoped so sequence 0 from a new
+            // meeting cannot collide with a previous meeting.
+            var trackId = $"room-microphone-{sessionId}";
             await _spool.UpsertTrackInfoAsync(new RecordingTrackInfo(
                 trackId,
                 "room-microphone",
@@ -135,7 +232,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 selected.Name,
                 _storage.MicrophoneDeviceId is null ? "DEFAULT" : "FIXED",
                 _storage.RecordingProfile,
-                "Pcm16",
+                "PCM_S16LE",
                 16,
                 "PCM_S16",
                 null,
@@ -145,7 +242,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             var writer = new AudioGraphSessionWriter(sessionId, trackId, _spool, _storage, _engine, _logger);
             _writer = writer;
             _sessionId = sessionId;
-            writer.Start();
+            await writer.StartAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -175,7 +272,10 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             if (_sessionId is null) return Error("RECORDING_NOT_ACTIVE");
             var sessionId = _sessionId;
             await StopCoreAsync(cancellationToken).ConfigureAwait(false);
-            var result = await _delivery.RunAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            // STOP is a local durability boundary. Network binding, uploads and
+            // server media finalization are retried by RecorderHostWorker after
+            // LOCAL_READY and must not block the user's recording workflow.
+            var result = await _delivery.FinalizeLocalAsync(sessionId, cancellationToken).ConfigureAwait(false);
             var status = await GetSessionStatusAsync(sessionId, cancellationToken).ConfigureAwait(false);
             return new AgentIpcResponse(result.Success, result.Stage, sessionId, result.ErrorCode, null, status.MeetingId, null, AgentIpcProtocol.Version, null, status);
         }
@@ -396,12 +496,18 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
     private async Task StopCoreAsync(CancellationToken cancellationToken)
     {
-        await _engine.StopAsync(cancellationToken).ConfigureAwait(false);
-        if (_writer is not null) await _writer.StopAsync(cancellationToken).ConfigureAwait(false);
-        _writer = null;
-        _sessionId = null;
-        _runtimeLease?.Dispose();
-        _runtimeLease = null;
+        try
+        {
+            await _engine.StopAsync(cancellationToken).ConfigureAwait(false);
+            if (_writer is not null) await _writer.StopAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writer = null;
+            _sessionId = null;
+            _runtimeLease?.Dispose();
+            _runtimeLease = null;
+        }
     }
 
     private static AgentIpcAudioDevice ToIpcDevice(AudioDeviceDescriptor device) => new(
@@ -437,9 +543,16 @@ internal sealed class AudioGraphSessionWriter
     private readonly AudioGraphCaptureEngine _engine;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _notStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateUnbounded<RawChunkWorkItem>(new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = true,
+        AllowSynchronousContinuations = false
+    });
     private AudioFrameDurableConsumer? _consumer;
     private CancellationTokenSource _stop = new();
     private Task? _worker;
+    private Task? _encoderWorker;
     private FileStream? _raw;
     private string? _rawPart;
     private string? _rawPath;
@@ -447,6 +560,9 @@ internal sealed class AudioGraphSessionWriter
     private int _sequence;
     private long _startSample;
     private long _sampleCount;
+    private long _lastDurabilityCheckpointTimestamp;
+
+    private static readonly long DurabilityCheckpointTicks = Stopwatch.Frequency;
 
     public AudioGraphSessionWriter(string sessionId, string trackId, SpoolStore spool, AgentStorageSettings storage, AudioGraphCaptureEngine engine, ILogger logger)
     {
@@ -460,14 +576,29 @@ internal sealed class AudioGraphSessionWriter
 
     public Task FirstDurableBytes => _consumer?.FirstDurableWrite ?? _notStarted.Task;
 
-    public void Start()
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         _consumer = new AudioFrameDurableConsumer();
-        _worker = Task.Run(ProcessAsync);
+        try
+        {
+            // Prepare the first durable raw chunk before AudioGraph can emit
+            // its first quantum. Otherwise the first callback burst can fill
+            // the bounded queue while SQLite/file initialization is running.
+            await EnsureChunkAsync(0).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            _worker = Task.Run(ProcessAsync);
+            _encoderWorker = Task.Run(ProcessEncodingAsync);
+        }
+        catch
+        {
+            await DisposeRawAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        Exception? failure = null;
         if (_worker is not null)
         {
             try
@@ -476,14 +607,27 @@ internal sealed class AudioGraphSessionWriter
                 // it before cancelling so the final partial chunk is durable.
                 await _worker.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (Exception ex)
             {
+                failure = ex;
                 _stop.Cancel();
+                _encoderQueue.Writer.TryComplete(ex);
                 try { await _worker.ConfigureAwait(false); } catch { }
-                throw;
+            }
+        }
+        if (_encoderWorker is not null)
+        {
+            try { await _encoderWorker.WaitAsync(cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                failure ??= ex;
+                _stop.Cancel();
+                _encoderQueue.Writer.TryComplete(ex);
+                try { await _encoderWorker.ConfigureAwait(false); } catch { }
             }
         }
         _stop.Dispose();
+        if (failure is not null) throw failure;
     }
 
     private async Task ProcessAsync()
@@ -493,13 +637,34 @@ internal sealed class AudioGraphSessionWriter
             var consumer = _consumer ?? throw new InvalidOperationException("AUDIO_WRITER_NOT_STARTED");
             await consumer.RunAsync(_engine.Frames, ConsumeFrameAsync, _stop.Token).ConfigureAwait(false);
             if (_sampleCount > 0) await CompleteChunkAsync().ConfigureAwait(false);
+            _encoderQueue.Writer.TryComplete();
+            if (_encoderWorker is not null) await _encoderWorker.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
         catch (Exception ex)
         {
             _logger.LogError(ex, "AudioGraph local writer failed. Session={SessionId}", _sessionId);
+            _encoderQueue.Writer.TryComplete(ex);
+            try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            throw;
         }
         finally { await DisposeRawAsync().ConfigureAwait(false); }
+    }
+
+    private async Task ProcessEncodingAsync()
+    {
+        try
+        {
+            await foreach (var work in _encoderQueue.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
+                await EncodeChunkAsync(work).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AudioGraph chunk encoder failed. Session={SessionId}", _sessionId);
+            try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            throw;
+        }
     }
 
     private async Task ConsumeFrameAsync(AudioFrame frame)
@@ -516,8 +681,12 @@ internal sealed class AudioGraphSessionWriter
             throw new InvalidOperationException("AUDIO_FORMAT_UNSUPPORTED");
         await _raw!.WriteAsync(frame.Pcm16Bytes).ConfigureAwait(false);
         _sampleCount += frame.SampleCount;
-        await _raw.FlushAsync().ConfigureAwait(false);
-        _raw.Flush(flushToDisk: true);
+        if (Stopwatch.GetTimestamp() - _lastDurabilityCheckpointTimestamp >= DurabilityCheckpointTicks)
+        {
+            await _raw.FlushAsync().ConfigureAwait(false);
+            _raw.Flush(flushToDisk: true);
+            _lastDurabilityCheckpointTimestamp = Stopwatch.GetTimestamp();
+        }
     }
 
     private Task EnsureChunkAsync(long startSample)
@@ -531,8 +700,9 @@ internal sealed class AudioGraphSessionWriter
         _outputPath = Path.Combine(root, $"{_sequence:D6}.flac");
         _startSample = startSample;
         _sampleCount = 0;
-        _spool.RegisterRawChunk(new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, 0, SampleRate, 1, "room-microphone", "Pcm16", 16, "WRITING", 0, null, null, "PCM_S16", null, 16));
-        _raw = new FileStream(_rawPart, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        _spool.RegisterRawChunk(new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, 0, SampleRate, 1, "room-microphone", "PCM_S16LE", 16, "WRITING", 0, null, null, "PCM_S16", null, 16));
+        _raw = new FileStream(_rawPart, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        _lastDurabilityCheckpointTimestamp = Stopwatch.GetTimestamp();
         return Task.CompletedTask;
     }
 
@@ -547,26 +717,43 @@ internal sealed class AudioGraphSessionWriter
         var rawSize = new FileInfo(_rawPath).Length;
         var rawSha = FlacEncoder.ComputeSha256(_rawPath);
         await _spool.SetRawChunkStateAsync(_sessionId, _trackId, _sequence, "RAW_READY", rawSize, rawSha, sampleCount: _sampleCount).ConfigureAwait(false);
-        var raw = new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, _sampleCount, SampleRate, 1, "room-microphone", "Pcm16", 16, "RAW_READY", rawSize, rawSha, null, "PCM_S16", null, 16);
-        var outputPart = _outputPath + ".part";
-        FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), _rawPath, outputPart, FlacEncoder.RawFormat(raw));
-        File.Move(outputPart, _outputPath, true);
-        var size = new FileInfo(_outputPath).Length;
-        var sha = FlacEncoder.ComputeSha256(_outputPath);
-        await _spool.UpsertChunkAsync(new RecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _outputPath, _startSample, _sampleCount, SampleRate, 1, "room-microphone", size, sha, "READY", 0)).ConfigureAwait(false);
-        await _spool.SetRawChunkStateAsync(_sessionId, _trackId, _sequence, "READY", size, sha).ConfigureAwait(false);
-        File.Delete(_rawPath);
+        var raw = new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, _sampleCount, SampleRate, 1, "room-microphone", "PCM_S16LE", 16, "RAW_READY", rawSize, rawSha, null, "PCM_S16", null, 16);
+        await _encoderQueue.Writer.WriteAsync(new RawChunkWorkItem(raw), _stop.Token).ConfigureAwait(false);
         _sequence++;
         _rawPart = _rawPath = _outputPath = null;
         _sampleCount = 0;
     }
 
+    private async Task EncodeChunkAsync(RawChunkWorkItem work)
+    {
+        var raw = work.Chunk;
+        var outputPart = raw.OutputPath + ".part";
+        FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
+        File.Move(outputPart, raw.OutputPath, true);
+        var size = new FileInfo(raw.OutputPath).Length;
+        var sha = FlacEncoder.ComputeSha256(raw.OutputPath);
+        await _spool.UpsertChunkAsync(new RecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, raw.Sequence, raw.OutputPath, raw.StartSample, raw.SampleCount, SampleRate, 1, "room-microphone", size, sha, "READY", 0)).ConfigureAwait(false);
+        await _spool.SetRawChunkStateAsync(_sessionId, _trackId, raw.Sequence, "READY", size, sha).ConfigureAwait(false);
+        File.Delete(raw.RawPath);
+    }
+
     private async Task DisposeRawAsync()
     {
-        if (_raw is not null) await _raw.DisposeAsync().ConfigureAwait(false);
+        if (_raw is not null)
+        {
+            try
+            {
+                await _raw.FlushAsync().ConfigureAwait(false);
+                _raw.Flush(flushToDisk: true);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Unable to checkpoint partial raw chunk. Session={SessionId}", _sessionId); }
+            await _raw.DisposeAsync().ConfigureAwait(false);
+        }
         _raw = null;
     }
 }
+
+internal sealed record RawChunkWorkItem(RawRecordingChunk Chunk);
 
 public sealed class RecorderHostPipeServer : BackgroundService
 {
@@ -693,7 +880,7 @@ public sealed class RecorderHostPipeServer : BackgroundService
             {
                 "HEALTH" or "STATUS" or "LIST_AUDIO_DEVICES" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
                 "SUBSCRIBE_AUDIO_DEVICE_EVENTS" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
-                "PREFLIGHT" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
+                "PREFLIGHT" => await _runtime.PreflightAsync(cancellationToken).ConfigureAwait(false),
                 "TEST_AUDIO_SOURCE" or "MICROPHONE_TEST" => ReadBool(request.Payload, "systemAudio")
                     ? new AgentIpcResponse(false, "DISABLED", null, "AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", null)
                     : await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false),

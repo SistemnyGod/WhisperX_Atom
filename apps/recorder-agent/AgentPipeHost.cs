@@ -90,6 +90,8 @@ public sealed class AgentPipeHost(
     private async Task<AgentIpcResponse> ExecuteAsync(AgentIpcRequest request, CancellationToken cancellationToken)
     {
         var command = request.Command.Trim().ToUpperInvariant();
+        if (RecorderRuntimeMode.IsAudioGraph && IsCaptureOrDeliveryCommand(command))
+            return Error("LEGACY_RUNTIME_STANDBY");
         var gated = IsMutatingCommand(command);
         if (gated) await _commandGate.WaitAsync(cancellationToken);
         try
@@ -241,6 +243,11 @@ public sealed class AgentPipeHost(
         "CONFIGURE" or "UPDATE_SERVER_URL" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
         "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "MARKER" or "DECISION" or
         "ACTION_ITEM" or "VOICE_EVENT";
+
+    private static bool IsCaptureOrDeliveryCommand(string command) => command is
+        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or
+        "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or "TEST_AUDIO_SOURCE" or
+        "MICROPHONE_TEST" or "TEST_AUDIO_DEVICE" or "SELECT_AUDIO_DEVICE";
 
     private void TrackFinalization(RecordingStopHandle stop, Guid? meetingId)
     {

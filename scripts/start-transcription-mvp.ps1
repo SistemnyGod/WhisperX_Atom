@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 if ([string]::IsNullOrWhiteSpace($GpuMode)) { $GpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" } }
 $env:GPU_WORKER_MODE = $GpuMode
@@ -51,15 +52,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "API_NOT_READY: Transcript MVP readiness check failed." }
 
     if (-not $SkipRecorder) {
-        try {
-            & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
-            if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
-        }
-        catch {
-            $service = Get-Service -Name "WhisperXAtomRecorder" -ErrorAction SilentlyContinue
-            if ($null -ne $service) { throw "RECORDER_UNAVAILABLE: Recorder Service did not start. $($_.Exception.Message)" }
+        $captureEngine = (Resolve-RecorderRuntime).CaptureEngine
+        if ($captureEngine.Trim().ToUpperInvariant() -eq "AUDIOGRAPH") {
+            $env:AUDIO_CAPTURE_ENGINE = "AUDIOGRAPH"
             & (Join-Path $PSScriptRoot "start-recorder-host.ps1")
-            if ($LASTEXITCODE -ne 0) { throw "RECORDER_UNAVAILABLE: Recorder Service is not installed and host fallback did not start." }
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_HOST_UNAVAILABLE: exit code $LASTEXITCODE" }
+        }
+        else {
+            $env:AUDIO_CAPTURE_ENGINE = "LEGACY_WASAPI"
+            & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_UNAVAILABLE: exit code $LASTEXITCODE" }
         }
     }
     if (-not $SkipDesktop) { & (Join-Path $PSScriptRoot "launch-desktop.ps1") }

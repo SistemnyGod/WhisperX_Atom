@@ -108,6 +108,7 @@ $report = [ordered]@{
         outputBitsPerSample = if ($null -ne $attempt) { $attempt.outputBitsPerSample } else { $null }
         outputSampleRate = if ($null -ne $attempt) { $attempt.outputSampleRate } else { $null }
         outputChannelCount = if ($null -ne $attempt) { $attempt.outputChannelCount } else { $null }
+        requestedSamplesPerQuantum = if ($null -ne $attempt) { $attempt.requestedSamplesPerQuantum } else { $null }
         graphSamplesPerQuantum = if ($null -ne $attempt) { $attempt.graphSamplesPerQuantum } else { $null }
         nativeFrameBytes = if ($null -ne $attempt) { $attempt.nativeFrameBytes } else { 0 }
         normalizedFrameBytes = if ($null -ne $attempt) { $attempt.normalizedFrameBytes } else { 0 }

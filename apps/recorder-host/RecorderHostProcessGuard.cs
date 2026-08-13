@@ -14,7 +14,14 @@ public sealed class RecorderHostProcessGuard : IDisposable
     public static RecorderHostProcessGuard? TryAcquire()
     {
         var sid = ResolveCurrentSid();
+        // Every Host launch path must derive the same identity. Before the
+        // installer migrates machine config v1, the current-user config is
+        // authoritative for the AudioGraph Host. Falling back straight to
+        // "unknown" allowed a packaged Host and a dev-script Host to acquire
+        // different mutexes and write/recover the same canonical spool.
         var installationId = Environment.GetEnvironmentVariable("ATOM_AGENT_INSTALLATION_ID");
+        if (string.IsNullOrWhiteSpace(installationId))
+            installationId = TryReadUserInstallationId();
         if (string.IsNullOrWhiteSpace(installationId))
             installationId = TryReadMachineInstallationId();
         var identity = sid + "-" + (installationId ?? "unknown");
@@ -48,6 +55,29 @@ public sealed class RecorderHostProcessGuard : IDisposable
                 : null;
         }
         catch { return null; }
+    }
+
+    private static string? TryReadUserInstallationId()
+    {
+        try
+        {
+            var path = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH");
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                path = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "WhisperXAtom", "Agent", "agent-config.json");
+            }
+            if (!File.Exists(path)) return null;
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (string.Equals(property.Name, "installationId", StringComparison.OrdinalIgnoreCase))
+                    return property.Value.GetString();
+            }
+        }
+        catch { }
+        return null;
     }
 
     public void Dispose()

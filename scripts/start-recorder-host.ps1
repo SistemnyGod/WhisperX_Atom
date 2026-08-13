@@ -9,12 +9,14 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
+. (Join-Path $PSScriptRoot "Resolve-RecorderRuntime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 $runtimeRoot = Get-WhisperXRuntimeRoot -RepoPath $repo
 $pidPath = Join-Path $runtimeRoot "recorder-host.pid"
 $stdoutPath = Join-Path $runtimeRoot "recorder-host.stdout.log"
 $stderrPath = Join-Path $runtimeRoot "recorder-host.stderr.log"
-$audioGraph = [string]::Equals($env:AUDIO_CAPTURE_ENGINE, "AUDIOGRAPH", [StringComparison]::OrdinalIgnoreCase)
+$engine = (Resolve-RecorderRuntime).CaptureEngine
+$audioGraph = [string]::Equals($engine, "AUDIOGRAPH", [StringComparison]::OrdinalIgnoreCase)
 $publishedRoot = if ($audioGraph) { Join-Path $repo "artifacts\recorder-host-current" } else { Join-Path $repo "artifacts\recorder-current" }
 $defaultExe = if ($audioGraph) { Join-Path $publishedRoot "WhisperX.Atom.Recorder.Host.exe" } else { Join-Path $publishedRoot "WhisperX.Atom.Recorder.Service.exe" }
 $project = if ($audioGraph) { Join-Path $repo "apps\recorder-host\WhisperX.Atom.Recorder.Host.csproj" } else { Join-Path $repo "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj" }
@@ -91,6 +93,16 @@ if ($publishRequired) {
 }
 $ExecutablePath = (Resolve-Path -LiteralPath $ExecutablePath).Path
 
+$anyHost = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | Select-Object -First 1)
+if ($anyHost.Count -gt 0 -and (Test-RecorderPipe)) {
+    # A live Host owns the canonical user spool regardless of which artifact
+    # directory launched it. Starting a second binary would compete for raw
+    # recovery and make the shared named pipe route commands nondeterministically.
+    $anyHost[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
+    Write-Host "Recorder host is already running. PID=$($anyHost[0].Id)"
+    return
+}
+
 $existing = Get-RecorderProcess $ExecutablePath
 if ($null -ne $existing -and (Test-RecorderPipe)) {
     $existing.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
@@ -121,6 +133,15 @@ if ($null -ne $machineConfig) {
         if ($null -ne $installationProperty) { $machineInstallationId = [string]$installationProperty.Value }
     }
 }
+if ([string]::IsNullOrWhiteSpace($machineInstallationId) -and $audioGraph -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    try {
+        $hostConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        $hostInstallation = $hostConfig.PSObject.Properties["InstallationId"]
+        if ($null -eq $hostInstallation) { $hostInstallation = $hostConfig.PSObject.Properties["installationId"] }
+        if ($null -ne $hostInstallation) { $machineInstallationId = [string]$hostInstallation.Value }
+    }
+    catch { }
+}
 $env:AUDIO_CAPTURE_ENGINE = if ($audioGraph) { "AUDIOGRAPH" } else { "LEGACY_WASAPI" }
 $env:ATOM_AGENT_CONFIG_PATH = $configPath
 $env:ATOM_AGENT_DATA_ROOT = $dataRoot
@@ -130,13 +151,19 @@ $env:ATOM_AGENT_DPAPI_SCOPE = if ($audioGraph) { "CURRENT_USER" } else { "LOCAL_
 $toolDirectory = if (-not [string]::IsNullOrWhiteSpace($env:WHISPERX_FFMPEG_DIR)) { $env:WHISPERX_FFMPEG_DIR } else { Join-Path $repo "vendor\ffmpeg\win-x64" }
 $bundledFfmpeg = Join-Path (Split-Path -Parent $ExecutablePath) "ffmpeg.exe"
 $bundledFfprobe = Join-Path (Split-Path -Parent $ExecutablePath) "ffprobe.exe"
-if (-not (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf)) {
-    $sourceFfmpeg = Join-Path $toolDirectory "ffmpeg.exe"
-    $sourceFfprobe = Join-Path $toolDirectory "ffprobe.exe"
-    if ((Test-Path -LiteralPath $sourceFfmpeg -PathType Leaf) -and (Test-Path -LiteralPath $sourceFfprobe -PathType Leaf)) {
-        Copy-Item -LiteralPath $sourceFfmpeg -Destination $bundledFfmpeg -Force
-        Copy-Item -LiteralPath $sourceFfprobe -Destination $bundledFfprobe -Force
+function Sync-PinnedTool([string]$source, [string]$destination) {
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $sourceInfo = Get-Item -LiteralPath $source
+    $destinationInfo = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
+    if ($null -eq $destinationInfo -or $destinationInfo.Length -ne $sourceInfo.Length) {
+        Copy-Item -LiteralPath $source -Destination $destination -Force
     }
+}
+$sourceFfmpeg = Join-Path $toolDirectory "ffmpeg.exe"
+$sourceFfprobe = Join-Path $toolDirectory "ffprobe.exe"
+if ((Test-Path -LiteralPath $sourceFfmpeg -PathType Leaf) -and (Test-Path -LiteralPath $sourceFfprobe -PathType Leaf)) {
+    Sync-PinnedTool $sourceFfmpeg $bundledFfmpeg
+    Sync-PinnedTool $sourceFfprobe $bundledFfprobe
 }
 if (-not (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $bundledFfprobe -PathType Leaf)) {
     throw "FFMPEG_UNAVAILABLE: bundled ffmpeg.exe and ffprobe.exe are required beside the Recorder executable."

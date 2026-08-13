@@ -46,6 +46,15 @@ public sealed partial class LoginWindow : Window
             }
 
             var bootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync();
+            // Authentication alone is not enough to open a recording UI. A
+            // temporary LAN failure is allowed when the local Host is ready,
+            // but a missing/unreachable Host must remain visible and retryable
+            // instead of opening a shell that cannot record.
+            if (!bootstrap.RecorderAvailable)
+            {
+                StatusText.Text = $"{bootstrap.Code}: {bootstrap.Message}";
+                return;
+            }
             await _authenticated(bootstrap);
             Close();
         }

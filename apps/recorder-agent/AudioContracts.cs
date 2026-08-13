@@ -159,6 +159,7 @@ public sealed class AudioGraphAttemptDiagnostics
     public int? OutputBitsPerSample { get; set; }
     public int? OutputSampleRate { get; set; }
     public int? OutputChannelCount { get; set; }
+    public int? RequestedSamplesPerQuantum { get; set; }
     public int? GraphSamplesPerQuantum { get; set; }
     public long NativeFrameBytes { get; set; }
     public long NormalizedFrameBytes { get; set; }
@@ -196,6 +197,7 @@ public sealed class AudioGraphAttemptDiagnostics
         OutputBitsPerSample = OutputBitsPerSample,
         OutputSampleRate = OutputSampleRate,
         OutputChannelCount = OutputChannelCount,
+        RequestedSamplesPerQuantum = RequestedSamplesPerQuantum,
         GraphSamplesPerQuantum = GraphSamplesPerQuantum,
         NativeFrameBytes = NativeFrameBytes,
         NormalizedFrameBytes = NormalizedFrameBytes,

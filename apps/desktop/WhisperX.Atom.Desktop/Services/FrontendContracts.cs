@@ -29,7 +29,7 @@ public interface IRecorderService
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> AddMarkerAsync(string eventType = "MARKER", CancellationToken cancellationToken = default);

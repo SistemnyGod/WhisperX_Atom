@@ -55,13 +55,33 @@ public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeByt
 public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
 public sealed record DesktopProcessingReadiness(bool Ready, JsonElement Components, JsonElement? Queue, DateTimeOffset? CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
-public sealed record DesktopJob(string Id, string MeetingId, string Type, string Status, string Stage, int Progress, int Attempt, string? Error)
+public sealed record DesktopJob(
+    string Id,
+    string MeetingId,
+    string Type,
+    string Status,
+    string Stage,
+    int Progress,
+    int Attempt,
+    string? Error,
+    string? ErrorCode = null,
+    string? PipelineCorrelationId = null)
 {
     [JsonIgnore]
     public string StatusText => UiStatusMapper.Text(Status);
 
     [JsonIgnore]
     public string StageText => UiStatusMapper.Text(Stage);
+
+    [JsonIgnore]
+    public bool Retryable => IsRetryable(ErrorCode);
+
+    private static bool IsRetryable(string? errorCode) => errorCode is not null
+        && (errorCode.StartsWith("WORKER_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.StartsWith("GPU_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.StartsWith("CUDA_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.StartsWith("NETWORK_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.StartsWith("SERVER_", StringComparison.OrdinalIgnoreCase));
 }
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
 

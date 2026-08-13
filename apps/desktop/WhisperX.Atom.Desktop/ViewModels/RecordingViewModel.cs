@@ -32,6 +32,8 @@ public sealed class RecordingViewModel : ObservableObject
     private Task? _sessionTask;
     private bool _serverProcessingExpected;
     private bool _hasAudioSource;
+    private bool _recorderRuntimeReady;
+    private bool _localStorageReady;
     private bool _isProcessing;
     private int _processingProgress;
     private int _rawChunksPending;
@@ -201,7 +203,8 @@ public sealed class RecordingViewModel : ObservableObject
     // A previously confirmed Agent/owner pair may continue local-first
     // capture while the LAN server is offline. It is still not advertised as
     // server-ready, but the persisted owner makes the local path safe.
-    public bool AgentReady => _services.AgentBootstrap.IsReady || _services.AgentBootstrap.LastStatus.OfflineEligible;
+    public bool AgentReady => _services.AgentBootstrap.LastStatus.Authenticated
+        || _services.AgentBootstrap.LastStatus.OfflineEligible;
     public string AgentStatus => _lastAgentResponse is { } response
         ? AgentStatusFormatter.Format(response)
         : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
@@ -216,7 +219,8 @@ public sealed class RecordingViewModel : ObservableObject
         RecordingState.Error => "Ошибка записи",
         _ => "Готово к записи"
     };
-    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error) && _hasAudioSource && AgentReady;
+    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error)
+        && _recorderRuntimeReady && _hasAudioSource && _localStorageReady && AgentReady;
     public bool CanPause => State == RecordingState.Recording;
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
@@ -344,63 +348,26 @@ public sealed class RecordingViewModel : ObservableObject
             }
 
             var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
-            Guid? serverMeetingId = null;
             var bootstrap = _services.AgentBootstrap.LastStatus;
-            if (!bootstrap.Ready && !bootstrap.OfflineEligible)
+            if (!bootstrap.Authenticated && !bootstrap.OfflineEligible)
             {
                 State = RecordingState.Error;
                 ErrorMessage = MapRecordingError(bootstrap.Code);
                 StatusMessage = bootstrap.Message;
                 return false;
             }
-            if (!bootstrap.Ready)
+            if (!bootstrap.Ready || !bootstrap.ServerConnected)
             {
-                WarningMessage = bootstrap.Message;
+                WarningMessage = "Сервер недоступен: запись будет сохранена локально и доставлена автоматически после восстановления связи.";
             }
 
             var ownerUserId = _services.Settings.Load().OwnerUserId;
-
-            // Online intent gets a real server Meeting before START. The Agent
-            // only receives this server-issued id; it never invents one. If the
-            // server is unavailable, retain the local-first path with a null id.
-            if (bootstrap.Ready && bootstrap.ServerConnected && _services.Backend.HasSession)
-            {
-                try
-                {
-                    var meeting = await _services.Backend.CreateMeetingAsync(title, cancellationToken: CancellationToken.None);
-                    if (Guid.TryParse(meeting.Id, out var createdMeetingId))
-                    {
-                        serverMeetingId = createdMeetingId;
-                        MeetingId = createdMeetingId;
-                        _serverProcessingExpected = true;
-                    }
-                    else
-                    {
-                        WarningMessage = "Сервер не вернул корректный MeetingId. Запись продолжится локально.";
-                    }
-                }
-                catch (Exception ex)
-                {
-                    if (!bootstrap.OfflineEligible)
-                    {
-                        State = RecordingState.Error;
-                        ErrorMessage = MapRecordingError("SERVER_UNAVAILABLE");
-                        StatusMessage = SafeError(ex);
-                        return false;
-                    }
-                    WarningMessage = "Сервер недоступен. Запись сохранится локально и будет отправлена после восстановления связи.";
-                }
-            }
-
-            var response = await _services.Recorder.StartAsync(title, serverMeetingId, ownerUserId);
+            // Meeting creation and binding belong to the background delivery
+            // worker. START must not wait for HTTP, and localOnly=false keeps
+            // the durable session eligible for later automatic delivery.
+            var response = await _services.Recorder.StartAsync(title, null, ownerUserId, localOnly: false);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
-            if (!response.Ok && serverMeetingId.HasValue)
-            {
-                try { await _services.Backend.CancelMeetingAsync(serverMeetingId.Value, CancellationToken.None); } catch { }
-                MeetingId = null;
-            }
-            if (response.Ok && MeetingId is null) MeetingId = serverMeetingId;
             if (response.Ok && response.MeetingId is Guid agentMeetingId)
             {
                 MeetingId ??= agentMeetingId;
@@ -488,6 +455,12 @@ public sealed class RecordingViewModel : ObservableObject
     public async Task SetRecordingProfileAsync(string? profile)
     {
         if (!CanSelectRecordingProfile) return;
+        var requested = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        if (RecorderRuntimeMode.IsAudioGraph && requested is "ONLINE" or "SYSTEM_ONLY")
+        {
+            ErrorMessage = "AUDIO_SYSTEM_AUDIO_DEFERRED";
+            return;
+        }
         var normalized = NormalizeRecordingProfile(profile);
         if (string.Equals(_recordingProfile, normalized, StringComparison.Ordinal)) return;
         try
@@ -925,6 +898,11 @@ public sealed class RecordingViewModel : ObservableObject
         {
             _pendingUploads = health.PendingUploadSessions;
             _hasAudioSource = IsRequiredAudioReady(health, RecordingProfile);
+            _recorderRuntimeReady = string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
+                ? health.DeviceWatcherReady && health.AudioGraphReady
+                : string.Equals(health.CaptureEngine, "LEGACY_WASAPI", StringComparison.OrdinalIgnoreCase);
+            _localStorageReady = health.FreeBytes > 0
+                && !string.Equals(health.StorageWatermarkState, "BLOCK_RECORDING", StringComparison.OrdinalIgnoreCase);
             _rawChunksPending = health.RawChunksPending;
             _rawChunksFailed = health.RawChunksFailed;
             _rawChunksBytes = health.RawChunksBytes;
@@ -1147,6 +1125,7 @@ public sealed class RecordingViewModel : ObservableObject
     private static string NormalizeRecordingProfile(string? profile)
     {
         var normalized = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        if (RecorderRuntimeMode.IsAudioGraph && normalized is "ONLINE" or "SYSTEM_ONLY") return "ROOM";
         return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
     }
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Recorder Agent не ответил. Проверьте локальный сервис.");

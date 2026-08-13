@@ -128,7 +128,7 @@ public sealed class AgentApiClient : IDisposable
         await PersistConfigurationAsync(temporary, new AgentConfiguration(uri.ToString().TrimEnd('/'), agentId.ToString(), ProtectToken(token), true,
             _installationId,
             _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile,
-            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired)), cancellationToken);
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired)), cancellationToken);
         File.Move(temporary, _configPath, true);
     }
 
@@ -148,7 +148,7 @@ public sealed class AgentApiClient : IDisposable
             uri.ToString().TrimEnd('/'), _agentId.ToString(), ProtectToken(_token), true,
             _installationId, _storage.ArchiveRoot, _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId, _storage.RecordingProfile,
-            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -168,7 +168,7 @@ public sealed class AgentApiClient : IDisposable
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
             _storage.RecordingProfile,
-            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -188,7 +188,7 @@ public sealed class AgentApiClient : IDisposable
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
             _storage.RecordingProfile,
-            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }
@@ -208,7 +208,7 @@ public sealed class AgentApiClient : IDisposable
             _storage.MicrophoneDeviceId,
             _storage.SystemAudioDeviceId,
             _storage.RecordingProfile,
-            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, Environment.GetEnvironmentVariable("AUDIO_CAPTURE_ENGINE") ?? "LEGACY_WASAPI", _storage.UserReselectRequired));
+            AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
     }

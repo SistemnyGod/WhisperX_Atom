@@ -54,25 +54,37 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
 
     private async Task<AgentBootstrapStatus> EnsureAgentReadyCoreAsync(CancellationToken cancellationToken)
     {
-        var user = await services.Backend.GetCurrentUserAsync(cancellationToken);
         var settings = services.Settings.Load();
         var offlineEligible = services.Backend.CanUseOffline
             && settings.OwnerUserId is not null
             && settings.AgentBootstrapConfirmed;
+
+        // Local capture is a prerequisite, not a consequence, of a successful
+        // network round trip. Start/verify the current-user Host before asking
+        // the API for the cached user so a temporary LAN outage cannot make a
+        // durable local recorder disappear from the product.
+        RecorderServiceSnapshot? host = null;
+        if (RecorderRuntimeMode.IsAudioGraph)
+        {
+            host = await services.RecorderService.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (!host.PipeReachable)
+                return new(false, false, offlineEligible, host.Error ?? "RECORDER_HOST_UNAVAILABLE",
+                    "Recorder Host AudioGraph не запущен или Named Pipe недоступен.")
+                { Authenticated = services.Backend.HasSession };
+        }
+
+        var user = await services.Backend.GetCurrentUserAsync(cancellationToken);
+        if (user is null && services.Backend.AuthState == DesktopAuthState.Offline
+            && offlineEligible && host?.PipeReachable == true)
+            return new(false, true, true, "SERVER_UNAVAILABLE",
+                "LAN-сервер временно недоступен; Recorder Host готов к локальной записи.")
+            { Authenticated = true, PipeReachable = true };
         if (user is null && services.Backend.AuthState == DesktopAuthState.Offline)
-            return new(false, false, offlineEligible, "SERVER_UNAVAILABLE", offlineEligible
+            return new(false, host?.PipeReachable == true, offlineEligible, "SERVER_UNAVAILABLE", offlineEligible
                 ? "LAN-сервер временно недоступен; ранее подтверждённая локальная запись может продолжиться."
                 : "LAN-сервер недоступен, а локальная привязка Agent ещё не подтверждена.");
         if (user is null)
             return new(false, false, false, "AUTH_REQUIRED", "Требуется вход в сервер.") { Authenticated = false };
-
-        if (RecorderRuntimeMode.IsAudioGraph)
-        {
-            var host = await services.RecorderService.StartAsync(cancellationToken);
-            if (!host.PipeReachable)
-                return new(false, false, offlineEligible, host.Error ?? "RECORDER_HOST_UNAVAILABLE",
-                    "Recorder Host AudioGraph не запущен или Named Pipe недоступен.") { Authenticated = true };
-        }
 
         AgentIpcResponse health;
         try

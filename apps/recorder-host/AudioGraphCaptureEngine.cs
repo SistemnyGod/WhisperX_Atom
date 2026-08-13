@@ -19,7 +19,9 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private const int SampleRate = RecordingContract.MicrophoneSampleRate;
     private const int Channels = 1;
     private const int BitsPerSample = 16;
-    private const int QueueCapacity = 32;
+    // 256 quanta provide a bounded ~2.56 second startup/backpressure window
+    // while keeping overrun explicit instead of silently dropping frames.
+    private const int QueueCapacity = 256;
 
     private readonly AudioGraphDeviceCatalog _catalog;
     private readonly object _gate = new();
@@ -185,7 +187,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
                 EncodingProperties = _encodingProperties,
                 DesiredSamplesPerQuantum = SampleRate / 100
             };
-            lock (_gate) _attempt.GraphSamplesPerQuantum = SampleRate / 100;
+            lock (_gate) _attempt.RequestedSamplesPerQuantum = SampleRate / 100;
             lock (_gate) _attempt.GraphCreateAttempted = true;
             var creation = await AudioGraph.CreateAsync(settings);
             lock (_gate)
@@ -196,7 +198,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
             if (creation.Status != AudioGraphCreationStatus.Success || creation.Graph is null)
                 throw new InvalidOperationException($"AUDIOGRAPH_CREATE_FAILED:{creation.Status}");
             _graph = creation.Graph;
-            lock (_gate) _attempt.GraphCreated = true;
+            lock (_gate)
+            {
+                _attempt.GraphCreated = true;
+                _attempt.GraphSamplesPerQuantum = checked((int)_graph.SamplesPerQuantum);
+            }
 
             lock (_gate) _attempt.InputNodeCreateAttempted = true;
             var inputResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _encodingProperties, information);
@@ -609,6 +615,12 @@ internal static class AudioGraphErrorMapper
         if (message.Contains("AUDIO_INPUT_NODE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase)
             || message.Contains("AUDIO_DEVICE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_INPUT_NODE_CREATE_FAILED";
+        if (message.Contains("AUDIO_DEVICE_UNAVAILABLE", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_DEVICE_UNAVAILABLE";
+        if (message.Contains("AUDIO_DEFAULT_ENDPOINT_MISSING", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_DEVICE_NOT_FOUND";
+        if (message.Contains("AUDIO_DEVICE_ACCESS_DENIED", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_DEVICE_ACCESS_DENIED";
         if (message.Contains("AUDIOGRAPH_CREATE_FAILED", StringComparison.OrdinalIgnoreCase)
             || message.Contains("AUDIO_GRAPH_CREATE_FAILED", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_GRAPH_CREATE_FAILED";

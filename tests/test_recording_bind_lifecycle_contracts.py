@@ -40,11 +40,14 @@ def test_offline_delivery_is_pending_not_failed():
     assert 'new FinalizationResult(true, "DELIVERY_PENDING"' in coordinator
 
 
-def test_online_desktop_flow_uses_server_created_meeting_id():
+def test_desktop_start_defers_meeting_creation_to_idempotent_background_bind():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
-    assert "CreateMeetingAsync(title" in view_model
-    assert "serverMeetingId = createdMeetingId" in view_model
-    assert "StartAsync(title, serverMeetingId, ownerUserId)" in view_model
+    start = view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
+    assert "CreateMeetingAsync" not in start
+    assert "StartAsync(title, null, ownerUserId, localOnly: false)" in start
+
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "localOnly).ConfigureAwait(false)" in host
 
 
 def test_server_bind_is_idempotent_by_agent_and_local_session():
