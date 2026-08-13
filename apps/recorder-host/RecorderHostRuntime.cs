@@ -60,6 +60,10 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
+        // Initialization performs spool recovery before the pipe is exposed;
+        // it must obey the same installation-scoped ownership boundary as
+        // START and the background delivery worker.
+        using var initializationLease = RecorderRuntimeLease.Acquire(_api.InstallationId);
         await _spool.InitializeAsync(cancellationToken).ConfigureAwait(false);
         await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
         await _engine.InitializeAsync(cancellationToken).ConfigureAwait(false);
@@ -75,12 +79,18 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var selectionMode = string.IsNullOrWhiteSpace(_storage.MicrophoneDeviceId)
             ? AudioSelectionMode.Default
             : AudioSelectionMode.Fixed;
+        var userReselectRequired = _storage.UserReselectRequired;
         try
         {
             // Selecting DEFAULT only resolves a descriptor. It deliberately
             // does not open an AudioGraph until the user starts recording.
             await _engine.SelectDeviceAsync(selectionMode, _storage.MicrophoneDeviceId, cancellationToken).ConfigureAwait(false);
-            _storage.SetUserReselectRequired(false);
+            // A migrated legacy endpoint is represented by DEFAULT plus an
+            // explicit reselect requirement. Do not silently clear that
+            // requirement merely because Windows currently has a usable
+            // default device; the user must confirm DEFAULT or a fixed ID.
+            if (!userReselectRequired)
+                _storage.SetUserReselectRequired(false);
         }
         catch (Exception ex) when (selectionMode == AudioSelectionMode.Fixed)
         {
@@ -142,6 +152,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             FirstFrameConfirmed: telemetry.FrameCount > 0,
             UserReselectRequired: _storage.UserReselectRequired,
             EffectiveMicrophoneDeviceId: effectiveDevice?.Id,
+            RuntimeBuildIdentity: AgentIpcProtocol.CurrentBuildIdentity,
+            Capabilities: new[]
+            {
+                AgentIpcProtocol.ConcurrentRequestsCapability,
+                AgentIpcProtocol.DeviceEventStreamCapability
+            },
             MicrophoneCaptureReady: ready,
             MicrophoneCaptureState: _engine.State.ToString());
         return new AgentIpcResponse(!systemAudioDeferred, _engine.State.ToString(), _sessionId,
@@ -188,7 +204,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         if (!watermark.AllowsRecording) errors.Add("STORAGE_LOW_SPACE");
         if (_sessionId is not null) errors.Add("RECORDING_ALREADY_ACTIVE");
         if (!_api.IsConfigured) warnings.Add("BACKEND_NOT_CONFIGURED_RECORDING_CAN_START_OFFLINE");
-        else if (!string.Equals(_api.ServerConnectionState, "READY", StringComparison.OrdinalIgnoreCase)) warnings.Add("SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE");
+        else if (!string.Equals(_api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase)) warnings.Add("SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE");
 
         var ready = !(_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
             && errors.Count == 0;
@@ -271,6 +287,25 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // START can fail before the writer/engine inner try is entered
+            // (for example when a fixed device disappeared or the spool
+            // session could not be created). Release the installation lease
+            // in every such path so the next START is not poisoned by a stale
+            // RECORDER_RUNTIME_LEASE_HELD.
+            try
+            {
+                if (_sessionId is not null || _writer is not null)
+                    await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                else
+                {
+                    _runtimeLease?.Dispose();
+                    _runtimeLease = null;
+                }
+            }
+            catch (Exception cleanupException)
+            {
+                _logger.LogWarning(cleanupException, "Recorder Host failed to clean up an aborted START.");
+            }
             return Error(AudioGraphErrorMapper.Map(ex), ex.Message);
         }
         finally { _gate.Release(); }
@@ -337,29 +372,48 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     public async Task<AgentIpcResponse> SelectDeviceAsync(string? deviceId, CancellationToken cancellationToken)
     {
         var previous = _storage.MicrophoneDeviceId;
+        var previousReselectRequired = _storage.UserReselectRequired;
         var mode = string.IsNullOrWhiteSpace(deviceId) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed;
+        var configurationCommitted = false;
         try
         {
             var probe = await _engine.ProbeAsync(mode, deviceId, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
             if (!probe.Ready)
+            {
+                await RestoreEngineSelectionAsync(previous).ConfigureAwait(false);
                 return Error(probe.ErrorCode ?? (mode == AudioSelectionMode.Fixed ? "SELECTED_DEVICE_UNAVAILABLE" : "AUDIO_DEVICE_NOT_READY"), probe.ErrorDetail);
+            }
 
             _storage.SetAudioDevices(mode == AudioSelectionMode.Fixed ? deviceId : null, null);
             _storage.SetUserReselectRequired(false);
             await _api.SetAudioDevicesAsync(mode == AudioSelectionMode.Fixed ? deviceId : null, null, cancellationToken).ConfigureAwait(false);
+            configurationCommitted = true;
             return await HealthAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            try
+            if (!configurationCommitted)
             {
-                await _engine.SelectDeviceAsync(
-                    string.IsNullOrWhiteSpace(previous) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed,
-                    previous,
-                    CancellationToken.None).ConfigureAwait(false);
+                _storage.SetAudioDevices(previous, null);
+                _storage.SetUserReselectRequired(previousReselectRequired);
+                await RestoreEngineSelectionAsync(previous).ConfigureAwait(false);
             }
-            catch { }
             return Error(AudioGraphErrorMapper.Map(ex), ex.Message);
+        }
+    }
+
+    private async Task RestoreEngineSelectionAsync(string? deviceId)
+    {
+        try
+        {
+            await _engine.SelectDeviceAsync(
+                string.IsNullOrWhiteSpace(deviceId) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed,
+                deviceId,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception restoreException)
+        {
+            _logger.LogDebug(restoreException, "Recorder Host could not restore the previous microphone selection.");
         }
     }
 
@@ -403,7 +457,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         else
         {
             _storage.SetAudioDevices(null, null);
-            _storage.SetUserReselectRequired(false);
+            // A legacy endpoint migration may intentionally leave the Host in
+            // DEFAULT mode while requiring explicit user confirmation. A
+            // CONFIGURE request without a device id must not erase that gate.
+            if (!_storage.UserReselectRequired)
+                _storage.SetUserReselectRequired(false);
             await _api.PersistCurrentConfigurationAsync(cancellationToken).ConfigureAwait(false);
         }
         return await HealthAsync(cancellationToken).ConfigureAwait(false);
@@ -786,13 +844,18 @@ public sealed class RecorderHostPipeServer : BackgroundService
 {
     private readonly RecorderHostRuntime _runtime;
     private readonly ILogger<RecorderHostPipeServer> _logger;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private string? _initializationError;
 
-    public RecorderHostPipeServer(RecorderHostRuntime runtime, ILogger<RecorderHostPipeServer> logger)
+    public RecorderHostPipeServer(
+        RecorderHostRuntime runtime,
+        ILogger<RecorderHostPipeServer> logger,
+        IHostApplicationLifetime lifetime)
     {
         _runtime = runtime;
         _logger = logger;
+        _lifetime = lifetime;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -812,13 +875,27 @@ public sealed class RecorderHostPipeServer : BackgroundService
             Environment.ExitCode = 12;
             throw new InvalidOperationException(_initializationError, ex);
         }
+        var connections = new List<Task>();
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await using var pipe = RecorderHostPipeSecurity.CreateServer();
-                await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
-                await HandleAsync(pipe, stoppingToken).ConfigureAwait(false);
+                var pipe = RecorderHostPipeSecurity.CreateServer();
+                try
+                {
+                    await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                    // Do not await a long-lived device-event subscription here.
+                    // Each accepted pipe instance owns its connection and runs
+                    // independently so HEALTH/START/STOP remain available.
+                    var connection = HandleConnectionAsync(pipe, stoppingToken);
+                    connections.RemoveAll(task => task.IsCompleted);
+                    connections.Add(connection);
+                    pipe = null!;
+                }
+                finally
+                {
+                    if (pipe is not null) await pipe.DisposeAsync().ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -838,6 +915,19 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 try { await Task.Delay(100, stoppingToken).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             }
+        }
+        try { await Task.WhenAll(connections).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+
+    private async Task HandleConnectionAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    {
+        await using (pipe.ConfigureAwait(false))
+        {
+            try { await HandleAsync(pipe, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (IOException exception) { _logger.LogDebug(exception, "Recorder Host IPC connection closed."); }
+            catch (Exception exception) { _logger.LogWarning(exception, "Recorder Host IPC request failed."); }
         }
     }
 
@@ -949,6 +1039,7 @@ public sealed class RecorderHostPipeServer : BackgroundService
             {
                 "HEALTH" or "STATUS" or "LIST_AUDIO_DEVICES" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
                 "PREFLIGHT" => await _runtime.PreflightAsync(cancellationToken).ConfigureAwait(false),
+                "SHUTDOWN" => await ShutdownAsync(cancellationToken).ConfigureAwait(false),
                 "TEST_AUDIO_SOURCE" or "MICROPHONE_TEST" => ReadBool(request.Payload, "systemAudio")
                     ? new AgentIpcResponse(false, "DISABLED", null, "AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", null)
                     : await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false),
@@ -981,6 +1072,26 @@ public sealed class RecorderHostPipeServer : BackgroundService
             _logger.LogWarning(ex, "Recorder Host command failed: {Command}", request.Command);
             return new AgentIpcResponse(false, "ERROR", null, AudioGraphErrorMapper.Map(ex), null);
         }
+    }
+
+    private async Task<AgentIpcResponse> ShutdownAsync(CancellationToken cancellationToken)
+    {
+        var health = await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(health.Health?.ActiveSessionId))
+            return new AgentIpcResponse(false, "RECORDING", health.Health.ActiveSessionId,
+                "RECORDER_HOST_UPDATE_BLOCKED_ACTIVE_RECORDING", health.Health);
+
+        // Let the current response flush before stopping the generic host.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150).ConfigureAwait(false);
+                _lifetime.StopApplication();
+            }
+            catch { }
+        });
+        return new AgentIpcResponse(true, "SHUTDOWN", null, null, health.Health);
     }
 
     private async Task<AgentIpcResponse> SessionStatusAsync(string? sessionId, CancellationToken cancellationToken)

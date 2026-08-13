@@ -40,6 +40,10 @@ public sealed class AgentPipeClient
         {
             throw new RecorderIpcException("RECORDER_IPC_TIMEOUT", true, ex);
         }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_ACCESS_DENIED", false, ex);
+        }
         catch (IOException ex)
         {
             throw new RecorderIpcException("RECORDER_IPC_UNAVAILABLE", false, ex);
@@ -83,6 +87,10 @@ public sealed class AgentPipeClient
         catch (TimeoutException ex)
         {
             throw new RecorderIpcException("RECORDER_IPC_TIMEOUT", true, ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_ACCESS_DENIED", false, ex);
         }
         catch (IOException ex)
         {

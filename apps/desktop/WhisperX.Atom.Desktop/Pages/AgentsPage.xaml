@@ -41,6 +41,12 @@
                     <StackPanel Spacing="6">
                         <TextBlock Text="АКТИВНЫЕ" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding OnlineCountText}" FontSize="28" FontWeight="SemiBold" />
+                        <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
+                            <TextBlock Text="Unavailable:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="{Binding UnavailableCountText}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="Revoked:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="{Binding RevokedCountText}" FontSize="{StaticResource CaptionTextSize}" />
+                        </StackPanel>
                         <TextBlock Text="По статусу, который вернул API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
@@ -67,7 +73,7 @@
                                 <DataTemplate>
                                     <Grid Padding="20,12" ColumnDefinitions="1.4*,130,170,*">
                                         <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{Binding EffectiveStatus}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
                                         <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
                                         <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                                     </Grid>

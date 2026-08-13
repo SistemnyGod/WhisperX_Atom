@@ -53,6 +53,7 @@ public sealed class RecordingViewModel : ObservableObject
     private string _microphoneTestStatus = "Микрофон ещё не проверен.";
     private string _systemAudioTestStatus = "Системный звук ещё не проверен.";
     private bool _deviceListRefreshInProgress;
+    private bool _deviceEventStreamSupported;
     private string _processingStatus = "После остановки здесь появится статус WhisperX.";
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
@@ -240,7 +241,10 @@ public sealed class RecordingViewModel : ObservableObject
         if (_pollCts is not null) return;
         _pollCts = new CancellationTokenSource();
         _pollTask = PollLoopAsync(_pollCts.Token);
-        if (RecorderRuntimeMode.IsAudioGraph)
+        // Older installed Hosts expose only the one-request pipe. Do not open
+        // a long-lived subscription against them: it would occupy the only
+        // listener and make HEALTH/START appear to hang.
+        if (RecorderRuntimeMode.IsAudioGraph && _deviceEventStreamSupported)
             _deviceSubscriptionTask = DeviceSubscriptionLoopAsync(_pollCts.Token);
     }
 
@@ -937,7 +941,18 @@ public sealed class RecordingViewModel : ObservableObject
             _hasAudioSource = IsRequiredAudioReady(health, RecordingProfile);
             _recorderRuntimeReady = string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
                 ? health.DeviceWatcherReady && health.AudioGraphReady
+                    && health.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true
                 : string.Equals(health.CaptureEngine, "LEGACY_WASAPI", StringComparison.OrdinalIgnoreCase);
+            _deviceEventStreamSupported = health.Capabilities?.Contains(
+                AgentIpcProtocol.DeviceEventStreamCapability,
+                StringComparer.OrdinalIgnoreCase) == true;
+            if (string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
+                && (health.Capabilities is null
+                    || !health.Capabilities.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase)
+                    || !_deviceEventStreamSupported))
+            {
+                WarningMessage = "Recorder Host требует обновления для безопасной работы IPC. Запустите установщик актуальной версии.";
+            }
             _localStorageReady = health.FreeBytes > 0
                 && !string.Equals(health.StorageWatermarkState, "BLOCK_RECORDING", StringComparison.OrdinalIgnoreCase);
             _rawChunksPending = health.RawChunksPending;
@@ -972,6 +987,20 @@ public sealed class RecordingViewModel : ObservableObject
             // The AudioGraph Host rejected a legacy NAudio device identity.
             // Keep DEFAULT as the effective strategy instead of making the UI
             // repeatedly send an endpoint the Host can never open.
+            if (string.Equals(health.CaptureEngine, "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(_microphoneDeviceId)
+                && (health.CaptureDevices is null || health.CaptureDevices.All(device =>
+                    !string.Equals(device.Id, _microphoneDeviceId, StringComparison.OrdinalIgnoreCase))))
+            {
+                // Desktop settings may still contain an old NAudio identity.
+                // AudioGraph owns the authoritative DeviceInformation.Id list;
+                // never send an incompatible endpoint back to the Host.
+                _microphoneDeviceId = null;
+                _confirmedMicrophoneDeviceId = null;
+                SaveSettings();
+                OnPropertyChanged(nameof(SelectedMicrophoneId));
+                WarningMessage = "Сохранённый микрофон устарел. Подтвердите устройство Windows по умолчанию или выберите его заново.";
+            }
             if (health.UserReselectRequired && string.IsNullOrWhiteSpace(health.SelectedMicrophoneDeviceId))
             {
                 _microphoneDeviceId = null;
@@ -988,7 +1017,7 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(IsDeviceListRefreshInProgress));
             try
             {
-                if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
+            if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
                     OnPropertyChanged(nameof(Microphones));
                 if (UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден"))
                     OnPropertyChanged(nameof(SystemAudioDevices));
@@ -1000,7 +1029,9 @@ public sealed class RecordingViewModel : ObservableObject
             }
             var micState = health.MicrophoneCaptureState ?? (health.Microphone ? "DISCOVERED" : "DEVICE_LOST");
             var systemState = health.SystemAudioCaptureState ?? (health.SystemAudio ? "DISCOVERED" : "DEVICE_LOST");
-            MicrophoneStatus = health.Microphone ? $"Микрофон: {micState} · устройств: {health.CaptureDeviceCount}" : "Микрофон не найден";
+            MicrophoneStatus = health.Microphone
+                ? $"Микрофон: {micState} · устройств: {health.CaptureDeviceCount}"
+                : string.IsNullOrWhiteSpace(health.Error) ? "Микрофон не найден" : $"Recorder Host: {health.Error}";
             SystemAudioStatus = health.SystemAudio ? $"Системный звук: {systemState} · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
             OnPropertyChanged(nameof(MicrophoneStatus));
             OnPropertyChanged(nameof(SystemAudioStatus));
@@ -1100,6 +1131,11 @@ public sealed class RecordingViewModel : ObservableObject
         var code = value.Trim().ToUpperInvariant();
         return code switch
         {
+            "RECORDER_HOST_NOT_RUNNING" => "Recorder Host не запущен. Перезапустите приложение или установите актуальный пакет.",
+            "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_IPC_TIMEOUT" => "Recorder Host запущен, но не отвечает по IPC. Закройте старый Host и запустите актуальную версию.",
+            "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "IPC_VERSION_INCOMPATIBLE" => "Установленная версия Recorder Host несовместима с Desktop или требует перезапуска. Завершите старый Host и запустите актуальный установщик.",
+            "RECORDER_IPC_ACCESS_DENIED" => "Доступ Desktop к Recorder Host запрещён ACL named pipe. Перезапустите Host под текущим пользователем.",
+            "AUDIO_DEFAULT_ENDPOINT_MISSING" or "AUDIO_DEVICE_UNAVAILABLE" => "Windows не предоставила доступное устройство записи. Выберите микрофон или подтвердите устройство по умолчанию.",
             "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
             "MICROPHONE_PROBE_REQUIRED" or "microphone_probe_required" => "Микрофон найден, но ещё не подтверждён реальным захватом. Нажмите «Проверить микрофон».",
             "SYSTEM_AUDIO_PROBE_REQUIRED" or "system_audio_probe_required" => "Системный аудиопоток ещё не подтверждён реальным захватом. Нажмите «Проверить системный звук».",

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Reflection;
 
 namespace WhisperX.Atom.Recorder;
 
@@ -9,6 +10,20 @@ public static class AgentIpcProtocol
     public const int LegacyVersion = 5;
     public const int MinimumSupportedVersion = 5;
     public const int MaxServerInstances = 8;
+
+    public const string ConcurrentRequestsCapability = "CONCURRENT_REQUESTS";
+    public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
+
+    public static string CurrentBuildIdentity
+    {
+        get
+        {
+            var assembly = Assembly.GetEntryAssembly() ?? typeof(AgentIpcProtocol).Assembly;
+            return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                ?? assembly.GetName().Version?.ToString()
+                ?? "UNKNOWN";
+        }
+    }
 }
 
 public static class RecorderPipeNames
@@ -146,7 +161,9 @@ public sealed record AgentIpcHealth(
     // The confirmed configuration remains SelectedMicrophoneDeviceId. For
     // DEFAULT selection that value is null, while this value identifies the
     // endpoint Windows resolved for the current Host runtime.
-    string? EffectiveMicrophoneDeviceId = null);
+    string? EffectiveMicrophoneDeviceId = null,
+    string? RuntimeBuildIdentity = null,
+    IReadOnlyList<string>? Capabilities = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

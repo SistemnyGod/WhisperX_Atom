@@ -90,7 +90,7 @@ public sealed class AgentPipeHost(
     private async Task<AgentIpcResponse> ExecuteAsync(AgentIpcRequest request, CancellationToken cancellationToken)
     {
         var command = request.Command.Trim().ToUpperInvariant();
-        if (RecorderRuntimeMode.IsAudioGraph && IsCaptureOrDeliveryCommand(command))
+        if (!RecorderServiceRuntime.IsActive && IsCaptureOrDeliveryCommand(command))
             return Error("LEGACY_RUNTIME_STANDBY");
         var gated = IsMutatingCommand(command);
         if (gated) await _commandGate.WaitAsync(cancellationToken);

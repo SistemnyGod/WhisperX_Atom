@@ -41,12 +41,14 @@ finally
 
 public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, RecordingDeliveryCoordinator delivery, RawChunkRecovery rawRecovery, DeviceHealthMonitor deviceHealth, ILogger<RecorderWorker> logger) : BackgroundService
 {
+    private RecorderRuntimeLease? _runtimeLease;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // The Service remains installed as an explicit Legacy WASAPI fallback.
         // When the machine/runtime selection is AudioGraph it must not recover,
         // upload or finalize the canonical spool in parallel with Recorder Host.
-        if (RecorderRuntimeMode.IsAudioGraph)
+        if (RecorderServiceRuntime.IsAudioGraph)
         {
             logger.LogInformation("Legacy Recorder Service is in standby because AudioGraph Recorder Host owns the runtime.");
             try { await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken); }
@@ -54,6 +56,21 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
             return;
         }
 
+        try
+        {
+            _runtimeLease = RecorderRuntimeLease.Acquire(api.InstallationId);
+            RecorderServiceRuntime.SetActive(true);
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("RECORDER_RUNTIME_LEASE_HELD", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Legacy Recorder Service is in standby because another recorder runtime owns the canonical spool.");
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            return;
+        }
+
+        try
+        {
         await spool.InitializeAsync(stoppingToken);
         logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.ChunkDurationSeconds, api.IsConfigured);
         await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
@@ -159,6 +176,13 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                 logger.LogWarning(ex, "Agent command or upload channel is unavailable; local spool remains authoritative.");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
+        }
+        }
+        finally
+        {
+            RecorderServiceRuntime.SetActive(false);
+            _runtimeLease?.Dispose();
+            _runtimeLease = null;
         }
     }
 
@@ -350,9 +374,51 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        var localSession = recorder.SessionId;
-        await recorder.StopAsync(cancellationToken);
-        await UploadAndFinalizeAsync(localSession, cancellationToken);
+        // If the Service is standby because Host owns the lease, it must not
+        // touch the shared spool during shutdown either.
+        if (_runtimeLease is not null)
+        {
+            var localSession = recorder.SessionId;
+            await recorder.StopAsync(cancellationToken);
+            await UploadAndFinalizeAsync(localSession, cancellationToken);
+        }
         await base.StopAsync(cancellationToken);
     }
+}
+
+/// <summary>
+/// Runtime selection for the separately installed legacy Windows Service.
+/// Desktop process environment variables are not inherited by SCM-launched
+/// services, so the installer passes an explicit argument. A missing argument
+/// remains legacy for backwards compatibility with older service entries.
+/// </summary>
+internal static class RecorderServiceRuntime
+{
+    private static int _active;
+
+    public static bool IsAudioGraph { get; } = ResolveEngine() == RecorderRuntimeResolver.AudioGraph;
+    public static bool IsActive => Volatile.Read(ref _active) == 1;
+
+    public static void SetActive(bool active) => Volatile.Write(ref _active, active ? 1 : 0);
+
+    private static string ResolveEngine()
+    {
+        var args = Environment.GetCommandLineArgs();
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (argument.StartsWith("--runtime=", StringComparison.OrdinalIgnoreCase))
+                return Normalize(argument["--runtime=".Length..]);
+            if (string.Equals(argument, "--runtime", StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+                return Normalize(args[index + 1]);
+        }
+
+        return RecorderRuntimeResolver.LegacyWasapi;
+    }
+
+    private static string Normalize(string value) => value.Trim().ToUpperInvariant() switch
+    {
+        RecorderRuntimeResolver.AudioGraph => RecorderRuntimeResolver.AudioGraph,
+        _ => RecorderRuntimeResolver.LegacyWasapi
+    };
 }

@@ -9,149 +9,109 @@
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <controls:PageHeader Title="Запись" Subtitle="Проверка устройств, локальное сохранение и возобновляемая доставка">
+            <controls:PageHeader Title="Запись" Subtitle="Выберите микрофон, проверьте сигнал и начните локальную запись">
                 <controls:PageHeader.Actions>
-                    <Button Content="Проверить устройства" Style="{StaticResource ToolbarButtonStyle}" Click="CheckDevicesButton_Click" />
+                    <Button Content="Проверить устройства" Style="{StaticResource ToolbarButtonStyle}" Click="CheckDevicesButton_Click" AutomationProperties.Name="Проверить устройства записи" />
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
 
-            <Grid x:Name="RecordingHeroGrid" ColumnDefinitions="*,340" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
+            <Border Style="{StaticResource CardStyle}" Padding="14">
+                <StackPanel x:Name="RecordingActionsPanel" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanStart}" Click="StartButton_Click" AutomationProperties.Name="Начать запись" />
+                    <Button x:Name="PauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanPause}" Click="PauseResumeButton_Click" AutomationProperties.Name="Поставить запись на паузу" />
+                    <Button Content="Метка" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="MarkerButton_Click" AutomationProperties.Name="Добавить метку" />
+                    <Button Content="Решение" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="DecisionButton_Click" AutomationProperties.Name="Добавить решение" />
+                    <Button Content="Задача" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="TaskButton_Click" AutomationProperties.Name="Добавить задачу" />
+                    <Button Content="Завершить" Style="{StaticResource DangerButtonStyle}" IsEnabled="{Binding CanStop}" Click="StopButton_Click" AutomationProperties.Name="Завершить запись" />
+                </StackPanel>
+            </Border>
+
+            <Grid x:Name="RecordingHeroGrid" ColumnDefinitions="*,320" ColumnSpacing="16">
                 <StackPanel x:Name="RecordingMainColumn" Spacing="{StaticResource PageGap}">
-                    <Border x:Name="RecordingHeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" Padding="24">
-                        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="12">
+                    <Border x:Name="RecordingHeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" Padding="20">
+                        <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="12">
                             <StackPanel Orientation="Horizontal" Spacing="8">
-                                <Border x:Name="RecordingStateBadge" Style="{StaticResource StatusBadgeStyle}">
-                                    <TextBlock x:Name="RecordingStateBadgeText" Text="{Binding StateTitle}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" />
-                                </Border>
+                                <Border x:Name="RecordingStateBadge" Style="{StaticResource StatusBadgeStyle}"><TextBlock x:Name="RecordingStateBadgeText" Text="{Binding StateTitle}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" /></Border>
                                 <TextBlock Text="СОСТОЯНИЕ ЗАПИСИ" Style="{StaticResource EyebrowStyle}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding MediaTimeLabel}" FontSize="{StaticResource RecordingTimerTextSize}" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}" Margin="12,0,0,0" />
                             </StackPanel>
-                            <TextBox Grid.Row="1" Text="{Binding Title, Mode=TwoWay}" Style="{StaticResource InputStyle}" PlaceholderText="Название встречи" />
-                            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="12">
-                                <Ellipse x:Name="StateIndicator" Width="14" Height="14" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center" />
-                                <TextBlock Text="{Binding StateTitle}" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" />
-                                <TextBlock Text="{Binding MediaTimeLabel}" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}" />
+                            <TextBox Grid.Row="1" Text="{Binding Title, Mode=TwoWay}" Style="{StaticResource InputStyle}" PlaceholderText="Название совещания" AutomationProperties.Name="Название совещания" />
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="10">
+                                <Ellipse x:Name="StateIndicator" Width="12" Height="12" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding StateTitle}" Style="{StaticResource PageTitleStyle}" />
                             </StackPanel>
-                            <TextBlock Grid.Row="3" Text="{Binding StatusMessage}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <Grid Grid.Row="4" ColumnDefinitions="*,*" ColumnSpacing="18">
-                                <StackPanel Spacing="3">
-                                    <controls:AudioLevelMeter Label="Микрофон" Level="{Binding MicrophoneLevel}" DbText="{Binding MicrophoneDbLabel}" />
-                                    <controls:AudioWaveformMonitor Samples="{Binding MicrophoneWaveform}" IsStale="{Binding MicrophoneTelemetryStale}" />
-                                    <TextBlock Text="{Binding MicrophoneTelemetryLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Spacing="3">
-                                    <controls:AudioLevelMeter Label="Системный звук" Level="{Binding SystemAudioLevel}" DbText="{Binding SystemAudioDbLabel}" />
-                                    <controls:AudioWaveformMonitor Samples="{Binding SystemAudioWaveform}" IsStale="{Binding SystemAudioTelemetryStale}" />
-                                    <TextBlock Text="{Binding SystemAudioTelemetryLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Grid.Row="3" Spacing="8">
+                                <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                                <controls:AudioLevelMeter Label="Микрофон" Level="{Binding MicrophoneLevel}" DbText="{Binding MicrophoneDbLabel}" />
+                                <controls:AudioWaveformMonitor Samples="{Binding MicrophoneWaveform}" IsStale="{Binding MicrophoneTelemetryStale}" Height="74" />
+                                <TextBlock Text="{Binding MicrophoneTelemetryLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            </StackPanel>
                         </Grid>
                     </Border>
 
                     <InfoBar x:Name="ErrorInfoBar" IsOpen="False" IsClosable="False" Severity="Error">
-                        <InfoBar.ActionButton>
-                            <Button Content="Повторить отправку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" />
-                        </InfoBar.ActionButton>
+                        <InfoBar.ActionButton><Button Content="Повторить отправку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" /></InfoBar.ActionButton>
                     </InfoBar>
-
                     <InfoBar x:Name="WarningInfoBar" IsOpen="False" IsClosable="False" Severity="Warning" />
 
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Жизненный цикл записи" Style="{StaticResource SectionTitleStyle}" />
-                            <Grid x:Name="LifeCycleGrid" ColumnDefinitions="*,*,*,*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
-                                <TextBlock Text="1 · Проверка" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="1" Text="2 · Локальное сохранение" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="2" Text="3 · Master-файл" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="3" Text="4 · Синхронизация" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="4" Text="5 · API" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <Grid ColumnDefinitions="*,Auto"><TextBlock Text="Локальное сохранение" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="{Binding LocalFinalizeStatusLabel}" Grid.Column="1" Foreground="{StaticResource SuccessBrush}" /></Grid>
+                            <Grid x:Name="LifeCycleGrid" ColumnDefinitions="*,*,*,*,*" ColumnSpacing="8">
+                                <TextBlock Text="1 · Проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="2 · Первый frame" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="2" Text="3 · Durable chunk" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="3" Text="4 · Master FLAC" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="4" Text="5 · Доставка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                             </Grid>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource CardStyle}">
-                        <StackPanel Spacing="10">
-                            <Grid ColumnDefinitions="*,Auto">
-                                <StackPanel>
-                                    <TextBlock Text="WhisperX обработка" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="ASR → alignment → diarization → готовая стенограмма" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                                </StackPanel>
-                                <TextBlock Grid.Column="1" Text="{Binding ProcessingStatus}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" HorizontalTextAlignment="Right" />
-                            </Grid>
-                            <controls:ProcessingStepper Steps="{Binding ProcessingSteps}" CurrentIndex="{Binding ProcessingStageIndex}" />
-                            <ProgressBar Value="{Binding ProcessingProgress}" IsIndeterminate="{Binding IsProcessing}" Minimum="0" Maximum="100" />
-                            <TextBlock Text="{Binding TranscriptStatus}" FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding ProcessingError}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding TranscriptPreview}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" MaxLines="3" />
-                            <ListView ItemsSource="{Binding TranscriptSegments}" SelectionMode="None" MaxHeight="220">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10" Padding="0,4">
-                                            <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
-                            <Button Content="Открыть стенограмму совещания" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanOpenTranscript}" Click="OpenTranscriptButton_Click" HorizontalAlignment="Left" />
-                        </StackPanel>
-                    </Border>
-                </StackPanel>
-
-                <StackPanel x:Name="RecordingSourcesColumn" Grid.Column="1" Spacing="16">
-                    <Border Style="{StaticResource CardStyle}">
-                        <StackPanel x:Name="RecordingActionsPanel" Spacing="10">
-                            <TextBlock Text="Управление записью" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Следующее доступное действие определяется состоянием Agent." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                            <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanStart}" Click="StartButton_Click" />
-                            <Button x:Name="PauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanPause}" Click="PauseResumeButton_Click" />
-                            <Button Content="Метка" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="MarkerButton_Click" />
-                            <Button Content="Решение" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="DecisionButton_Click" />
-                            <Button Content="Задача" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="TaskButton_Click" />
-                            <Button Content="Завершить" Style="{StaticResource DangerButtonStyle}" IsEnabled="{Binding CanStop}" Click="StopButton_Click" />
-                        </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource CardStyle}">
-                        <StackPanel Spacing="10">
-                            <TextBlock Text="Источники записи" Style="{StaticResource SectionTitleStyle}" />
-                            <controls:DeviceSelector x:Name="MicrophoneSelector" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Микрофон" HelperText="Выбор недоступен только во время записи или паузы." SelectionChanged="MicrophoneCombo_SelectionChanged" />
-                            <Button Content="Проверить микрофон" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestMicrophoneButton_Click" />
-                            <TextBlock Text="{Binding MicrophoneTestStatus}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <controls:DeviceSelector x:Name="SystemAudioSelector" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Системный звук" HelperText="Выберите источник системного звука. Во время записи смена заблокирована." SelectionChanged="SystemAudioCombo_SelectionChanged" />
-                            <Button Content="Проверить системный звук" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestSystemAudioButton_Click" />
-                            <TextBlock Text="{Binding SystemAudioTestStatus}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="Профиль записи" Style="{StaticResource SectionTitleStyle}" Margin="0,8,0,0" />
-                            <ComboBox x:Name="RecordingProfileSelector" ItemsSource="{Binding RecordingProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding RecordingProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectRecordingProfile}" SelectionChanged="RecordingProfile_SelectionChanged" />
-                            <TextBlock Text="Профиль сохраняется в настройках Agent и определяет источник ASR и master-файла." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding DeliveryStatusLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding StorageWatermarkLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Border>
 
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Локальный архив" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Постоянная копия записи не удаляется после отправки." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" FontSize="{StaticResource CaptionTextSize}" />
-                            <TextBlock Text="{Binding LocalFinalizeStatusLabel}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding DeliveryStatusLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding StorageWatermarkLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <Button Content="Открыть локальный архив" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanOpenLocalArchive}" Click="OpenArchiveButton_Click" />
-                            <Button Content="Выбрать папку архива" Style="{StaticResource CardButtonStyle}" Click="SelectArchiveButton_Click" />
+                            <Grid ColumnDefinitions="*,Auto"><StackPanel><TextBlock Text="Обработка" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="Стенограмма появится после локального сохранения и доставки" Style="{StaticResource CaptionStyle}" /></StackPanel><TextBlock Grid.Column="1" Text="{Binding ProcessingStatus}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" HorizontalTextAlignment="Right" /></Grid>
+                            <controls:ProcessingStepper Steps="{Binding ProcessingSteps}" CurrentIndex="{Binding ProcessingStageIndex}" />
+                            <ProgressBar Value="{Binding ProcessingProgress}" IsIndeterminate="{Binding IsProcessing}" Minimum="0" Maximum="100" />
+                            <TextBlock Text="{Binding TranscriptStatus}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ProcessingError}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding TranscriptPreview}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" MaxLines="3" />
+                            <Button Content="Открыть стенограмму" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanOpenTranscript}" Click="OpenTranscriptButton_Click" HorizontalAlignment="Left" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel x:Name="RecordingSourcesColumn" Grid.Column="1" Spacing="{StaticResource PageGap}">
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel Spacing="9">
+                            <TextBlock Text="Источники" Style="{StaticResource SectionTitleStyle}" />
+                            <controls:DeviceSelector x:Name="MicrophoneSelector" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Микрофон" HelperText="Выбор сохраняется после успешной проверки устройства." SelectionChanged="MicrophoneCombo_SelectionChanged" />
+                            <Button Content="Проверить микрофон" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestMicrophoneButton_Click" AutomationProperties.Name="Проверить микрофон" />
+                            <TextBlock Text="{Binding MicrophoneTestStatus}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="Профиль записи" Style="{StaticResource WorkspaceLabelStyle}" Margin="0,6,0,0" />
+                            <ComboBox x:Name="RecordingProfileSelector" ItemsSource="{Binding RecordingProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding RecordingProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectRecordingProfile}" SelectionChanged="RecordingProfile_SelectionChanged" Style="{StaticResource FormComboBoxStyle}" AutomationProperties.Name="Профиль записи" />
+                            <TextBlock Text="ROOM / MIC_ONLY — основной профиль" Style="{StaticResource CaptionStyle}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Системный звук" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Дополнительный источник пока недоступен в основном сценарии. Микрофон продолжает работать отдельно." Style="{StaticResource CaptionStyle}" />
+                            <controls:DeviceSelector x:Name="SystemAudioSelector" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Источник системного звука" HelperText="Будет доступен в отдельном профиле." SelectionChanged="SystemAudioCombo_SelectionChanged" />
+                            <Button Content="Проверить системный звук" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestSystemAudioButton_Click" AutomationProperties.Name="Проверить системный звук" />
+                            <TextBlock Text="{Binding SystemAudioTestStatus}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Border>
 
                     <Border x:Name="SyncCard" Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Синхронизация" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Запись сначала остаётся в локальном архиве. Agent повторяет доставку при восстановлении связи." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding PendingUploadsLabel}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding ChunkSyncLabel}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding PendingBytesLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding PendingAgeLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding EncoderBacklogLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding RawEncoderReadyLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding RawReadyLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding BackgroundDeliveryLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="Доставка" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Локальная запись не зависит от сети. Непереданные chunks будут отправлены позже." Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding PendingUploadsLabel}" />
+                            <TextBlock Text="{Binding ChunkSyncLabel}" Foreground="{StaticResource TextSecondaryBrush}" />
+                            <TextBlock Text="{Binding PendingBytesLabel}" Foreground="{StaticResource TextSecondaryBrush}" />
                             <Button x:Name="RetryUploadPanelButton" Content="Повторить отправку" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" />
                         </StackPanel>
                     </Border>

@@ -12,7 +12,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="48" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="28" />
         </Grid.RowDefinitions>
 
         <TitleBar
@@ -26,11 +25,17 @@
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>
             <TitleBar.Content>
-                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" Margin="20,0,16,0">
-                    <Ellipse x:Name="SystemStatusIndicator" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
-                    <TextBlock x:Name="SystemStatusText" Text="Проверка системы" VerticalAlignment="Center" />
-                    <TextBlock x:Name="ProfileText" Text="Локальная сессия" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" Margin="12,0,0,0" />
-                </StackPanel>
+                <Grid MinWidth="560" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="20,0,16,0">
+                    <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" />
+                        <TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" />
+                        <TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" />
+                        <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" />
+                    </StackPanel>
+                    <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />
+                    <TextBlock x:Name="SystemStatusText" Visibility="Collapsed" Text="Проверка системы" />
+                </Grid>
             </TitleBar.Content>
         </TitleBar>
 
@@ -72,7 +77,7 @@
                         <FontIcon Glyph="&#xE787;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="SeriesNavItem" Content="Серии оперативок" Tag="series">
+                    <NavigationViewItem x:Name="SeriesNavItem" Visibility="Collapsed" Content="Серии оперативок" Tag="series">
                     <ToolTipService.ToolTip>Повторяющиеся оперативки</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Серии оперативок</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
@@ -107,22 +112,22 @@
                         <FontIcon Glyph="&#xE73E;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItemHeader Content="АНАЛИЗ" Style="{StaticResource NavigationHeaderStyle}" />
-                <NavigationViewItem x:Name="SearchNavItem" Content="Поиск" Tag="search">
+                <NavigationViewItemHeader x:Name="AnalysisNavHeader" Visibility="Collapsed" Content="АНАЛИЗ" Style="{StaticResource NavigationHeaderStyle}" />
+                <NavigationViewItem x:Name="SearchNavItem" Visibility="Collapsed" Content="Поиск" Tag="search">
                     <ToolTipService.ToolTip>Поиск по рабочим данным</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Поиск</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE721;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AnalyticsNavItem" Content="Аналитика" Tag="analytics">
+                <NavigationViewItem x:Name="AnalyticsNavItem" Visibility="Collapsed" Content="Аналитика" Tag="analytics">
                     <ToolTipService.ToolTip>Показатели обработки</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Аналитика</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE9D2;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AssistantNavItem" Content="ИИ-помощник" Tag="assistant">
+                <NavigationViewItem x:Name="AssistantNavItem" Visibility="Collapsed" Content="ИИ-помощник" Tag="assistant">
                     <ToolTipService.ToolTip>Чат с локальной нейросетью по стенограммам</ToolTipService.ToolTip>
                     <AutomationProperties.Name>ИИ-помощник</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
@@ -130,14 +135,14 @@
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItemHeader Content="СИСТЕМА" Style="{StaticResource NavigationHeaderStyle}" />
-                <NavigationViewItem x:Name="AgentsNavItem" Content="Агенты" Tag="agents">
+                <NavigationViewItem x:Name="AgentsNavItem" Content="Состояние системы" Tag="agents">
                     <ToolTipService.ToolTip>Состояние Recorder Agent</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Агенты</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE716;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AdministrationNavItem" Content="Администрирование" Tag="administration">
+                <NavigationViewItem x:Name="AdministrationNavItem" Visibility="Collapsed" Content="Администрирование" Tag="administration">
                     <ToolTipService.ToolTip>Пользователи и политики</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Администрирование</AutomationProperties.Name>
                     <NavigationViewItem.Icon>
@@ -155,12 +160,5 @@
             <Frame x:Name="NavFrame" />
         </NavigationView>
 
-        <Grid Grid.Row="2" Background="{StaticResource FooterBrush}" Padding="20,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBlock Text="WhisperX Atom Desktop" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
-        </Grid>
     </Grid>
 </Window>

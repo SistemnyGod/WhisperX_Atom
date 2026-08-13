@@ -52,7 +52,9 @@ PATCH /files/{id} отправить очередной блок
 
 ## Recorder Named Pipe
 
-Pipe name: `WhisperXAtomAgent`. Текущая версия IPC protocol — `5`.
+Primary AudioGraph Host pipe: `WhisperXAtomRecorderHost`. Current IPC protocol version is `6`.
+
+The legacy Service pipe `WhisperXAtomAgent` remains supported for the explicit `LEGACY_WASAPI` fallback and temporarily accepts protocol version `5`.
 
 | Команда | Назначение |
 | --- | --- |

@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $serviceName = "WhisperXAtomRecorder"
 $displayName = "WhisperX Atom Recorder Service"
 $serviceExe = Join-Path $ServiceDirectory "WhisperX.Atom.Recorder.Service.exe"
+$serviceCommandLine = "`"$serviceExe`" --runtime LEGACY_WASAPI"
 $recorderHostExe = if ([string]::IsNullOrWhiteSpace($RecorderHostDirectory)) { $null } else { Join-Path $RecorderHostDirectory "WhisperX.Atom.Recorder.Host.exe" }
 
 # ACL display names are localized and are not stable identifiers. Windows can
@@ -72,6 +73,67 @@ function Test-PinnedFfmpegPayload {
     }
 }
 
+function Invoke-RecorderHostIpc {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [int]$TimeoutMilliseconds = 3000
+    )
+
+    $pipe = $null
+    $reader = $null
+    $writer = $null
+    try {
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'WhisperXAtomRecorderHost', [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        $pipe.Connect($TimeoutMilliseconds)
+        if (-not $pipe.IsConnected) { return $null }
+        $reader = [System.IO.StreamReader]::new($pipe)
+        $writer = [System.IO.StreamWriter]::new($pipe)
+        $writer.AutoFlush = $true
+        $request = [ordered]@{ command = $Command; protocolVersion = 6; payload = @{} } | ConvertTo-Json -Compress -Depth 8
+        $writer.WriteLine($request)
+        $task = $reader.ReadLineAsync()
+        if (-not $task.Wait($TimeoutMilliseconds)) { return $null }
+        $line = $task.GetAwaiter().GetResult()
+        if ([string]::IsNullOrWhiteSpace($line)) { return $null }
+        return $line | ConvertFrom-Json
+    }
+    catch { return $null }
+    finally {
+        if ($null -ne $writer) { try { $writer.Dispose() } catch { } }
+        if ($null -ne $reader) { try { $reader.Dispose() } catch { } }
+        if ($null -ne $pipe) { try { $pipe.Dispose() } catch { } }
+    }
+}
+
+function Prepare-RecorderHostUpdate {
+    if ($null -eq $recorderHostExe) { return }
+
+    $processes = @(Get-Process -Name 'WhisperX.Atom.Recorder.Host' -ErrorAction SilentlyContinue)
+    if ($processes.Count -eq 0) { return }
+
+    $health = Invoke-RecorderHostIpc -Command 'HEALTH'
+    if ($null -eq $health) {
+        throw 'RECORDER_HOST_UPDATE_RESTART_REQUIRED: existing Host process is running but its IPC pipe is unresponsive.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$health.health.activeSessionId)) {
+        throw 'RECORDER_HOST_UPDATE_BLOCKED_ACTIVE_RECORDING: stop the active recording before updating Recorder Host.'
+    }
+
+    $shutdown = Invoke-RecorderHostIpc -Command 'SHUTDOWN'
+    if ($null -eq $shutdown -or $shutdown.ok -ne $true) {
+        throw 'RECORDER_HOST_UPDATE_RESTART_REQUIRED: current Host did not accept a safe idle shutdown.'
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $processes = @(Get-Process -Name 'WhisperX.Atom.Recorder.Host' -ErrorAction SilentlyContinue)
+    } while ($processes.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+    if ($processes.Count -gt 0) {
+        throw 'RECORDER_HOST_UPDATE_RESTART_REQUIRED: Host accepted shutdown but did not exit in time.'
+    }
+}
+
 function Get-InstallationIdFromConfig {
     param([Parameter(Mandatory)][string[]]$Paths)
 
@@ -124,6 +186,7 @@ if ([string]::IsNullOrWhiteSpace($AllowedUserSid) -and -not [string]::IsNullOrWh
     $AllowedUserSid = (Get-Content -LiteralPath $AllowedUserSidFile -Raw).Trim()
 }
 if ([string]::IsNullOrWhiteSpace($AllowedUserSid)) { throw "Installer user SID is required." }
+Prepare-RecorderHostUpdate
 $ffmpeg = Join-Path $ServiceDirectory "ffmpeg.exe"
 $ffprobe = Join-Path $ServiceDirectory "ffprobe.exe"
 if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
@@ -222,7 +285,7 @@ if ($null -ne $existing) {
     sc.exe delete $serviceName | Out-Null
     Start-Sleep -Seconds 1
 }
-New-Service -Name $serviceName -DisplayName $displayName -Description "Legacy fallback for WhisperX Atom recording" -BinaryPathName "`"$serviceExe`"" -StartupType Manual | Out-Null
+New-Service -Name $serviceName -DisplayName $displayName -Description "Legacy fallback for WhisperX Atom recording" -BinaryPathName $serviceCommandLine -StartupType Manual | Out-Null
 sc.exe config $serviceName start= demand | Out-Null
 sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
 Write-Host "Installed $displayName in Manual/Stopped fallback mode"

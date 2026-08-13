@@ -13,7 +13,8 @@ function Resolve-RecorderRuntime {
         try {
             $config = Get-Content -LiteralPath $MachineConfigPath -Raw | ConvertFrom-Json
             $candidate = [string]$config.audioConfiguration.captureEngine
-            if ($candidate -in @("AUDIOGRAPH", "LEGACY_WASAPI")) {
+            $audioVersion = [int]$config.audioConfiguration.audioConfigurationVersion
+            if ([int]$config.schemaVersion -eq 2 -and $audioVersion -eq 2 -and $candidate -in @("AUDIOGRAPH", "LEGACY_WASAPI")) {
                 $engine = $candidate
                 $source = "MACHINE_CONFIG"
             }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.Principal;
 using System.Text;
 using WhisperX.Atom.Desktop;
 using WhisperX.Atom.Recorder;
@@ -13,7 +14,10 @@ public sealed record RecorderServiceSnapshot(
     bool PipeReachable,
     string? BinaryPath,
     string? Version,
-    string? Error)
+    string? Error,
+    int? ProcessId = null,
+    string? BuildIdentity = null,
+    IReadOnlyList<string>? Capabilities = null)
 {
     public bool Running => string.Equals(State, "RUNNING", StringComparison.OrdinalIgnoreCase);
 }
@@ -102,30 +106,100 @@ public sealed class RecorderServiceController(IRecorderService recorder)
 
     private async Task<RecorderServiceSnapshot> GetHostSnapshotAsync(CancellationToken cancellationToken)
     {
+        var process = InspectHostProcess();
         try
         {
             var response = await recorder.GetHealthAsync(cancellationToken);
             var health = response.Health;
             var executable = ResolveHostExecutable();
+            var expectedBuild = GetFileVersion(executable);
+            var buildMatches = string.IsNullOrWhiteSpace(health?.RuntimeBuildIdentity)
+                || string.IsNullOrWhiteSpace(expectedBuild)
+                || string.Equals(health.RuntimeBuildIdentity, expectedBuild, StringComparison.OrdinalIgnoreCase);
+            var hasConcurrentHostCapabilities = health?.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true;
+            var hasEventStreamCapability = health?.Capabilities?.Contains(AgentIpcProtocol.DeviceEventStreamCapability, StringComparer.OrdinalIgnoreCase) == true;
+            var capabilityError = hasConcurrentHostCapabilities && hasEventStreamCapability ? null : "RECORDER_HOST_UPDATE_REQUIRED";
+            var pipeResponsive = health is not null;
+            var error = response.Error;
+            if (!buildMatches || capabilityError is not null)
+                error = capabilityError ?? "RECORDER_HOST_UPDATE_REQUIRED";
             return new RecorderServiceSnapshot(
                 RecorderPipeNames.AudioGraphHost,
-                response.Ok ? "RUNNING" : "UNKNOWN",
-                Exists: response.Ok,
-                PipeReachable: response.Ok,
+                pipeResponsive ? "RUNNING" : "UNKNOWN",
+                Exists: pipeResponsive || process.Exists,
+                PipeReachable: pipeResponsive && error is null,
+                BinaryPath: executable,
+                Version: health?.RuntimeBuildIdentity ?? GetFileVersion(executable),
+                Error: error,
+                ProcessId: process.ProcessId,
+                BuildIdentity: health?.RuntimeBuildIdentity,
+                Capabilities: health?.Capabilities);
+        }
+        catch (RecorderIpcException exception) when (string.Equals(exception.ErrorCode, "RECORDER_IPC_ACCESS_DENIED", StringComparison.OrdinalIgnoreCase))
+        {
+            // The pipe exists but its ACL does not allow this desktop token.
+            // Do not report the Host as stopped or try to launch a competing
+            // second instance; surface the actionable IPC error instead.
+            var executable = ResolveHostExecutable();
+            return new RecorderServiceSnapshot(
+                RecorderPipeNames.AudioGraphHost,
+                "UNKNOWN",
+                Exists: true,
+                PipeReachable: false,
                 BinaryPath: executable,
                 Version: GetFileVersion(executable),
-                Error: response.Ok ? null : response.Error ?? "RECORDER_HOST_UNAVAILABLE");
+                Error: "RECORDER_IPC_ACCESS_DENIED",
+                ProcessId: process.ProcessId);
         }
-        catch (Exception exception) when (exception is RecorderIpcException or IOException or TimeoutException)
+        catch (UnauthorizedAccessException)
+        {
+            // The pipe exists but its ACL does not allow this desktop token.
+            // Do not report the Host as stopped or try to launch a competing
+            // second instance; surface the actionable IPC error instead.
+            var executable = ResolveHostExecutable();
+            return new RecorderServiceSnapshot(
+                RecorderPipeNames.AudioGraphHost,
+                "UNKNOWN",
+                Exists: true,
+                PipeReachable: false,
+                BinaryPath: executable,
+                Version: GetFileVersion(executable),
+                Error: "RECORDER_IPC_ACCESS_DENIED",
+                ProcessId: process.ProcessId);
+        }
+        catch (RecorderIpcException exception) when (string.Equals(exception.ErrorCode, "IPC_VERSION_INCOMPATIBLE", StringComparison.OrdinalIgnoreCase))
         {
             return new RecorderServiceSnapshot(
                 RecorderPipeNames.AudioGraphHost,
-                "STOPPED",
-                Exists: false,
+                process.Exists ? "RUNNING" : "NOT_FOUND",
+                Exists: process.Exists,
                 PipeReachable: false,
-                BinaryPath: null,
-                Version: null,
-                Error: "RECORDER_HOST_UNAVAILABLE");
+                BinaryPath: process.Path ?? ResolveHostExecutable(),
+                Version: process.BuildIdentity ?? GetFileVersion(process.Path ?? ResolveHostExecutable()),
+                Error: "RECORDER_HOST_UPDATE_REQUIRED",
+                ProcessId: process.ProcessId,
+                BuildIdentity: process.BuildIdentity);
+        }
+        catch (Exception exception) when (exception is RecorderIpcException or IOException or TimeoutException)
+        {
+            var expectedBuild = GetFileVersion(ResolveHostExecutable());
+            var staleBuild = process.Exists
+                && !string.IsNullOrWhiteSpace(process.BuildIdentity)
+                && !string.IsNullOrWhiteSpace(expectedBuild)
+                && !string.Equals(process.BuildIdentity, expectedBuild, StringComparison.OrdinalIgnoreCase);
+            var error = staleBuild
+                ? "RECORDER_HOST_UPDATE_RESTART_REQUIRED"
+                : process.Exists ? "RECORDER_HOST_PIPE_UNRESPONSIVE" : "RECORDER_HOST_NOT_RUNNING";
+            return new RecorderServiceSnapshot(
+                RecorderPipeNames.AudioGraphHost,
+                process.Exists ? "RUNNING" : "NOT_FOUND",
+                Exists: process.Exists,
+                PipeReachable: false,
+                BinaryPath: process.Path ?? ResolveHostExecutable(),
+                Version: process.BuildIdentity ?? GetFileVersion(process.Path ?? ResolveHostExecutable()),
+                Error: error,
+                ProcessId: process.ProcessId,
+                BuildIdentity: process.BuildIdentity);
         }
     }
 
@@ -133,6 +207,8 @@ public sealed class RecorderServiceController(IRecorderService recorder)
     {
         var before = await GetHostSnapshotAsync(cancellationToken);
         if (before.PipeReachable) return before;
+        if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED")
+            return before;
 
         var executable = ResolveHostExecutable();
         if (!string.IsNullOrWhiteSpace(executable) && File.Exists(executable))
@@ -151,6 +227,9 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "WhisperXAtom", "Agent", "agent-config.json");
             directStart.Environment["ATOM_AGENT_DPAPI_SCOPE"] = "CURRENT_USER";
+            var currentUserSid = WindowsIdentity.GetCurrent().User?.Value;
+            if (!string.IsNullOrWhiteSpace(currentUserSid))
+                directStart.Environment["ATOM_AGENT_ALLOWED_SID"] = currentUserSid;
             var installationId = ResolveMachineInstallationId();
             if (!string.IsNullOrWhiteSpace(installationId))
                 directStart.Environment["ATOM_AGENT_INSTALLATION_ID"] = installationId;
@@ -219,6 +298,35 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         return null;
     }
 
+    private static HostProcessInspection InspectHostProcess()
+    {
+        try
+        {
+            var currentSession = Process.GetCurrentProcess().SessionId;
+            foreach (var process in Process.GetProcessesByName(HostProcessName))
+            {
+                try
+                {
+                    if (process.SessionId != currentSession) continue;
+                    var path = TryGetProcessPath(process);
+                    return new HostProcessInspection(true, process.Id, path, GetFileVersion(path));
+                }
+                finally { process.Dispose(); }
+            }
+        }
+        catch { }
+
+        return new HostProcessInspection(false, null, null, null);
+    }
+
+    private static string? TryGetProcessPath(Process process)
+    {
+        try { return process.MainModule?.FileName; }
+        catch { return null; }
+    }
+
+    private sealed record HostProcessInspection(bool Exists, int? ProcessId, string? Path, string? BuildIdentity);
+
     internal static string? ResolveHostExecutable()
     {
         var configured = Environment.GetEnvironmentVariable("WHISPERX_RECORDER_HOST_EXE");
@@ -238,7 +346,12 @@ public sealed class RecorderServiceController(IRecorderService recorder)
 
     private static string? GetFileVersion(string? path)
     {
-        try { return !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? FileVersionInfo.GetVersionInfo(path).FileVersion : null; }
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+            var info = FileVersionInfo.GetVersionInfo(path);
+            return string.IsNullOrWhiteSpace(info.ProductVersion) ? info.FileVersion : info.ProductVersion;
+        }
         catch { return null; }
     }
 

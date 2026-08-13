@@ -73,6 +73,30 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
                 { Authenticated = services.Backend.HasSession };
         }
 
+        // Do not issue another network request during an offline restart. A
+        // previously confirmed user can use the local recorder immediately;
+        // only the local pipe must be checked before publishing that state.
+        if (services.Backend.AuthState == DesktopAuthState.Offline)
+        {
+            var pipeReachable = host?.PipeReachable == true;
+            if (!pipeReachable)
+            {
+                try { pipeReachable = (await services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false)).Ok; }
+                catch { }
+            }
+
+            if (offlineEligible)
+                return new(false, pipeReachable, true, "SERVER_UNAVAILABLE",
+                    pipeReachable
+                        ? "LAN server is unavailable; Recorder is ready for local capture."
+                        : "LAN server is unavailable; Recorder must be started before capture.")
+                { Authenticated = true, PipeReachable = pipeReachable };
+
+            return new(false, pipeReachable, false, "SERVER_UNAVAILABLE",
+                "LAN server is unavailable and the local Agent link is not confirmed.")
+            { Authenticated = false, PipeReachable = pipeReachable };
+        }
+
         var user = await services.Backend.GetCurrentUserAsync(cancellationToken);
         if (user is null && services.Backend.AuthState == DesktopAuthState.Offline
             && offlineEligible && host?.PipeReachable == true)

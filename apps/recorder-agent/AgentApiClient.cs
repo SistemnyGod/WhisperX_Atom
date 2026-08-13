@@ -94,8 +94,11 @@ public sealed class AgentApiClient : IDisposable
         _baseUri = new Uri(baseUrl, UriKind.Absolute);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_ID") ?? config?.AgentId, out _agentId);
         Guid.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_INSTALLATION_ID") ?? config?.InstallationId.ToString(), out _installationId);
-        if (_installationId == Guid.Empty) _installationId = Guid.NewGuid();
+        var installationIdWasGenerated = _installationId == Guid.Empty;
+        if (installationIdWasGenerated) _installationId = Guid.NewGuid();
         _token = Environment.GetEnvironmentVariable("ATOM_AGENT_TOKEN") ?? config?.Token ?? string.Empty;
+        if (installationIdWasGenerated || config is null || config.InstallationId != _installationId)
+            PersistInstallationIdentity(config);
         if (config is not null && !string.Equals(config.ServerUrl.TrimEnd('/'), _baseUri.ToString().TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
             TryPersistMigratedConfiguration(config, _baseUri);
         _serverConnectionState = IsConfigured ? "UNKNOWN" : "NOT_CONFIGURED";
@@ -779,7 +782,8 @@ public sealed class AgentApiClient : IDisposable
             {
                 ServerUrl = serverUri.ToString().TrimEnd('/'),
                 Token = ProtectToken(config.Token),
-                Encrypted = true
+                Encrypted = true,
+                InstallationId = _installationId
             };
             File.WriteAllText(temporary, JsonSerializer.Serialize(migrated, ConfigJson));
             File.Move(temporary, _configPath, true);
@@ -787,6 +791,37 @@ public sealed class AgentApiClient : IDisposable
         catch
         {
             // A failed migration must not prevent the Agent from reconnecting.
+        }
+    }
+
+    private void PersistInstallationIdentity(AgentConfiguration? config)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_configPath)!;
+            Directory.CreateDirectory(directory);
+            var temporary = _configPath + ".part";
+            var persisted = new AgentConfiguration(
+                _baseUri.ToString().TrimEnd('/'),
+                _agentId == Guid.Empty ? string.Empty : _agentId.ToString(),
+                string.IsNullOrWhiteSpace(_token) ? string.Empty : ProtectToken(_token),
+                !string.IsNullOrWhiteSpace(_token),
+                _installationId,
+                _storage.ArchiveRoot,
+                _storage.MicrophoneDeviceId,
+                _storage.SystemAudioDeviceId,
+                _storage.RecordingProfile,
+                config?.AudioConfiguration ?? AudioConfigurationV2.FromCurrent(
+                    _storage.MicrophoneDeviceId,
+                    _storage.SystemAudioDeviceId,
+                    RecorderRuntimeResolver.Current.CaptureEngine,
+                    _storage.UserReselectRequired));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(persisted, ConfigJson));
+            File.Move(temporary, _configPath, true);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("INSTALLATION_ID_PERSIST_FAILED", ex);
         }
     }
 

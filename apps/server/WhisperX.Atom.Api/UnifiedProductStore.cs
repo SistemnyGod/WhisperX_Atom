@@ -4,7 +4,38 @@ using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
 
-public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
+public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null)
+{
+    private static readonly TimeSpan ActiveHeartbeatWindow = TimeSpan.FromSeconds(90);
+
+    public bool IsActive
+    {
+        get
+        {
+            if (LastSeenAt is null || string.Equals(Status, "OFFLINE", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Status, "REVOKED", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var seenUtc = DateTime.SpecifyKind(LastSeenAt.Value, DateTimeKind.Utc);
+            return DateTime.UtcNow - seenUtc <= ActiveHeartbeatWindow;
+        }
+    }
+
+    public string EffectiveStatus =>
+        string.Equals(Status, "REVOKED", StringComparison.OrdinalIgnoreCase)
+            ? "REVOKED"
+            : IsActive ? Status : "OFFLINE";
+
+    public int? HeartbeatAgeSeconds
+    {
+        get
+        {
+            if (LastSeenAt is null) return null;
+            var seenUtc = DateTime.SpecifyKind(LastSeenAt.Value, DateTimeKind.Utc);
+            return Math.Max(0, (int)(DateTime.UtcNow - seenUtc).TotalSeconds);
+        }
+    }
+}
 public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false, bool Linked = true);
 public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument Payload, long Cursor, string Status);
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);

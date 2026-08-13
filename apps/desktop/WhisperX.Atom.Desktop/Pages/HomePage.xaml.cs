@@ -77,8 +77,9 @@ public sealed partial class HomePage : Page
 
     private void HomePage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (HomeContentGrid is null || HomeMainColumn is null || HomeRailColumn is null || KpiGrid is null) return;
         ResponsiveLayout.SetTwoColumn(HomeContentGrid, HomeMainColumn, HomeRailColumn, 320, e.NewSize.Width);
-        ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
+        ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement?[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
     }
 
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");

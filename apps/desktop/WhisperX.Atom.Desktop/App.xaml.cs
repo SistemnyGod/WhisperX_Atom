@@ -93,6 +93,19 @@ public partial class App : Application
             }
             else if (_services.Backend.CanUseOffline)
             {
+                // Restore the local-first bootstrap state before showing the
+                // UI. Otherwise RecordingViewModel starts with AgentReady=false
+                // even though this user has a confirmed offline session.
+                try
+                {
+                    using var offlineBootstrapTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var offlineBootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync(offlineBootstrapTimeout.Token);
+                    WriteStartupLog($"OFFLINE_BOOTSTRAP_{offlineBootstrap.Code}", null);
+                }
+                catch (Exception exception)
+                {
+                    WriteStartupLog("OFFLINE_BOOTSTRAP_DEFERRED", exception);
+                }
                 ShowMainWindow();
             }
             else

@@ -18,12 +18,12 @@ if (-not $SkipRecorder) {
         if ($engine.Trim().ToUpperInvariant() -eq "AUDIOGRAPH") {
             $env:AUDIO_CAPTURE_ENGINE = "AUDIOGRAPH"
             & (Join-Path $PSScriptRoot "start-recorder-host.ps1") -ReadyTimeoutSeconds 20
-            if ($LASTEXITCODE -ne 0) { throw "RECORDER_HOST_START_FAILED: exit code $LASTEXITCODE" }
+            if (-not $?) { throw "RECORDER_HOST_START_FAILED: recorder host launcher returned a failure." }
         }
         else {
             $env:AUDIO_CAPTURE_ENGINE = "LEGACY_WASAPI"
             & (Join-Path $PSScriptRoot "start-recorder-service.ps1")
-            if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_START_FAILED: exit code $LASTEXITCODE" }
+            if (-not $?) { throw "RECORDER_SERVICE_START_FAILED: recorder service launcher returned a failure." }
         }
     }
     catch {
@@ -208,8 +208,9 @@ if ([string]::IsNullOrWhiteSpace($desktopExe)) {
             "-p:NuGetAudit=false", "--output", $publishedDesktop, "--no-restore"
         )
         & $dotnet.Source @publishArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "Desktop publish failed with exit code $LASTEXITCODE"
+        $publishExitCode = if (Get-Variable LASTEXITCODE -ErrorAction SilentlyContinue) { [int]$LASTEXITCODE } else { 0 }
+        if ($publishExitCode -ne 0) {
+            throw "Desktop publish failed with exit code $publishExitCode"
         }
     }
     finally {

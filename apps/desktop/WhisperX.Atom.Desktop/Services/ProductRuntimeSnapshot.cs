@@ -66,11 +66,17 @@ public sealed record ProductRuntimeSnapshot(
             ["RecorderHost"] = new(
                 "RecorderHost",
                 recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
-                    ? recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
+                    ? recorder.Ok && HasCurrentHostCapabilities(recorder.Health) ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
                     : ProductRuntimeStatus.Disabled,
-                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST" ? recorder?.Error : null,
-                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST" ? "AUDIOGRAPH" : "not selected", now,
-                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"),
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
+                    ? recorder?.Error ?? (HasCurrentHostCapabilities(recorder?.Health) ? null : "RECORDER_HOST_UPDATE_REQUIRED")
+                    : null,
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
+                    ? recorder?.Health?.RuntimeBuildIdentity ?? "AUDIOGRAPH"
+                    : "not selected",
+                now,
+                recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST",
+                recorder?.Health?.Capabilities),
             ["LegacyServiceFallback"] = new(
                 "LegacyServiceFallback",
                 recorder?.Health?.RecorderProcessModel == "WINDOWS_SERVICE"
@@ -110,7 +116,11 @@ public sealed record ProductRuntimeSnapshot(
             ["Qwen"] = new("Qwen", ProductRuntimeStatus.Disabled, "QWEN_OPTIONAL_DISABLED", "SUMMARY", now, false)
         };
 
-        var canRecord = map["Recorder"].Status is ProductRuntimeStatus.Ready
+        var recorderProcessReady = map["RecorderHost"].Status is ProductRuntimeStatus.Ready
+            || map["LegacyServiceFallback"].Status is ProductRuntimeStatus.Ready;
+        var canRecord = map["Authentication"].Status is ProductRuntimeStatus.Ready
+            && map["Recorder"].Status is ProductRuntimeStatus.Ready
+            && recorderProcessReady
             && map["CaptureRuntime"].Status is ProductRuntimeStatus.Ready
             && map["LocalStorage"].Status is ProductRuntimeStatus.Ready;
         var canUpload = canRecord && map["Backend"].Status is ProductRuntimeStatus.Ready
@@ -119,4 +129,8 @@ public sealed record ProductRuntimeSnapshot(
         var canSummarize = canTranscribe && map["Qwen"].Status is ProductRuntimeStatus.Ready;
         return new ProductRuntimeSnapshot(now, map, canRecord, canUpload, canTranscribe, canSummarize);
     }
+
+    private static bool HasCurrentHostCapabilities(AgentIpcHealth? health) =>
+        health?.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true
+        && health.Capabilities.Contains(AgentIpcProtocol.DeviceEventStreamCapability, StringComparer.OrdinalIgnoreCase);
 }

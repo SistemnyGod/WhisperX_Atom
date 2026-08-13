@@ -43,7 +43,8 @@ public sealed record DesktopAgentBootstrapResult(
     bool ReenrollRequired = false,
     bool Linked = true,
     string State = "AGENT_READY");
-public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Status, DateTimeOffset? LastSeenAt, Guid? InstallationId = null)
+public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Status, DateTimeOffset? LastSeenAt, Guid? InstallationId = null,
+    string EffectiveStatus = "OFFLINE", bool IsActive = false, int? HeartbeatAgeSeconds = null)
 {
     [JsonIgnore]
     public string LastSeenText => LastSeenAt is null ? "—" : LastSeenAt.Value.LocalDateTime.ToString("dd.MM.yyyy HH:mm:ss");

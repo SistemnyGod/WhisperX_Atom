@@ -3,9 +3,10 @@
 The product UI is a Windows desktop application. The browser UI is not required.
 
 - `WhisperX.Atom.Desktop`: WPF operator and administration UI.
-- `WhisperX.Atom.Recorder.Service`: Windows Service for capture, local spool and upload.
+- `WhisperX.Atom.Recorder.Host`: current-user AudioGraph capture process that owns the primary recording path, local spool and upload.
+- `WhisperX.Atom.Recorder.Service`: Windows Service fallback for the explicit `LEGACY_WASAPI` mode.
 - The local Development API is loopback-only at `http://127.0.0.1:8080`; Production uses the separate HTTPS gateway configuration.
-- `AgentPipeHost` exposes a local Named Pipe (`WhisperXAtomAgent`) for desktop recording controls.
+- `RecorderHostPipeServer` exposes `WhisperXAtomRecorderHost` for the primary Desktop recording controls. The legacy `WhisperXAtomAgent` pipe is used only by the explicit fallback Service mode.
 
 Build a package:
 

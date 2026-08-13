@@ -70,6 +70,18 @@ function Test-RecorderPipe {
     }
 }
 
+function Get-ProductVersion([string]$path) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $null
+        }
+        $version = (Get-Item -LiteralPath $path).VersionInfo.ProductVersion
+        if ([string]::IsNullOrWhiteSpace($version)) { return $null }
+        return $version
+    }
+    catch { return $null }
+}
+
 if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { $ExecutablePath = $defaultExe }
 $publishRequired = $Rebuild -or -not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)
 if (-not $publishRequired) {
@@ -89,9 +101,11 @@ if ($publishRequired) {
         "-p:NuGetAudit=false", "-o", $publishedRoot, "--no-restore"
     )
     & dotnet publish @publishArgs
-    if ($LASTEXITCODE -ne 0) { throw "RECORDER_HOST_BUILD_FAILED" }
+    $publishExitCode = if (Get-Variable LASTEXITCODE -ErrorAction SilentlyContinue) { [int]$LASTEXITCODE } else { 0 }
+    if ($publishExitCode -ne 0) { throw "RECORDER_HOST_BUILD_FAILED: exit code $publishExitCode" }
 }
 $ExecutablePath = (Resolve-Path -LiteralPath $ExecutablePath).Path
+$expectedBuild = Get-ProductVersion $ExecutablePath
 
 $anyHost = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | Select-Object -First 1)
 if ($anyHost.Count -gt 0 -and (Test-RecorderPipe)) {
@@ -101,6 +115,24 @@ if ($anyHost.Count -gt 0 -and (Test-RecorderPipe)) {
     $anyHost[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
     Write-Host "Recorder host is already running. PID=$($anyHost[0].Id)"
     return
+}
+if ($anyHost.Count -gt 0) {
+    # A process-level mutex belongs to the user session even when the pipe is
+    # temporarily unavailable. Never start a second Host: it will only fail
+    # with RECORDER_HOST_ALREADY_RUNNING and can compete with recovery later.
+    # A non-responsive process is an actionable failure, not a successful
+    # no-op. In particular, an old binary may still own the pipe while the
+    # current package is already published beside it.
+    $anyHost[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
+    $runningPath = $null
+    try { $runningPath = $anyHost[0].Path } catch { }
+    $runningBuild = Get-ProductVersion $runningPath
+    if (-not [string]::IsNullOrWhiteSpace($expectedBuild) -and
+        -not [string]::IsNullOrWhiteSpace($runningBuild) -and
+        -not [string]::Equals($expectedBuild, $runningBuild, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "RECORDER_HOST_UPDATE_RESTART_REQUIRED: running Host build '$runningBuild' does not match expected '$expectedBuild'. No duplicate Host was started."
+    }
+    throw "RECORDER_HOST_PIPE_UNRESPONSIVE: Host process $($anyHost[0].Id) is running but its IPC pipe is not ready. No duplicate Host was started."
 }
 
 $existing = Get-RecorderProcess $ExecutablePath

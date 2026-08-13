@@ -38,6 +38,7 @@ public sealed partial class MainWindow : Window
 
         _services = services;
         var settings = services.Settings.Load();
+        PageTitleText.Text = "Главная";
         HomeNavItem.Content = "Главная";
         RecordingNavItem.Content = "Запись";
         MeetingsNavItem.Content = "Совещания";
@@ -49,7 +50,7 @@ public sealed partial class MainWindow : Window
         SearchNavItem.Content = "Поиск";
         AnalyticsNavItem.Content = "Аналитика";
         AssistantNavItem.Content = "ИИ-помощник";
-        AgentsNavItem.Content = "Агенты";
+        AgentsNavItem.Content = "Состояние системы";
         AdministrationNavItem.Content = "Администрирование";
         SettingsNavItem.Content = "Настройки";
         SystemStatusText.Text = "Система";
@@ -83,6 +84,18 @@ public sealed partial class MainWindow : Window
     private void NavigateToPage(string route, object? payload = null)
     {
         var normalizedRoute = route.ToLowerInvariant();
+        PageTitleText.Text = normalizedRoute switch
+        {
+            "recording" => "Запись",
+            "meetings" => "Совещания",
+            "transcripts" => "Стенограммы",
+            "summaries" => "Саммари",
+            "tasks" => "Задачи",
+            "speakers" => "Спикеры",
+            "agents" => "Состояние системы",
+            "settings" => "Настройки",
+            _ => "Главная"
+        };
         object parameter = normalizedRoute == "meetings" && payload is MeetingNavigationTarget target
             ? new MeetingNavigationRequest(_services, target)
             : normalizedRoute switch
@@ -180,6 +193,7 @@ public sealed partial class MainWindow : Window
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
+        SetRuntimeStatus(backendAvailable, recorderAvailable, processingReady);
         SetSystemStatus(status.Item1, status.Item2);
     }
 
@@ -206,6 +220,19 @@ public sealed partial class MainWindow : Window
         {
             SystemStatusIndicator.Fill = brush;
         }
+    }
+
+    private void SetRuntimeStatus(bool backendAvailable, bool recorderAvailable, bool processingReady)
+    {
+        if (!_uiDispatcherQueue.HasThreadAccess)
+        {
+            _uiDispatcherQueue.TryEnqueue(() => SetRuntimeStatus(backendAvailable, recorderAvailable, processingReady));
+            return;
+        }
+
+        RecorderStatusText.Text = recorderAvailable ? "Recorder · готов" : "Recorder · недоступен";
+        ServerStatusText.Text = backendAvailable ? "Сервер · доступен" : "Сервер · офлайн";
+        WhisperXStatusText.Text = processingReady ? "WhisperX · готов" : "WhisperX · не готов";
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)

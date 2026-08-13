@@ -605,6 +605,8 @@ internal static class AudioGraphErrorMapper
     public static string Map(Exception exception)
     {
         var message = exception.ToString();
+        if (message.Contains("RECORDER_RUNTIME_LEASE_HELD", StringComparison.OrdinalIgnoreCase))
+            return "RECORDER_RUNTIME_LEASE_HELD";
         if (exception is InvalidCastException
             || message.Contains("AUDIO_BUFFER_INTEROP_FAILED", StringComparison.OrdinalIgnoreCase)
             || message.Contains("IMemoryBufferByteAccess", StringComparison.OrdinalIgnoreCase)

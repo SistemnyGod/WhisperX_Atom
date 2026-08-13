@@ -65,7 +65,13 @@ public static class RecorderRuntimeResolver
 
     private static string? ReadConfiguredEngine(string path)
     {
-        return Normalize(MachineServerConfig.Load(path)?.AudioConfiguration?.CaptureEngine);
+        var config = MachineServerConfig.Load(path);
+        // A v1 file may still provide ServerOrigin, but it is not a valid
+        // source for the recorder engine. Installer/config migration owns the
+        // v1 -> v2 transition; until then use the release default explicitly.
+        if (config is null || config.SchemaVersion != 2 || config.AudioConfiguration is null)
+            return null;
+        return Normalize(config.AudioConfiguration.CaptureEngine);
     }
 
     private static string? Normalize(string? value)

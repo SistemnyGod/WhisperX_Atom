@@ -286,7 +286,8 @@ def test_runtime_config_and_legacy_standby_preserve_the_audiograph_default():
     script_resolver = read("scripts/Resolve-RecorderRuntime.ps1")
 
     assert "environmentOverride ?? Environment.GetEnvironmentVariable(EnvironmentVariable)" in resolver
-    assert "MachineServerConfig.Load(path)?.AudioConfiguration?.CaptureEngine" in resolver
+    assert "var config = MachineServerConfig.Load(path)" in resolver
+    assert "config.SchemaVersion != 2" in resolver
     assert "schemaVersion = 2" in config_writer
     assert "installationId = $installationId" in config_writer
     assert "audioConfigurationVersion = 2" in config_writer

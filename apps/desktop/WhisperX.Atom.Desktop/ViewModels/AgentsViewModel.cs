@@ -53,7 +53,9 @@ public sealed class AgentsViewModel : ObservableObject
     public bool HasAgents => Agents.Count > 0;
     public bool HasSelection => SelectedAgent is not null;
     public string AgentCountText => Agents.Count.ToString();
-    public string OnlineCountText => Agents.Count(agent => IsOnline(agent.Status)).ToString();
+    public string OnlineCountText => Agents.Count(agent => agent.IsActive).ToString();
+    public string UnavailableCountText => Agents.Count(agent => !agent.IsActive && !string.Equals(agent.EffectiveStatus, "REVOKED", StringComparison.OrdinalIgnoreCase)).ToString();
+    public string RevokedCountText => Agents.Count(agent => string.Equals(agent.EffectiveStatus, "REVOKED", StringComparison.OrdinalIgnoreCase)).ToString();
 
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
@@ -166,12 +168,9 @@ public sealed class AgentsViewModel : ObservableObject
         OnPropertyChanged(nameof(HasAgents));
         OnPropertyChanged(nameof(AgentCountText));
         OnPropertyChanged(nameof(OnlineCountText));
+        OnPropertyChanged(nameof(UnavailableCountText));
+        OnPropertyChanged(nameof(RevokedCountText));
     }
-
-    private static bool IsOnline(string status) => status.Equals("ONLINE", StringComparison.OrdinalIgnoreCase)
-        || status.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
-        || status.Equals("READY", StringComparison.OrdinalIgnoreCase)
-        || status.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase);
 
     private static string FormatStorage(long free, long total) => free <= 0 || total <= 0
         ? "Нет данных"

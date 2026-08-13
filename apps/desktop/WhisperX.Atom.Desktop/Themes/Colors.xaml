@@ -22,6 +22,23 @@
     <Color x:Key="DangerColor">#D64550</Color>
     <Color x:Key="DangerSurfaceColor">#FFF6F6</Color>
     <Color x:Key="DangerBorderColor">#F0B9BE</Color>
+    <Color x:Key="InfoSurfaceColor">#EEF5FF</Color>
+    <Color x:Key="DisabledSurfaceColor">#F1F4F8</Color>
+    <Color x:Key="DisabledTextColor">#8996A8</Color>
+
+    <!-- Semantic aliases used by the workspace. Keep legacy keys above for compatibility. -->
+    <SolidColorBrush x:Key="AppBackgroundBrush" Color="{StaticResource PageBackgroundColor}" />
+    <SolidColorBrush x:Key="SurfacePrimaryBrush" Color="{StaticResource SurfaceColor}" />
+    <SolidColorBrush x:Key="SurfaceSecondaryBrush" Color="{StaticResource SidebarColor}" />
+    <SolidColorBrush x:Key="SurfaceElevatedBrush" Color="{StaticResource SurfaceColor}" />
+    <SolidColorBrush x:Key="BorderDefaultBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="BorderStrongBrush" Color="{StaticResource HeroBorderColor}" />
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource MutedTextColor}" />
+    <SolidColorBrush x:Key="TextMutedBrush" Color="{StaticResource MutedTextColor}" />
+    <SolidColorBrush x:Key="InfoSurfaceBrush" Color="{StaticResource InfoSurfaceColor}" />
+    <SolidColorBrush x:Key="DisabledSurfaceBrush" Color="{StaticResource DisabledSurfaceColor}" />
+    <SolidColorBrush x:Key="DisabledTextBrush" Color="{StaticResource DisabledTextColor}" />
 
     <SolidColorBrush x:Key="PageBackgroundBrush" Color="{StaticResource PageBackgroundColor}" />
     <SolidColorBrush x:Key="SidebarBrush" Color="{StaticResource SidebarColor}" />

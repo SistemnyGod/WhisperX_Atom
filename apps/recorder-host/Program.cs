@@ -18,6 +18,10 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
     options.TimestampFormat = "O ";
 });
+var hostLogPath = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+    "WhisperXAtom", "logs", "recorder-host.log");
+builder.Logging.AddProvider(new RecorderHostFileLoggerProvider(hostLogPath));
 var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
     ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
 
