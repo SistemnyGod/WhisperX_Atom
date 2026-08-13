@@ -30,10 +30,10 @@ public sealed record DeviceHealthSnapshot(
             using var enumerator = new MMDeviceEnumerator();
             var captureEndpoints = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
             var renderEndpoints = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-            var defaultCaptureId = TryGetDefaultId(enumerator, DataFlow.Capture);
-            var defaultRenderId = TryGetDefaultId(enumerator, DataFlow.Render);
-            captureDevices = captureEndpoints.Select(device => ToDevice(device, device.ID == defaultCaptureId)).ToArray();
-            renderDevices = renderEndpoints.Select(device => ToDevice(device, device.ID == defaultRenderId)).ToArray();
+            var captureDefaults = GetDefaultIds(enumerator, DataFlow.Capture);
+            var renderDefaults = GetDefaultIds(enumerator, DataFlow.Render);
+            captureDevices = captureEndpoints.Select(device => ToDevice(device, DataFlow.Capture, captureDefaults)).ToArray();
+            renderDevices = renderEndpoints.Select(device => ToDevice(device, DataFlow.Render, renderDefaults)).ToArray();
             captureCount = captureDevices.Count;
             renderCount = renderDevices.Count;
             microphone = IsSelectedDeviceAvailable(captureDevices, storage?.MicrophoneDeviceId);
@@ -64,12 +64,64 @@ public sealed record DeviceHealthSnapshot(
     private static bool IsSelectedDeviceAvailable(IReadOnlyList<AgentIpcAudioDevice> devices, string? selectedId) =>
         devices.Count > 0 && (string.IsNullOrWhiteSpace(selectedId) || devices.Any(device => string.Equals(device.Id, selectedId, StringComparison.OrdinalIgnoreCase)));
 
-    private static AgentIpcAudioDevice ToDevice(MMDevice device, bool isDefault) =>
-        new(device.ID, string.IsNullOrWhiteSpace(device.FriendlyName) ? device.ID : device.FriendlyName, isDefault);
-
-    private static string? TryGetDefaultId(MMDeviceEnumerator enumerator, DataFlow flow)
+    private static AgentIpcAudioDevice ToDevice(MMDevice device, DataFlow flow, DefaultEndpointIds defaults)
     {
-        try { return enumerator.GetDefaultAudioEndpoint(flow, Role.Multimedia)?.ID; }
+        int? sampleRate = null;
+        int? channels = null;
+        int? bits = null;
+        int? validBits = null;
+        string? sourceEncoding = null;
+        string? sourceSubFormat = null;
+        string? normalized = null;
+        try
+        {
+            var format = device.AudioClient.MixFormat;
+            var descriptor = AudioSampleFormatResolver.Resolve(format);
+            sampleRate = descriptor.SampleRate;
+            channels = descriptor.Channels;
+            bits = descriptor.BitsPerSample;
+            validBits = descriptor.ValidBitsPerSample;
+            sourceEncoding = descriptor.SourceEncoding;
+            sourceSubFormat = descriptor.SourceSubFormat;
+            normalized = descriptor.CanonicalEncoding;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException or NotSupportedException)
+        {
+            sourceEncoding = "UNRESOLVED";
+        }
+
+        return new AgentIpcAudioDevice(
+            device.ID,
+            string.IsNullOrWhiteSpace(device.FriendlyName) ? device.ID : device.FriendlyName,
+            string.Equals(device.ID, defaults.Multimedia, StringComparison.OrdinalIgnoreCase),
+            device.State.ToString(),
+            flow.ToString(),
+            string.Equals(device.ID, defaults.Console, StringComparison.OrdinalIgnoreCase),
+            string.Equals(device.ID, defaults.Multimedia, StringComparison.OrdinalIgnoreCase),
+            string.Equals(device.ID, defaults.Communications, StringComparison.OrdinalIgnoreCase),
+            sampleRate,
+            channels,
+            sourceEncoding,
+            sourceSubFormat,
+            bits,
+            validBits,
+            normalized,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static DefaultEndpointIds GetDefaultIds(MMDeviceEnumerator enumerator, DataFlow flow)
+    {
+        return new(
+            TryGetDefaultId(enumerator, flow, Role.Console),
+            TryGetDefaultId(enumerator, flow, Role.Multimedia),
+            TryGetDefaultId(enumerator, flow, Role.Communications));
+    }
+
+    private static string? TryGetDefaultId(MMDeviceEnumerator enumerator, DataFlow flow, Role role)
+    {
+        try { return enumerator.GetDefaultAudioEndpoint(flow, role)?.ID; }
         catch (COMException) { return null; }
     }
+
+    private sealed record DefaultEndpointIds(string? Console, string? Multimedia, string? Communications);
 }

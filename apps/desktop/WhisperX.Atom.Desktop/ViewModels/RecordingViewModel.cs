@@ -22,6 +22,8 @@ public sealed class RecordingViewModel : ObservableObject
     private int _pendingUploads;
     private string? _microphoneDeviceId;
     private string? _systemAudioDeviceId;
+    private string? _confirmedMicrophoneDeviceId;
+    private string? _confirmedSystemAudioDeviceId;
     private string _recordingProfile = "ROOM";
     private bool _recordingProfileManaged;
     private CancellationTokenSource? _processingCts;
@@ -46,6 +48,8 @@ public sealed class RecordingViewModel : ObservableObject
     private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
     private IReadOnlyList<double> _systemAudioWaveform = Array.Empty<double>();
     private string _microphoneTestStatus = "Микрофон ещё не проверен.";
+    private string _systemAudioTestStatus = "Системный звук ещё не проверен.";
+    private bool _deviceListRefreshInProgress;
     private string _processingStatus = "После остановки здесь появится статус WhisperX.";
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
@@ -77,6 +81,8 @@ public sealed class RecordingViewModel : ObservableObject
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
         _microphoneDeviceId = settings.MicrophoneDeviceId;
         _systemAudioDeviceId = settings.SystemAudioDeviceId;
+        _confirmedMicrophoneDeviceId = settings.MicrophoneDeviceId;
+        _confirmedSystemAudioDeviceId = settings.SystemAudioDeviceId;
         _recordingProfile = NormalizeRecordingProfile(settings.RecordingProfile);
     }
 
@@ -189,7 +195,9 @@ public sealed class RecordingViewModel : ObservableObject
     public bool MicrophoneTelemetryStale => _microphoneTelemetryStale;
     public bool SystemAudioTelemetryStale => _systemAudioTelemetryStale;
     public string MicrophoneTestStatus { get => _microphoneTestStatus; private set => SetProperty(ref _microphoneTestStatus, value); }
-    public bool CanTestAudio => State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
+    public string SystemAudioTestStatus { get => _systemAudioTestStatus; private set => SetProperty(ref _systemAudioTestStatus, value); }
+    public bool IsDeviceListRefreshInProgress => _deviceListRefreshInProgress;
+    public bool CanTestAudio => State is not (RecordingState.Starting or RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
     // A previously confirmed Agent/owner pair may continue local-first
     // capture while the LAN server is offline. It is still not advertised as
     // server-ready, but the persisted owner makes the local path safe.
@@ -200,6 +208,7 @@ public sealed class RecordingViewModel : ObservableObject
     public string StateTitle => State switch
     {
         RecordingState.Checking => "Проверка устройств",
+        RecordingState.Starting => "Запуск захвата",
         RecordingState.Recording => "Идёт запись",
         RecordingState.Paused => "Запись приостановлена",
         RecordingState.Finalizing => "Сохранение записи",
@@ -215,7 +224,7 @@ public sealed class RecordingViewModel : ObservableObject
     public bool CanRetryUpload => _sessionRetryable && !string.IsNullOrWhiteSpace(SessionId) && State is (RecordingState.Idle or RecordingState.Error or RecordingState.Finalizing);
     // Local capture has already stopped in Finalizing; encoding and delivery run in the
     // background and must not prevent configuring the next recording.
-    public bool CanSelectDevices => State is not RecordingState.Recording and not RecordingState.Paused;
+    public bool CanSelectDevices => State is not (RecordingState.Starting or RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
     public string RecordingProfile { get => _recordingProfile; private set => SetProperty(ref _recordingProfile, value); }
     public bool RecordingProfileManaged { get => _recordingProfileManaged; private set => SetProperty(ref _recordingProfileManaged, value); }
     public bool CanSelectRecordingProfile => !_recordingProfileManaged && State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
@@ -429,19 +438,19 @@ public sealed class RecordingViewModel : ObservableObject
     public async Task SetMicrophoneAsync(string? id)
     {
         if (!CanSelectDevices || string.Equals(_microphoneDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
-        var previous = _microphoneDeviceId;
+        var previous = _confirmedMicrophoneDeviceId;
         _microphoneDeviceId = NormalizeDeviceId(id);
         OnPropertyChanged(nameof(SelectedMicrophoneId));
-        await SaveAndSyncDevicesAsync(previous, _systemAudioDeviceId, microphoneChanged: true, systemChanged: false);
+        await SaveAndSyncDevicesAsync(previous, _confirmedSystemAudioDeviceId, microphoneChanged: true, systemChanged: false);
     }
 
     public async Task SetSystemAudioAsync(string? id)
     {
         if (!CanSelectDevices || string.Equals(_systemAudioDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
-        var previous = _systemAudioDeviceId;
+        var previous = _confirmedSystemAudioDeviceId;
         _systemAudioDeviceId = NormalizeDeviceId(id);
         OnPropertyChanged(nameof(SelectedSystemAudioId));
-        await SaveAndSyncDevicesAsync(_microphoneDeviceId, previous, microphoneChanged: false, systemChanged: true);
+        await SaveAndSyncDevicesAsync(_confirmedMicrophoneDeviceId, previous, microphoneChanged: false, systemChanged: true);
     }
 
     public async Task SetRecordingProfileAsync(string? profile)
@@ -475,17 +484,38 @@ public sealed class RecordingViewModel : ObservableObject
             MicrophoneTestStatus = result is null
                 ? "Не удалось получить результат проверки."
                 : !result.Success
-                    ? "Устройство недоступно."
+                    ? $"Аудиопакеты не получены: {result.ErrorCode ?? "AUDIO_TEST_FAILED"}."
                     : !result.SignalDetected
                         ? "Сигнал не обнаружен."
                         : result.Clipping
                             ? $"Сигнал обнаружен, но есть clipping. Пик: {result.PeakDb:0} dB."
                             : $"Микрофон работает. Средний уровень: {result.AverageRmsDb:0} dB, пик: {result.PeakDb:0} dB.";
+            await RefreshAsync();
         }
         catch (Exception ex)
         {
             MicrophoneTestStatus = $"Проверка не выполнена: {SafeError(ex)}";
         }
+    }
+
+    public async Task TestSystemAudioAsync()
+    {
+        if (!CanTestAudio) return;
+        SystemAudioTestStatus = "Проверяю системный звук…";
+        try
+        {
+            var response = await _services.Recorder.TestAudioSourceAsync(_systemAudioDeviceId, systemAudio: true);
+            var result = response.AudioSourceTest;
+            SystemAudioTestStatus = result is null
+                ? "Не удалось получить результат проверки."
+                : !result.Success
+                    ? $"Аудиопакеты не получены: {result.ErrorCode ?? "AUDIO_TEST_FAILED"}."
+                    : !result.SignalDetected
+                        ? $"Поток открыт: пакетов {result.PacketCount}, но сигнал пока не обнаружен."
+                        : $"Системный звук работает. Пик: {result.PeakDb:0} dB.";
+            await RefreshAsync();
+        }
+        catch (Exception ex) { SystemAudioTestStatus = $"Проверка не выполнена: {SafeError(ex)}"; }
     }
 
     public async Task SetArchiveRootAsync(string path)
@@ -525,13 +555,15 @@ public sealed class RecordingViewModel : ObservableObject
                 NormalizeDeviceId(confirmed?.SelectedSystemAudioDeviceId), _systemAudioDeviceId, StringComparison.OrdinalIgnoreCase);
             if (!microphoneConfirmed || !systemConfirmed)
                 throw new InvalidOperationException("DEVICE_SELECTION_NOT_CONFIRMED");
+            _confirmedMicrophoneDeviceId = _microphoneDeviceId;
+            _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
             SaveSettings();
             ErrorMessage = string.Empty;
         }
         catch (Exception ex)
         {
-            _microphoneDeviceId = previousMicrophoneId;
-            _systemAudioDeviceId = previousSystemAudioId;
+            _microphoneDeviceId = _confirmedMicrophoneDeviceId = previousMicrophoneId;
+            _systemAudioDeviceId = _confirmedSystemAudioDeviceId = previousSystemAudioId;
             OnPropertyChanged(nameof(SelectedMicrophoneId));
             OnPropertyChanged(nameof(SelectedSystemAudioId));
             ErrorMessage = ex is InvalidOperationException { Message: "DEVICE_SELECTION_NOT_CONFIRMED" }
@@ -860,7 +892,7 @@ public sealed class RecordingViewModel : ObservableObject
             if (response.Health is { } health)
         {
             _pendingUploads = health.PendingUploadSessions;
-            _hasAudioSource = health.Microphone || health.SystemAudio;
+            _hasAudioSource = IsRequiredAudioReady(health, RecordingProfile);
             _rawChunksPending = health.RawChunksPending;
             _rawChunksFailed = health.RawChunksFailed;
             _rawChunksBytes = health.RawChunksBytes;
@@ -892,12 +924,26 @@ public sealed class RecordingViewModel : ObservableObject
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
             _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
-            if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
-                OnPropertyChanged(nameof(Microphones));
-            if (UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден"))
-                OnPropertyChanged(nameof(SystemAudioDevices));
-            MicrophoneStatus = health.Microphone ? $"Микрофон готов · устройств: {health.CaptureDeviceCount}" : "Микрофон не найден";
-            SystemAudioStatus = health.SystemAudio ? $"Системный звук готов · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
+            if (_confirmedMicrophoneDeviceId is null) _confirmedMicrophoneDeviceId = health.SelectedMicrophoneDeviceId;
+            if (_confirmedSystemAudioDeviceId is null) _confirmedSystemAudioDeviceId = health.SelectedSystemAudioDeviceId;
+            _deviceListRefreshInProgress = true;
+            OnPropertyChanged(nameof(IsDeviceListRefreshInProgress));
+            try
+            {
+                if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
+                    OnPropertyChanged(nameof(Microphones));
+                if (UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден"))
+                    OnPropertyChanged(nameof(SystemAudioDevices));
+            }
+            finally
+            {
+                _deviceListRefreshInProgress = false;
+                OnPropertyChanged(nameof(IsDeviceListRefreshInProgress));
+            }
+            var micState = health.MicrophoneCaptureState ?? (health.Microphone ? "DISCOVERED" : "DEVICE_LOST");
+            var systemState = health.SystemAudioCaptureState ?? (health.SystemAudio ? "DISCOVERED" : "DEVICE_LOST");
+            MicrophoneStatus = health.Microphone ? $"Микрофон: {micState} · устройств: {health.CaptureDeviceCount}" : "Микрофон не найден";
+            SystemAudioStatus = health.SystemAudio ? $"Системный звук: {systemState} · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
             OnPropertyChanged(nameof(MicrophoneStatus));
             OnPropertyChanged(nameof(SystemAudioStatus));
             OnPropertyChanged(nameof(MicrophoneLevel));
@@ -915,6 +961,7 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(CanStart));
         StatusMessage = State switch
         {
+            RecordingState.Starting => "Открываю аудиопоток и жду первый принятый буфер…",
             RecordingState.Recording => "Запись идёт. Метки сохраняются в локальном архиве.",
             RecordingState.Paused => "Запись приостановлена. Можно продолжить или завершить.",
             RecordingState.Finalizing => "Локальная копия сохраняется, затем Agent повторит отправку.",
@@ -939,15 +986,50 @@ public sealed class RecordingViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(selectedId) && source.All(x => !string.Equals(x.Id, selectedId, StringComparison.OrdinalIgnoreCase)))
             desired.Add(new AudioDeviceOption(selectedId, unavailableLabel, false, "Unavailable"));
         desired.AddRange(source.Select(device => new AudioDeviceOption(device.Id, device.Name, device.IsDefault, device.State)));
-        if (target.Count == desired.Count && target.Zip(desired).All(pair => pair.First == pair.Second)) return false;
-        target.Clear();
-        foreach (var device in desired) target.Add(device);
-        return true;
+        var changed = false;
+        for (var index = 0; index < desired.Count; index++)
+        {
+            var wanted = desired[index];
+            var existingIndex = -1;
+            for (var candidateIndex = 0; candidateIndex < target.Count; candidateIndex++)
+            {
+                if (!string.Equals(target[candidateIndex].Id, wanted.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                existingIndex = candidateIndex;
+                break;
+            }
+            if (existingIndex >= 0 && existingIndex != index)
+            {
+                var existing = target[existingIndex];
+                target.RemoveAt(existingIndex);
+                target.Insert(index, existing == wanted ? existing : wanted);
+                changed = true;
+            }
+            else if (index >= target.Count)
+            {
+                target.Add(wanted);
+                changed = true;
+            }
+            else if (target[index] != wanted)
+            {
+                target[index] = wanted;
+                changed = true;
+            }
+        }
+        while (target.Count > desired.Count) { target.RemoveAt(target.Count - 1); changed = true; }
+        return changed;
     }
+
+    private static bool IsRequiredAudioReady(AgentIpcHealth health, string profile) => profile switch
+    {
+        "SYSTEM_ONLY" => health.SystemAudioCaptureReady == true,
+        "ONLINE" => health.MicrophoneCaptureReady == true && health.SystemAudioCaptureReady == true,
+        _ => health.MicrophoneCaptureReady == true
+    };
 
     private static RecordingState ParseState(string? state) => state?.ToUpperInvariant() switch
     {
         "RECORDING" => RecordingState.Recording,
+        "STARTING" => RecordingState.Starting,
         "PAUSED" => RecordingState.Paused,
         "FINALIZING" => RecordingState.Finalizing,
         "ERROR" => RecordingState.Error,
@@ -961,6 +1043,12 @@ public sealed class RecordingViewModel : ObservableObject
         return code switch
         {
             "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
+            "MICROPHONE_PROBE_REQUIRED" or "microphone_probe_required" => "Микрофон найден, но ещё не подтверждён реальным захватом. Нажмите «Проверить микрофон».",
+            "SYSTEM_AUDIO_PROBE_REQUIRED" or "system_audio_probe_required" => "Системный аудиопоток ещё не подтверждён реальным захватом. Нажмите «Проверить системный звук».",
+            "AUDIO_NO_DATA" => "Поток открылся, но за время проверки не пришёл ни один аудиопакет.",
+            "AUDIO_CALLBACK_TIMEOUT" => "Аудиопоток открылся, но первый буфер не пришёл вовремя. Проверьте устройство и разрешения Windows.",
+            "AUDIO_DEVICE_ACCESS_DENIED" => "Windows не разрешила доступ к аудиоустройству. Проверьте разрешение микрофона и классических приложений.",
+            "AUDIO_FORMAT_UNSUPPORTED" => "Формат аудиоустройства не поддерживается Recorder Agent.",
             "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Проверьте свободное место и доступ к архиву.",
             "ENCODER_FAILED" => "Не удалось закодировать аудиочанк. Локальные данные сохранены для восстановления.",
             "LOCAL_ENCODING_FAILED" => "Не удалось завершить кодирование локального аудио.",

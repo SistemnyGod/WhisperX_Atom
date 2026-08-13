@@ -5,12 +5,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Program.cs;RecordingCoordinator.cs;AgentApiClient.cs;DeviceHealth.cs;AgentPipeHost.cs;AgentPipeSecurity.cs;LocalArchiveWriter.cs;FlacEncoder.cs;RawChunkRecovery.cs;SessionFinalizationCoordinator.cs;RecordingDeliveryCoordinator.cs;AudioSampleFormat.cs" />
+    <Compile Remove="Program.cs;RecordingCoordinator.cs;AgentApiClient.cs;DeviceHealth.cs;DeviceHealthMonitor.cs;AgentPipeHost.cs;AgentPipeSecurity.cs;LocalArchiveWriter.cs;FlacEncoder.cs;RawChunkRecovery.cs;SessionFinalizationCoordinator.cs;RecordingDeliveryCoordinator.cs;AudioRuntimeProbeRunner.cs;AudioRuntimeProbe\**" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageReference Include="SQLitePCLRaw.core" Version="2.1.12" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
     <PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 </Project>

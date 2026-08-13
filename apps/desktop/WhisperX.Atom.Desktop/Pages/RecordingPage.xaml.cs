@@ -104,6 +104,13 @@ public sealed partial class RecordingPage : Page
         UpdateError();
     }
 
+    private async void TestSystemAudioButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.TestSystemAudioAsync();
+        UpdateError();
+    }
+
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
@@ -133,14 +140,14 @@ public sealed partial class RecordingPage : Page
 
     private async void MicrophoneCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingSelections || ViewModel is null || MicrophoneSelector.SelectedItem is not AudioDeviceOption option) return;
+        if (_updatingSelections || ViewModel?.IsDeviceListRefreshInProgress == true || ViewModel is null || MicrophoneSelector.SelectedItem is not AudioDeviceOption option) return;
         await ViewModel.SetMicrophoneAsync(option.Id);
         UpdateError();
     }
 
     private async void SystemAudioCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingSelections || ViewModel is null || SystemAudioSelector.SelectedItem is not AudioDeviceOption option) return;
+        if (_updatingSelections || ViewModel?.IsDeviceListRefreshInProgress == true || ViewModel is null || SystemAudioSelector.SelectedItem is not AudioDeviceOption option) return;
         await ViewModel.SetSystemAudioAsync(option.Id);
         UpdateError();
     }

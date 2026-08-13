@@ -119,6 +119,8 @@
                             <Button Content="Проверить микрофон" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestMicrophoneButton_Click" />
                             <TextBlock Text="{Binding MicrophoneTestStatus}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             <controls:DeviceSelector x:Name="SystemAudioSelector" ItemsSource="{Binding SystemAudioDevices}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Системный звук" HelperText="Выберите источник системного звука. Во время записи смена заблокирована." SelectionChanged="SystemAudioCombo_SelectionChanged" />
+                            <Button Content="Проверить системный звук" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanTestAudio}" Click="TestSystemAudioButton_Click" />
+                            <TextBlock Text="{Binding SystemAudioTestStatus}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             <TextBlock Text="Профиль записи" Style="{StaticResource SectionTitleStyle}" Margin="0,8,0,0" />
                             <ComboBox x:Name="RecordingProfileSelector" ItemsSource="{Binding RecordingProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding RecordingProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectRecordingProfile}" SelectionChanged="RecordingProfile_SelectionChanged" />
                             <TextBlock Text="Профиль сохраняется в настройках Agent и определяет источник ASR и master-файла." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />

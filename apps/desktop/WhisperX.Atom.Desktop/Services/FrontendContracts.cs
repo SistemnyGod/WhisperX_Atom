@@ -8,6 +8,7 @@ public enum RecordingState
 {
     Idle,
     Checking,
+    Starting,
     Recording,
     Paused,
     Finalizing,

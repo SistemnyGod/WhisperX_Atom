@@ -2,7 +2,7 @@ using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder;
 
-internal enum RawAudioSampleFormat
+public enum RawAudioSampleFormat
 {
     Pcm16,
     Pcm24,
@@ -10,7 +10,7 @@ internal enum RawAudioSampleFormat
     Float32
 }
 
-internal sealed record AudioSampleFormatDescriptor(
+public sealed record AudioSampleFormatDescriptor(
     RawAudioSampleFormat Kind,
     int SampleRate,
     int Channels,
@@ -38,7 +38,7 @@ internal sealed record AudioSampleFormatDescriptor(
     };
 }
 
-internal static class AudioSampleFormatResolver
+public static class AudioSampleFormatResolver
 {
     private static readonly Guid PcmSubFormat = new("00000001-0000-0010-8000-00aa00389b71");
     private static readonly Guid IeeeFloatSubFormat = new("00000003-0000-0010-8000-00aa00389b71");

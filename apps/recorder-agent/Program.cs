@@ -18,6 +18,7 @@ try
     var builder = Host.CreateApplicationBuilder(args);
     builder.Services.AddSerilog();
     builder.Services.AddSingleton(new SpoolStore(dataRoot));
+    builder.Services.AddSingleton<DeviceHealthMonitor>();
     builder.Services.AddSingleton<AgentStorageSettings>();
     builder.Services.AddSingleton<AgentStateMachine>();
     builder.Services.AddSingleton<RecordingCoordinator>();
@@ -36,7 +37,7 @@ finally
     await Log.CloseAndFlushAsync();
 }
 
-public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, RecordingDeliveryCoordinator delivery, RawChunkRecovery rawRecovery, ILogger<RecorderWorker> logger) : BackgroundService
+public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, RecordingDeliveryCoordinator delivery, RawChunkRecovery rawRecovery, DeviceHealthMonitor deviceHealth, ILogger<RecorderWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -101,7 +102,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                 }
                 if (DateTimeOffset.UtcNow >= api.NextHeartbeatAtUtc)
                 {
-                    var health = DeviceHealthSnapshot.Collect(Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
+                    var health = deviceHealth.Collect(Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
                         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent"), storage);
                     await api.HeartbeatAsync(health, stoppingToken);
                     logger.LogDebug("Device health: microphone={Microphone}, captureDevices={CaptureDevices}, systemAudio={SystemAudio}, renderDevices={RenderDevices}, freeBytes={FreeBytes}, error={Error}",

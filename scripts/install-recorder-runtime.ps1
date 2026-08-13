@@ -10,6 +10,8 @@ $publishRoot = Join-Path $repo "artifacts\recorder-current"
 $project = Join-Path $repo "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj"
 $sourceExe = Join-Path $publishRoot "WhisperX.Atom.Recorder.Service.exe"
 $installer = Join-Path $repo "apps\desktop\Installer\Install-Service.ps1"
+$ffmpegSourceRoot = if (-not [string]::IsNullOrWhiteSpace($env:WHISPERX_FFMPEG_DIR)) { $env:WHISPERX_FFMPEG_DIR } else { Join-Path $repo "vendor\ffmpeg\win-x64" }
+$ffmpegSourceRoot = [IO.Path]::GetFullPath($ffmpegSourceRoot)
 
 $isAdministrator = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdministrator) {
@@ -37,6 +39,28 @@ if (-not $NoBuild -or -not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     if ($LASTEXITCODE -ne 0) { throw "RECORDER_PUBLISH_FAILED" }
 }
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "RECORDER_BINARY_NOT_FOUND: $sourceExe" }
+
+# Keep the standalone service installer aligned with the release publisher.
+# The service must use the pinned payload beside its executable, never a
+# machine PATH executable.
+$ffmpegManifestPath = Join-Path $ffmpegSourceRoot "ffmpeg-manifest.json"
+if (-not (Test-Path -LiteralPath $ffmpegManifestPath -PathType Leaf)) {
+    throw "FFMPEG_MANIFEST_NOT_FOUND: $ffmpegManifestPath"
+}
+$ffmpegManifest = Get-Content -LiteralPath $ffmpegManifestPath -Raw | ConvertFrom-Json
+if ($ffmpegManifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$ffmpegManifest.version)) {
+    throw "FFMPEG_MANIFEST_INVALID: $ffmpegManifestPath"
+}
+foreach ($entry in $ffmpegManifest.files) {
+    $name = [string]$entry.file
+    if ($name -notin @("ffmpeg.exe", "ffprobe.exe")) { throw "FFMPEG_MANIFEST_FILE_UNEXPECTED: $name" }
+    $source = Join-Path $ffmpegSourceRoot $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "FFMPEG_BINARY_MISSING: $source" }
+    $actualHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "FFMPEG_CHECKSUM_MISMATCH: $name" }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $publishRoot $name) -Force
+}
+Copy-Item -LiteralPath $ffmpegManifestPath -Destination (Join-Path $publishRoot "ffmpeg-manifest.json") -Force
 
 # Install-Service.ps1 recreates the service, but the executable must be
 # replaceable before it is invoked. Stop the existing process first and wait

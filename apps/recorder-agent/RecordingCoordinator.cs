@@ -41,6 +41,8 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     private CaptureTrack? _systemAudio;
     private string? _sessionId;
     private int _fatalCaptureFailureStarted;
+    private AudioSourceTestResult? _lastMicrophoneProbe;
+    private AudioSourceTestResult? _lastSystemAudioProbe;
 
     public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
     {
@@ -54,6 +56,21 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     }
 
     public string? SessionId => _sessionId;
+
+    public AudioSourceTestResult? LastMicrophoneProbe => Volatile.Read(ref _lastMicrophoneProbe);
+    public AudioSourceTestResult? LastSystemAudioProbe => Volatile.Read(ref _lastSystemAudioProbe);
+
+    public (bool Microphone, bool SystemAudio, string? Error) GetCaptureReadiness(string profile)
+    {
+        var microphone = AudioDeviceProbe.IsReady(LastMicrophoneProbe, _storage.MicrophoneDeviceId);
+        var systemAudio = AudioDeviceProbe.IsReady(LastSystemAudioProbe, _storage.SystemAudioDeviceId);
+        return profile switch
+        {
+            "SYSTEM_ONLY" => (false, systemAudio, systemAudio ? null : "system_audio_probe_required"),
+            "ONLINE" => (microphone, systemAudio, microphone && systemAudio ? null : "audio_source_probe_required"),
+            _ => (microphone, false, microphone ? null : "microphone_probe_required")
+        };
+    }
 
     public long? CurrentMediaTimeMs
     {
@@ -116,7 +133,7 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         {
             if (_state.State is RecorderState.Recording or RecorderState.Paused)
                 throw new InvalidOperationException("Recording is already active.");
-            if (!_state.TryTransition(RecorderState.Recording, "recording-started"))
+            if (!_state.TryTransition(RecorderState.Starting, "capture-start-requested"))
                 throw new InvalidOperationException($"Cannot start recording from {_state.State}.");
         }
 
@@ -212,8 +229,29 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 if (microphone.IsFailed)
                     throw new IOException("AUDIO_SOURCE_FAILED");
             }
-            if (profile == "SYSTEM_ONLY" && systemAudio?.IsFailed == true)
-                throw new IOException("AUDIO_SOURCE_FAILED");
+            if (systemAudio is not null)
+            {
+                // Keep the explicit SYSTEM_ONLY failure guard as a distinct
+                // diagnostic condition; a silent loopback still needs packet
+                // confirmation below, but a stopped capture is not silence.
+                if (profile == "SYSTEM_ONLY" && systemAudio?.IsFailed == true)
+                    throw new IOException("AUDIO_SOURCE_FAILED");
+                var activeSystemAudio = systemAudio!;
+                using var callbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                callbackTimeout.CancelAfter(TimeSpan.FromSeconds(1));
+                try
+                {
+                    await activeSystemAudio.FirstAudio.WaitAsync(callbackTimeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new IOException("AUDIO_CALLBACK_TIMEOUT");
+                }
+                if (activeSystemAudio.IsFailed)
+                    throw new IOException("AUDIO_SOURCE_FAILED");
+            }
+            if (!_state.TryTransition(RecorderState.Recording, "first-audio-buffer-accepted"))
+                throw new InvalidOperationException("recording_state_transition_failed");
             Interlocked.Exchange(ref _fatalCaptureFailureStarted, 0);
             if (microphoneWarning is not null || systemWarning is not null)
                 await _spool.AddEventAsync(sessionId, "AUDIO_SOURCE_WARNING", payloadJson: JsonSerializer.Serialize(new { microphone = microphoneWarning, systemAudio = systemWarning }), cancellationToken: cancellationToken);
@@ -259,75 +297,14 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     }
 
     public async Task<AudioSourceTestResult> TestAudioSourceAsync(string? deviceId, bool systemAudio, CancellationToken cancellationToken = default)
+        => await TestAudioSourceAsync(deviceId, systemAudio, TimeSpan.FromSeconds(3), cancellationToken);
+
+    public async Task<AudioSourceTestResult> TestAudioSourceAsync(string? deviceId, bool systemAudio, TimeSpan duration, CancellationToken cancellationToken = default)
     {
-        using var enumerator = new MMDeviceEnumerator();
-        MMDevice? selectedDevice = null;
-        IWaveIn? capture = null;
-        string? friendlyName = null;
-        var started = Stopwatch.GetTimestamp();
-        var samples = 0;
-        var rmsSum = 0d;
-        var peak = 0d;
-        var clipping = false;
-        try
-        {
-            try
-            {
-                selectedDevice = ResolveSelectedDevice(enumerator, systemAudio ? DataFlow.Render : DataFlow.Capture, deviceId);
-                friendlyName = selectedDevice?.FriendlyName;
-                capture = systemAudio
-                    ? selectedDevice is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(selectedDevice)
-                    : selectedDevice is null ? new WasapiCapture() : new WasapiCapture(selectedDevice);
-                selectedDevice = null;
-            }
-            finally { selectedDevice?.Dispose(); }
-
-            var format = capture.WaveFormat;
-            var gate = new object();
-            void OnData(object? _, WaveInEventArgs args)
-            {
-                var result = CaptureTrack.CalculateTelemetry(args.Buffer, args.BytesRecorded, format);
-                if (result is null) return;
-                lock (gate)
-                {
-                    rmsSum += result.Value.Rms;
-                    samples++;
-                    peak = Math.Max(peak, result.Value.Peak);
-                    clipping |= result.Value.Clipping;
-                }
-            }
-
-            capture.DataAvailable += OnData;
-            try
-            {
-                capture.StartRecording();
-                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-            }
-            finally
-            {
-                try { capture.StopRecording(); } catch (InvalidOperationException) { }
-                capture.DataAvailable -= OnData;
-            }
-
-            double averageRms;
-            lock (gate) averageRms = samples == 0 ? 0 : rmsSum / samples;
-            var averageDb = averageRms <= 0 ? -60d : Math.Clamp(20d * Math.Log10(averageRms), -60d, 0d);
-            var peakDb = peak <= 0 ? -60d : Math.Clamp(20d * Math.Log10(peak), -60d, 0d);
-            return new AudioSourceTestResult(true, deviceId, friendlyName, samples > 0 && averageRms >= 0.003d, averageDb, peakDb, clipping, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency));
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return new AudioSourceTestResult(false, deviceId, null, false, null, null, false, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency), "AUDIO_TEST_CANCELLED");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Audio source test failed. SystemAudio={SystemAudio}", systemAudio);
-            return new AudioSourceTestResult(false, deviceId, null, false, null, null, false, (long)Math.Round((Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency), ex.Message.Contains("unavailable", StringComparison.OrdinalIgnoreCase) ? "AUDIO_SOURCE_UNAVAILABLE" : "AUDIO_TEST_FAILED");
-        }
-        finally
-        {
-            capture?.Dispose();
-        }
+        var result = await AudioRuntimeProbe.RunAsync(deviceId, systemAudio, duration, cancellationToken);
+        if (systemAudio) Volatile.Write(ref _lastSystemAudioProbe, result);
+        else Volatile.Write(ref _lastMicrophoneProbe, result);
+        return result;
     }
 
     private static MMDevice? ResolveSelectedDevice(MMDeviceEnumerator enumerator, DataFlow flow, string? deviceId)
@@ -577,6 +554,10 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         private bool _clipping;
         private DateTimeOffset? _lastAudioAtUtc;
         private DateTimeOffset? _silenceStartedAtUtc;
+        private long _captureStartedTimestamp;
+        private int _packetCount;
+        private long _bytesReceived;
+        private long? _firstPacketLatencyMs;
         private readonly TaskCompletionSource<bool> _firstAudio = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public CaptureTrack(string sessionId, string trackType, IWaveIn capture, SpoolStore spool, string dataRoot, string ffmpegPath, ILogger logger, RecordingSessionClock sessionClock, MMDevice? device = null, Action<CaptureTrack, string, Exception>? failureHandler = null, string profile = "ROOM")
@@ -620,10 +601,18 @@ public sealed class RecordingCoordinator : IAsyncDisposable
         public long? SilenceDurationMs { get { lock (_peakGate) return TelemetryStaleUnsafe() || _silenceStartedAtUtc is null ? null : (long)Math.Max(0, (DateTimeOffset.UtcNow - _silenceStartedAtUtc.Value).TotalMilliseconds); } }
         public bool TelemetryStale { get { lock (_peakGate) return TelemetryStaleUnsafe(); } }
         public bool IsFailed => Volatile.Read(ref _failureReported) != 0;
+        public int PacketCount => Volatile.Read(ref _packetCount);
+        public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+        public long? FirstPacketLatencyMs { get { lock (_peakGate) return _firstPacketLatencyMs; } }
+        public string NormalizedSampleFormat => _sampleFormat.CanonicalEncoding;
 
         public void Start()
         {
-            if (Interlocked.Exchange(ref _started, 1) == 0) _capture.StartRecording();
+            if (Interlocked.Exchange(ref _started, 1) == 0)
+            {
+                Interlocked.Exchange(ref _captureStartedTimestamp, Stopwatch.GetTimestamp());
+                _capture.StartRecording();
+            }
         }
 
         public void Pause()
@@ -642,9 +631,20 @@ public sealed class RecordingCoordinator : IAsyncDisposable
             if (IsFailed) return;
             try
             {
-                _firstAudio.TrySetResult(true);
-                UpdatePeak(e.Buffer, e.BytesRecorded);
                 _writer.Append(e.Buffer.AsSpan(0, e.BytesRecorded));
+                Interlocked.Increment(ref _packetCount);
+                Interlocked.Add(ref _bytesReceived, e.BytesRecorded);
+                lock (_peakGate)
+                {
+                    _firstPacketLatencyMs ??= _captureStartedTimestamp == 0
+                        ? null
+                        : (long)Math.Round((Stopwatch.GetTimestamp() - _captureStartedTimestamp) * 1000d / Stopwatch.Frequency);
+                }
+                UpdatePeak(e.Buffer, e.BytesRecorded);
+                // The capture is considered started only after the first buffer
+                // has been accepted by the durable writer. A callback that is
+                // merely raised by WASAPI is not sufficient evidence.
+                _firstAudio.TrySetResult(true);
             }
             catch (Exception ex) { ReportFailure(ClassifyWriteFailure(ex), ex); }
         }
@@ -702,6 +702,30 @@ public sealed class RecordingCoordinator : IAsyncDisposable
                 for (var offset = 0; offset + 2 <= bytesRecorded; offset += 2)
                 {
                     var sample = Math.Abs(BitConverter.ToInt16(buffer, offset) / 32768d);
+                    peak = Math.Max(peak, sample);
+                    sumSquares += sample * sample;
+                    samples++;
+                    if (sample >= 0.995d) clippedSamples++;
+                }
+            }
+            else if (descriptor.Kind == RawAudioSampleFormat.Pcm24)
+            {
+                for (var offset = 0; offset + 3 <= bytesRecorded; offset += 3)
+                {
+                    var value = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+                    if ((value & 0x00800000) != 0) value |= unchecked((int)0xFF000000);
+                    var sample = Math.Abs(value / 8388608d);
+                    peak = Math.Max(peak, sample);
+                    sumSquares += sample * sample;
+                    samples++;
+                    if (sample >= 0.995d) clippedSamples++;
+                }
+            }
+            else if (descriptor.Kind == RawAudioSampleFormat.Pcm32)
+            {
+                for (var offset = 0; offset + 4 <= bytesRecorded; offset += 4)
+                {
+                    var sample = Math.Abs(BitConverter.ToInt32(buffer, offset) / 2147483648d);
                     peak = Math.Max(peak, sample);
                     sumSquares += sample * sample;
                     samples++;

@@ -20,7 +20,28 @@ public sealed record AudioSourceTestResult(
     double? PeakDb,
     bool Clipping,
     long DurationMs,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    bool StreamOpened = false,
+    bool StreamStarted = false,
+    int PacketCount = 0,
+    long BytesReceived = 0,
+    long? FirstPacketLatencyMs = null,
+    int? SampleRate = null,
+    int? Channels = null,
+    string? RawSampleFormat = null,
+    string CaptureState = "UNKNOWN",
+    string? ProcessUser = null,
+    string? ProcessSid = null,
+    int? WindowsSessionId = null,
+    int? ProcessId = null,
+    string? DefaultMultimediaEndpointId = null,
+    string? DefaultCommunicationsEndpointId = null,
+    string? SelectedEndpointId = null,
+    bool EndpointFound = false,
+    bool EndpointActive = false,
+    bool AccessGranted = false,
+    bool FormatResolved = false,
+    string? ErrorDetail = null);
 
 public sealed record AgentIpcResponse(
     bool Ok,
@@ -88,13 +109,31 @@ public sealed record AgentIpcHealth(
     double StorageFreePercent = 100,
     string? StorageWatermarkReason = null,
     string RecordingProfile = "ROOM",
-    bool RecordingProfileManaged = false);
+    bool RecordingProfileManaged = false,
+    AudioSourceTestResult? MicrophoneProbe = null,
+    AudioSourceTestResult? SystemAudioProbe = null,
+    bool? MicrophoneCaptureReady = null,
+    bool? SystemAudioCaptureReady = null,
+    string? MicrophoneCaptureState = null,
+    string? SystemAudioCaptureState = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
     string Name,
     bool IsDefault,
-    string State = "Active");
+    string State = "Active",
+    string DataFlow = "Unknown",
+    bool IsDefaultConsole = false,
+    bool IsDefaultMultimedia = false,
+    bool IsDefaultCommunications = false,
+    int? SampleRate = null,
+    int? Channels = null,
+    string? SourceEncoding = null,
+    string? SourceSubFormat = null,
+    int? BitsPerSample = null,
+    int? ValidBitsPerSample = null,
+    string? NormalizedSampleFormat = null,
+    DateTimeOffset? LastSeenAtUtc = null);
 
 public sealed record AgentPreflightResult(
     bool Ready,

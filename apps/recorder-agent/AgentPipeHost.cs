@@ -13,6 +13,7 @@ public sealed class AgentPipeHost(
     AgentApiClient api,
     AgentStorageSettings storage,
     RecordingDeliveryCoordinator delivery,
+    DeviceHealthMonitor deviceHealth,
     ILogger<AgentPipeHost> logger) : BackgroundService
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -137,7 +138,7 @@ public sealed class AgentPipeHost(
                     if (storage.RecordingProfileManaged) return Error("recording_profile_managed_by_environment");
                     var requestedProfile = ReadString(request.Payload, "recordingProfile");
                     if (string.IsNullOrWhiteSpace(requestedProfile)) return Error("recording_profile_required");
-                    if (state.State is RecorderState.Recording or RecorderState.Paused or RecorderState.Finalizing)
+                    if (state.State is RecorderState.Starting or RecorderState.Recording or RecorderState.Paused or RecorderState.Finalizing)
                         return Error("recording_profile_locked");
                     await api.SetRecordingProfileAsync(requestedProfile, cancellationToken);
                     return await StatusAsync(cancellationToken);
@@ -146,7 +147,12 @@ public sealed class AgentPipeHost(
                     var testDeviceId = ReadString(request.Payload, "deviceId");
                     var testSystemAudio = request.Payload.TryGetProperty("systemAudio", out var systemValue)
                         && systemValue.ValueKind == JsonValueKind.True;
-                    var test = await recorder.TestAudioSourceAsync(testDeviceId, testSystemAudio, cancellationToken);
+                    var testSeconds = request.Payload.TryGetProperty("durationSeconds", out var durationValue)
+                        && durationValue.ValueKind == JsonValueKind.Number
+                        && durationValue.TryGetInt32(out var requestedSeconds)
+                        ? Math.Clamp(requestedSeconds, 1, 10)
+                        : 3;
+                    var test = await recorder.TestAudioSourceAsync(testDeviceId, testSystemAudio, TimeSpan.FromSeconds(testSeconds), cancellationToken);
                     return new AgentIpcResponse(test.Success, "IDLE", null, test.Success ? null : test.ErrorCode, null, null,
                         null, AgentIpcProtocol.Version, null, null, test);
                 case "RETRY_UPLOAD":
@@ -283,12 +289,12 @@ public sealed class AgentPipeHost(
 
     private async Task<AgentIpcResponse> StatusAsync(CancellationToken cancellationToken)
     {
-        var health = DeviceHealthSnapshot.Collect(DataRoot(), storage);
+        var health = deviceHealth.Collect(DataRoot(), storage);
         var watermark = StorageRetentionPolicy.FromEnvironment().Evaluate(health.FreeBytes, health.TotalBytes);
         var pendingUploadSessions = 0;
         var activeSessionId = state.State is RecorderState.Recording or RecorderState.Paused
             ? recorder.SessionId
-            : null;
+            : state.State == RecorderState.Starting ? recorder.SessionId : null;
         var backgroundPendingSessions = 0;
         var backgroundFailedSessions = 0;
         try { pendingUploadSessions = await spool.PendingUploadSessionCountAsync(cancellationToken); }
@@ -323,13 +329,18 @@ public sealed class AgentPipeHost(
             peaks.MicrophoneTelemetryStale, peaks.SystemAudioTelemetryStale, rawBacklog.Health,
             activeSessionId, backgroundPendingSessions, backgroundFailedSessions,
             rawBacklog.Ready, rawBacklog.ReadyForUpload, watermark.State.ToString(), watermark.FreePercent, watermark.Reason,
-            storage.RecordingProfile, storage.RecordingProfileManaged), null, recorder.CurrentMediaTimeMs,
+            storage.RecordingProfile, storage.RecordingProfileManaged,
+            recorder.LastMicrophoneProbe, recorder.LastSystemAudioProbe,
+            recorder.GetCaptureReadiness(storage.RecordingProfile).Microphone,
+            recorder.GetCaptureReadiness(storage.RecordingProfile).SystemAudio,
+            AudioDeviceProbe.State(recorder.LastMicrophoneProbe),
+            AudioDeviceProbe.State(recorder.LastSystemAudioProbe)), null, recorder.CurrentMediaTimeMs,
             AgentIpcProtocol.Version, null, sessionStatus);
     }
 
     private async Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken)
     {
-        var health = DeviceHealthSnapshot.Collect(DataRoot(), storage);
+        var health = deviceHealth.Collect(DataRoot(), storage);
         var watermark = StorageRetentionPolicy.FromEnvironment().Evaluate(health.FreeBytes, health.TotalBytes);
         var warnings = new List<string>();
         var errors = new List<string>();
@@ -348,10 +359,21 @@ public sealed class AgentPipeHost(
         if (!health.Microphone && !health.SystemAudio) errors.Add("no_audio_source_available");
         if (!string.IsNullOrWhiteSpace(health.Error)) warnings.Add(health.Error);
         if (!api.IsConfigured) warnings.Add("backend_not_configured_recording_can_start_offline");
+        var captureReadiness = recorder.GetCaptureReadiness(storage.RecordingProfile);
+        if (!captureReadiness.Microphone && storage.RecordingProfile is not "SYSTEM_ONLY")
+            errors.Add(recorder.LastMicrophoneProbe?.ErrorCode ?? "microphone_probe_required");
+        if (!captureReadiness.SystemAudio && storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
+            errors.Add(recorder.LastSystemAudioProbe?.ErrorCode ?? "system_audio_probe_required");
         var minimumBytes = watermark.BlockFreeBytes;
-        var ready = (health.Microphone || health.SystemAudio) && ffmpeg && archive && spoolReady && watermark.AllowsRecording;
+        var requiredSourceReady = storage.RecordingProfile switch
+        {
+            "SYSTEM_ONLY" => captureReadiness.SystemAudio,
+            "ONLINE" => captureReadiness.Microphone && captureReadiness.SystemAudio,
+            _ => captureReadiness.Microphone
+        };
+        var ready = requiredSourceReady && ffmpeg && archive && spoolReady && watermark.AllowsRecording;
         return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, null, null, recorder.CurrentMediaTimeMs,
-            AgentIpcProtocol.Version, new AgentPreflightResult(ready, health.Microphone, health.SystemAudio, ffmpeg, spoolReady, archive,
+            AgentIpcProtocol.Version, new AgentPreflightResult(ready, captureReadiness.Microphone, captureReadiness.SystemAudio, ffmpeg, spoolReady, archive,
                 health.FreeBytes, minimumBytes, api.ServerConnectionState, warnings, errors, watermark.State.ToString(), watermark.FreePercent, watermark.Reason));
     }
 
@@ -419,7 +441,7 @@ public sealed class AgentPipeHost(
         // The active capture is authoritative for the primary status. A
         // previous session waiting for delivery must not turn a live recording
         // into a red "recording error" in Desktop.
-        if ((state.State is RecorderState.Recording or RecorderState.Paused)
+        if ((state.State is RecorderState.Recording or RecorderState.Paused || state.State == RecorderState.Starting)
             && !string.IsNullOrWhiteSpace(recorder.SessionId))
             return (state.State, recorder.SessionId, null);
 

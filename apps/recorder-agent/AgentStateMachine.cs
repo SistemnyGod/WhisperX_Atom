@@ -3,6 +3,7 @@ namespace WhisperX.Atom.Recorder;
 public enum RecorderState
 {
     Idle,
+    Starting,
     Recording,
     Paused,
     Finalizing,
@@ -58,8 +59,9 @@ public sealed class AgentStateMachine
 
     private static bool IsAllowed(RecorderState from, RecorderState to) => (from, to) switch
     {
-        (RecorderState.Idle, RecorderState.Recording or RecorderState.Recovering or RecorderState.Offline) => true,
-        (RecorderState.Offline, RecorderState.Recording or RecorderState.Idle) => true,
+        (RecorderState.Idle, RecorderState.Starting or RecorderState.Recovering or RecorderState.Offline) => true,
+        (RecorderState.Offline, RecorderState.Starting or RecorderState.Idle) => true,
+        (RecorderState.Starting, RecorderState.Recording or RecorderState.Error or RecorderState.Idle) => true,
         (RecorderState.Recording, RecorderState.Paused or RecorderState.Finalizing or RecorderState.Offline) => true,
         (RecorderState.Paused, RecorderState.Recording or RecorderState.Finalizing or RecorderState.Offline) => true,
         (RecorderState.Finalizing, RecorderState.Idle or RecorderState.Offline) => true,
