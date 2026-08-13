@@ -56,6 +56,22 @@ def test_user_bootstrap_and_owner_propagation_are_explicit():
     assert "OwnerUserId" in recorder
 
 
+def test_bootstrap_null_agent_is_typed_and_api_errors_are_json():
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+
+    assert "using NpgsqlTypes;" in store
+    assert 'find.Parameters.Add("agent", NpgsqlDbType.Uuid)' in store
+    assert "INVALID_LOGIN_REQUEST" in api
+    assert 'error = "INTERNAL_SERVER_ERROR"' in api
+    assert "traceId" in api
+    bootstrap = client.split("public async Task<DesktopAgentBootstrapResult> BootstrapLocalAgentAsync", 1)[1].split("public async Task<DesktopAgentEnrollment> ReenrollAgentAsync", 1)[0]
+    assert "ReadAsStringAsync(cancellationToken)" in bootstrap
+    assert "AGENT_BOOTSTRAP_RESPONSE_EMPTY" in bootstrap
+    assert "AGENT_BOOTSTRAP_RESPONSE_INVALID" in bootstrap
+
+
 def test_managed_machine_origin_is_read_only_in_desktop_settings():
     settings = read("apps/desktop/WhisperX.Atom.Desktop/DesktopSettings.cs")
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs")

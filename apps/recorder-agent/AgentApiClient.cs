@@ -176,13 +176,23 @@ public sealed class AgentApiClient : IDisposable
     public async Task SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default)
     {
         _storage.SetAudioDevices(microphoneDeviceId, systemAudioDeviceId);
-        if (!IsConfigured) return;
+        await PersistCurrentConfigurationAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Persists user-scoped recorder intent even before Agent enrollment. This
+    /// keeps AudioGraph device migration/reselection independent of LAN state.
+    /// </summary>
+    public async Task PersistCurrentConfigurationAsync(CancellationToken cancellationToken = default)
+    {
+        var directory = Path.GetDirectoryName(_configPath)!;
+        Directory.CreateDirectory(directory);
         var temporary = _configPath + ".part";
         var configuration = new AgentConfiguration(
             _baseUri.ToString().TrimEnd('/'),
-            _agentId.ToString(),
-            ProtectToken(_token),
-            true,
+            _agentId == Guid.Empty ? string.Empty : _agentId.ToString(),
+            string.IsNullOrWhiteSpace(_token) ? string.Empty : ProtectToken(_token),
+            !string.IsNullOrWhiteSpace(_token),
             _installationId,
             _storage.ArchiveRoot,
             _storage.MicrophoneDeviceId,

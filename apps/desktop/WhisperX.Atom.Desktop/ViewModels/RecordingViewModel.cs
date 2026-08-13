@@ -11,6 +11,7 @@ public sealed class RecordingViewModel : ObservableObject
     private readonly FrontendServices _services;
     private CancellationTokenSource? _pollCts;
     private Task? _pollTask;
+    private Task? _deviceSubscriptionTask;
     private RecordingState _state = RecordingState.Checking;
     private string _title = "Новая запись";
     private string? _sessionId;
@@ -239,6 +240,8 @@ public sealed class RecordingViewModel : ObservableObject
         if (_pollCts is not null) return;
         _pollCts = new CancellationTokenSource();
         _pollTask = PollLoopAsync(_pollCts.Token);
+        if (RecorderRuntimeMode.IsAudioGraph)
+            _deviceSubscriptionTask = DeviceSubscriptionLoopAsync(_pollCts.Token);
     }
 
     public async Task StopPollingAsync()
@@ -248,7 +251,9 @@ public sealed class RecordingViewModel : ObservableObject
         {
             _pollCts.Cancel();
             try { if (_pollTask is not null) await _pollTask; } catch (OperationCanceledException) { }
+            try { if (_deviceSubscriptionTask is not null) await _deviceSubscriptionTask; } catch (OperationCanceledException) { }
             _pollTask = null;
+            _deviceSubscriptionTask = null;
             _pollCts.Dispose();
             _pollCts = null;
         }
@@ -269,6 +274,38 @@ public sealed class RecordingViewModel : ObservableObject
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         while (await timer.WaitForNextTickAsync(cancellationToken)) await RefreshAsync(cancellationToken);
+    }
+
+    private async Task DeviceSubscriptionLoopAsync(CancellationToken cancellationToken)
+    {
+        // DeviceWatcher is the primary source in AudioGraph mode. Reconnect
+        // only after a transient IPC break; the slower HEALTH loop remains a
+        // safety net for recording and delivery state.
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await foreach (var response in _services.Recorder.SubscribeAudioDeviceEventsAsync(cancellationToken))
+                {
+                    ApplyResponse(response);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (RecorderIpcException)
+            {
+                // Host restart is expected during install/recovery.
+            }
+            catch (IOException)
+            {
+                // The dedicated subscription pipe is intentionally disposable.
+            }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
     }
 
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
@@ -932,6 +969,17 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(RawEncoderReadyLabel));
             OnPropertyChanged(nameof(StorageWatermarkLabel));
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
+            // The AudioGraph Host rejected a legacy NAudio device identity.
+            // Keep DEFAULT as the effective strategy instead of making the UI
+            // repeatedly send an endpoint the Host can never open.
+            if (health.UserReselectRequired && string.IsNullOrWhiteSpace(health.SelectedMicrophoneDeviceId))
+            {
+                _microphoneDeviceId = null;
+                _confirmedMicrophoneDeviceId = null;
+                SaveSettings();
+                OnPropertyChanged(nameof(SelectedMicrophoneId));
+                WarningMessage = "Выберите или подтвердите микрофон Windows по умолчанию перед следующей записью.";
+            }
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
             _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
             if (_confirmedMicrophoneDeviceId is null) _confirmedMicrophoneDeviceId = health.SelectedMicrophoneDeviceId;

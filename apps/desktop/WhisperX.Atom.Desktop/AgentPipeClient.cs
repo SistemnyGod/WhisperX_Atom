@@ -64,4 +64,45 @@ public sealed class AgentPipeClient
             throw new RecorderIpcException("RECORDER_IPC_TIMEOUT", true, ex);
         }
     }
+
+    /// <summary>
+    /// Keeps a dedicated IPC connection for AudioGraph device notifications.
+    /// Control requests remain short-lived, so device changes cannot block
+    /// START/STOP/HEALTH traffic.
+    /// </summary>
+    public async IAsyncEnumerable<AgentIpcResponse> SubscribeAsync(
+        string command,
+        object? payload = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await using var pipe = new NamedPipeClientStream(".", RecorderPipeNames.ForCurrentProcess(), PipeDirection.InOut, PipeOptions.Asynchronous);
+        try
+        {
+            await pipe.ConnectAsync(3000, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_TIMEOUT", true, ex);
+        }
+        catch (IOException ex)
+        {
+            throw new RecorderIpcException("RECORDER_IPC_UNAVAILABLE", false, ex);
+        }
+
+        using var reader = new StreamReader(pipe);
+        await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload ?? new { }, _json));
+        var request = new AgentIpcRequest(command, document.RootElement.Clone()) { ProtocolVersion = AgentIpcProtocol.Version };
+        await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(line)) yield break;
+            var response = JsonSerializer.Deserialize<AgentIpcResponse>(line, _json)
+                ?? throw new IOException("Recorder Host returned an invalid device event.");
+            if (response.Error == "IPC_VERSION_INCOMPATIBLE")
+                throw new RecorderIpcException("IPC_VERSION_INCOMPATIBLE", false);
+            yield return response;
+        }
+    }
 }

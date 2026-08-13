@@ -137,6 +137,31 @@ def test_desktop_start_uses_host_preflight_default_and_background_delivery():
     assert "CreateMeetingAsync" not in start and "CancelMeetingAsync" not in start
 
 
+def test_legacy_naudio_selection_is_not_persisted_as_an_audiograph_device():
+    user_config = read("apps/desktop/Installer/Configure-RecorderHostUser.ps1")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+
+    assert "$isAudioGraphDeviceId" in user_config
+    assert "$existingDevice.StartsWith(" in user_config
+    assert "userReselectRequired = $requiresReselect" in user_config
+    assert "SetUserReselectRequired(true)" in runtime
+    assert "SetAudioDevices(null, null)" in runtime
+    assert "PersistCurrentConfigurationAsync" in runtime
+
+
+def test_audiograph_device_subscription_uses_a_dedicated_long_lived_pipe():
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+    desktop_client = read("apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs")
+    recorder_service = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderPipeService.cs")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+
+    assert "StreamDeviceEventsAsync" in host
+    assert '"SUBSCRIBE_AUDIO_DEVICE_EVENTS" => await HealthAsync' not in host
+    assert "IAsyncEnumerable<AgentIpcResponse> SubscribeAsync" in desktop_client
+    assert 'SubscribeAsync("SUBSCRIBE_AUDIO_DEVICE_EVENTS"' in recorder_service
+    assert "DeviceSubscriptionLoopAsync" in view_model
+
+
 def test_audiograph_diagnostics_and_acceptance_scripts_are_redacted():
     probe = read("scripts/probe-audiograph-runtime.ps1")
     acceptance = read("scripts/acceptance-audiograph-local-recording.ps1")

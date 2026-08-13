@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
 
 public sealed record AgentRow(Guid Id, string Name, Guid? RoomId, string Status, DateTime? LastSeenAt, Guid? InstallationId = null);
 public sealed record AgentBootstrapResult(AgentRow Agent, string? Token, bool ReenrollRequired = false, bool Linked = true);
@@ -107,7 +108,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using (var find = new NpgsqlCommand("SELECT id,name,room_id,status,last_seen_at,installation_id,token_revoked_at FROM recorder_agents WHERE installation_id=@installation OR (@agent IS NOT NULL AND id=@agent) ORDER BY CASE WHEN installation_id=@installation THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE", connection, transaction))
         {
             find.Parameters.AddWithValue("installation", installationId);
-            find.Parameters.AddWithValue("agent", (object?)requestedAgentId ?? DBNull.Value);
+            // PostgreSQL cannot infer the type of a NULL parameter used in
+            // `@agent IS NOT NULL`. Keep the nullable query shape but bind it
+            // explicitly as uuid.
+            var requestedAgentParameter = find.Parameters.Add("agent", NpgsqlDbType.Uuid);
+            requestedAgentParameter.Value = requestedAgentId.HasValue
+                ? requestedAgentId.Value
+                : DBNull.Value;
             await using var reader = await find.ExecuteReaderAsync();
             if (await reader.ReadAsync())
             {

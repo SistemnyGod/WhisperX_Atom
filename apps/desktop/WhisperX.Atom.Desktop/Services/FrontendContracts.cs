@@ -27,6 +27,7 @@ public sealed record RecordingSnapshot(
 public interface IRecorderService
 {
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AgentIpcResponse> SubscribeAudioDeviceEventsAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default);

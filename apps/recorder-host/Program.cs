@@ -8,6 +8,16 @@ using var processGuard = RecorderHostProcessGuard.TryAcquire()
     ?? throw new InvalidOperationException("RECORDER_HOST_ALREADY_RUNNING");
 
 var builder = Host.CreateApplicationBuilder(args);
+// A current-user Recorder Host normally has no Event Log write privilege.
+// Keep diagnostics from becoming a capture failure by using console output,
+// which the development launcher captures and Windows can safely discard for
+// the hidden installed process.
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "O ";
+});
 var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
     ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
 

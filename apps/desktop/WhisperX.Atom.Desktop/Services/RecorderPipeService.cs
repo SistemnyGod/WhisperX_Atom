@@ -10,6 +10,9 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("HEALTH", cancellationToken: cancellationToken);
 
+    public IAsyncEnumerable<AgentIpcResponse> SubscribeAudioDeviceEventsAsync(CancellationToken cancellationToken = default) =>
+        _client.SubscribeAsync("SUBSCRIBE_AUDIO_DEVICE_EVENTS", cancellationToken: cancellationToken);
+
     public Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("PREFLIGHT", cancellationToken: cancellationToken);
 

@@ -99,7 +99,21 @@ app.Use(async (context, next) =>
     catch (Exception ex)
     {
         app.Logger.LogError(ex, "http_request_failed trace_id={TraceId} method={Method} path={Path}", traceId, context.Request.Method, context.Request.Path.Value);
-        throw;
+        if (!context.Response.HasStarted)
+        {
+            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = "INTERNAL_SERVER_ERROR",
+                retryable = true,
+                traceId
+            });
+        }
+        else
+        {
+            throw;
+        }
     }
     finally
     {
@@ -510,7 +524,11 @@ app.MapGet("/api/admin/meetings/{id:guid}/diagnostics", async (Guid id, HttpCont
 
 app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IConfiguration configuration) =>
 {
-    var user = await db.FindUserAsync(request.Username);
+    var username = request.Username?.Trim();
+    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(request.Password))
+        return Results.Json(new { error = "INVALID_LOGIN_REQUEST", retryable = false }, statusCode: StatusCodes.Status400BadRequest);
+
+    var user = await db.FindUserAsync(username);
     if (user is null || !PasswordService.Verify(request.Password, user.PasswordHash))
         return Results.Json(new { error = "INVALID_CREDENTIALS", retryable = false }, statusCode: StatusCodes.Status401Unauthorized);
 
@@ -1360,7 +1378,7 @@ public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, str
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
 
-public record LoginRequest(string Username, string Password);
+public record LoginRequest(string? Username, string? Password);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 public record AdminUserCreateRequest(string Username, string Role = "Reader");
 public record AdminUserUpdateRequest(string? Role, bool? IsActive);

@@ -52,6 +52,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
     public AudioGraphCaptureEngine Engine => _engine;
 
+    public event EventHandler<AudioDeviceChangedEventArgs>? DeviceChanged
+    {
+        add => _engine.DeviceStateChanged += value;
+        remove => _engine.DeviceStateChanged -= value;
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await _spool.InitializeAsync(cancellationToken).ConfigureAwait(false);
@@ -78,9 +84,14 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         }
         catch (Exception ex) when (selectionMode == AudioSelectionMode.Fixed)
         {
-            // Keep the explicit Fixed intent. Falling back to another microphone
-            // would silently record a different source.
+            // A legacy MMDevice/NAudio identity is not interchangeable with a
+            // DeviceInformation.Id. Do not keep an unusable value around: it
+            // would make every later preflight fail. Switch only the strategy
+            // to DEFAULT and require user confirmation before a FIXED choice is
+            // persisted again.
+            _storage.SetAudioDevices(null, null);
             _storage.SetUserReselectRequired(true);
+            await _api.PersistCurrentConfigurationAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogWarning(ex, "Configured fixed microphone is unavailable and requires user reselect.");
         }
     }
@@ -129,6 +140,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             DeviceWatcherReady: _engine.DeviceCatalog.IsReady,
             AudioGraphReady: _engine.DeviceCatalog.IsReady && ready,
             FirstFrameConfirmed: telemetry.FrameCount > 0,
+            UserReselectRequired: _storage.UserReselectRequired,
             EffectiveMicrophoneDeviceId: effectiveDevice?.Id,
             MicrophoneCaptureReady: ready,
             MicrophoneCaptureState: _engine.State.ToString());
@@ -375,10 +387,25 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(systemAudioDeviceId))
             return Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", "Process Loopback is intentionally outside the microphone migration.");
         _storage.SetArchiveRoot(archiveRoot);
-        _storage.SetAudioDevices(microphoneDeviceId, systemAudioDeviceId);
         await _api.ConfigureAsync(serverUrl, agentId, token, cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(microphoneDeviceId))
-            await SelectDeviceAsync(microphoneDeviceId, cancellationToken).ConfigureAwait(false);
+        {
+            // Desktop settings can still carry a legacy NAudio endpoint ID.
+            // Validate it before it becomes a confirmed Host setting.
+            var selection = await SelectDeviceAsync(microphoneDeviceId, cancellationToken).ConfigureAwait(false);
+            if (!selection.Ok)
+            {
+                _storage.SetAudioDevices(null, null);
+                _storage.SetUserReselectRequired(true);
+                await _api.PersistCurrentConfigurationAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            _storage.SetAudioDevices(null, null);
+            _storage.SetUserReselectRequired(false);
+            await _api.PersistCurrentConfigurationAsync(cancellationToken).ConfigureAwait(false);
+        }
         return await HealthAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -780,6 +807,10 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 ? "SPOOL_READONLY"
                 : AudioGraphErrorMapper.Map(ex);
             _logger.LogError(ex, "Recorder Host initialization failed: {ErrorCode}", _initializationError);
+            // A failed Host must not retain an apparently live pipe. Desktop
+            // can then surface the exact startup code and retry a clean Host.
+            Environment.ExitCode = 12;
+            throw new InvalidOperationException(_initializationError, ex);
         }
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -847,6 +878,13 @@ public sealed class RecorderHostPipeServer : BackgroundService
             return;
         }
 
+        if (request.ProtocolVersion == AgentIpcProtocol.Version
+            && string.Equals(request.Command, "SUBSCRIBE_AUDIO_DEVICE_EVENTS", StringComparison.OrdinalIgnoreCase))
+        {
+            await StreamDeviceEventsAsync(pipe, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var response = request.ProtocolVersion != AgentIpcProtocol.Version
             ? new AgentIpcResponse(false, "ERROR", null, "IPC_VERSION_INCOMPATIBLE", null,
                 ProtocolVersion: AgentIpcProtocol.Version,
@@ -869,6 +907,37 @@ public sealed class RecorderHostPipeServer : BackgroundService
         }
     }
 
+    private async Task StreamDeviceEventsAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    {
+        var events = Channel.CreateUnbounded<AudioDeviceChangedEventArgs>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false
+        });
+        EventHandler<AudioDeviceChangedEventArgs> handler = (_, change) => events.Writer.TryWrite(change);
+        _runtime.DeviceChanged += handler;
+        try
+        {
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false), _json)).ConfigureAwait(false);
+            await foreach (var _ in events.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var health = await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(health, _json)).ConfigureAwait(false);
+            }
+        }
+        catch (IOException)
+        {
+            // The Desktop closes this dedicated stream during navigation or exit.
+        }
+        finally
+        {
+            _runtime.DeviceChanged -= handler;
+            events.Writer.TryComplete();
+        }
+    }
+
     private async Task<AgentIpcResponse> ExecuteAsync(AgentIpcRequest request, CancellationToken cancellationToken)
     {
         try
@@ -879,7 +948,6 @@ public sealed class RecorderHostPipeServer : BackgroundService
             return request.Command.Trim().ToUpperInvariant() switch
             {
                 "HEALTH" or "STATUS" or "LIST_AUDIO_DEVICES" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
-                "SUBSCRIBE_AUDIO_DEVICE_EVENTS" => await _runtime.HealthAsync(cancellationToken).ConfigureAwait(false),
                 "PREFLIGHT" => await _runtime.PreflightAsync(cancellationToken).ConfigureAwait(false),
                 "TEST_AUDIO_SOURCE" or "MICROPHONE_TEST" => ReadBool(request.Payload, "systemAudio")
                     ? new AgentIpcResponse(false, "DISABLED", null, "AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", null)

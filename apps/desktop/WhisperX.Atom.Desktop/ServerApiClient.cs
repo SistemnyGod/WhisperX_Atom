@@ -305,7 +305,43 @@ public sealed class ServerApiClient : IDisposable
             version = "0.1.0",
             capabilities = new { desktop = true, microphone = true, systemAudio = true }
         }, cancellationToken);
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            var traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues)
+                ? traceValues.FirstOrDefault()
+                : null;
+            throw new DesktopApiException(
+                (int)response.StatusCode,
+                response.IsSuccessStatusCode ? "AGENT_BOOTSTRAP_RESPONSE_EMPTY" : "AGENT_BOOTSTRAP_FAILED",
+                response.IsSuccessStatusCode
+                    ? "Сервер вернул пустой ответ при привязке Recorder Agent."
+                    : "Сервер не смог выполнить привязку Recorder Agent.",
+                retryable: (int)response.StatusCode >= 500,
+                traceId: traceId);
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException exception)
+        {
+            var traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues)
+                ? traceValues.FirstOrDefault()
+                : null;
+            throw new DesktopApiException(
+                (int)response.StatusCode,
+                "AGENT_BOOTSTRAP_RESPONSE_INVALID",
+                "Сервер вернул некорректный ответ при привязке Recorder Agent.",
+                exception,
+                retryable: (int)response.StatusCode >= 500,
+                traceId: traceId);
+        }
+
+        using (document)
+        {
         var root = document.RootElement;
         if (response.StatusCode == HttpStatusCode.Conflict && string.Equals(root.GetProperty("error").GetString(), "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase))
             return new DesktopAgentBootstrapResult(
@@ -336,6 +372,7 @@ public sealed class ServerApiClient : IDisposable
             ? stateElement.GetString() ?? (linked ? "AGENT_READY" : "AGENT_LINK_PENDING")
             : linked ? "AGENT_READY" : "AGENT_LINK_PENDING";
         return new DesktopAgentBootstrapResult(root.GetProperty("agentId").GetGuid().ToString(), token, false, linked, state);
+        }
     }
 
     public async Task<DesktopAgentEnrollment> ReenrollAgentAsync(Guid agentId, CancellationToken cancellationToken = default)

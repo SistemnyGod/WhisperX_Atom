@@ -142,6 +142,7 @@ public sealed record AgentIpcHealth(
     bool DeviceWatcherReady = false,
     bool AudioGraphReady = false,
     bool FirstFrameConfirmed = false,
+    bool UserReselectRequired = false,
     // The confirmed configuration remains SelectedMicrophoneDeviceId. For
     // DEFAULT selection that value is null, while this value identifies the
     // endpoint Windows resolved for the current Host runtime.
