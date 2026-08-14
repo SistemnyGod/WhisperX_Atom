@@ -1303,10 +1303,10 @@ app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, Ht
     }
 });
 
-app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, int? version, HttpContext context) =>
+app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, int? version, bool? includeWords, HttpContext context) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
-    var transcript = await db.GetTranscriptAsync(id, version);
+    var transcript = await db.GetTranscriptAsync(id, version, includeWords == true);
     return Results.Ok(new
     {
         id = transcript.Id,
@@ -2250,7 +2250,7 @@ public sealed class Database(IConfiguration configuration)
         await tx.CommitAsync();
         return job;
     }
-    public async Task<TranscriptRow> GetTranscriptAsync(Guid meetingId, int? requestedVersion = null)
+    public async Task<TranscriptRow> GetTranscriptAsync(Guid meetingId, int? requestedVersion = null, bool includeWords = false)
     {
         var segments = new List<TranscriptSegmentRow>();
         Guid transcriptId = Guid.Empty;
@@ -2260,9 +2260,10 @@ public sealed class Database(IConfiguration configuration)
         double? qualityScore = null;
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT t.id,t.status,t.warnings,t.quality_metadata,t.quality_score,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,s.words,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=COALESCE(@version,(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting)) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
+            "SELECT t.id,t.status,t.warnings,t.quality_metadata,t.quality_score,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,CASE WHEN @include_words THEN s.words ELSE NULL END,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=COALESCE(@version,(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting)) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         command.Parameters.AddWithValue("version", (object?)requestedVersion ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_words", includeWords);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {

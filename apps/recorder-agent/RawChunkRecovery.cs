@@ -47,7 +47,28 @@ public sealed class RawChunkRecovery(
                 }
 
                 if (!File.Exists(raw.RawPath))
-                    throw new FileNotFoundException("raw_chunk_missing", raw.RawPath);
+                {
+                    // The raw payload is the only recoverable source for this
+                    // row. Once both the payload and its crash-part are gone,
+                    // retrying the same row on every startup can never make
+                    // progress and blocks the first page of the recovery scan.
+                    // Mark it terminally so the operator sees one durable
+                    // diagnostic instead of an infinite retry storm.
+                    await spool.SetRawChunkStateAsync(
+                        raw.SessionId,
+                        raw.TrackId,
+                        raw.Sequence,
+                        "DISCARDED",
+                        error: "raw_chunk_missing",
+                        cancellationToken: cancellationToken);
+                    completed = false;
+                    logger.LogError(
+                        "Raw audio chunk cannot be recovered because its payload is missing. Session={SessionId}, Track={TrackType}, Sequence={Sequence}",
+                        raw.SessionId,
+                        raw.TrackType,
+                        raw.Sequence);
+                    continue;
+                }
 
                 await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "ENCODING", cancellationToken: cancellationToken);
                 var outputPart = raw.OutputPath + ".part";

@@ -240,6 +240,9 @@ def test_audiograph_writer_propagates_failures_and_keeps_encoding_off_capture_co
     assert "_attempt.RequestedSamplesPerQuantum" in engine
     assert "_graph.SamplesPerQuantum" in engine
     assert "requestedSamplesPerQuantum" in probe
+    assert "EncoderQueueCapacity = 8" in writer
+    assert "Channel.CreateBounded<RawChunkWorkItem>" in writer
+    assert "FullMode = BoundedChannelFullMode.Wait" in writer
 
 
 def test_audiograph_stop_is_local_first_and_delivery_is_backgrounded():

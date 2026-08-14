@@ -158,6 +158,14 @@ def test_disk_backed_overflow_is_bounded_and_restart_recoverable():
     assert "RAW_CHUNK_LEGACY_TIMELINE_INFERRED" in recovery
 
 
+def test_irrecoverable_raw_chunks_become_terminal_and_recovery_is_fair():
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert 'error: "raw_chunk_missing"' in recovery
+    assert '"DISCARDED"' in recovery
+    assert "ORDER BY updated_at,session_id,track_id,sequence" in spool
+
+
 def test_upload_queue_prioritizes_active_sessions_and_persists_chunk_backoff():
     spool = read("apps/recorder-agent/SpoolStore.cs")
     api = read("apps/recorder-agent/AgentApiClient.cs")

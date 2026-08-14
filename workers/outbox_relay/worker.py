@@ -48,16 +48,27 @@ async def run() -> None:
         published = False
         with psycopg.connect(conninfo) as connection:
             await recover_expired(connection)
-            row = connection.execute("SELECT id, topic, payload FROM outbox_messages WHERE published_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1").fetchone()
-            if row:
-                message_id, topic, payload = row
-                await jetstream.publish(
-                    topic,
-                    json.dumps(payload).encode("utf-8"),
-                    headers={"Nats-Msg-Id": str(message_id)},
+            row = connection.execute(
+                "SELECT id, topic, payload FROM outbox_messages WHERE published_at IS NULL ORDER BY created_at, id LIMIT 1"
+            ).fetchone()
+
+        if row:
+            message_id, topic, payload = row
+            # Do not hold a PostgreSQL transaction/row lock while waiting on
+            # NATS. A relay restart or a slow broker must not stall writers
+            # inserting new outbox rows. NATS de-duplicates the stable message
+            # id, so two relay instances racing on the same row are harmless.
+            await jetstream.publish(
+                topic,
+                json.dumps(payload).encode("utf-8"),
+                headers={"Nats-Msg-Id": str(message_id)},
+            )
+            with psycopg.connect(conninfo) as connection:
+                connection.execute(
+                    "UPDATE outbox_messages SET published_at=now() WHERE id=%s AND published_at IS NULL",
+                    (message_id,),
                 )
-                connection.execute("UPDATE outbox_messages SET published_at=now() WHERE id=%s", (message_id,))
-                published = True
+            published = True
         if not published:
             await asyncio.sleep(0.5)
 

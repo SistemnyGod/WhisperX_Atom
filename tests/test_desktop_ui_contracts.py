@@ -22,6 +22,16 @@ def test_recording_primary_actions_and_local_first_copy_are_visible():
     assert 'Text="Системный звук"' in recording
 
 
+def test_recording_controls_explain_local_first_flow_and_adapt_to_compact_widths():
+    recording = (DESKTOP / "Pages" / "RecordingPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "RecordingPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'Text="Управление записью"' in recording
+    assert 'ToolTipService.ToolTip="Запустить локальную запись"' in recording
+    assert 'Text="ПОЗЖЕ"' in recording
+    assert 'e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal' in codebehind
+    assert 'локальную запись' in codebehind
+
+
 def test_device_selector_exposes_accessible_name_without_refresh_selection_side_effects():
     selector = (DESKTOP / "Controls" / "DeviceSelector.xaml").read_text(encoding="utf-8")
     assert 'AutomationProperties.Name="{x:Bind Label, Mode=OneWay}"' in selector

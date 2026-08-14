@@ -621,6 +621,7 @@ internal sealed class AudioGraphSessionWriter
 {
     private const int SampleRate = RecordingContract.MicrophoneSampleRate;
     private const int ChunkSamples = SampleRate * RecordingContract.ChunkDurationSeconds;
+    private const int EncoderQueueCapacity = 8;
     private readonly string _sessionId;
     private readonly string _trackId;
     private readonly SpoolStore _spool;
@@ -628,8 +629,9 @@ internal sealed class AudioGraphSessionWriter
     private readonly AudioGraphCaptureEngine _engine;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _notStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateUnbounded<RawChunkWorkItem>(new UnboundedChannelOptions
+    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateBounded<RawChunkWorkItem>(new BoundedChannelOptions(EncoderQueueCapacity)
     {
+        FullMode = BoundedChannelFullMode.Wait,
         SingleReader = true,
         SingleWriter = true,
         AllowSynchronousContinuations = false

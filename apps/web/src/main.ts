@@ -54,7 +54,7 @@ const app = {
     const error = ref("");
     const notice = ref("");
     const uppy = new Uppy({ autoProceed: false }).use(Tus, { endpoint: "/files/", chunkSize: 16 * 1024 * 1024, retryDelays: [0, 1000, 3000, 5000] });
-    let eventSources: EventSource[] = [];
+    const eventSources = new Map<string, EventSource>();
     let assistantPollGeneration = 0;
 
     async function api(path: string, options: RequestInit = {}) {
@@ -77,13 +77,21 @@ const app = {
     async function logout() { await api("/api/auth/logout", { method: "POST" }).catch(() => undefined); closeEvents(); authenticated.value = false; selected.value = null; meetings.value = []; }
     async function loadMeetings() { meetings.value = await api("/api/meetings"); if (!selected.value && meetings.value.length) await selectMeeting(meetings.value[0]); }
     async function loadAgents() { agents.value = await api("/api/agents").catch(() => []); }
+    async function refreshWorkspace() {
+      const hadSelectedMeeting = Boolean(selected.value);
+      await Promise.all([loadMeetings(), loadAgents()]);
+      if (hadSelectedMeeting && selected.value) await refreshSelected();
+    }
     async function createMeeting() {
       if (!title.value.trim()) return;
       clearMessage();
       try { const meeting = await api("/api/meetings", jsonOptions("POST", { title: title.value.trim(), description: description.value || null })); title.value = ""; description.value = ""; await loadMeetings(); await selectMeeting(meeting); activeNav.value = "meetings"; }
       catch (exc) { error.value = exc instanceof Error ? exc.message : "Не удалось создать совещание"; }
     }
-    function closeEvents() { eventSources.forEach((source) => source.close()); eventSources = []; }
+    function closeEvents() {
+      eventSources.forEach((source) => source.close());
+      eventSources.clear();
+    }
     async function refreshSelected() {
       if (!selected.value) return;
       const id = selected.value.id;
@@ -101,19 +109,37 @@ const app = {
     }
     function subscribeJobs() {
       closeEvents();
-      jobs.value.forEach((job) => {
+      jobs.value.filter((job) => !["READY", "FAILED", "CANCELLED"].includes(job.status)).forEach((job) => {
         const source = new EventSource(`/api/jobs/${job.id}/events`);
+        eventSources.set(job.id, source);
         source.addEventListener("progress", async (event) => {
           const update = JSON.parse((event as MessageEvent).data) as Job;
           const index = jobs.value.findIndex((item) => item.id === update.id);
           if (index >= 0) jobs.value[index] = update; else jobs.value.push(update);
-          if (["READY", "FAILED"].includes(update.status)) await refreshSelected();
+          if (["READY", "FAILED", "CANCELLED"].includes(update.status)) {
+            // The API closes terminal streams. Close and forget this source
+            // before refreshing so refreshSelected() cannot recreate an
+            // endless terminal-event -> refresh -> SSE loop.
+            source.close();
+            if (eventSources.get(update.id) === source) eventSources.delete(update.id);
+            await refreshSelected();
+          }
         });
-        source.onerror = () => { source.close(); window.setTimeout(() => { if (selected.value) refreshSelected().catch(() => undefined); }, 3000); };
-        eventSources.push(source);
+        source.onerror = () => {
+          source.close();
+          if (eventSources.get(job.id) === source) eventSources.delete(job.id);
+          window.setTimeout(() => {
+            if (selected.value && !["READY", "FAILED", "CANCELLED"].includes(jobs.value.find((item) => item.id === job.id)?.status || ""))
+              refreshSelected().catch(() => undefined);
+          }, 3000);
+        };
       });
     }
     async function selectMeeting(meeting: Meeting) { selected.value = meeting; activeTab.value = "overview"; clearMessage(); await refreshSelected(); }
+    function focusNewMeeting() {
+      activeNav.value = "meetings";
+      window.setTimeout(() => document.getElementById("new-meeting-title")?.focus(), 0);
+    }
     async function retryJob(job: Job) { await api(`/api/jobs/${job.id}/retry`, { method: "POST" }); notice.value = "Задание поставлено на повторную обработку"; await refreshSelected(); }
     function chooseFile(event: Event) { file.value = (event.target as HTMLInputElement).files?.[0] || null; }
     async function upload() {
@@ -171,6 +197,19 @@ const app = {
     const selectedStatus = computed(() => selected.value?.status || "READY");
     const summaryContent = computed(() => summary.value?.content || {});
     const globalTasks = computed(() => tasks.value.length);
+    const onlineAgentCount = computed(() => agents.value.filter((agent) => agent.status === "ONLINE").length);
+    const serverStatusLabel = computed(() => onlineAgentCount.value > 0 ? "Сервер онлайн" : agents.value.length ? "Agent не в сети" : "Источник не подключён");
+    const agentStatusDetail = computed(() => onlineAgentCount.value > 0 ? `${onlineAgentCount.value} онлайн` : "Проверьте источники записи");
+    const statusLabel = (status?: string) => ({
+      READY: "Готово", RUNNING: "В работе", QUEUED: "В очереди", FAILED: "Ошибка", CANCELLED: "Отменено",
+      PENDING: "Ожидание", PARTIAL_READY: "Частично готово", NEEDS_REVIEW: "Нужна проверка", OPEN: "Открыто", DONE: "Готово",
+      ONLINE: "Онлайн", OFFLINE: "Не в сети",
+    } as Record<string, string>)[status || ""] || status || "—";
+    const stageLabel = (stage?: string) => ({
+      INGEST: "Приём файла", UPLOADED: "Файл принят", VALIDATING: "Проверка файла", NORMALIZING: "Нормализация",
+      TRANSCRIBING: "Стенограмма", ALIGNING: "Выравнивание слов", DIARIZING: "Распознавание спикеров", SUMMARIZING: "Саммари",
+      ASSEMBLING: "Сборка аудио", MEDIA_READY: "Медиа готово",
+    } as Record<string, string>)[stage || ""] || stage || "Ожидание";
     const filteredTasks = computed(() => {
       const query = taskSearch.value.trim().toLowerCase();
       return tasks.value.filter((task) => {
@@ -183,7 +222,7 @@ const app = {
     onMounted(async () => { try { await api("/api/auth/me"); authenticated.value = true; await loadMeetings(); await loadAgents(); } catch { /* show login */ } });
     onBeforeUnmount(closeEvents);
 
-    return { username, password, authenticated, activeNav, activeTab, navItems, meetings, selected, jobs, segments, transcriptStatus, media, speakers, summary, summaryContent, decisions, tasks, agents, title, description, file, assistantQuestion, assistantAnswer, assistantPrompts, taskFilter, taskSearch, filteredTasks, busy, error, notice, globalTasks, activeJob, selectedStatus, previewUrl, timecode, login, logout, loadMeetings, loadAgents, createMeeting, selectMeeting, refreshSelected, chooseFile, upload, seek, retryJob, recordingCommand, rebuildSummary, updateTask, renameSpeaker, askAssistant };
+    return { username, password, authenticated, activeNav, activeTab, navItems, meetings, selected, jobs, segments, transcriptStatus, media, speakers, summary, summaryContent, decisions, tasks, agents, title, description, file, assistantQuestion, assistantAnswer, assistantPrompts, taskFilter, taskSearch, filteredTasks, busy, error, notice, globalTasks, onlineAgentCount, serverStatusLabel, agentStatusDetail, activeJob, selectedStatus, previewUrl, timecode, statusLabel, stageLabel, login, logout, loadMeetings, loadAgents, refreshWorkspace, createMeeting, selectMeeting, focusNewMeeting, refreshSelected, chooseFile, upload, seek, retryJob, recordingCommand, rebuildSummary, updateTask, renameSpeaker, askAssistant };
   },
   template: `
     <main v-if="!authenticated" class="login-screen">
@@ -203,39 +242,38 @@ const app = {
         <div class="brand"><div class="brand-mark small">A</div><div><strong>WhisperX <span>Atom</span></strong><small>локальный сервер</small></div></div>
         <div class="sidebar-section-label">Рабочее место</div>
         <nav>
-          <button v-for="item in navItems" :key="item.id" :class="{ active: activeNav === item.id }" @click="activeNav = item.id">
+          <button v-for="item in navItems" :key="item.id" :class="{ active: activeNav === item.id }" :aria-current="activeNav === item.id ? 'page' : undefined" :aria-label="item.label" :title="item.label" @click="activeNav = item.id">
             <i aria-hidden="true">{{ item.icon }}</i><span>{{ item.label }}</span><b v-if="item.id === 'tasks' && globalTasks">{{ globalTasks }}</b>
           </button>
         </nav>
         <div class="sidebar-bottom">
-          <div class="server-chip"><span class="dot"></span><div><strong>Сервер онлайн</strong><small>GPU · RTX 5060 Ti</small></div></div>
+          <div class="server-chip"><span class="dot" :class="{ off: !onlineAgentCount }"></span><div><strong>{{ serverStatusLabel }}</strong><small>{{ agentStatusDetail }}</small></div></div>
           <button class="ghost" @click="logout">Выйти</button>
         </div>
       </aside>
       <section class="main-area">
         <header class="topbar">
           <div><p class="eyebrow">{{ activeNav === 'home' ? 'ОБЗОР' : navItems.find((item) => item.id === activeNav)?.label.toUpperCase() }}</p><h2>{{ selected?.title || 'Рабочее место' }}</h2></div>
-          <div class="top-actions"><button class="icon-btn" title="Обновить" @click="loadMeetings">↻</button><button class="profile">{{ username.slice(0, 1).toUpperCase() }}</button></div>
+          <div class="top-actions"><button class="icon-btn" title="Обновить рабочее место" aria-label="Обновить рабочее место" @click="refreshWorkspace">↻</button><button class="profile" :aria-label="'Профиль пользователя'">{{ username.slice(0, 1).toUpperCase() }}</button></div>
         </header>
-        <div v-if="error" class="alert error">{{ error }} <button @click="error = ''">×</button></div>
-        <div v-if="notice" class="alert success">{{ notice }} <button @click="notice = ''">×</button></div>
+        <div v-if="error" class="alert error" role="alert" aria-live="assertive">{{ error }} <button aria-label="Закрыть сообщение об ошибке" @click="error = ''">×</button></div>
+        <div v-if="notice" class="alert success" role="status" aria-live="polite">{{ notice }} <button aria-label="Закрыть уведомление" @click="notice = ''">×</button></div>
 
         <template v-if="activeNav === 'home'">
           <section class="home-hero">
             <div><p class="eyebrow">РАБОЧИЙ КОНТУР</p><h1>Контролируйте каждое совещание</h1><p class="muted">Начните запись, следите за обработкой и возвращайтесь к важным решениям в одном спокойном рабочем пространстве.</p></div>
             <div class="hero-actions"><button class="primary" @click="selected ? recordingCommand('START') : activeNav = 'meetings'">● Начать запись</button><button class="secondary" @click="activeNav = 'meetings'">Открыть совещания</button></div>
           </section>
-          <div class="home-status-strip"><span><i class="dot"></i> Контур готов</span><span>{{ meetings.length }} совещаний в истории</span><span>{{ agents.filter((agent) => agent.status === 'ONLINE').length }} источника онлайн</span><span>{{ jobs.filter((job) => job.status === 'RUNNING' || job.status === 'QUEUED').length }} в обработке</span></div>
+          <div class="home-status-strip"><span><i class="dot" :class="{ off: !onlineAgentCount }"></i> {{ onlineAgentCount ? 'Контур готов' : 'Контур ожидает источник' }}</span><span>{{ meetings.length }} совещаний в истории</span><span>{{ onlineAgentCount }} источника онлайн</span><span>{{ jobs.filter((job) => job.status === 'RUNNING' || job.status === 'QUEUED').length }} в обработке</span></div>
           <div class="home-grid">
-            <section class="panel meetings-panel"><div class="section-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ ЗАПИСИ</p><h2>Совещания</h2></div><button class="secondary" @click="activeNav = 'meetings'">Все совещания</button></div><div class="meeting-list"><button v-for="meeting in meetings.slice(0, 5)" :key="meeting.id" class="meeting-row" :class="{ selected: selected?.id === meeting.id }" @click="selectMeeting(meeting); activeNav = 'meetings'"><span class="meeting-icon">◷</span><span><strong>{{ meeting.title }}</strong><small>{{ new Date(meeting.createdAt).toLocaleString() }}</small></span><em>{{ meeting.status }}</em></button><div v-if="!meetings.length" class="empty-state">Создайте первое совещание или загрузите запись.</div></div><div class="create-inline"><input v-model="title" placeholder="Название нового совещания" @keyup.enter="createMeeting" /><button class="primary" @click="createMeeting">＋ Создать</button></div></section>
-            <aside class="home-rail"><section class="panel quick-panel"><p class="eyebrow">БЫСТРЫЙ СТАРТ</p><h2>Запишите разговор</h2><p>Управляйте Recorder Agent из браузера. Запись продолжится даже при временной потере связи.</p><button class="primary wide" @click="selected ? recordingCommand('START') : activeNav = 'meetings'">● Начать запись</button><button class="secondary wide" @click="activeNav = 'agents'">Настроить источник</button></section><section class="panel status-panel"><div class="section-heading"><div><p class="eyebrow">СИСТЕМА</p><h3>Состояние контура</h3></div><span class="status-pill">ONLINE</span></div><div class="status-line"><span>Recorder Agent</span><strong>{{ agents.filter((agent) => agent.status === 'ONLINE').length ? 'Готов' : 'Не подключён' }}</strong></div><div class="status-line"><span>Обработка</span><strong>{{ jobs.length ? 'Активна' : 'Ожидание' }}</strong></div><button class="link-button" @click="activeNav = 'agents'">Открыть источники →</button></section></aside>
+            <section class="panel meetings-panel"><div class="section-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ ЗАПИСИ</p><h2>Совещания</h2></div><button class="secondary" @click="activeNav = 'meetings'">Все совещания</button></div><div class="meeting-list"><button v-for="meeting in meetings.slice(0, 5)" :key="meeting.id" class="meeting-row" :class="{ selected: selected?.id === meeting.id }" :aria-label="'Открыть совещание'" @click="selectMeeting(meeting); activeNav = 'meetings'"><span class="meeting-icon">◷</span><span><strong>{{ meeting.title }}</strong><small>{{ new Date(meeting.createdAt).toLocaleString() }}</small></span><em>{{ statusLabel(meeting.status) }}</em></button><div v-if="!meetings.length" class="empty-state">Создайте первое совещание или загрузите запись.</div></div><div class="create-inline"><input v-model="title" placeholder="Название нового совещания" @keyup.enter="createMeeting" /><button class="primary" @click="createMeeting">＋ Создать</button></div></section>
+            <aside class="home-rail"><section class="panel quick-panel"><p class="eyebrow">БЫСТРЫЙ СТАРТ</p><h2>Запишите разговор</h2><p>Управляйте Recorder Agent из браузера. Запись продолжится даже при временной потере связи.</p><button class="primary wide" @click="selected ? recordingCommand('START') : activeNav = 'meetings'">● Начать запись</button><button class="secondary wide" @click="activeNav = 'agents'">Настроить источник</button></section><section class="panel status-panel"><div class="section-heading"><div><p class="eyebrow">СИСТЕМА</p><h3>Состояние контура</h3></div><span class="status-pill" :class="{ failed: !onlineAgentCount }">{{ onlineAgentCount ? 'ONLINE' : 'CHECK' }}</span></div><div class="status-line"><span>Recorder Agent</span><strong>{{ onlineAgentCount ? 'Готов' : 'Не подключён' }}</strong></div><div class="status-line"><span>Обработка</span><strong>{{ jobs.length ? 'Активна' : 'Ожидание' }}</strong></div><button class="link-button" @click="activeNav = 'agents'">Открыть источники →</button></section></aside>
           </div>
         </template>
 
         <template v-else-if="activeNav === 'meetings'">
-          <section class="section-heading page-heading"><div><p class="eyebrow">MEETING CONTROL ROOM</p><h1>Совещания</h1><p class="muted">Создавайте встречи, импортируйте записи и переходите к результатам обработки.</p></div><button class="primary" @click="activeNav = 'meetings'">＋ Новое совещание</button></section>
-          <div class="meetings-layout"><section class="panel meeting-browser"><div class="browser-toolbar"><div><h3>История записей</h3><span class="muted">{{ meetings.length }} встреч</span></div><button class="ghost" @click="loadMeetings">Обновить</button></div><div class="create-inline"><input id="new-meeting-title" v-model="title" placeholder="Название нового совещания" @keyup.enter="createMeeting" /><button class="primary" @click="createMeeting">Создать</button></div><div class="meeting-list"><button v-for="meeting in meetings" :key="meeting.id" class="meeting-row" :class="{ selected: selected?.id === meeting.id }" @click="selectMeeting(meeting)"><span class="meeting-icon">◷</span><span><strong>{{ meeting.title }}</strong><small>{{ new Date(meeting.createdAt).toLocaleString() }}</small></span><em>{{ meeting.status }}</em></button><div v-if="!meetings.length" class="empty-state">Пока нет совещаний.</div></div></section>
-            <section v-if="selected" class="panel meeting-workspace"><div class="workspace-header"><div><p class="eyebrow">SELECTED MEETING</p><h1>{{ selected.title }}</h1><div class="meeting-meta"><span class="status-pill">{{ selected.status }}</span><span>{{ transcriptStatus }}</span><span>{{ media.length }} файла</span></div></div><div class="recording-actions"><button class="primary" @click="recordingCommand('START')">● Запись</button><button class="secondary" @click="recordingCommand('PAUSE')">Ⅱ Пауза</button><button class="danger" @click="recordingCommand('STOP')">■ Стоп</button></div></div><div class="meeting-body"><div class="meeting-main"><div class="player-card"><div class="player-heading"><span>Аудиозапись</span><span v-if="previewUrl" class="status-pill">PREVIEW</span></div><audio id="meeting-audio" :src="previewUrl" controls></audio><div class="waveform"><i v-for="n in 52" :key="n" :style="{ height: (18 + ((n * 17) % 42)) + 'px' }"></i></div><small v-if="!previewUrl">Preview появится после нормализации медиа.</small></div><div class="processing-strip"><div><span class="eyebrow">ТЕКУЩАЯ ОБРАБОТКА</span><strong>{{ activeJob?.stage || 'Ожидание входящей записи' }}</strong></div><progress :value="activeJob?.progress || 0" max="100"></progress><span>{{ activeJob?.progress || 0 }}%</span></div><div class="tabbar"><button v-for="tab in [{id:'overview',label:'Обзор'},{id:'transcript',label:'Стенограмма'},{id:'summary',label:'Саммари'},{id:'decisions',label:'Решения'},{id:'tasks',label:'Поручения'},{id:'files',label:'Файлы'}]" :key="tab.id" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">{{ tab.label }}</button></div><div v-if="activeTab === 'overview'" class="overview-grid"><div><h3>Состояние обработки</h3><div v-for="job in jobs" :key="job.id" class="job-row"><span>{{ job.type || 'JOB' }} · {{ job.stage }}</span><progress :value="job.progress" max="100"></progress><b>{{ job.status }}</b><button v-if="job.status === 'FAILED'" class="link-button" @click="retryJob(job)">Повторить</button></div><div v-if="!jobs.length" class="empty-state">Запись ещё не загружена.</div></div><div class="upload-box"><h3>Добавить запись</h3><p>Аудио или видео → FFmpeg → WhisperX → Qwen.</p><input type="file" accept="audio/*,video/*,.flac,.wav,.m4a,.mp4,.mkv,.mov,.webm" @change="chooseFile" /><button class="primary wide" :disabled="!file || busy" @click="upload">{{ busy ? 'Загрузка…' : 'Загрузить и обработать' }}</button></div></div><div v-else-if="activeTab === 'transcript'" class="transcript-panel"><div class="transcript-toolbar"><div><strong>Стенограмма</strong><span>{{ segments.length }} сегментов · {{ transcriptStatus }}</span></div><button class="secondary" @click="refreshSelected">Обновить</button></div><div class="transcript-layout"><div class="transcript-content"><button v-for="segment in segments" :key="segment.id" class="segment-row" @click="seek(segment)"><span class="timecode">{{ timecode(segment.startMs) }}</span><span class="speaker-label">{{ segment.speaker || segment.speakerLabel || 'Спикер N' }}</span><span class="segment-text">{{ segment.text }}</span><small>{{ segment.confidence ? Math.round(segment.confidence * 100) + '%' : '' }}</small></button><div v-if="!segments.length" class="empty-state">Стенограмма появится после этапов ASR, alignment и diarization.</div></div><aside class="speaker-drawer"><div class="section-heading"><div><p class="eyebrow">УЧАСТНИКИ</p><h3>Спикеры</h3></div><span>{{ speakers.length }}</span></div><div v-for="speaker in speakers" :key="speaker.id" class="speaker-row"><div><strong>{{ speaker.displayName || 'Спикер N' }}</strong><small>{{ speaker.stableKey }} · {{ speaker.confidence ? Math.round(speaker.confidence * 100) + '%' : 'требует проверки' }}</small></div><button class="ghost" @click="renameSpeaker(speaker)">Изменить</button></div><div v-if="!speakers.length" class="empty-state">Появятся после диаризации.</div></aside></div></div><div v-else-if="activeTab === 'summary'" class="summary-panel"><div class="section-heading"><div><p class="eyebrow">AI OUTPUT</p><h3>Итог совещания</h3></div><button class="secondary" @click="rebuildSummary">Пересобрать</button></div><p v-if="summaryContent.summary" class="summary-text">{{ summaryContent.summary }}</p><div v-else class="empty-state">Саммари будет создано автоматически после стенограммы.</div><div class="tag-list"><span v-for="topic in (summaryContent.topics || [])" :key="topic">{{ topic }}</span></div><h3>Риски и открытые вопросы</h3><ul><li v-for="item in [...(summaryContent.risks || []), ...(summaryContent.open_questions || [])]" :key="item.text">{{ item.text }}</li></ul></div><div v-else-if="activeTab === 'decisions'" class="decision-list"><div v-for="decision in decisions" :key="decision.id" class="decision-row"><span class="decision-icon">✓</span><span>{{ decision.text }}</span><small>{{ decision.status }}</small></div><div v-if="!decisions.length" class="empty-state">Решения появятся в саммари.</div></div><div v-else-if="activeTab === 'tasks'" class="task-table"><div class="table-head"><span>Поручение</span><span>Ответственный</span><span>Срок</span><span>Статус</span></div><button v-for="task in tasks" :key="task.id" class="task-row" @click="updateTask(task)"><span>{{ task.task }}</span><span>{{ task.responsible || 'Не назначен' }}</span><span>{{ task.deadline ? new Date(task.deadline).toLocaleDateString() : 'Без срока' }}</span><span class="status-pill">{{ task.status }}</span></button><div v-if="!tasks.length" class="empty-state">Поручения появятся после автоматического саммари.</div></div><div v-else class="file-list"><div v-for="asset in media" :key="asset.id"><strong>{{ asset.originalName }}</strong><small>{{ asset.status }} · {{ Math.round(asset.sizeBytes / 1024 / 1024 * 10) / 10 }} MB</small></div><div v-if="!media.length" class="empty-state">Файлы появятся после загрузки записи.</div></div></div><aside class="meeting-rail"><section class="rail-section"><p class="eyebrow">КОНТЕКСТ</p><h3>Совещание</h3><div class="rail-stat"><span>Статус</span><strong>{{ selected.status }}</strong></div><div class="rail-stat"><span>Сегменты</span><strong>{{ segments.length }}</strong></div><div class="rail-stat"><span>Файлы</span><strong>{{ media.length }}</strong></div></section><section class="rail-section"><p class="eyebrow">ОБРАБОТКА</p><div v-for="job in jobs" :key="'rail-' + job.id" class="rail-job"><span class="dot" :class="job.status === 'FAILED' ? 'off' : ''"></span><div><strong>{{ job.stage }}</strong><small>{{ job.status }} · {{ job.progress }}%</small></div></div><div v-if="!jobs.length" class="empty-state">Pipeline появится после загрузки.</div></section><section class="rail-section"><p class="eyebrow">ПОМОЩНИК</p><p class="muted">Задайте вопрос по текущему совещанию и получите ответ с источниками.</p><button class="secondary wide" @click="activeNav = 'assistant'">Спросить помощника</button></section></aside></div></section><section v-else class="panel empty-meeting"><div class="empty-state">Выберите совещание слева, чтобы открыть его рабочее пространство.</div></section>
+          <section class="section-heading page-heading"><div><p class="eyebrow">MEETING CONTROL ROOM</p><h1>Совещания</h1><p class="muted">Создавайте встречи, импортируйте записи и переходите к результатам обработки.</p></div><button class="primary" @click="focusNewMeeting">＋ Новое совещание</button></section>
+          <div class="meetings-layout"><section class="panel meeting-browser"><div class="browser-toolbar"><div><h3>История записей</h3><span class="muted">{{ meetings.length }} встреч</span></div><button class="ghost" @click="loadMeetings">Обновить</button></div><div class="create-inline"><input id="new-meeting-title" v-model="title" placeholder="Название нового совещания" @keyup.enter="createMeeting" /><button class="primary" @click="createMeeting">Создать</button></div><div class="meeting-list"><button v-for="meeting in meetings" :key="meeting.id" class="meeting-row" :class="{ selected: selected?.id === meeting.id }" :aria-label="'Открыть совещание'" @click="selectMeeting(meeting)"><span class="meeting-icon">◷</span><span><strong>{{ meeting.title }}</strong><small>{{ new Date(meeting.createdAt).toLocaleString() }}</small></span><em>{{ statusLabel(meeting.status) }}</em></button><div v-if="!meetings.length" class="empty-state">Пока нет совещаний.</div></div></section>
           </div>
         </template>
 

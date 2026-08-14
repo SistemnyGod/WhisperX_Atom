@@ -80,6 +80,25 @@ class ServerFirstContractTests(unittest.TestCase):
         api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
         self.assertIn("t.version=COALESCE(@version,(SELECT MAX(version)", api)
 
+    def test_web_terminal_job_events_close_sse_before_refreshing(self):
+        web = Path("apps/web/src/main.ts").read_text(encoding="utf-8")
+        self.assertIn("const eventSources = new Map<string, EventSource>()", web)
+        self.assertIn("eventSources.delete(update.id)", web)
+        self.assertIn("await refreshSelected()", web)
+        self.assertIn('!["READY", "FAILED", "CANCELLED"].includes(job.status)', web)
+
+    def test_web_runtime_template_uses_vue_compiler_build(self):
+        vite = Path("apps/web/vite.config.ts").read_text(encoding="utf-8")
+        self.assertIn('vue: "vue/dist/vue.esm-bundler.js"', vite)
+
+    def test_web_control_room_exposes_real_source_state_and_keyboard_focus(self):
+        web = Path("apps/web/src/main.ts").read_text(encoding="utf-8")
+        css = Path("apps/web/src/style.css").read_text(encoding="utf-8")
+        self.assertIn("const onlineAgentCount = computed", web)
+        self.assertIn("serverStatusLabel", web)
+        self.assertIn('aria-label="Обновить рабочее место"', web)
+        self.assertIn("button:focus-visible", css)
+
     def test_search_contract_is_bounded_and_scoped(self):
         api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
         store = Path("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs").read_text(encoding="utf-8-sig")

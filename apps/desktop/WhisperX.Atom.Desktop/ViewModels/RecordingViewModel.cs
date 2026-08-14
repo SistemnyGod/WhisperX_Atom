@@ -198,6 +198,7 @@ public sealed class RecordingViewModel : ObservableObject
     public IReadOnlyList<double> SystemAudioWaveform => _systemAudioWaveform;
     public bool MicrophoneTelemetryStale => _microphoneTelemetryStale;
     public bool SystemAudioTelemetryStale => _systemAudioTelemetryStale;
+    public bool SystemAudioCaptureAvailable => _lastAgentResponse?.Health?.SystemAudioCaptureReady == true;
     public string MicrophoneTestStatus { get => _microphoneTestStatus; private set => SetProperty(ref _microphoneTestStatus, value); }
     public string SystemAudioTestStatus { get => _systemAudioTestStatus; private set => SetProperty(ref _systemAudioTestStatus, value); }
     public bool IsDeviceListRefreshInProgress => _deviceListRefreshInProgress;
@@ -977,6 +978,7 @@ public sealed class RecordingViewModel : ObservableObject
             _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, health.MicrophonePeak);
             _systemAudioWaveform = AppendWaveformSample(_systemAudioWaveform, health.SystemAudioPeak);
             OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(SystemAudioCaptureAvailable));
             OnPropertyChanged(nameof(PendingUploadsLabel));
             OnPropertyChanged(nameof(EncoderBacklogLabel));
             OnPropertyChanged(nameof(BackgroundDeliveryLabel));

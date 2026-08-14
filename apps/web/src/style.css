@@ -402,3 +402,17 @@ progress { accent-color: var(--teal); }
   .assistant-header { flex-direction: column; }
   .assistant-context { align-items: flex-start; }
 }
+
+/* Keyboard and touch polish for the control room. */
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(21, 155, 148, .32);
+  outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+  .hero-actions, .recording-actions { width: 100%; }
+  .hero-actions button, .recording-actions button { flex: 1 1 auto; }
+  .create-inline { flex-direction: column; }
+  .create-inline .primary { width: 100%; margin-top: 0; }
+  .meeting-row { min-height: 58px; }
+}

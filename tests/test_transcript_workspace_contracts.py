@@ -45,3 +45,11 @@ def test_transcript_registry_uses_lazy_loading_and_timestamp_seek_exists():
     assert "LoadSelectedAsync" in vm
     assert "new TranscriptRegistryItem(item)" in vm
     assert "PlaybackSession.Position = TimeSpan.FromMilliseconds(segment.StartMs)" in page
+
+
+def test_transcript_words_are_opt_in_to_keep_default_payload_small():
+    program = source("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "bool? includeWords" in program
+    assert "includeWords == true" in program
+    assert "CASE WHEN @include_words THEN s.words ELSE NULL END" in program
+    assert 'command.Parameters.AddWithValue("include_words", includeWords);' in program

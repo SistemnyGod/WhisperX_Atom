@@ -99,6 +99,18 @@ def test_outbox_and_online_drift_have_durable_dedup_and_fallback_contracts():
     assert "AUDIO_TRACK_DRIFT_HIGH" in media and "AUDIO_TRACK_DRIFT_HIGH" in local
 
 
+def test_outbox_relay_does_not_hold_postgres_work_during_nats_publish():
+    outbox = read("workers/outbox_relay/worker.py")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/026_outbox_pending_index.sql")
+    publish_start = outbox.index("await jetstream.publish")
+    update_connection_start = outbox.index("with psycopg.connect(conninfo) as connection:", publish_start)
+    publish = outbox[publish_start:update_connection_start]
+    assert "with psycopg.connect(conninfo) as connection:" in outbox
+    assert "with psycopg.connect(conninfo) as connection:" not in publish
+    assert "published_at IS NULL" in migration
+    assert "WHERE published_at IS NULL" in migration
+
+
 def test_disabled_owner_keeps_delivery_retryable_without_changing_local_archive():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     agent = read("apps/recorder-agent/AgentApiClient.cs")

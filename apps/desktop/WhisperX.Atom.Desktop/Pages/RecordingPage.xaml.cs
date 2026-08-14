@@ -182,7 +182,9 @@ public sealed partial class RecordingPage : Page
     {
         ResponsiveLayout.SetTwoColumn(RecordingHeroGrid, RecordingMainColumn, RecordingSourcesColumn, 340, e.NewSize.Width);
         ResponsiveLayout.SetCardColumns(LifeCycleGrid, LifeCycleGrid.Children.OfType<FrameworkElement>().ToArray(), e.NewSize.Width);
-        RecordingActionsPanel.Orientation = Orientation.Vertical;
+        // Keep the primary controls in one scan line when there is room, but
+        // avoid horizontal clipping in the compact shell/sidebar layout.
+        RecordingActionsPanel.Orientation = e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal;
     }
 
     private void UpdateStateIndicator()
@@ -223,5 +225,8 @@ public sealed partial class RecordingPage : Page
         if (ViewModel is null) return;
         PauseResumeButton.Content = ViewModel.State == RecordingState.Paused ? "Продолжить" : "Пауза";
         PauseResumeButton.IsEnabled = ViewModel.CanPause || ViewModel.CanResume;
+        ToolTipService.SetToolTip(PauseResumeButton, ViewModel.State == RecordingState.Paused
+            ? "Продолжить локальную запись"
+            : "Приостановить локальную запись");
     }
 }
