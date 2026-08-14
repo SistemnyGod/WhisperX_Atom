@@ -350,7 +350,22 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
 {
     var checkedAt = DateTimeOffset.UtcNow;
     var mediaRoot = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
-    var storage = Directory.Exists(mediaRoot);
+    // Match /health/ready: a bind mount may be created lazily by Docker, so a
+    // Directory.Exists-only check can report a false storage outage. Probe the
+    // actual write/delete path used by media ingestion instead.
+    var storage = false;
+    try
+    {
+        Directory.CreateDirectory(mediaRoot);
+        var probe = Path.Combine(mediaRoot, $".readiness-probe-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(probe, "ready");
+        File.Delete(probe);
+        storage = true;
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "System readiness media storage probe failed");
+    }
     var postgres = true;
     try { await db.PingAsync(); }
     catch (Exception ex)
@@ -390,10 +405,19 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     var fresh = workers
         .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
         .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastSeenAt).First(), StringComparer.OrdinalIgnoreCase);
+    static bool IsActiveWorker(WorkerRuntimeRow worker) =>
+        string.Equals(worker.Status, "READY", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(worker.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(worker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase);
+    static bool IsFreshWorker(WorkerRuntimeRow worker, DateTimeOffset now)
+    {
+        var age = now.UtcDateTime - worker.LastSeenAt.ToUniversalTime();
+        return age >= TimeSpan.Zero && age <= TimeSpan.FromSeconds(60);
+    }
     var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker" })
     {
-        if (!fresh.TryGetValue(name, out var item) || checkedAt.UtcDateTime - item.LastSeenAt.ToUniversalTime() > TimeSpan.FromSeconds(60))
+        if (!fresh.TryGetValue(name, out var item) || !IsFreshWorker(item, checkedAt))
         {
             workerReady[name] = new { status = "UNAVAILABLE", lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
             continue;
@@ -401,7 +425,9 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         workerReady[name] = new { status = item.Status, lastSeenAt = item.LastSeenAt, version = item.Version, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = item.LastErrorCode };
     }
 
-    var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker) && checkedAt.UtcDateTime - gpuWorker.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60);
+    var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker)
+        && IsFreshWorker(gpuWorker, checkedAt)
+        && IsActiveWorker(gpuWorker);
     var gpuCapabilities = gpuWorker?.Capabilities.RootElement;
     var cuda = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("cudaAvailable", out var cudaValue) && cudaValue.ValueKind == JsonValueKind.True;
     var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue)
@@ -409,9 +435,8 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         : "DEGRADED";
     var requiredWorkersReady = new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" }.All(name =>
         fresh.TryGetValue(name, out var worker) &&
-        checkedAt.UtcDateTime - worker.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60) &&
-        !string.Equals(worker.Status, "FAILED", StringComparison.OrdinalIgnoreCase) &&
-        !string.Equals(worker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase));
+        IsFreshWorker(worker, checkedAt) &&
+        IsActiveWorker(worker));
     var qwenEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     object qwen;
     if (!qwenEnabled)
@@ -422,7 +447,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     {
         qwen = new { status = "DEGRADED", reason = "nats_unavailable" };
     }
-    else if (!fresh.TryGetValue("summary-worker", out var summaryWorker) || checkedAt.UtcDateTime - summaryWorker.LastSeenAt.ToUniversalTime() > TimeSpan.FromSeconds(60))
+    else if (!fresh.TryGetValue("summary-worker", out var summaryWorker) || !IsFreshWorker(summaryWorker, checkedAt))
     {
         qwen = new { status = "DEGRADED", reason = "summary_worker_stale" };
     }
@@ -439,6 +464,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing" }
             : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch" }
             : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing" }
+            : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready" }
             : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable" }
             : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded" }
             : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy" }
@@ -1031,6 +1057,14 @@ app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest r
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (request.TrackType is not ("room-microphone" or "system-audio"))
+        return Results.BadRequest(new { error = "recording_track_type_invalid" });
+    if (request.SampleRate is < 8000 or > 192000 || request.Channels is < 1 or > 8)
+        return Results.BadRequest(new { error = "recording_track_format_invalid" });
+    if (request.BitsPerSample is not null and not (8 or 16 or 24 or 32))
+        return Results.BadRequest(new { error = "recording_track_bits_invalid" });
+    if (request.ValidBitsPerSample is not null && (request.ValidBitsPerSample < 1 || request.ValidBitsPerSample > request.BitsPerSample.GetValueOrDefault(32)))
+        return Results.BadRequest(new { error = "recording_track_valid_bits_invalid" });
     var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample);
     return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
 });
@@ -1047,9 +1081,9 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     try
     {
+        long size;
         await using (var output = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-            await request.Body.CopyToAsync(output);
-        var size = new FileInfo(partPath).Length;
+            size = await CopyRequestBodyWithLimitAsync(request, output, 128L * 1024 * 1024, context.RequestAborted);
         var sha = await StorageHelpers.ComputeSha256Async(partPath);
         var expectedSha = request.Headers["X-Chunk-SHA256"].ToString();
         if (!string.IsNullOrWhiteSpace(expectedSha) && !string.Equals(expectedSha, sha, StringComparison.OrdinalIgnoreCase))
@@ -1059,6 +1093,11 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
         }
         var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
         var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
+        if (startSample < 0 || sampleCount < 0)
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_sample_metadata_invalid" });
+        }
         if (File.Exists(path))
         {
             var existingSha = await StorageHelpers.ComputeSha256Async(path);
@@ -1084,12 +1123,33 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
         }
         return Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha });
     }
+    catch (RequestBodyTooLargeException)
+    {
+        if (File.Exists(partPath)) File.Delete(partPath);
+        return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    }
     catch
     {
         if (File.Exists(partPath)) File.Delete(partPath);
         throw;
     }
 });
+
+static async Task<long> CopyRequestBodyWithLimitAsync(HttpRequest request, Stream destination, long maxBytes, CancellationToken cancellationToken)
+{
+    var buffer = new byte[1024 * 1024];
+    long total = 0;
+    while (true)
+    {
+        var read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);
+        if (read == 0) break;
+        total += read;
+        if (total > maxBytes) throw new RequestBodyTooLargeException();
+        await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+    }
+    await destination.FlushAsync(cancellationToken);
+    return total;
+}
 
 app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/missing-chunks", async (Guid sessionId, Guid trackId, int expectedCount, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1419,6 +1479,8 @@ public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
+
+public sealed class RequestBodyTooLargeException : Exception { }
 
 public record LoginRequest(string? Username, string? Password);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);

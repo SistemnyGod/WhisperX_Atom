@@ -221,7 +221,7 @@ public sealed class RecordingViewModel : ObservableObject
         "READY_NO_SIGNAL" => "Поток открыт, сигнала пока нет",
         "CLIPPING" => "Голос записывается, но уровень перегружен",
         "FORMAT_MISMATCH" => "Ошибка формата аудиобуфера",
-        "NO_PACKETS" => "Ожидаются аудиокадры от микрофона",
+        "NO_PACKETS" => "Нет данных от микрофона",
         "UNAVAILABLE" => "Микрофон недоступен",
         _ => "Состояние сигнала проверяется"
     };

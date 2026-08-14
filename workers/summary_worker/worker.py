@@ -12,7 +12,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
-from workers.nats_utils import fetch_available, maintain_message
+from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 from .contracts import (
     MEETING_PROTOCOL_RU,
@@ -404,20 +404,18 @@ async def run() -> None:
             heartbeat.set_state("DEGRADED", capabilities["modelValidationReason"])
         else:
             heartbeat.set_state("READY")
-    set_runtime_state()
     jetstream = client.jetstream()
-    try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
-    except Exception:
-        pass
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     summary_subscription = await jetstream.pull_subscribe("llm.summarize", durable="summary-worker")
     assistant_subscription = await jetstream.pull_subscribe("llm.assistant", durable="assistant-worker")
+    set_runtime_state()
     summary_worker = SummaryWorker()
     assistant_worker = AssistantWorker()
 
     async def consume_summary() -> None:
         while True:
             for message in await fetch_available(summary_subscription, nats.errors.TimeoutError, timeout=1):
+                job_id: str | None = None
                 try:
                     payload = json.loads(message.data)
                     job_id = str(payload.get("job_id", ""))
@@ -428,6 +426,7 @@ async def run() -> None:
                         await summary_worker.handle(payload)
                     await message.ack()
                 except Exception:
+                    LOGGER.exception("summary_message_failed job_id=%s", job_id)
                     await message.nak()
                 finally:
                     heartbeat.set_job(None)
@@ -436,6 +435,7 @@ async def run() -> None:
     async def consume_assistant() -> None:
         while True:
             for message in await fetch_available(assistant_subscription, nats.errors.TimeoutError, timeout=1):
+                query_id: str | None = None
                 try:
                     payload = json.loads(message.data)
                     query_id = str(payload.get("query_id", ""))
@@ -444,6 +444,7 @@ async def run() -> None:
                         await assistant_worker.handle(payload)
                     await message.ack()
                 except Exception:
+                    LOGGER.exception("assistant_message_failed query_id=%s", query_id)
                     await message.nak()
 
     await asyncio.gather(consume_assistant(), consume_summary())

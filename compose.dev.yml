@@ -97,6 +97,7 @@ services:
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       NATS_URL: nats://nats:4222
+      WORKER_INSTANCE_ID: outbox-relay
     depends_on:
       api:
         condition: service_healthy
@@ -105,10 +106,11 @@ services:
       nats:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import workers.outbox_relay.worker"]
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   import-worker:
     profiles: ["core", "gpu"]
@@ -127,15 +129,17 @@ services:
       IMPORT_INTERVAL_SECONDS: ${IMPORT_INTERVAL_SECONDS:-5}
       IMPORT_BATCH_SIZE: ${IMPORT_BATCH_SIZE:-8}
       IMPORT_MAX_STABLE_PATHS: ${IMPORT_MAX_STABLE_PATHS:-2048}
+      WORKER_INSTANCE_ID: import-worker
     depends_on:
       api:
         condition: service_healthy
     volumes: *media-volumes
     healthcheck:
-      test: ["CMD", "python", "-c", "import workers.import_worker.worker"]
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   media-worker:
     profiles: ["core", "gpu"]
@@ -147,6 +151,7 @@ services:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       MEDIA_ROOT: /data
       NATS_URL: nats://nats:4222
+      WORKER_INSTANCE_ID: media-worker
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,10 +159,11 @@ services:
         condition: service_healthy
     volumes: *media-volumes
     healthcheck:
-      test: ["CMD", "python", "-c", "import workers.media_worker.worker"]
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   gpu-worker:
     profiles: ["gpu"]
@@ -263,10 +269,11 @@ services:
               capabilities: [gpu]
   summary-worker:
     healthcheck:
-      test: ["CMD", "python3.12", "-c", "import workers.summary_worker.worker"]
+      test: ["CMD", "python3.12", "-m", "workers.runtime_healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
     profiles: ["llm"]
     build:
       context: .
@@ -287,6 +294,7 @@ services:
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-3072}
       GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+      WORKER_INSTANCE_ID: summary-worker
     volumes:
       - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
     deploy:

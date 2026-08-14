@@ -5,8 +5,10 @@ COPY workers/media_worker /srv/workers/media_worker
 COPY workers/__init__.py /srv/workers/__init__.py
 COPY workers/nats_utils.py /srv/workers/nats_utils.py
 COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py
+COPY workers/runtime_healthcheck.py /srv/workers/runtime_healthcheck.py
 COPY whisperx_atom /srv/whisperx_atom
 COPY workers/media_worker/requirements.txt /srv/media-requirements.txt
 RUN pip install --no-cache-dir -r /srv/media-requirements.txt
+ENV WORKER_NAME=media-worker
 CMD ["python", "-m", "workers.media_worker.worker"]
 

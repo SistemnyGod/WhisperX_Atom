@@ -57,14 +57,18 @@ foreach ($route in @("home", "recording", "meetings", "transcripts", "settings")
 Assert-Contains $mainWindow "AutomationProperties.Name" "navigation accessibility names"
 
 $recording = Join-Path $desktop "Pages/RecordingPage.xaml"
-foreach ($binding in @("CanStart", "CanPause", "CanMark", "CanStop", "CanSelectDevices", "MicrophoneLevel", "SystemAudioLevel")) {
+# The start action remains enabled while the ViewModel performs its own
+# recovery/readiness check, so a failed Host can produce an actionable error
+# instead of leaving the button inert. CanStart is still the final readiness
+# predicate inside the ViewModel, while the page binds CanAttemptStart.
+foreach ($binding in @("CanAttemptStart", "CanPause", "CanMark", "CanStop", "CanSelectDevices", "MicrophoneLevel", "SystemAudioLevel")) {
     Assert-Contains $recording "{Binding $binding}" "recording binding $binding"
 }
 
 $deviceSelector = Join-Path $desktop "Controls\DeviceSelector.xaml"
 Assert-Contains $deviceSelector "IsSelectionEnabled" "explicit device picker availability binding"
 $recordingViewModel = Join-Path $desktop "ViewModels\RecordingViewModel.cs"
-Assert-Contains $recordingViewModel "State is not RecordingState.Recording and not RecordingState.Paused" "device selection remains available after local capture ends"
+Assert-Contains $recordingViewModel "CanSelectDevices => State is not (" "device selection remains available after local capture ends"
 if ((Get-Content -LiteralPath $recording -Raw -Encoding UTF8) -match "DeviceId") {
     throw "Recording page exposes a technical DeviceId"
 }

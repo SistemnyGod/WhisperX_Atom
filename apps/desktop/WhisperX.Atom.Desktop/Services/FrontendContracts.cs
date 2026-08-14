@@ -51,6 +51,7 @@ public interface IBackendService : IDisposable
     bool HasSession { get; }
     string? SessionCookie { get; }
     DesktopAuthState AuthState { get; }
+    string? LastConnectionErrorCode { get; }
     DateTimeOffset? SessionExpiresAtUtc { get; }
     bool CanUseOffline { get; }
     void ApplySettings(DesktopSettings settings);
@@ -143,7 +144,24 @@ public static class AgentStatusFormatter
 {
     public static string Format(AgentIpcResponse response)
     {
-        if (!response.Ok) return "Recorder Agent: локальный сервис сообщил об ошибке";
+        if (!response.Ok)
+        {
+            return response.Error?.ToUpperInvariant() switch
+            {
+                "RECORDER_IPC_ACCESS_DENIED" => "Recorder Agent: доступ к локальному IPC запрещён",
+                "RECORDER_IPC_TIMEOUT" or "RECORDER_HOST_PIPE_UNRESPONSIVE" => "Recorder Agent: локальный Host не отвечает",
+                "RECORDER_HOST_NOT_RUNNING" => "Recorder Agent: локальный Host не запущен",
+                "AUDIO_INPUT_NODE_CREATE_FAILED" => "Recorder Agent: Windows не создала вход микрофона",
+                "AUDIO_DEVICE_ACCESS_DENIED" => "Recorder Agent: Windows запретила доступ к микрофону",
+                "AUDIO_NO_FRAMES" or "AUDIO_NO_DATA" => "Recorder Agent: от микрофона не поступают аудиокадры",
+                "AUDIO_BUFFER_FORMAT_MISMATCH" => "Recorder Agent: несовместимый формат аудиобуфера",
+                "SERVER_NETWORK_UNREACHABLE" => "Recorder Agent: сервер недоступен по сети; запись сохраняется локально",
+                "SERVER_TIMEOUT" => "Recorder Agent: сервер не ответил вовремя; запись сохраняется локально",
+                "AGENT_AUTH_REJECTED" => "Recorder Agent: сервер отклонил авторизацию",
+                _ when !string.IsNullOrWhiteSpace(response.Error) => $"Recorder Agent: {response.Error}",
+                _ => "Recorder Agent: локальный сервис сообщил об ошибке"
+            };
+        }
         if (response.Health is null) return "Recorder Agent: локальный сервис недоступен";
         return response.Health.ServerConnectionState switch
         {

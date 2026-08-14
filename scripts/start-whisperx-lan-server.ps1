@@ -166,6 +166,30 @@ COMMIT;
     $stateText = (& docker @psArgs | Out-String)
     $degraded = @($requiredServices | Where-Object { $stateText -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
     if ($degraded.Count -gt 0) { Write-Warning "SERVER_DEGRADED: services not running: $($degraded -join ', ')" }
+
+    # A running container is not proof that a worker can process work. The
+    # worker Dockerfiles expose a heartbeat-backed healthcheck; wait for it so
+    # the launcher cannot report PROCESSING_READY while a worker is stuck
+    # during startup or has lost its database connection.
+    $healthCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
+    if ($EnableQwen) { $healthCompose += @("--profile", "llm") }
+    function Test-WorkerHealthy([string]$service) {
+        $containerId = ((& docker @healthCompose ps -q $service 2>$null | Select-Object -First 1) | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($containerId)) { return $false }
+        $health = ((& docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}" $containerId 2>$null) | Out-String).Trim().ToLowerInvariant()
+        # Processing readiness must fail closed. A missing Docker healthcheck
+        # is a packaging/configuration defect, not proof that the worker is OK.
+        return $health -eq "healthy"
+    }
+    $workerHealthDeadline = [DateTimeOffset]::UtcNow.AddSeconds(120)
+    $workerHealthPending = @($workerServices)
+    while ($workerHealthPending.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $workerHealthDeadline) {
+        $workerHealthPending = @($workerServices | Where-Object { -not (Test-WorkerHealthy $_) })
+        if ($workerHealthPending.Count -gt 0) { Start-Sleep -Seconds 3 }
+    }
+    if ($workerHealthPending.Count -gt 0) {
+        throw "LAN_WORKER_HEALTH_FAILED: $($workerHealthPending -join ', ') did not reach healthy heartbeat state."
+    }
     [ordered]@{
         generatedAtUtc = [DateTimeOffset]::UtcNow
         project = $projectName

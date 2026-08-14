@@ -76,12 +76,13 @@ Check "coreServices" {
     "RUNNING"
 }
 Check "processingServices" {
-    $psArgs = @("compose", "--project-name", $projectName, "--env-file", $EnvFile, "-f", (Join-Path $repo "compose.dev.yml"), "-f", (Join-Path $repo "compose.lan.yml"), "--profile", "core", "--profile", "gpu", "--profile", "lan", "ps", "--format", "{{.Service}} {{.State}}")
+    $psArgs = @("compose", "--project-name", $projectName, "--env-file", $EnvFile, "-f", (Join-Path $repo "compose.dev.yml"), "-f", (Join-Path $repo "compose.lan.yml"), "--profile", "core", "--profile", "gpu", "--profile", "lan", "ps", "--format", "{{.Service}} {{.State}} {{.Health}}")
     $states = (& docker @psArgs | Out-String)
     $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
-    $missing = @($required | Where-Object { $states -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
-    if ($missing.Count -gt 0) { throw "PROCESSING_SERVICES_UNAVAILABLE:$($missing -join ',')" }
-    "RUNNING"
+    if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true") { $required += "summary-worker" }
+    $missing = @($required | Where-Object { $states -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running\s+healthy") })
+    if ($missing.Count -gt 0) { throw "PROCESSING_SERVICES_UNHEALTHY:$($missing -join ',')" }
+    "HEALTHY"
 }
 Check "legacyRuntime" {
     $legacyNames = @(docker ps --filter "label=com.docker.compose.project=whisperx-atom-lan" --format "{{.Names}}")

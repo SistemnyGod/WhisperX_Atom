@@ -338,12 +338,13 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             await writer.StartAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
                 // AudioGraph replaces its completed frame channel for every
-                // capture start. Bind the durable consumer only after that
-                // reset; binding it in writer.StartAsync consumes the previous
-                // session's channel forever while the live queue overruns.
+                // capture start. The writer has been created against that new
+                // channel by writer.StartAsync; bind it before AudioGraph
+                // emits frames so a delayed scheduler cannot fill the queue
+                // and falsely report AUDIO_PIPELINE_OVERRUN.
                 writer.BeginConsuming();
+                await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
                 await writer.FirstDurableBytes.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -650,7 +651,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             {
                 // Completed chunks are safe to upload while capture continues;
                 // finalization remains strictly stop-scoped.
+                await EnsureActiveSessionBoundAsync(activeSession, cancellationToken).ConfigureAwait(false);
                 await _api.UploadPendingChunksAsync(_spool, activeSession, cancellationToken).ConfigureAwait(false);
+                await _api.UploadPendingEventsAsync(_spool, activeSession, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -673,7 +676,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             }).ToArray();
             await Task.WhenAll(deliveryTasks).ConfigureAwait(false);
         }
-        if (_api.IsConfigured)
+        // Heartbeat cadence is owned by AgentApiClient so a healthy LAN does
+        // not receive a request every worker tick and transient failures use
+        // the same bounded backoff as delivery. Configuration changes reset
+        // NextHeartbeatAtUtc and wake the first probe immediately.
+        if (_api.IsConfigured && DateTimeOffset.UtcNow >= _api.NextHeartbeatAtUtc)
         {
             var root = _storage.ArchiveRoot;
             var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root))!);
@@ -688,6 +695,58 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 null,
                 _engine.DeviceCatalog.Devices.Select(ToIpcDevice).ToArray(),
                 Array.Empty<AgentIpcAudioDevice>()), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<Guid?> EnsureActiveSessionBoundAsync(string localSessionId, CancellationToken cancellationToken)
+    {
+        var info = await _spool.GetSessionInfoAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (info?.State is not ("RECORDING" or "PAUSED")) return null;
+
+        var tracks = await _spool.GetTrackInfosAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (tracks.Count == 0) return null;
+
+        var existingServerSession = await _spool.GetServerSessionIdAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (existingServerSession is Guid existing)
+        {
+            var complete = true;
+            foreach (var track in tracks)
+            {
+                if (await _spool.GetServerBindingAsync(localSessionId, track.TrackId, cancellationToken).ConfigureAwait(false) is null)
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete) return existing;
+        }
+
+        try
+        {
+            var serverSessionId = await _api.BindSessionAsync(
+                localSessionId,
+                info.MeetingId,
+                info.Title,
+                tracks,
+                _spool,
+                cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Active recording server binding is ready. Session={SessionId}, ServerSession={ServerSessionId}",
+                localSessionId,
+                serverSessionId);
+            return serverSessionId;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "Active recording server binding is unavailable; upload will retry without losing local chunks. Session={SessionId}",
+                localSessionId);
+            return null;
         }
     }
 

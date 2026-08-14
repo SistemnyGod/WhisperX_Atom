@@ -18,7 +18,7 @@ def test_host_releases_installation_lease_when_start_fails_before_capture():
     assert "RECORDER_RUNTIME_LEASE_HELD" in read("apps/recorder-agent/RecorderRuntimeLease.cs")
 
 
-def test_durable_writer_subscribes_after_audiograph_replaces_its_frame_channel():
+def test_durable_writer_subscribes_before_audiograph_can_emit_frames():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     start = runtime.split("public async Task<AgentIpcResponse> StartAsync", 1)[1].split(
         "public async Task<AgentIpcResponse> StopAsync", 1
@@ -26,7 +26,7 @@ def test_durable_writer_subscribes_after_audiograph_replaces_its_frame_channel()
     writer_start = runtime.split("public async Task StartAsync(CancellationToken", 1)[1].split(
         "public void BeginConsuming", 1
     )[0]
-    assert start.index("await _engine.StartAsync") < start.index("writer.BeginConsuming()")
+    assert start.index("writer.BeginConsuming()") < start.index("await _engine.StartAsync")
     assert start.index("writer.BeginConsuming()") < start.index("writer.FirstDurableBytes")
     assert "_worker = Task.Run(ProcessAsync)" not in writer_start
     engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
@@ -35,6 +35,15 @@ def test_durable_writer_subscribes_after_audiograph_replaces_its_frame_channel()
     )[0]
     assert "try { await StopAsync(CancellationToken.None)" in engine_start
     assert "throw;" in engine_start
+
+
+def test_host_heartbeat_uses_agent_backoff_cadence():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    reconcile = runtime.split("public async Task ReconcileBackgroundAsync", 1)[1].split(
+        "public async Task<RecordingSessionStatus>", 1
+    )[0]
+    assert "DateTimeOffset.UtcNow >= _api.NextHeartbeatAtUtc" in reconcile
+    assert "NextHeartbeatAtUtc and wake the first probe immediately" in reconcile
 
 
 def test_host_ipc_maps_acl_denial_and_uses_exact_configured_user_sid():
@@ -146,6 +155,14 @@ def test_desktop_distinguishes_running_host_from_unresponsive_pipe():
     assert "RECORDER_HOST_UPDATE_REQUIRED" in controller
     assert "RECORDER_HOST_UPDATE_RESTART_REQUIRED" in controller
     assert "staleBuild" in controller
+
+
+def test_desktop_restarts_only_a_stale_current_user_host_after_update():
+    controller = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderServiceController.cs")
+    assert "TryStopOwnedHost" in controller
+    assert "entireProcessTree: true" in controller
+    assert "process.SessionId != Process.GetCurrentProcess().SessionId" in controller
+    assert "RECORDER_HOST_UPDATE_RESTART_REQUIRED" in controller
 
 
 def test_host_launcher_fails_when_existing_process_owns_unresponsive_pipe():

@@ -41,6 +41,7 @@ public sealed class SettingsViewModel : ObservableObject
             if (!SetProperty(ref _isBusy, value)) return;
             OnPropertyChanged(nameof(CanLogin));
             OnPropertyChanged(nameof(CanChangePassword));
+            OnPropertyChanged(nameof(CanChangeServerOrigin));
             OnPropertyChanged(nameof(CanReconnectAgent));
             OnPropertyChanged(nameof(CanUseActions));
             OnPropertyChanged(nameof(CanLogout));
@@ -49,6 +50,7 @@ public sealed class SettingsViewModel : ObservableObject
     public string DiagnosticsPath { get => _diagnosticsPath; private set => SetProperty(ref _diagnosticsPath, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool CanLogin => !IsBusy && !IsLoggedIn;
+    public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
     public bool CanChangePassword => !IsBusy && IsLoggedIn;
     public bool CanReconnectAgent => !IsBusy && IsLoggedIn;
     public bool CanUseActions => !IsBusy;
@@ -85,6 +87,7 @@ public sealed class SettingsViewModel : ObservableObject
             StatusText = "Вход в локальный API выполнен.";
             OnPropertyChanged(nameof(IsLoggedIn));
             OnPropertyChanged(nameof(CanLogin));
+            OnPropertyChanged(nameof(CanChangeServerOrigin));
             OnPropertyChanged(nameof(CanChangePassword));
             OnPropertyChanged(nameof(CanReconnectAgent));
             OnPropertyChanged(nameof(CanLogout));
@@ -337,12 +340,79 @@ public sealed class SettingsViewModel : ObservableObject
         {
             IsBusy = true;
             var ready = await _services.Backend.CheckReadyAsync();
-            StatusText = ready ? "Локальный API доступен." : "Локальный API не отвечает.";
+            StatusText = ready
+                ? "API доступен."
+                : _services.Backend.LastConnectionErrorCode switch
+                {
+                    "SERVER_NETWORK_UNREACHABLE" => "Сервер недоступен по сети. Проверьте LAN, адрес и брандмауэр.",
+                    "SERVER_TIMEOUT" => "Сервер не ответил вовремя. Проверьте LAN и состояние gateway.",
+                    { } code when code.StartsWith("SERVER_HTTP_", StringComparison.OrdinalIgnoreCase)
+                        => $"Сервер ответил отказом ({code[12..]}). Проверьте состояние API и авторизацию.",
+                    _ => "Сервер не отвечает. Проверьте адрес и состояние API."
+                };
             return ready;
         }
         catch (Exception ex)
         {
             StatusText = SafeError(ex, "Не удалось проверить подключение к API.");
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task<bool> ApplyServerOriginAsync()
+    {
+        if (ServerOriginManaged)
+        {
+            StatusText = "Адрес сервера управляется установщиком.";
+            return false;
+        }
+
+        var candidate = ApiUrl.Trim().TrimEnd('/');
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrWhiteSpace(uri.Host))
+        {
+            StatusText = "Укажите корректный HTTP(S)-адрес сервера.";
+            return false;
+        }
+
+        try
+        {
+            IsBusy = true;
+            var current = _services.Settings.Load();
+            var originChanged = !string.Equals(
+                current.ApiUrl.TrimEnd('/'),
+                candidate,
+                StringComparison.OrdinalIgnoreCase);
+            var updated = originChanged
+                ? current with
+                {
+                    ApiUrl = candidate,
+                    ProtectedSessionCookie = null,
+                    SessionExpiresAtUtc = null,
+                    OwnerUserId = null,
+                    AgentBootstrapConfirmed = false
+                }
+                : current with { ApiUrl = candidate };
+            _services.Settings.Save(updated);
+            _services.Backend.ApplySettings(updated);
+            OnPropertyChanged(nameof(LoginStatusText));
+            OnPropertyChanged(nameof(SessionExpiryText));
+
+            if (!await _services.Backend.EnsureAuthenticatedAsync())
+            {
+                StatusText = "Адрес сервера сохранён. Выполните вход для проверки подключения.";
+                return true;
+            }
+
+            var bootstrap = await _services.AgentBootstrap.EnsureAgentReadyAsync();
+            StatusText = bootstrap.Message;
+            return bootstrap.Ready || bootstrap.OfflineEligible;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex, "Не удалось применить адрес сервера.");
             return false;
         }
         finally { IsBusy = false; }

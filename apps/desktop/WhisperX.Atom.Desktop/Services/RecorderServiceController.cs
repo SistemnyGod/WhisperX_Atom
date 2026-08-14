@@ -207,7 +207,20 @@ public sealed class RecorderServiceController(IRecorderService recorder)
     {
         var before = await GetHostSnapshotAsync(cancellationToken);
         if (before.PipeReachable) return before;
-        if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED")
+        if (before.Exists
+            && (before.Error is "RECORDER_HOST_UPDATE_RESTART_REQUIRED"
+                || before.Error == "RECORDER_HOST_UPDATE_REQUIRED" && IsStaleHostBuild(before)))
+        {
+            // An installed Desktop can outlive the previous current-user Host
+            // process. Starting a second Host only produces
+            // RECORDER_HOST_ALREADY_RUNNING and leaves the UI stuck in the
+            // old build. Restart only a stale Host in this user's session; do
+            // not kill an unknown or merely busy process.
+            if (!TryStopOwnedHost(before))
+                return before with { Error = "RECORDER_HOST_UPDATE_RESTART_REQUIRED" };
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+        else if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED")
             return before;
 
         var executable = ResolveHostExecutable();
@@ -286,6 +299,38 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             await Task.Delay(500, cancellationToken);
         }
         return snapshot with { Error = "RECORDER_HOST_START_TIMEOUT" };
+    }
+
+    private static bool IsStaleHostBuild(RecorderServiceSnapshot snapshot)
+    {
+        var expected = GetFileVersion(ResolveHostExecutable());
+        return !string.IsNullOrWhiteSpace(expected)
+            && !string.IsNullOrWhiteSpace(snapshot.BuildIdentity)
+            && !string.Equals(expected, snapshot.BuildIdentity, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryStopOwnedHost(RecorderServiceSnapshot snapshot)
+    {
+        if (snapshot.ProcessId is not int processId || processId == Environment.ProcessId) return false;
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (process.SessionId != Process.GetCurrentProcess().SessionId
+                || !string.Equals(process.ProcessName, HostProcessName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var expectedPath = ResolveHostExecutable();
+            var actualPath = TryGetProcessPath(process);
+            if (!string.IsNullOrWhiteSpace(expectedPath)
+                && !string.IsNullOrWhiteSpace(actualPath)
+                && !string.Equals(Path.GetFullPath(expectedPath), Path.GetFullPath(actualPath), StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(5000);
+            return process.HasExited;
+        }
+        catch { return false; }
     }
 
     private static string? ResolveMachineInstallationId()

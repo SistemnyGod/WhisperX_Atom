@@ -90,12 +90,16 @@ public sealed record DesktopSettings(
 
     private static DesktopSettings MigrateApiUrl(DesktopSettings settings)
     {
-        var configuredUrl = settings.ApiUrl?.TrimEnd('/');
+        string configuredUrl = settings.ApiUrl?.TrimEnd('/') ?? string.Empty;
         var defaultUrl = DefaultApiUrl();
         var machineConfig = MachineServerConfig.Load();
         if (machineConfig?.Managed == true)
             configuredUrl = machineConfig.ServerOrigin.TrimEnd('/');
-        if (string.IsNullOrWhiteSpace(configuredUrl) || IsLoopbackUrl(configuredUrl))
+        // A damaged or partially-written settings file must never prevent the
+        // shell from starting: ServerApiClient validates its base URI in the
+        // constructor. Treat malformed values exactly like an unconfigured
+        // origin and fall back to the managed/environment source.
+        if (!IsHttpUrl(configuredUrl) || IsUnconfiguredUrl(configuredUrl))
         {
             configuredUrl = defaultUrl;
         }
@@ -131,8 +135,12 @@ public sealed record DesktopSettings(
             : null;
     }
 
-    private static bool IsLoopbackUrl(string? value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback;
+    private static bool IsUnconfiguredUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback && uri.Port == 0;
+
+    private static bool IsHttpUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     private static string Protect(string value)
     {

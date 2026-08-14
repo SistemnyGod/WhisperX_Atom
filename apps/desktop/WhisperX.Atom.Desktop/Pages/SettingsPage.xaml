@@ -28,6 +28,7 @@
                         </StackPanel>
                         <StackPanel x:Name="ApiActionsPanel" Orientation="Horizontal" Spacing="8">
                             <Button x:Name="ChangePasswordButton" Content="Сменить пароль" Style="{StaticResource SecondaryButtonStyle}" Click="ChangePasswordButton_Click" IsEnabled="{Binding CanChangePassword}" />
+                            <Button Content="Применить адрес сервера" Style="{StaticResource SecondaryButtonStyle}" Click="ApplyServerOriginButton_Click" IsEnabled="{Binding CanChangeServerOrigin}" AutomationProperties.Name="Применить адрес сервера" />
                             <Button Content="Проверить API" Style="{StaticResource SecondaryButtonStyle}" Click="CheckBackendButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Проверить API" />
                         </StackPanel>
                     </StackPanel>

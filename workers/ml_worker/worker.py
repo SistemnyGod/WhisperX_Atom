@@ -7,7 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from workers.nats_utils import fetch_available, maintain_message
+from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from whisperx_atom.contracts import ProcessingRequest
 from whisperx_atom.processing import ProcessingService
 from workers.gpu_lease import PostgresGpuLease
@@ -189,16 +189,14 @@ async def run() -> None:
     startup_capabilities = {**gpu_capabilities(), "natsConnected": True}
     heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
     await heartbeat.start()
-    heartbeat.set_state("READY")
     worker = GpuWorker(heartbeat)
     jetstream = client.jetstream()
-    try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
-    except Exception:
-        pass
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     subscription = await jetstream.pull_subscribe("ml.transcribe", durable="whisperx-gpu")
+    heartbeat.set_state("READY")
     while True:
         for message in await fetch_available(subscription, nats.errors.TimeoutError):
+            job_id: str | None = None
             try:
                 payload = json.loads(message.data)
                 job_id = str(payload.get("job_id", ""))
@@ -212,6 +210,7 @@ async def run() -> None:
                 # the pull consumer into a tight redelivery loop.
                 await message.nak(delay=RESIDENT_LLM_RETRY_DELAY_SECONDS)
             except Exception:
+                LOGGER.exception("gpu_message_failed job_id=%s", job_id)
                 await message.nak()
 
 

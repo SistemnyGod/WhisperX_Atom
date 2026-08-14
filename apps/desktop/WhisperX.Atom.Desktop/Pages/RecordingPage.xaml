@@ -67,7 +67,6 @@
                                 <controls:AudioWaveformMonitor Samples="{Binding MicrophoneWaveform}" SignalState="{Binding MicrophoneSignalState}" IsStale="{Binding MicrophoneTelemetryStale}" Height="74" />
                                 <TextBlock Text="{Binding MicrophoneSignalLabel}" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
                                 <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding MicrophoneSignalLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                 <TextBlock Text="{Binding MicrophoneTelemetryLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             </StackPanel>
                         </Grid>

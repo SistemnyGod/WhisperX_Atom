@@ -15,6 +15,7 @@ public sealed class BackendService : IBackendService
     public bool HasSession => AuthState != DesktopAuthState.LoginRequired && !string.IsNullOrWhiteSpace(SessionCookie);
     public string? SessionCookie => _client.GetSessionCookie();
     public DesktopAuthState AuthState => _client.AuthState;
+    public string? LastConnectionErrorCode => _client.LastConnectionErrorCode;
     public DateTimeOffset? SessionExpiresAtUtc => _client.SessionExpiresAtUtc;
     public bool CanUseOffline
     {

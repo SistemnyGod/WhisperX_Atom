@@ -5,6 +5,7 @@ import json
 import os
 
 import psycopg
+from workers.nats_utils import ensure_stream
 from workers.runtime_heartbeat import AsyncHeartbeat
 
 
@@ -30,19 +31,13 @@ async def run() -> None:
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     heartbeat = AsyncHeartbeat("outbox-relay", capabilities=lambda: {"natsConnected": True, "outboxRelay": "ready"})
     await heartbeat.start()
-    heartbeat.set_state("READY")
     jetstream = client.jetstream()
     subjects = ["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"]
     # Existing development streams may have been created before a new subject
     # was introduced. Update the subject set instead of silently keeping stale
     # configuration (which would block the oldest outbox message forever).
-    try:
-        await jetstream.update_stream(name="WHISPERX", subjects=subjects)
-    except Exception:
-        try:
-            await jetstream.add_stream(name="WHISPERX", subjects=subjects)
-        except Exception:
-            pass
+    await ensure_stream(jetstream, name="WHISPERX", subjects=subjects)
+    heartbeat.set_state("READY")
 
     while True:
         published = False

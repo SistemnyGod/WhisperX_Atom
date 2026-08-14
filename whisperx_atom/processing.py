@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import copy
 import subprocess
@@ -17,6 +18,9 @@ from .transcript_quality import (
     quality_gate,
 )
 from diarization_quality import choose_best_diarization_candidate, diarization_profiles_for_processing_profile, score_diarization_result
+
+
+LOGGER = logging.getLogger("whisperx.processing")
 
 
 class ProcessingService:
@@ -116,6 +120,7 @@ class ProcessingService:
                         stage_outcomes["ALIGNMENT"] = "FAILED"
                         report("ALIGNMENT_PARTIAL", 60)
                 except Exception:
+                    LOGGER.warning("alignment_failed job_id=%s", request.job_id, exc_info=True)
                     warnings.append("ALIGNMENT_FAILED")
                     stage_outcomes["ALIGNMENT"] = "FAILED"
                     report("ALIGNMENT_PARTIAL", 60)
@@ -152,6 +157,7 @@ class ProcessingService:
                     else:
                         stage_outcomes["DIARIZATION"] = "SUCCEEDED"
                 except Exception:
+                    LOGGER.warning("diarization_failed job_id=%s", request.job_id, exc_info=True)
                     warnings.append("DIARIZATION_FAILED")
                     stage_outcomes["DIARIZATION"] = "FAILED"
                     report("DIARIZATION_PARTIAL", 80)
@@ -236,7 +242,7 @@ class ProcessingService:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception:
-                pass
+                LOGGER.debug("cuda_cache_cleanup_failed job_id=%s", request.job_id, exc_info=True)
 
 
 def _probe_duration_seconds(path: Path) -> float | None:

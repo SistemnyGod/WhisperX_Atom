@@ -7,7 +7,7 @@ import logging
 import time
 from pathlib import Path
 
-from workers.nats_utils import fetch_available, maintain_message
+from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 
 from .media_worker import prepare_media
@@ -26,14 +26,11 @@ async def run() -> None:
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     heartbeat = AsyncHeartbeat("media-worker", capabilities=lambda: {"natsConnected": True, "mediaPipeline": "ready"})
     await heartbeat.start()
-    heartbeat.set_state("READY")
     await asyncio.to_thread(reset_media_leases)
     jetstream = client.jetstream()
-    try:
-        await jetstream.add_stream(name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
-    except Exception:
-        pass
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     subscription = await jetstream.pull_subscribe("media.ingest", durable="whisperx-media")
+    heartbeat.set_state("READY")
     root = Path(os.getenv("MEDIA_ROOT", "/data"))
     active_jobs: set[str] = set()
     while True:
@@ -114,7 +111,7 @@ async def run() -> None:
                     try:
                         await asyncio.to_thread(update_recording_session_state, session_id, "MEDIA_FAILED")
                     except Exception:
-                        pass
+                        logger.exception("recording_session_failure_state_update_failed session_id=%s", session_id)
                 update_job(job_id, "FAILED", "FAILED", 0, str(exc), failure.code)
                 await message.ack()
                 heartbeat.set_state("READY", failure.code)

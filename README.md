@@ -14,6 +14,11 @@ until the transcript gates pass.
 uses the separate HTTPS profile. `run_app.bat` is the Desktop client launcher;
 it does not start a second server.
 
+The LAN launcher does not treat a running Docker container as processing-ready.
+Worker containers must report a fresh PostgreSQL heartbeat through their Docker
+healthcheck; otherwise startup fails with `LAN_WORKER_HEALTH_FAILED` and the
+Desktop must remain in a degraded/offline state until the worker recovers.
+
 WhisperX Atom — локальная система записи совещаний, доставки аудио, транскрибации WhisperX и последующего анализа. Рабочий пользовательский интерфейс — нативное Windows-приложение WinUI 3. Запись и CUDA выполняются на Windows-хосте, а серверные сервисы работают в Docker.
 
 ## Быстрый старт

@@ -23,6 +23,17 @@ def test_lan_compose_publishes_only_gateway_and_uses_lan_environment():
     assert "SERVER_ORIGIN=http://192.168.2.194:8080" in example
 
 
+def test_client_has_no_machine_specific_server_fallback():
+    agent = read("apps/recorder-agent/AgentApiClient.cs")
+    desktop = read("apps/desktop/WhisperX.Atom.Desktop/DesktopSettings.cs")
+    installer = read("apps/desktop/Installer/Install-Service.ps1")
+    assert "UnconfiguredServerSink" in agent
+    assert "127.0.0.1:0" in desktop
+    assert "127.0.0.1:0" in installer
+    assert "192.168.2.194" not in desktop
+    assert "uri.IsLoopback && uri.Port == 0" in agent
+
+
 def test_lan_gateway_routes_only_api_health_and_files():
     caddy = read("infrastructure/caddy/Caddyfile.lan")
     assert "auto_https off" in caddy
@@ -38,6 +49,13 @@ def test_lan_runtime_guards_private_http_and_strong_secrets():
     assert "IsPrivateLanOrigin" in api
     assert "LAN_SECRET_INVALID" in api
     assert "builder.Environment.IsProduction()" in api
+
+
+def test_system_readiness_separates_gateway_recording_ingress_and_whisperx():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    readiness = api.split('app.MapGet("/api/system/readiness"', 1)[1].split('app.MapGet("/api/system/status"', 1)[0]
+    for component in ("gateway", "recordingIngress", "whisperx", "storage"):
+        assert component in readiness
 
 
 def test_user_bootstrap_and_owner_propagation_are_explicit():
@@ -93,6 +111,28 @@ def test_managed_machine_origin_is_read_only_in_desktop_settings():
     assert "IsReadOnly=\"{Binding ServerOriginManaged}\"" in page
 
 
+def test_unmanaged_server_origin_can_be_applied_and_revalidated_from_settings():
+    settings = read("apps/desktop/WhisperX.Atom.Desktop/DesktopSettings.cs")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs")
+    page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml")
+    assert "ApplyServerOriginAsync" in view_model
+    assert "Uri.UriSchemeHttp" in view_model and "Uri.UriSchemeHttps" in view_model
+    assert "_services.Backend.ApplySettings(updated)" in view_model
+    assert "ApplyServerOriginButton_Click" in page
+    assert "!IsHttpUrl(configuredUrl)" in settings
+    assert "IsUnconfiguredUrl(configuredUrl)" in settings
+    assert "LastConnectionErrorCode" in read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+    assert "SERVER_NETWORK_UNREACHABLE" in view_model and "SERVER_TIMEOUT" in view_model
+    assert "uri.Port == 0" in read("apps/desktop/WhisperX.Atom.Desktop/MachineServerConfig.cs")
+
+
+def test_recorder_agent_accepts_explicit_local_http_origin_and_rejects_non_http_urls():
+    agent = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "if (!IsHttpUrl(serverUrl)" in agent
+    assert "if (!HasCredentials || !IsHttpUrl(serverUrl)" in agent
+    assert "uri.IsLoopback && uri.Port == 0" in agent
+
+
 def test_health_and_version_endpoints_are_public_compatibility_contracts():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     assert 'app.MapGet("/health/live"' in api
@@ -112,9 +152,26 @@ def test_readiness_checks_are_concurrent_safe_and_degrade_to_structured_status()
 
 def test_system_readiness_does_not_report_failed_workers_as_ready_cuda():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
-    assert 'string.Equals(worker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase)' in api
     assert 'var gpuWorkerFailed = gpuWorker is null' in api
     assert 'var gpuStatus = !cuda || gpuWorkerFailed' in api
+    assert "IsActiveWorker(worker)" in api
+
+
+def test_system_readiness_does_not_promote_starting_workers_to_ready():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "static bool IsActiveWorker" in api
+    assert 'string.Equals(worker.Status, "READY"' in api
+    assert 'string.Equals(worker.Status, "BUSY"' in api
+    assert 'string.Equals(worker.Status, "DEGRADED"' in api
+    assert 'summary_worker_starting' in api
+    assert "static bool IsFreshWorker" in api
+    assert "age >= TimeSpan.Zero" in api
+
+
+def test_async_worker_heartbeat_overwrites_stale_ready_state_on_restart():
+    heartbeat = read("workers/runtime_heartbeat.py")
+    assert "Publish STARTING before any NATS/model setup" in heartbeat
+    assert "await asyncio.to_thread(self._write)" in heartbeat
 
 
 def test_outbox_and_online_drift_have_durable_dedup_and_fallback_contracts():
@@ -155,6 +212,62 @@ def test_gpu_readiness_distinguishes_busy_from_unavailable():
     assert "GPU_WORKER_MODE" in compose
     assert "capabilities.get(\"cudaAvailable\")" in healthcheck
     assert "torch.cuda.is_available" not in healthcheck
+    assert '"STARTING"' in healthcheck
+    assert "0 <= age <= 60" in healthcheck
+
+
+def test_worker_container_healthchecks_validate_live_heartbeats_not_python_imports():
+    compose = read("compose.dev.yml")
+    healthcheck = read("workers/runtime_healthcheck.py")
+    assert "workers.runtime_healthcheck" in compose
+    assert "import workers." not in compose
+    assert "worker_instances" in healthcheck
+    assert "last_seen_at" in healthcheck
+    assert "NON_READY_STATES" in healthcheck
+    assert '"STARTING"' in healthcheck
+
+
+def test_workers_fail_closed_when_jetstream_stream_setup_fails():
+    helper = read("workers/nats_utils.py")
+    assert "async def ensure_stream" in helper
+    assert "nats_stream_unavailable" in helper
+    for worker in (
+        "workers/outbox_relay/worker.py",
+        "workers/media_worker/worker.py",
+        "workers/ml_worker/worker.py",
+        "workers/summary_worker/worker.py",
+    ):
+        source = read(worker)
+        assert "ensure_stream(" in source
+        assert "except Exception:\n        pass" not in source
+
+
+def test_compose_assigns_stable_worker_instance_ids_for_healthchecks():
+    compose = read("compose.dev.yml")
+    for worker in ("outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker"):
+        assert f"WORKER_INSTANCE_ID: {worker}" in compose or (
+            worker == "gpu-worker" and "WORKER_INSTANCE_ID: ${GPU_WORKER_INSTANCE_ID:-gpu-worker}" in compose
+        )
+
+
+def test_worker_message_failures_are_logged_before_redelivery():
+    assert 'LOGGER.exception("gpu_message_failed job_id=%s", job_id)' in read("workers/ml_worker/worker.py")
+    summary = read("workers/summary_worker/worker.py")
+    assert 'LOGGER.exception("summary_message_failed job_id=%s", job_id)' in summary
+    assert 'LOGGER.exception("assistant_message_failed query_id=%s", query_id)' in summary
+
+
+def test_lan_launcher_waits_for_worker_health_not_only_running_state():
+    launcher = read("scripts/start-whisperx-lan-server.ps1")
+    assert "Test-WorkerHealthy" in launcher
+    assert "LAN_WORKER_HEALTH_FAILED" in launcher
+    assert "State.Health" in launcher
+    assert 'return $health -eq "healthy"' in launcher
+    assert '"no-healthcheck"' not in launcher
+    doctor = read("scripts/doctor-whisperx-lan-server.ps1")
+    assert "PROCESSING_SERVICES_UNHEALTHY" in doctor
+    assert "{{.Service}} {{.State}} {{.Health}}" in doctor
+    assert 'if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true") { $required += "summary-worker" }' in doctor
 
 
 def test_installer_requires_pinned_ffmpeg_payload_and_manifest():

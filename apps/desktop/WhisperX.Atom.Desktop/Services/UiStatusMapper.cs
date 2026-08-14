@@ -69,12 +69,12 @@ public static class UiStatusMapper
             ["UNKNOWN"] = new("UNKNOWN", "Нет данных", UiStatusKind.Neutral),
             ["CONNECTED"] = new("CONNECTED", "Подключено", UiStatusKind.Success),
             ["NOT_CONFIGURED"] = new("NOT_CONFIGURED", "Не настроено", UiStatusKind.Warning),
-            ["AUTH_REJECTED"] = new("AUTH_REJECTED", "Требуется переподключение", UiStatusKind.Warning)
-            , ["SERVER_NETWORK_UNREACHABLE"] = new("SERVER_NETWORK_UNREACHABLE", "Сервер недоступен по сети", UiStatusKind.Warning)
-            , ["SERVER_TIMEOUT"] = new("SERVER_TIMEOUT", "Сервер не ответил вовремя", UiStatusKind.Warning)
-            , ["SERVER_NOT_CONFIGURED"] = new("SERVER_NOT_CONFIGURED", "Сервер не настроен", UiStatusKind.Warning)
-            , ["UPLOAD_RETRY_PENDING"] = new("UPLOAD_RETRY_PENDING", "Ожидается повторная отправка", UiStatusKind.Warning)
-            , ["PROCESSING_UNAVAILABLE"] = new("PROCESSING_UNAVAILABLE", "Обработка WhisperX недоступна", UiStatusKind.Warning)
+            ["AUTH_REJECTED"] = new("AUTH_REJECTED", "Требуется переподключение", UiStatusKind.Warning),
+            ["SERVER_NETWORK_UNREACHABLE"] = new("SERVER_NETWORK_UNREACHABLE", "Сервер недоступен по сети", UiStatusKind.Warning),
+            ["SERVER_TIMEOUT"] = new("SERVER_TIMEOUT", "Сервер не ответил вовремя", UiStatusKind.Warning),
+            ["SERVER_NOT_CONFIGURED"] = new("SERVER_NOT_CONFIGURED", "Сервер не настроен", UiStatusKind.Warning),
+            ["UPLOAD_RETRY_PENDING"] = new("UPLOAD_RETRY_PENDING", "Ожидается повторная отправка", UiStatusKind.Warning),
+            ["PROCESSING_UNAVAILABLE"] = new("PROCESSING_UNAVAILABLE", "Обработка WhisperX недоступна", UiStatusKind.Warning)
         });
 
     public static UiStatus Map(string? code)

@@ -90,6 +90,10 @@ class AsyncHeartbeat:
 
     async def start(self) -> None:
         if self._task is None:
+            # Publish STARTING before any NATS/model setup.  Without this
+            # synchronous first write, a deterministic instance id could
+            # leave a previous READY row visible during a restart.
+            await asyncio.to_thread(self._write)
             self._task = asyncio.create_task(self._run())
 
     async def stop(self, status: str = "STOPPED") -> None:

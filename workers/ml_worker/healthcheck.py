@@ -21,13 +21,14 @@ def main() -> int:
                 """,
                 (os.getenv("WORKER_INSTANCE_ID", "gpu-worker"),),
             ).fetchone()
-            if row is None or row[0] in {"FAILED", "STOPPED"}:
+            if row is None or str(row[0]).upper() in {"STARTING", "FAILED", "STOPPED", "UNAVAILABLE"}:
                 return 1
             capabilities = row[2] or {}
             if capabilities.get("cudaAvailable") is not True:
                 return 1
             last_seen = row[1].replace(tzinfo=timezone.utc) if row[1].tzinfo is None else row[1]
-            return 0 if (datetime.now(timezone.utc) - last_seen).total_seconds() <= 60 else 1
+            age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+            return 0 if 0 <= age <= 60 else 1
     except Exception:
         return 1
 

@@ -199,6 +199,14 @@ def test_upload_recovery_resets_stale_chunks_and_blocks_terminal_errors():
     assert "UnblockTerminalUploadsAsync(configureSessionId, cancellationToken)" in host
 
 
+def test_server_chunk_ingress_enforces_limit_even_without_content_length():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "CopyRequestBodyWithLimitAsync" in api
+    assert "RequestBodyTooLargeException" in api
+    assert "128L * 1024 * 1024" in api
+    assert "StatusCodes.Status413PayloadTooLarge" in api
+
+
 def test_failed_sessions_need_explicit_retry_marker_for_startup_recovery():
     spool = read("apps/recorder-agent/SpoolStore.cs")
     assert "state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL" in spool
@@ -299,6 +307,30 @@ def test_audio_telemetry_includes_rms_clipping_and_stale_window():
     for field in ("MicrophoneRms", "MicrophoneClipping", "MicrophoneTelemetryStale", "RawBacklogHealth"):
         assert field in protocol
     assert "peaks.MicrophoneRms" in host
+
+
+def test_live_audio_telemetry_stream_is_additive_and_short_windowed():
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    desktop = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "AudioTelemetryStreamCapability" in protocol
+    assert "AgentIpcAudioTelemetry" in protocol
+    assert "LiveTelemetryWindow = TimeSpan.FromMilliseconds(75)" in engine
+    assert "SUBSCRIBE_AUDIO_TELEMETRY" in runtime
+    assert "MediaClockLoopAsync" in desktop
+    assert "TimeSpan.FromMilliseconds(500)" in desktop
+
+
+def test_active_recording_uploads_completed_chunks_without_finalizing():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    reconcile = runtime.split("public async Task ReconcileBackgroundAsync", 1)[1].split(
+        "public async Task<RecordingSessionStatus>", 1
+    )[0]
+    assert "UploadPendingChunksAsync(_spool, activeSession" in reconcile
+    assert "using (var deliveryGate = new SemaphoreSlim(2, 2))" in reconcile
+    assert "EnsureActiveSessionBoundAsync(activeSession" in reconcile
+    assert "UploadPendingEventsAsync(_spool, activeSession" in reconcile
 
 
 def test_transcript_fallback_does_not_retry_only_missing_word_timestamps_and_cleans_alternate_temp():

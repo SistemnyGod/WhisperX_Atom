@@ -128,6 +128,7 @@ public sealed class ServerApiClient : IDisposable
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private long _authVersion;
     private DesktopAuthState _authState = DesktopAuthState.Unknown;
+    private string? _lastConnectionErrorCode;
 
     public event Action? SessionChanged;
 
@@ -153,6 +154,7 @@ public sealed class ServerApiClient : IDisposable
     public Uri BaseAddress => _http.BaseAddress!;
     public Uri TusBaseAddress { get; }
     public DesktopAuthState AuthState => _authState;
+    public string? LastConnectionErrorCode => _lastConnectionErrorCode;
     public DateTimeOffset? SessionExpiresAtUtc { get; private set; }
 
     private static string NormalizeBaseUrl(string value)
@@ -193,16 +195,23 @@ public sealed class ServerApiClient : IDisposable
         try
         {
             using var response = await _http.GetAsync("ready", cancellationToken);
+            _lastConnectionErrorCode = response.IsSuccessStatusCode
+                ? null
+                : response.StatusCode == HttpStatusCode.RequestTimeout
+                    ? "SERVER_TIMEOUT"
+                    : $"SERVER_HTTP_{(int)response.StatusCode}";
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException)
         {
+            _lastConnectionErrorCode = "SERVER_NETWORK_UNREACHABLE";
             return false;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             // HttpClient.Timeout surfaces as TaskCanceledException. Treat that
             // as an unavailable backend, but preserve explicit page cancellation.
+            _lastConnectionErrorCode = "SERVER_TIMEOUT";
             return false;
         }
     }

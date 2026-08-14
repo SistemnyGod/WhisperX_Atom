@@ -38,7 +38,8 @@ public sealed record MachineServerConfig(
                 return null;
 
             var audio = NormalizeAudio(value.AudioConfiguration);
-            return value with { ServerOrigin = uri.ToString().TrimEnd('/'), AudioConfiguration = audio };
+            var managed = value.Managed && !(uri.IsLoopback && uri.Port == 0);
+            return value with { ServerOrigin = uri.ToString().TrimEnd('/'), Managed = managed, AudioConfiguration = audio };
         }
         catch (IOException) { return null; }
         catch (JsonException) { return null; }

@@ -40,7 +40,11 @@ public sealed record MachineServerConfig(
                 || audio.SystemAudio is null))
                 return null;
 
-            return value with { ServerOrigin = uri.ToString().TrimEnd('/'), AudioConfiguration = audio };
+            // Older installers could mark the inert loopback sink as managed,
+            // which made the invalid origin read-only forever. Treat that
+            // sentinel as an unconfigured, user-editable origin.
+            var managed = value.Managed && !(uri.IsLoopback && uri.Port == 0);
+            return value with { ServerOrigin = uri.ToString().TrimEnd('/'), Managed = managed, AudioConfiguration = audio };
         }
         catch (IOException) { return null; }
         catch (JsonException) { return null; }

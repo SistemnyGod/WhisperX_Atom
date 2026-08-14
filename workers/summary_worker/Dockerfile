@@ -13,7 +13,9 @@ COPY workers/summary_worker /srv/workers/summary_worker
 COPY workers/__init__.py /srv/workers/__init__.py
 COPY workers/nats_utils.py /srv/workers/nats_utils.py
 COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
+COPY workers/runtime_healthcheck.py /srv/workers/runtime_healthcheck.py
 COPY workers/summary_worker/requirements.txt /srv/summary-requirements.txt
 RUN python3.12 -m pip install --break-system-packages --no-cache-dir -r /srv/summary-requirements.txt
 ENV PYTHONPATH=/srv
+ENV WORKER_NAME=summary-worker
 CMD ["python3.12", "-m", "workers.summary_worker.worker"]

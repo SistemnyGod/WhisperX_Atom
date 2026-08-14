@@ -44,6 +44,13 @@ public sealed partial class SettingsPage : Page
         UpdateStatus();
     }
 
+    private async void ApplyServerOriginButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.ApplyServerOriginAsync();
+        UpdateStatus();
+    }
+
     private async void ReconnectAgentButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;

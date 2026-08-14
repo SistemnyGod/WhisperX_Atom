@@ -107,7 +107,12 @@ public sealed class AgentApiClient : IDisposable
         _serverConnectionState = IsConfigured ? "UNKNOWN" : "NOT_CONFIGURED";
     }
 
-    public bool IsConfigured => _agentId != Guid.Empty && !string.IsNullOrWhiteSpace(_token);
+    // Credentials alone are not enough: an installation created without a
+    // managed server origin must remain visibly NOT_CONFIGURED instead of
+    // attempting the inert loopback sink on port 0.  This also makes a stale
+    // token from a previous installation harmless until an origin is set.
+    private bool HasCredentials => _agentId != Guid.Empty && !string.IsNullOrWhiteSpace(_token);
+    public bool IsConfigured => HasCredentials && _baseUri.Port > 0;
     public Guid InstallationId => _installationId;
     public Guid? AgentId => _agentId == Guid.Empty ? null : _agentId;
     public string ServerConnectionState => _serverConnectionState;
@@ -118,7 +123,8 @@ public sealed class AgentApiClient : IDisposable
 
     public async Task ConfigureAsync(string serverUrl, Guid agentId, string token, CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri) || string.IsNullOrWhiteSpace(token) || agentId == Guid.Empty)
+        if (!IsHttpUrl(serverUrl) || !Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri)
+            || string.IsNullOrWhiteSpace(uri.Host) || string.IsNullOrWhiteSpace(token) || agentId == Guid.Empty)
             throw new InvalidOperationException("agent_configuration_invalid");
         lock (_configurationGate)
         {
@@ -141,7 +147,9 @@ public sealed class AgentApiClient : IDisposable
 
     public async Task UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default)
     {
-        if (!IsConfigured || !Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri))
+        if (!HasCredentials || !IsHttpUrl(serverUrl)
+            || !Uri.TryCreate(serverUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri)
+            || string.IsNullOrWhiteSpace(uri.Host))
             throw new InvalidOperationException("agent_configuration_invalid");
         lock (_configurationGate)
         {
@@ -847,7 +855,7 @@ public sealed class AgentApiClient : IDisposable
         && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     private static bool IsLoopbackUrl(string? value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback;
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsLoopback && uri.Port == 0;
 
     private void AddAuthentication(HttpRequestMessage request, string? pipelineCorrelationId = null)
     {
