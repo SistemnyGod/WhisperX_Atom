@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import logging
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+LOGGER = logging.getLogger("whisperx.summary.llama")
 
 
 class LocalLlamaServer:
@@ -51,7 +55,10 @@ class LocalLlamaServer:
             "--reasoning", "off",
             "--chat-template-kwargs", '{"enable_thinking":false}',
         ]
-        self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Keep llama.cpp diagnostics in the worker/container log. Suppressing
+        # both streams made model/flag failures indistinguishable from a
+        # generic startup timeout.
+        self.process = subprocess.Popen(command)
         deadline = time.monotonic() + self.start_timeout
         health_url = f"http://127.0.0.1:{self.port}/health"
         while time.monotonic() < deadline:
@@ -63,8 +70,8 @@ class LocalLlamaServer:
                 with urllib.request.urlopen(health_url, timeout=2) as response:
                     if response.status == 200:
                         return
-            except (OSError, urllib.error.URLError):
-                pass
+            except (OSError, urllib.error.URLError) as exc:
+                LOGGER.debug("llama_health_probe_failed: %s", exc)
             time.sleep(1)
         self.stop()
         raise TimeoutError("llm_server_start_timeout")

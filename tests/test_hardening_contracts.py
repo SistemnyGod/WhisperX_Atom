@@ -105,6 +105,15 @@ def test_media_worker_releases_only_media_leases_on_startup():
     assert "job.type='TRANSCRIBE'" in persistence
     assert "job.stage IN ('UPLOADED','VALIDATING','NORMALIZING')" in persistence
     assert "await asyncio.to_thread(reset_media_leases)" in worker
+    assert "await asyncio.to_thread(release_message, message_id)" in worker
+
+def test_gpu_worker_reclaims_stale_inference_leases_after_restart():
+    persistence = read(Path("workers/ml_worker/persistence.py"))
+    worker = read(Path("workers/ml_worker/worker.py"))
+    assert "reset_stale_leases" in persistence
+    assert "GPU_STALE_LEASE_SECONDS" in persistence
+    assert "WORKER_RESTART_RECOVERY" in persistence
+    assert "await asyncio.to_thread(worker._repository.reset_stale_leases)" in worker
 
 def test_media_worker_serializes_duplicate_delivery_per_job():
     worker = read(Path("workers/media_worker/worker.py"))

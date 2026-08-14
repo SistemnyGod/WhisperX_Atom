@@ -26,6 +26,13 @@ public sealed partial class SettingsPage : Page
         ViewModel = new SettingsViewModel(_services);
         DataContext = ViewModel;
         UpdateStatus();
+        _ = RefreshRuntimeDiagnosticsAsync();
+    }
+
+    private async Task RefreshRuntimeDiagnosticsAsync()
+    {
+        if (ViewModel is null) return;
+        await ViewModel.RefreshRecorderDiagnosticsAsync();
     }
 
     private async void ChangePasswordButton_Click(object sender, RoutedEventArgs e)
@@ -72,6 +79,7 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.StartRecorderServiceAsync();
+        await ViewModel.RefreshRecorderDiagnosticsAsync();
         UpdateStatus();
     }
 

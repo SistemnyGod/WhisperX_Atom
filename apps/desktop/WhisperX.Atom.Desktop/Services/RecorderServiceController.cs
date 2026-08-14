@@ -17,7 +17,10 @@ public sealed record RecorderServiceSnapshot(
     string? Error,
     int? ProcessId = null,
     string? BuildIdentity = null,
-    IReadOnlyList<string>? Capabilities = null)
+    IReadOnlyList<string>? Capabilities = null,
+    string? ServerOrigin = null,
+    Guid? AgentId = null,
+    Guid? InstallationId = null)
 {
     public bool Running => string.Equals(State, "RUNNING", StringComparison.OrdinalIgnoreCase);
 }
@@ -113,6 +116,10 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             var health = response.Health;
             var executable = ResolveHostExecutable();
             var expectedBuild = GetFileVersion(executable);
+            var pathMatches = !process.Exists
+                || string.IsNullOrWhiteSpace(process.Path)
+                || string.IsNullOrWhiteSpace(executable)
+                || string.Equals(Path.GetFullPath(process.Path), Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase);
             var buildMatches = string.IsNullOrWhiteSpace(health?.RuntimeBuildIdentity)
                 || string.IsNullOrWhiteSpace(expectedBuild)
                 || string.Equals(health.RuntimeBuildIdentity, expectedBuild, StringComparison.OrdinalIgnoreCase);
@@ -121,8 +128,12 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             var capabilityError = hasConcurrentHostCapabilities && hasEventStreamCapability ? null : "RECORDER_HOST_UPDATE_REQUIRED";
             var pipeResponsive = health is not null;
             var error = response.Error;
-            if (!buildMatches || capabilityError is not null)
-                error = capabilityError ?? "RECORDER_HOST_UPDATE_REQUIRED";
+            if (!pathMatches)
+                error = "RECORDER_HOST_BUILD_MISMATCH";
+            else if (!buildMatches)
+                error = "RECORDER_HOST_BUILD_MISMATCH";
+            else if (capabilityError is not null)
+                error = capabilityError;
             return new RecorderServiceSnapshot(
                 RecorderPipeNames.AudioGraphHost,
                 pipeResponsive ? "RUNNING" : "UNKNOWN",
@@ -133,7 +144,10 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 Error: error,
                 ProcessId: process.ProcessId,
                 BuildIdentity: health?.RuntimeBuildIdentity,
-                Capabilities: health?.Capabilities);
+                Capabilities: health?.Capabilities,
+                ServerOrigin: health?.ServerOrigin,
+                AgentId: health?.AgentId,
+                InstallationId: health?.InstallationId);
         }
         catch (RecorderIpcException exception) when (string.Equals(exception.ErrorCode, "RECORDER_IPC_ACCESS_DENIED", StringComparison.OrdinalIgnoreCase))
         {
@@ -220,7 +234,7 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 return before with { Error = "RECORDER_HOST_UPDATE_RESTART_REQUIRED" };
             await Task.Delay(250, cancellationToken).ConfigureAwait(false);
         }
-        else if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED")
+        else if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_BUILD_MISMATCH")
             return before;
 
         var executable = ResolveHostExecutable();

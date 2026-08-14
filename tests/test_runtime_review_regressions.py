@@ -365,3 +365,18 @@ def test_recorder_health_never_waits_for_full_windows_device_reconciliation():
     assert "DeviceWatcher is the authoritative live source" in health
     assert "ReconcileAsync" not in health
     assert "DeviceCatalog.Devices" in health
+
+
+def test_audiograph_host_uses_user_scope_and_legacy_service_uses_machine_scope():
+    host = read("apps/recorder-host/Program.cs")
+    service = read("apps/recorder-agent/Program.cs")
+    assert 'ATOM_AGENT_CONFIG_PATH' in host
+    assert 'Environment.SpecialFolder.LocalApplicationData' in host
+    assert 'ATOM_AGENT_CONFIG_PATH' in service
+    assert 'Environment.SpecialFolder.CommonApplicationData' in service
+
+
+def test_desktop_reports_host_path_or_build_mismatch_explicitly():
+    controller = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderServiceController.cs")
+    assert "RECORDER_HOST_BUILD_MISMATCH" in controller
+    assert "Path.GetFullPath(process.Path)" in controller

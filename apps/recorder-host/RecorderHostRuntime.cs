@@ -994,8 +994,13 @@ internal sealed class AudioGraphSessionWriter
         _sampleCount += frame.SampleCount;
         if (Stopwatch.GetTimestamp() - _lastDurabilityCheckpointTimestamp >= DurabilityCheckpointTicks)
         {
+            // Do not call FileStream.Flush(flushToDisk:true) on the realtime
+            // AudioGraph consumer. On Windows this can block for seconds and
+            // fill the bounded frame queue, producing a false
+            // AUDIO_PIPELINE_OVERRUN. The raw bytes are already written to the
+            // OS file cache; the forced disk flush remains at chunk boundaries
+            // and during finalization, where it cannot starve capture.
             await _raw.FlushAsync().ConfigureAwait(false);
-            _raw.Flush(flushToDisk: true);
             _lastDurabilityCheckpointTimestamp = Stopwatch.GetTimestamp();
         }
     }

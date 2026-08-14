@@ -47,6 +47,18 @@
                                 <ProgressRing Grid.Column="1" Width="22" Height="22" IsActive="{Binding IsBusy}" VerticalAlignment="Center" />
                             </Grid>
                         </Border>
+                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Диагностика Recorder Host" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding RecorderRuntimeState}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding RecorderRuntimeOrigin}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding RecorderRuntimeBuild}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding RecorderRuntimeProcess}" Style="{StaticResource CaptionStyle}" />
+                                <TextBlock Text="{Binding RecorderRuntimeIdentity}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding RecorderRuntimePath}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding RecorderRuntimeError}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
                         <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" />
                         <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
                         <TextBlock Text="Действия" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />

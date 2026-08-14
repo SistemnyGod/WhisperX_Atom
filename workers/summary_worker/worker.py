@@ -418,6 +418,15 @@ async def run() -> None:
                 job_id: str | None = None
                 try:
                     payload = json.loads(message.data)
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                    LOGGER.exception("summary_poison_message_discarded")
+                    await message.ack()
+                    continue
+                if not isinstance(payload, dict) or not str(payload.get("job_id", "")).strip():
+                    LOGGER.error("summary_poison_message_discarded reason=job_id_missing")
+                    await message.ack()
+                    continue
+                try:
                     job_id = str(payload.get("job_id", ""))
                     message_id = str(payload.get("message_id", ""))
                     heartbeat.set_job(job_id or None)
@@ -438,14 +447,28 @@ async def run() -> None:
                 query_id: str | None = None
                 try:
                     payload = json.loads(message.data)
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                    LOGGER.exception("assistant_poison_message_discarded")
+                    await message.ack()
+                    continue
+                if not isinstance(payload, dict) or not str(payload.get("query_id", "")).strip():
+                    LOGGER.error("assistant_poison_message_discarded reason=query_id_missing")
+                    await message.ack()
+                    continue
+                try:
                     query_id = str(payload.get("query_id", ""))
                     message_id = str(payload.get("message_id", ""))
+                    heartbeat.set_job(query_id)
+                    heartbeat.set_state("BUSY")
                     async with maintain_message(message, on_tick=lambda: asyncio.to_thread(assistant_worker.repository.renew_lease, query_id, message_id)):
                         await assistant_worker.handle(payload)
                     await message.ack()
                 except Exception:
                     LOGGER.exception("assistant_message_failed query_id=%s", query_id)
                     await message.nak()
+                finally:
+                    heartbeat.set_job(None)
+                    set_runtime_state()
 
     await asyncio.gather(consume_assistant(), consume_summary())
 

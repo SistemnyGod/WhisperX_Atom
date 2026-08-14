@@ -855,8 +855,17 @@ app.MapPost("/api/internal/imports", async (ImportRequest request, HttpRequest h
     var supplied = http.Headers["X-Import-Worker-Token"].ToString();
     if (string.IsNullOrWhiteSpace(expected) || !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(supplied)))
         return Results.Unauthorized();
-    if (!MediaPolicy.IsAllowedExtension(request.OriginalName) || string.IsNullOrWhiteSpace(request.Sha256) || request.SizeBytes <= 0 || request.SizeBytes > 8L * 1024 * 1024 * 1024)
+    if (!MediaPolicy.IsAllowedExtension(request.OriginalName) || string.IsNullOrWhiteSpace(request.SourceType) || request.SourceType.Length > 80 || !System.Text.RegularExpressions.Regex.IsMatch(request.Sha256 ?? string.Empty, "^[0-9a-fA-F]{64}$") || request.SizeBytes <= 0 || request.SizeBytes > 8L * 1024 * 1024 * 1024)
         return Results.BadRequest(new { error = "unsupported_or_oversized_audio" });
+    string sourcePath;
+    try { sourcePath = StorageHelpers.StoragePath(request.StorageKey); }
+    catch (InvalidOperationException) { return Results.BadRequest(new { error = "invalid_import_storage_key" }); }
+    if (!File.Exists(sourcePath)) return Results.Conflict(new { error = "import_file_not_ready" });
+    var actualSize = new FileInfo(sourcePath).Length;
+    if (actualSize != request.SizeBytes) return Results.BadRequest(new { error = "import_size_mismatch" });
+    var actualSha256 = await StorageHelpers.ComputeSha256Async(sourcePath);
+    if (!string.Equals(actualSha256, request.Sha256, StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new { error = "import_checksum_mismatch" });
     var job = await db.RegisterImportAsync(request);
     return Results.Accepted("/api/jobs/" + job.Id, job);
 });
@@ -1084,15 +1093,33 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
         long size;
         await using (var output = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
             size = await CopyRequestBodyWithLimitAsync(request, output, 128L * 1024 * 1024, context.RequestAborted);
+        if (size <= 0)
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_empty" });
+        }
         var sha = await StorageHelpers.ComputeSha256Async(partPath);
         var expectedSha = request.Headers["X-Chunk-SHA256"].ToString();
+        if (!string.IsNullOrWhiteSpace(expectedSha) && !System.Text.RegularExpressions.Regex.IsMatch(expectedSha, "^[0-9a-fA-F]{64}$"))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_checksum_invalid" });
+        }
         if (!string.IsNullOrWhiteSpace(expectedSha) && !string.Equals(expectedSha, sha, StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(partPath);
             return Results.BadRequest(new { error = "chunk_checksum_mismatch" });
         }
-        var startSample = long.TryParse(request.Headers["X-Start-Sample"], out var parsedStart) ? parsedStart : 0;
-        var sampleCount = long.TryParse(request.Headers["X-Sample-Count"], out var parsedCount) ? parsedCount : 0;
+        var startHeader = request.Headers["X-Start-Sample"].ToString();
+        var countHeader = request.Headers["X-Sample-Count"].ToString();
+        if ((!string.IsNullOrWhiteSpace(startHeader) && !long.TryParse(startHeader, out _))
+            || (!string.IsNullOrWhiteSpace(countHeader) && !long.TryParse(countHeader, out _)))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_sample_metadata_invalid" });
+        }
+        var startSample = long.TryParse(startHeader, out var parsedStart) ? parsedStart : 0;
+        var sampleCount = long.TryParse(countHeader, out var parsedCount) ? parsedCount : 0;
         if (startSample < 0 || sampleCount < 0)
         {
             File.Delete(partPath);
@@ -1539,10 +1566,19 @@ public static class StorageHelpers
 
     public static string StoragePath(string storageKey)
     {
-        var normalized = storageKey.Replace("\\", "/");
-        if (normalized.StartsWith("/data/", StringComparison.Ordinal)) return normalized;
-        if (normalized.StartsWith("data/", StringComparison.Ordinal)) return "/" + normalized;
-        throw new InvalidOperationException("invalid_storage_key");
+        var normalized = (storageKey ?? string.Empty).Replace("\\", "/").Trim();
+        if (normalized.StartsWith("data/", StringComparison.Ordinal)) normalized = "/" + normalized;
+        if (!normalized.StartsWith("/data/", StringComparison.Ordinal) && !string.Equals(normalized, "/data", StringComparison.Ordinal))
+            throw new InvalidOperationException("invalid_storage_key");
+
+        var root = Path.GetFullPath(Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data")
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relative = normalized.Length == "/data".Length ? string.Empty : normalized["/data/".Length..];
+        var full = Path.GetFullPath(Path.Combine(root, relative));
+        if (!string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
+            && !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("invalid_storage_key");
+        return full;
     }
 }
 

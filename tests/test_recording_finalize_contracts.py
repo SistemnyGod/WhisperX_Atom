@@ -110,3 +110,10 @@ def test_missing_chunk_reconciliation_validates_confirmed_storage():
     assert "StorageHelpers.StoragePath(chunk.StorageKey)" in missing
     assert "new FileInfo(path).Length != chunk.SizeBytes" in missing
     assert "ComputeSha256Async(path)" in missing
+
+
+def test_recording_assembly_resolves_chunks_below_media_root():
+    assembly = read("workers/media_worker/recording_assembly.py")
+    assert "PurePosixPath" in assembly
+    assert "invalid_recording_chunk_storage_key" in assembly
+    assert 'Path(os.getenv("MEDIA_ROOT", "/data"))' in assembly

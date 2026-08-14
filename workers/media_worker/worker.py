@@ -6,6 +6,7 @@ import os
 import logging
 import time
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
@@ -14,6 +15,18 @@ from .media_worker import prepare_media
 from .persistence import claim_message, job_attempt, job_state, mark_ready_for_asr_and_enqueue, record_stage_timing, release_message, reset_media_leases, renew_lease, schedule_media_retry, update_asset, update_job, update_recording_session_state
 from .recording_assembly import assemble_recording_session
 from .retry import RETRY_DELAY_SECONDS, classify_media_failure, should_retry
+
+
+def resolve_media_path(storage_key: str, root: Path) -> Path:
+    """Resolve server storage keys without allowing path traversal."""
+    value = str(storage_key or "").strip().replace("\\", "/")
+    try:
+        relative = PurePosixPath(value).relative_to("/data")
+    except ValueError as exc:
+        raise ValueError("invalid_storage_key") from exc
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("invalid_storage_key")
+    return root.joinpath(*relative.parts)
 
 
 async def run() -> None:
@@ -33,10 +46,24 @@ async def run() -> None:
     heartbeat.set_state("READY")
     root = Path(os.getenv("MEDIA_ROOT", "/data"))
     active_jobs: set[str] = set()
+
+    def reset_heartbeat() -> None:
+        heartbeat.set_job(None)
+        heartbeat.set_state("READY")
+
     while True:
         for message in await fetch_available(subscription, nats.errors.TimeoutError):
-            payload = json.loads(message.data)
-            job_id = payload["job_id"]
+            try:
+                payload = json.loads(message.data)
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                logger.exception("media_poison_message_discarded")
+                await message.ack()
+                continue
+            if not isinstance(payload, dict) or not str(payload.get("job_id", "")).strip():
+                logger.error("media_poison_message_discarded reason=job_id_missing")
+                await message.ack()
+                continue
+            job_id = str(payload["job_id"])
             correlation_id = payload.get("correlation_id")
             meeting_id = payload.get("meeting_id")
             logger.info("media_message correlation_id=%s meeting_id=%s job_id=%s", correlation_id, meeting_id, job_id)
@@ -49,13 +76,16 @@ async def run() -> None:
                     await message.ack()
                 else:
                     await message.nak()
+                reset_heartbeat()
                 continue
             state = job_state(job_id)
             if state is not None and (state[0] in ("READY", "FAILED", "CANCELLED") or state[1] in ("READY_FOR_ASR", "TRANSCRIBING", "ALIGNING", "DIARIZING", "QUALITY_CHECK", "PERSISTING", "READY")):
                 await message.ack()
+                reset_heartbeat()
                 continue
             if job_id in active_jobs:
                 await message.nak()
+                reset_heartbeat()
                 continue
             active_jobs.add(job_id)
             try:
@@ -72,7 +102,7 @@ async def run() -> None:
                         await asyncio.to_thread(record_stage_timing, str(session_id), "assembly_ms", int((time.monotonic() - assembly_started) * 1000))
                         await asyncio.to_thread(update_recording_session_state, str(session_id), "ASSEMBLED")
                     else:
-                        source = Path(payload["storage_key"])
+                        source = resolve_media_path(str(payload["storage_key"]), root)
                     prepare_started = time.monotonic()
                     derivatives = await asyncio.to_thread(prepare_media, source, root / "derived" / job_id)
                     if source_type == "recorder_session":
@@ -93,6 +123,10 @@ async def run() -> None:
                         "audio_quality": derivatives.quality_report,
                     })
                     await asyncio.to_thread(mark_ready_for_asr_and_enqueue, job_id, next_message)
+                    # The media-stage inbox row is only a delivery lease. It
+                    # must not remain owned for 30 minutes after a successful
+                    # hand-off to the ASR stage.
+                    await asyncio.to_thread(release_message, message_id)
                     await message.ack()
             except Exception as exc:
                 failure = classify_media_failure(exc)

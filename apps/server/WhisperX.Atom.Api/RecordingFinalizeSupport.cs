@@ -123,11 +123,31 @@ public static class RecordingFinalizeSupport
 
             foreach (var chunk in track.Chunks)
             {
-                var path = StorageHelpers.StoragePath(chunk.StorageKey);
-                if (!File.Exists(path) || new FileInfo(path).Length != chunk.SizeBytes)
+                try
+                {
+                    var path = StorageHelpers.StoragePath(chunk.StorageKey);
+                    if (!File.Exists(path) || new FileInfo(path).Length != chunk.SizeBytes)
+                    {
+                        missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
+                        continue;
+                    }
+                    if (!string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
+                        missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
+                }
+                catch (IOException)
+                {
                     missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
-                else if (!string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
+                }
+                catch (UnauthorizedAccessException)
+                {
                     missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
+                }
+                catch (InvalidOperationException)
+                {
+                    // A stale/corrupt storage key must be recoverable through
+                    // the normal chunk resend path, not become an opaque 500.
+                    missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
+                }
             }
         }
 

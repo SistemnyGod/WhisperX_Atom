@@ -24,3 +24,8 @@ def test_doctor_surfaces_summary_qwen_llama_and_gpu_lease_reason():
     doctor = read("scripts/doctor-transcription-mvp.ps1")
     for field in ("summaryWorker", "qwenModel", "llamaCpp", "gpuLease"):
         assert field in doctor
+
+def test_llama_startup_keeps_child_diagnostics_visible():
+    source = read("workers/summary_worker/llama_subprocess.py")
+    assert "DEVNULL" not in source
+    assert "llama_health_probe_failed" in source

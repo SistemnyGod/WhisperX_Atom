@@ -41,6 +41,19 @@ class ServerFirstContractTests(unittest.TestCase):
         api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
         for name in ("original_name", "source_type", "source_path", "storage_key", "size_bytes", "sha256"):
             self.assertIn(f'JsonPropertyName("{name}")', api)
+        for check in ("import_file_not_ready", "import_size_mismatch", "import_checksum_mismatch", "invalid_import_storage_key"):
+            self.assertIn(check, api)
+
+    def test_storage_keys_are_normalized_inside_media_root_without_traversal(self):
+        api = Path("apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8-sig")
+        self.assertIn('Environment.GetEnvironmentVariable("MEDIA_ROOT")', api)
+        self.assertIn('Path.GetFullPath(Path.Combine(root, relative))', api)
+        self.assertIn('invalid_storage_key', api)
+
+    def test_gpu_worker_rejects_storage_paths_outside_data_mount(self):
+        worker = Path("workers/ml_worker/worker.py").read_text(encoding="utf-8")
+        self.assertIn('raise ValueError("invalid_storage_key")', worker)
+        self.assertIn('relative = posix_path.relative_to("/data")', worker)
     def test_media_paths_are_independent_of_job_json(self):
         path = Path("staging") / "job.part"
         self.assertEqual(path.parent, Path("staging"))

@@ -6,6 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 
 try:
     import psycopg
@@ -50,12 +51,15 @@ def _sha256(path: Path) -> str:
 
 
 def _storage_path(storage_key: str) -> Path:
-    normalized = storage_key.replace("\\", "/")
-    if normalized.startswith("/data/"):
-        return Path(normalized)
-    if normalized.startswith("data/"):
-        return Path("/") / normalized
-    raise ValueError("invalid_recording_chunk_storage_key")
+    normalized = str(storage_key or "").strip().replace("\\", "/")
+    try:
+        relative = PurePosixPath(normalized).relative_to("/data")
+    except ValueError as exc:
+        raise ValueError("invalid_recording_chunk_storage_key") from exc
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("invalid_recording_chunk_storage_key")
+    root = Path(os.getenv("MEDIA_ROOT", "/data"))
+    return root.joinpath(*relative.parts)
 
 
 def _run_ffmpeg(args: list[str]) -> None:

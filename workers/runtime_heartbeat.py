@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+
+LOGGER = logging.getLogger("whisperx.runtime-heartbeat")
 
 try:
     import psycopg
@@ -59,9 +63,10 @@ def write_heartbeat(
                 """,
                 (worker_name, _instance_id(worker_name), status, current_job_id, version, payload, last_error_code),
             )
-    except Exception:
+    except Exception as exc:
         # Readiness must observe failures, but a transient DB failure must not
         # terminate a worker that can still recover its connection.
+        LOGGER.warning("heartbeat_write_failed worker=%s error=%s", worker_name, type(exc).__name__)
         return
 
 
@@ -114,7 +119,7 @@ class AsyncHeartbeat:
             except Exception:
                 # A heartbeat failure must never terminate the heartbeat task;
                 # the next tick can recover the database connection.
-                pass
+                LOGGER.debug("heartbeat_tick_failed worker=%s", self.worker_name, exc_info=True)
             await asyncio.sleep(self.interval)
 
     def _write(self) -> None:

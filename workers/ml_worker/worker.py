@@ -33,26 +33,28 @@ RESIDENT_LLM_RETRY_DELAY_SECONDS = max(5, int(os.getenv("GPU_RESIDENT_LLM_RETRY_
 
 
 def resolve_storage_path(storage_key: str) -> Path:
-    """Translate Docker `/data/...` keys when the GPU worker runs on Windows."""
+    """Translate a storage key below `/data` to the worker's local mount."""
     value = str(storage_key or "").strip()
-    host_root = os.getenv("WHISPERX_DATA_HOST", "").strip()
-    if os.name == "nt" and host_root:
-        posix_path = PurePosixPath(value.replace("\\", "/"))
-        try:
-            relative = posix_path.relative_to("/data")
-        except ValueError:
-            pass
-        else:
-            return Path(host_root).joinpath(*relative.parts)
-    return Path(value)
+    posix_path = PurePosixPath(value.replace("\\", "/"))
+    try:
+        relative = posix_path.relative_to("/data")
+    except ValueError as exc:
+        raise ValueError("invalid_storage_key") from exc
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("invalid_storage_key")
+    host_root = os.getenv("WHISPERX_DATA_HOST", "").strip() if os.name == "nt" else "/data"
+    return Path(host_root).joinpath(*relative.parts)
 
 
 def error_code_for(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
     if "no speech" in text or "no_speech_detected" in text:
         return "NO_SPEECH_DETECTED"
+    # A decodable recording that produces no segments is a valid no-speech
+    # outcome. Keep the public error stable even when the quality gate raises
+    # its internal TRANSCRIPT_EMPTY reason.
     if "transcript_empty" in text:
-        return "TRANSCRIPT_EMPTY"
+        return "NO_SPEECH_DETECTED"
     if "invalid_timecode" in text:
         return "TRANSCRIPT_INVALID_TIMECODE"
     if "transcript_outside_media" in text:
@@ -190,6 +192,9 @@ async def run() -> None:
     heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
     await heartbeat.start()
     worker = GpuWorker(heartbeat)
+    recovered = await asyncio.to_thread(worker._repository.reset_stale_leases)
+    if recovered:
+        LOGGER.warning("recovered stale GPU jobs count=%s", recovered)
     jetstream = client.jetstream()
     await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
     subscription = await jetstream.pull_subscribe("ml.transcribe", durable="whisperx-gpu")
@@ -199,6 +204,15 @@ async def run() -> None:
             job_id: str | None = None
             try:
                 payload = json.loads(message.data)
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                LOGGER.exception("gpu_poison_message_discarded")
+                await message.ack()
+                continue
+            if not isinstance(payload, dict) or not str(payload.get("job_id", "")).strip():
+                LOGGER.error("gpu_poison_message_discarded reason=job_id_missing")
+                await message.ack()
+                continue
+            try:
                 job_id = str(payload.get("job_id", ""))
                 message_id = str(payload.get("message_id", ""))
                 async with maintain_message(message, on_tick=lambda: asyncio.to_thread(worker._repository.renew_lease, job_id, message_id)):

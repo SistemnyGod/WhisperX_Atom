@@ -14,6 +14,13 @@ public sealed class SettingsViewModel : ObservableObject
     private string _statusText = string.Empty;
     private bool _isBusy;
     private string _diagnosticsPath = string.Empty;
+    private string _recorderRuntimeState = "Проверка Host…";
+    private string _recorderRuntimePath = "—";
+    private string _recorderRuntimeBuild = "—";
+    private string _recorderRuntimeIdentity = "—";
+    private string _recorderRuntimeOrigin = "—";
+    private string _recorderRuntimeError = "—";
+    private string _recorderRuntimeProcess = "—";
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -48,6 +55,13 @@ public sealed class SettingsViewModel : ObservableObject
         }
     }
     public string DiagnosticsPath { get => _diagnosticsPath; private set => SetProperty(ref _diagnosticsPath, value); }
+    public string RecorderRuntimeState { get => _recorderRuntimeState; private set => SetProperty(ref _recorderRuntimeState, value); }
+    public string RecorderRuntimePath { get => _recorderRuntimePath; private set => SetProperty(ref _recorderRuntimePath, value); }
+    public string RecorderRuntimeBuild { get => _recorderRuntimeBuild; private set => SetProperty(ref _recorderRuntimeBuild, value); }
+    public string RecorderRuntimeIdentity { get => _recorderRuntimeIdentity; private set => SetProperty(ref _recorderRuntimeIdentity, value); }
+    public string RecorderRuntimeOrigin { get => _recorderRuntimeOrigin; private set => SetProperty(ref _recorderRuntimeOrigin, value); }
+    public string RecorderRuntimeError { get => _recorderRuntimeError; private set => SetProperty(ref _recorderRuntimeError, value); }
+    public string RecorderRuntimeProcess { get => _recorderRuntimeProcess; private set => SetProperty(ref _recorderRuntimeProcess, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool CanLogin => !IsBusy && !IsLoggedIn;
     public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
@@ -66,6 +80,28 @@ public sealed class SettingsViewModel : ObservableObject
         DesktopAuthState.LoginRequired => "Требуется повторный вход в API",
         _ => IsLoggedIn ? "Проверка сессии API…" : "Вход в API не выполнен"
     };
+
+    public async Task RefreshRecorderDiagnosticsAsync()
+    {
+        try
+        {
+            var snapshot = await _services.RecorderService.GetSnapshotAsync().ConfigureAwait(true);
+            RecorderRuntimeState = snapshot.PipeReachable ? "Подключён" : snapshot.Exists ? "Найден, но недоступен" : "Не запущен";
+            RecorderRuntimePath = string.IsNullOrWhiteSpace(snapshot.BinaryPath) ? "—" : snapshot.BinaryPath!;
+            RecorderRuntimeBuild = string.IsNullOrWhiteSpace(snapshot.BuildIdentity) ? snapshot.Version ?? "—" : snapshot.BuildIdentity!;
+            RecorderRuntimeOrigin = snapshot.ServerOrigin ?? ApiUrl;
+            RecorderRuntimeIdentity = snapshot.AgentId is Guid agent && snapshot.InstallationId is Guid installation
+                ? $"Agent {agent} · установка {installation}"
+                : "Agent identity не подтверждена";
+            RecorderRuntimeProcess = snapshot.ProcessId is int pid ? $"PID {pid}" : "PID —";
+            RecorderRuntimeError = string.IsNullOrWhiteSpace(snapshot.Error) ? "—" : snapshot.Error!;
+        }
+        catch (Exception exception)
+        {
+            RecorderRuntimeState = "Ошибка проверки";
+            RecorderRuntimeError = UiErrorFormatter.Format(exception, "RECORDER_HOST_UNAVAILABLE");
+        }
+    }
 
     public async Task<bool> LoginAsync(string password)
     {

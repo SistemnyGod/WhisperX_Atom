@@ -5,6 +5,7 @@ param(
     [ValidateRange(10, 180)]
     [int]$FinalizeTimeoutSeconds = 90,
     [string]$DeviceId = "",
+    [switch]$ServerDelivery,
     [switch]$StopHost
 )
 
@@ -53,7 +54,11 @@ try {
         $selection = Invoke-HostCommand "SELECT_AUDIO_DEVICE" @{ deviceId = $DeviceId }
         if ($selection.ok -ne $true) { throw "AUDIOGRAPH_FIXED_DEVICE_SELECT_FAILED: $($selection.error)" }
     }
-    $start = Invoke-HostCommand "START" @{ title = "AUDIOGRAPH_LOCAL_GATE"; localOnly = $true }
+    # Keep the default gate offline and deterministic; opt in to the real
+    # bind/upload/finalize path for an end-to-end LAN acceptance run.
+    $startPayload = @{ title = if ($ServerDelivery) { "AUDIOGRAPH_SERVER_GATE" } else { "AUDIOGRAPH_LOCAL_GATE" }; localOnly = $true }
+    if ($ServerDelivery) { $startPayload.localOnly = $false }
+    $start = Invoke-HostCommand "START" $startPayload
     if ($start.ok -ne $true) { throw "AUDIOGRAPH_START_FAILED: $($start.error)" }
     $localSessionId = [string]$start.sessionId
     if ([string]::IsNullOrWhiteSpace($localSessionId)) { throw "AUDIOGRAPH_SESSION_ID_MISSING" }
@@ -99,12 +104,17 @@ try {
             flacFileCount = $flacFiles.Count
             deliveryState = [string]$status.deliveryState
             errorCode = [string]$status.errorCode
+            serverSessionId = [string]$status.serverSessionId
+            mediaAssetId = [string]$status.mediaAssetId
+            processingJobId = [string]$status.processingJobId
+            traceId = [string]$status.traceId
         }
         safety = [ordered]@{ credentialsIncluded = $false; tokensIncluded = $false; audioIncluded = $false; transcriptIncluded = $false }
     }
     $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
     Write-Host "AudioGraph local report: $reportPath"
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists) {
+    $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or $deliveryFailed) {
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }

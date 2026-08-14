@@ -5,6 +5,17 @@ using Serilog;
 using System.Text.Json;
 using WhisperX.Atom.Recorder;
 
+// The legacy Windows Service must remain isolated from the interactive
+// AudioGraph Host.  Make its Machine-scope configuration explicit so a
+// current-user config cannot be selected accidentally after installation.
+if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")))
+{
+    var machineConfigPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "WhisperXAtom", "Agent", "agent-config.json");
+    Environment.SetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH", machineConfigPath);
+}
+
 var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
     ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
 Directory.CreateDirectory(dataRoot);

@@ -4,6 +4,18 @@ using Microsoft.Extensions.Logging;
 using WhisperX.Atom.Recorder;
 using WhisperX.Atom.Recorder.Host;
 
+// The AudioGraph Host is a per-user runtime.  Its credentials and installation
+// identity are protected in the interactive user's DPAPI scope; falling back
+// to ProgramData here silently attaches the Host to the legacy Service Agent.
+// Keep an explicit environment override for diagnostics and test harnesses.
+if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")))
+{
+    var userConfigPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WhisperXAtom", "Agent", "agent-config.json");
+    Environment.SetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH", userConfigPath);
+}
+
 using var processGuard = RecorderHostProcessGuard.TryAcquire()
     ?? throw new InvalidOperationException("RECORDER_HOST_ALREADY_RUNNING");
 

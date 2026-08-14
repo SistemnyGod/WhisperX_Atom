@@ -172,6 +172,7 @@ def test_async_worker_heartbeat_overwrites_stale_ready_state_on_restart():
     heartbeat = read("workers/runtime_heartbeat.py")
     assert "Publish STARTING before any NATS/model setup" in heartbeat
     assert "await asyncio.to_thread(self._write)" in heartbeat
+    assert "heartbeat_write_failed worker=%s error=%s" in heartbeat
 
 
 def test_outbox_and_online_drift_have_durable_dedup_and_fallback_contracts():
@@ -255,6 +256,11 @@ def test_worker_message_failures_are_logged_before_redelivery():
     summary = read("workers/summary_worker/worker.py")
     assert 'LOGGER.exception("summary_message_failed job_id=%s", job_id)' in summary
     assert 'LOGGER.exception("assistant_message_failed query_id=%s", query_id)' in summary
+    assert "gpu_poison_message_discarded" in read("workers/ml_worker/worker.py")
+    assert "media_poison_message_discarded" in read("workers/media_worker/worker.py")
+    assert "resolve_media_path" in read("workers/media_worker/worker.py")
+    assert "summary_poison_message_discarded" in summary
+    assert "assistant_poison_message_discarded" in summary
 
 
 def test_lan_launcher_waits_for_worker_health_not_only_running_state():

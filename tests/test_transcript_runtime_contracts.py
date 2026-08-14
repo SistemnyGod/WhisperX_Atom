@@ -49,6 +49,12 @@ def test_unknown_speakers_are_not_persisted_as_registry_members():
     assert "return None" in quality
 
 
+def test_gpu_worker_maps_empty_valid_audio_to_no_speech_code():
+    worker = read("workers/ml_worker/worker.py")
+    assert 'if "transcript_empty" in text:' in worker
+    assert 'return "NO_SPEECH_DETECTED"' in worker
+
+
 def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     compose = read("compose.dev.yml")
     worker = read("workers/ml_worker/worker.py")

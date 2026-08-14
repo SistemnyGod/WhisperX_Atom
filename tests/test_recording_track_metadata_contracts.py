@@ -24,7 +24,7 @@ def test_agent_api_store_and_diagnostics_preserve_safe_track_metadata():
     for field in ("deviceName", "selectionMode", "recordingProfile", "encoding", "bitsPerSample"):
         assert field in agent
     assert "CreateRecordingTrackAsync(agentId, sessionId, request.TrackType" in api
-    for error in ("recording_track_type_invalid", "recording_track_format_invalid", "recording_track_bits_invalid", "chunk_sample_metadata_invalid"):
+    for error in ("recording_track_type_invalid", "recording_track_format_invalid", "recording_track_bits_invalid", "chunk_empty", "chunk_checksum_invalid", "chunk_sample_metadata_invalid"):
         assert error in api
     assert "recordingTracks = recordingTracks.Select" in api
     for field in ("DeviceId", "DeviceName", "SelectionMode", "RecordingProfile", "Encoding", "BitsPerSample"):

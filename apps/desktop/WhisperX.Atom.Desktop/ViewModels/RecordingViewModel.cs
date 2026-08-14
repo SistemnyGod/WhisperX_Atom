@@ -1365,6 +1365,7 @@ public sealed class RecordingViewModel : ObservableObject
         return code switch
         {
             "RECORDER_HOST_NOT_RUNNING" => "Recorder Host не запущен. Перезапустите приложение или установите актуальный пакет.",
+            "RECORDER_HOST_BUILD_MISMATCH" => "Запущен Recorder Host из другой папки или сборки. Закройте посторонний Host и запустите установленный пакет.",
             "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_IPC_TIMEOUT" => "Recorder Host запущен, но не отвечает по IPC. Закройте старый Host и запустите актуальную версию.",
             "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "IPC_VERSION_INCOMPATIBLE" => "Установленная версия Recorder Host несовместима с Desktop или требует перезапуска. Завершите старый Host и запустите актуальный установщик.",
             "RECORDER_IPC_ACCESS_DENIED" => "Доступ Desktop к Recorder Host запрещён ACL named pipe. Перезапустите Host под текущим пользователем.",

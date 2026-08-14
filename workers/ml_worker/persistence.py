@@ -18,6 +18,59 @@ class JobRepository:
     def conninfo(self) -> str:
         return self._conninfo
 
+    def reset_stale_leases(self) -> int:
+        """Requeue ASR jobs abandoned by a crashed/restarted GPU worker.
+
+        Inbox leases are deliberately long enough for model inference, but a
+        process restart must not make the durable NATS message invisible for
+        the full lease interval.  A fresh job heartbeat is the ownership
+        signal; stale RUNNING jobs and their inbox rows are safe to reclaim.
+        """
+        stale_seconds = max(30, int(os.getenv("GPU_STALE_LEASE_SECONDS", "90")))
+        with psycopg.connect(self.conninfo) as connection:
+            with connection.transaction():
+                connection.execute(
+                    f"""
+                    UPDATE inbox_messages AS inbox
+                    SET lease_expires_at=now() - interval '1 second', worker_id=NULL
+                    FROM jobs AS job
+                    WHERE inbox.job_id=job.id
+                      AND job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                      AND job.status IN ('QUEUED','RUNNING')
+                      AND (
+                          job.status='QUEUED'
+                          OR job.last_heartbeat IS NULL
+                          OR job.last_heartbeat < now() - interval '{stale_seconds} seconds'
+                          OR job.lease_expires_at IS NULL
+                          OR job.lease_expires_at < now()
+                      )
+                    """
+                )
+                changed = connection.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status='QUEUED',
+                        stage=CASE
+                            WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR'
+                            ELSE stage
+                        END,
+                        worker_id=NULL,
+                        lease_expires_at=NULL,
+                        last_heartbeat=NULL,
+                        error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
+                        updated_at=now()
+                    WHERE type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                      AND status='RUNNING'
+                      AND (
+                          last_heartbeat IS NULL
+                          OR last_heartbeat < now() - interval '{stale_seconds} seconds'
+                          OR lease_expires_at IS NULL
+                          OR lease_expires_at < now()
+                      )
+                    """
+                )
+                return int(changed.rowcount)
+
     def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
         if not message_id:
             return True
