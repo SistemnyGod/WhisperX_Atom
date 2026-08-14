@@ -18,6 +18,25 @@ def test_host_releases_installation_lease_when_start_fails_before_capture():
     assert "RECORDER_RUNTIME_LEASE_HELD" in read("apps/recorder-agent/RecorderRuntimeLease.cs")
 
 
+def test_durable_writer_subscribes_after_audiograph_replaces_its_frame_channel():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    start = runtime.split("public async Task<AgentIpcResponse> StartAsync", 1)[1].split(
+        "public async Task<AgentIpcResponse> StopAsync", 1
+    )[0]
+    writer_start = runtime.split("public async Task StartAsync(CancellationToken", 1)[1].split(
+        "public void BeginConsuming", 1
+    )[0]
+    assert start.index("await _engine.StartAsync") < start.index("writer.BeginConsuming()")
+    assert start.index("writer.BeginConsuming()") < start.index("writer.FirstDurableBytes")
+    assert "_worker = Task.Run(ProcessAsync)" not in writer_start
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    engine_start = engine.split("public async Task StartAsync", 1)[1].split(
+        "public Task PauseAsync", 1
+    )[0]
+    assert "try { await StopAsync(CancellationToken.None)" in engine_start
+    assert "throw;" in engine_start
+
+
 def test_host_ipc_maps_acl_denial_and_uses_exact_configured_user_sid():
     client = read("apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs")
     controller = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderServiceController.cs")
@@ -45,6 +64,62 @@ def test_desktop_does_not_open_device_subscription_without_host_capability():
     assert "_deviceEventStreamSupported" in view_model
     assert "RecorderRuntimeMode.IsAudioGraph && _deviceEventStreamSupported" in view_model
     assert "RECORDER_HOST_UPDATE_REQUIRED" in view_model
+
+
+def test_recording_start_is_actionable_when_runtime_readiness_is_missing():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml")
+    start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split(
+        "public Task<bool> PauseAsync", 1
+    )[0]
+    assert "CanAttemptStart" in view_model
+    assert 'IsEnabled="{Binding CanAttemptStart}"' in page
+    assert "RecorderService.StartAsync" in start
+    assert "GetStartBlockedMessage" in start
+    assert "if (!CanStart) return false" not in start
+
+
+def test_background_health_poll_does_not_flash_user_error_bar():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    refresh = view_model.split("public async Task RefreshAsync", 1)[1].split(
+        "public async Task<bool> StartRecordingAsync", 1
+    )[0]
+    assert "preserveUserFeedback: true" in refresh
+    assert "ErrorMessage = SafeError(ex)" not in refresh
+
+
+def test_agent_bootstrap_recovery_is_single_flight_and_throttled():
+    window = read("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs")
+    recovery = window.split("private void QueueAgentRecovery", 1)[1].split(
+        "private void SetSystemStatus", 1
+    )[0]
+    assert "Interlocked.CompareExchange" in recovery
+    assert "_nextAgentRecoveryAtUtc" in recovery
+    assert "Volatile.Write" in recovery
+
+
+def test_crashed_host_sessions_leave_recording_state_before_recovery():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    reconcile = runtime.split("public async Task ReconcileBackgroundAsync", 1)[1].split(
+        "public async Task<RecordingSessionStatus>", 1
+    )[0]
+    assert 'session?.State is "RECORDING" or "PAUSED"' in reconcile
+    assert 'SetSessionStateAsync(sessionId, "FINALIZING"' in reconcile
+    assert "RECORDER_RECOVERED_AFTER_RESTART" in reconcile
+    assert "state IN ('RECORDING','PAUSED')" in spool
+    assert reconcile.index("finally { _gate.Release(); }") < reconcile.index("await _delivery.RunAsync")
+
+
+def test_local_archive_updates_do_not_erase_delivery_retry_schedule():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    delivery = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "WHEN $clearNext=1 THEN NULL WHEN $next IS NOT NULL THEN $next ELSE next_retry_at" in spool
+    assert 'command.Parameters.AddWithValue("$clearNext"' in spool
+    confirmed = delivery.split('deliveryState: "CONFIRMED"', 1)[1].split(");", 1)[0]
+    assert "clearNextRetry: true" in confirmed
+    persist_failure = delivery.split("private async Task<FinalizationResult> PersistFailureAsync", 1)[1]
+    assert "clearNextRetry: !result.Retryable" in persist_failure
 
 
 def test_desktop_maps_legacy_device_id_to_default_for_audiograph():
@@ -165,11 +240,13 @@ def test_v1_machine_config_cannot_select_recorder_engine():
 
 def test_offline_startup_restores_bootstrap_before_showing_main_window():
     app = read("apps/desktop/WhisperX.Atom.Desktop/App.xaml.cs")
-    offline = app.split("else if (_services.Backend.CanUseOffline)", 1)[1].split(
+    offline = app.split("else if (_services.Backend.AuthState == DesktopAuthState.Offline && _services.Backend.CanUseOffline)", 1)[1].split(
         "else\n", 1
     )[0]
     assert "AgentBootstrap.EnsureAgentReadyAsync" in offline
     assert offline.index("EnsureAgentReadyAsync") < offline.index("ShowMainWindow")
+    assert "DesktopAuthState.LoginRequired" in app
+    assert "Сеанс API истёк" in app
     coordinator = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
     assert "services.Backend.AuthState == DesktopAuthState.Offline" in coordinator
     assert "offlineEligible" in coordinator
@@ -209,3 +286,65 @@ def test_gpu_worker_runtime_identity_and_heartbeat_healthcheck_are_pinned_in_com
     assert "APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}" in compose
     assert "last_seen_at" in healthcheck
     assert "cudaAvailable" in healthcheck
+def test_audiograph_agent_config_is_not_blocked_by_stale_legacy_system_audio_id():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    configure = runtime.split("public async Task<AgentIpcResponse> ConfigureAsync(", 1)[1].split(
+        "public async Task<AgentIpcResponse> UpdateServerUrlAsync", 1
+    )[0]
+    assert "_api.ConfigureAsync" in configure
+    assert 'return Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED"' not in configure
+
+
+def test_server_periodically_reconciles_interrupted_recordings_and_failed_asr():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    mapper = read("apps/desktop/WhisperX.Atom.Desktop/Services/UiStatusMapper.cs")
+    assert "AddHostedService<OperationalRecoveryService>" in api
+    assert "ReconcileInterruptedWorkAsync" in api
+    assert "RECORDING_INTERRUPTED" in api
+    assert "session.state='AWAITING_AGENT_RECONNECT'" in api
+    assert "job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')" in api
+    assert "transcript.status IN ('READY','PARTIAL_READY')" in api
+    assert 'meeting.status IN (\'INGESTING\',\'MEDIA_PROCESSING\',\'TRANSCRIBING\',\'ALIGNING\',\'DIARIZING\')' in api
+    assert '["RECORDING_INTERRUPTED"]' in mapper
+    assert '["ADMIN_REVIEW"]' in mapper
+
+
+def test_gpu_failure_is_terminal_and_updates_meeting_without_hiding_existing_transcript():
+    persistence = read("workers/ml_worker/persistence.py")
+    assert "lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL" in persistence
+    assert 'if status == "FAILED"' in persistence
+    assert "SET status='FAILED'" in persistence
+    assert "NOT EXISTS" in persistence
+    assert "transcript.status IN ('READY','PARTIAL_READY')" in persistence
+
+
+def test_retry_restores_meeting_state_and_routes_transcript_reprocessing_to_gpu():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    retry = api.split("public async Task<JobRow?> RetryJobAsync", 1)[1].split(
+        "public async Task<TranscriptRow>", 1
+    )[0]
+    assert "WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR'" in retry
+    assert '"TRANSCRIBE" or "TRANSCRIBE_REPROCESS"' in retry
+    assert '"UPDATE meetings SET status=@status' in retry
+
+
+def test_missing_server_recording_is_terminal_and_routine_probes_do_not_flood_info_logs():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    agent = read("apps/recorder-agent/AgentApiClient.cs")
+    mapper = read("apps/desktop/WhisperX.Atom.Desktop/Services/UiStatusMapper.cs")
+    assert 'error = "RECORDING_SESSION_NOT_FOUND", retryable = false' in api
+    assert 'await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE")' in agent
+    assert 'ErrorCode: "RECORDING_SESSION_NOT_FOUND"' in mapper
+    assert 'AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning)' in api
+    assert "routineProbe" in api
+    assert "app.Logger.LogDebug" in api
+
+
+def test_recorder_health_never_waits_for_full_windows_device_reconciliation():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    health = runtime.split("public Task<AgentIpcResponse> HealthAsync", 1)[1].split(
+        "public async Task<AgentIpcResponse> PreflightAsync", 1
+    )[0]
+    assert "DeviceWatcher is the authoritative live source" in health
+    assert "ReconcileAsync" not in health
+    assert "DeviceCatalog.Devices" in health

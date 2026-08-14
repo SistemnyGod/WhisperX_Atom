@@ -227,7 +227,7 @@ Write-Host "AGENT_DATA_ROOT_ACL_READY=true"
 Write-Host "AGENT_DB_ACL_READY=$($agentDbAclReady.ToString().ToLowerInvariant())"
 Set-Content -LiteralPath (Join-Path $agentDataRoot "allowed-user.sid") -Value $AllowedUserSid -Encoding ascii -NoNewline
 $agentConfigPath = Join-Path $agentDataRoot "agent-config.json"
-$serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://192.168.2.194:8080" } else { $env:WHISPERX_API_URL }
+$serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://127.0.0.1:0" } else { $env:WHISPERX_API_URL }
 $machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
 $userAgentConfigPath = Get-UserAgentConfigPathForSid -Sid $AllowedUserSid
 # A user-scoped Host configuration owns the runtime lease. Preserve its
@@ -263,7 +263,7 @@ $microphone = if ($existingAudio -and $existingAudio.microphone) { $existingAudi
 $machineConfig = [ordered]@{
     schemaVersion = 2
     serverOrigin = $serverOrigin.TrimEnd('/')
-    managed = if ($existingMachine -and $null -ne $existingMachine.managed) { [bool]$existingMachine.managed } else { $true }
+    managed = if ($existingMachine -and $null -ne $existingMachine.managed) { [bool]$existingMachine.managed } else { -not [string]::Equals($serverOrigin, "http://127.0.0.1:0", [StringComparison]::OrdinalIgnoreCase) }
     installationId = $installationId
     audioConfiguration = [ordered]@{
         audioConfigurationVersion = 2

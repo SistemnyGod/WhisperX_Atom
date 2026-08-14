@@ -303,7 +303,7 @@ public sealed class AgentPipeHost(
         {
             logger.LogError(ex, "Recording finalization failed after local stop. Session={SessionId}, Meeting={MeetingId}", stop.SessionId, meetingId);
             var code = stage == "LOCAL_FINALIZATION" ? "LOCAL_ENCODING_FAILED" : "LOCAL_ARCHIVE_FAILED";
-            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "LOCAL_FAILED", deliveryState: "NOT_REQUESTED", errorCode: code, errorDetail: ex.Message, retryCount: 0, nextRetryAtUtc: null, cancellationToken: CancellationToken.None);
+            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "LOCAL_FAILED", deliveryState: "NOT_REQUESTED", errorCode: code, errorDetail: ex.Message, retryCount: 0, clearNextRetry: true, cancellationToken: CancellationToken.None);
             _finalizationErrors[stop.SessionId!] = code;
         }
     }

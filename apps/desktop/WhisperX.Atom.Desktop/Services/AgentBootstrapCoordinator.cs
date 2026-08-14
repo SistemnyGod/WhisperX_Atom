@@ -23,16 +23,22 @@ public sealed record AgentBootstrapStatus(
 
     public bool RequiresReenroll => string.Equals(Code, "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase);
     public bool IsTransient => string.Equals(Code, "RECORDER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Code, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(Code, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Code, "SERVER_NETWORK_UNREACHABLE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Code, "SERVER_TIMEOUT", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
 /// The single Desktop path that links the current user to the local Recorder Agent.
-/// It never rotates an existing Agent token.
+/// It does not rotate a healthy Agent token. If the local Host has retained its
+/// installation identity but lost the DPAPI-protected Agent credentials, an
+/// authenticated administrator may recover them through the server re-enroll
+/// endpoint.
 /// </summary>
 public sealed class AgentBootstrapCoordinator(FrontendServices services)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private DateTimeOffset _nextCredentialRecoveryAtUtc = DateTimeOffset.MinValue;
     private AgentBootstrapStatus _lastStatus = new(false, false, false, "AGENT_LINK_PENDING", "Recorder Agent ещё не привязан к пользователю.");
 
     public event Action? StatusChanged;
@@ -81,7 +87,7 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
             var pipeReachable = host?.PipeReachable == true;
             if (!pipeReachable)
             {
-                try { pipeReachable = (await services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false)).Ok; }
+                try { pipeReachable = (await services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false)).IsReachable; }
                 catch { }
             }
 
@@ -127,7 +133,7 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
             return new(false, false, offlineEligible, "RECORDER_UNAVAILABLE", "Recorder Service недоступен. Проверьте локальную службу и Named Pipe.") { Authenticated = true };
         }
 
-        if (!health.Ok || health.Health is null)
+        if (!health.IsReachable || health.Health is null)
             return new(false, false, offlineEligible, "RECORDER_UNAVAILABLE", "Recorder Service не запущен или Named Pipe недоступен.") { Authenticated = true };
 
         var agentHealth = health.Health;
@@ -179,13 +185,53 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
             { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId };
         var agentId = enrollmentAgentId;
 
-        if (!string.IsNullOrWhiteSpace(enrollment.Token))
+        // The server intentionally omits the token for an existing Agent so a
+        // normal bootstrap cannot rotate a working credential. A reinstalled
+        // or reset current-user Host, however, can still retain the managed
+        // InstallationId while having neither AgentId nor token. Updating only
+        // ServerOrigin in that state fails with agent_configuration_invalid.
+        // Recover exactly that missing-identity case via the admin-only
+        // re-enroll endpoint; revoked credentials continue to take the
+        // REENROLL_REQUIRED branch above and are never restored automatically.
+        var enrollmentToken = enrollment.Token;
+        if (string.IsNullOrWhiteSpace(enrollmentToken)
+            && (agentHealth.AgentId is null || agentHealth.AgentId == Guid.Empty))
+        {
+            if (DateTimeOffset.UtcNow < _nextCredentialRecoveryAtUtc)
+                return new(false, true, false, "AGENT_RECOVERY_RETRY_LATER", "Восстановление Recorder Agent уже выполнялось; повтор будет выполнен автоматически.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            // Avoid a token-rotation storm when a local CONFIGURE operation
+            // fails after the server has already issued the one-time token.
+            _nextCredentialRecoveryAtUtc = DateTimeOffset.UtcNow.AddMinutes(2);
+            try
+            {
+                var recovered = await services.Backend.ReenrollAgentAsync(agentId, cancellationToken);
+                if (!Guid.TryParse(recovered.AgentId, out var recoveredAgentId)
+                    || recoveredAgentId != agentId
+                    || string.IsNullOrWhiteSpace(recovered.Token))
+                    return new(false, true, false, "AGENT_RECOVERY_INVALID", "Сервер вернул некорректные данные восстановления Recorder Agent.")
+                    { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+                enrollmentToken = recovered.Token;
+            }
+            catch (DesktopApiException exception)
+            {
+                var requiresAdmin = exception.StatusCode is 401 or 403;
+                return new(false, true, false,
+                    requiresAdmin ? "AGENT_RECOVERY_REQUIRES_ADMIN" : exception.ErrorCode,
+                    requiresAdmin
+                        ? "Для автоматического восстановления Recorder Agent требуется учётная запись администратора."
+                        : $"Сервер не восстановил Recorder Agent: {exception.ErrorCode}.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(enrollmentToken))
         {
             settings = services.Settings.Load();
             var configured = await services.Recorder.ConfigureAgentAsync(
                 services.Backend.ApiUrl,
                 agentId,
-                enrollment.Token,
+                enrollmentToken,
                 settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(),
                 settings.MicrophoneDeviceId,
                 settings.SystemAudioDeviceId,
@@ -193,6 +239,7 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
             if (!configured.Ok)
                 return new(false, true, offlineEligible, configured.Error ?? "AGENT_CONFIGURE_FAILED", "Recorder Agent не подтвердил конфигурацию.")
                 { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            _nextCredentialRecoveryAtUtc = DateTimeOffset.MinValue;
         }
         else
         {
@@ -218,7 +265,7 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
             var heartbeatFresh = currentHealth?.LastHeartbeatAtUtc is { } heartbeat
                 && DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() <= TimeSpan.FromSeconds(90);
             var connected = string.Equals(currentHealth?.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase);
-            if (verifiedHealth.Ok && agentMatches && connected && heartbeatFresh)
+            if (verifiedHealth.IsReachable && agentMatches && connected && heartbeatFresh)
             {
                 var current = services.Settings.Load();
                 services.Settings.Save(current with

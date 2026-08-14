@@ -120,3 +120,30 @@ def test_release_gate_blocks_without_complete_live_core_evidence():
     assert "mvp-release-gate.json" in gate
     for field in ("localArchiveReady", "deliveryConfirmed", "mediaReady", "summaryStatus"):
         assert field in e2e
+
+
+def test_silent_valid_audio_becomes_no_speech_partial_transcript_without_summary_job():
+    processing = read("whisperx_atom/processing.py")
+    persistence = read("workers/ml_worker/persistence.py")
+    assert "_is_silent_pcm(ctx.asr_audio_path)" in processing
+    assert "NO_SPEECH_DETECTED" in processing
+    assert "status=\"PARTIAL_READY\"" in processing
+    assert "no_speech_detected" in persistence
+    assert 'result_error_code == "NO_SPEECH_DETECTED"' in persistence
+    assert "if no_speech_detected and result_error_code is None" in persistence
+    assert "and not no_speech_detected" in persistence
+    assert '"PARTIAL_READY" if no_speech_detected else "TRANSCRIPT_READY"' in persistence
+
+
+def test_gpu_worker_delays_redelivery_when_resident_llm_blocks_transcription():
+    worker = read("workers/ml_worker/worker.py")
+    assert 'RESIDENT_LLM_RETRY_DELAY_SECONDS = max(5, int(os.getenv("GPU_RESIDENT_LLM_RETRY_DELAY_SECONDS", "15")))' in worker
+    assert "except ResidentLlmConflict:" in worker
+    assert "await message.nak(delay=RESIDENT_LLM_RETRY_DELAY_SECONDS)" in worker
+
+
+def test_archive_validation_decodes_master_after_ffprobe():
+    writer = read("apps/recorder-agent/LocalArchiveWriter.cs")
+    assert "ffprobe_invalid_audio" in writer
+    assert "ffmpeg_decode_failed" in writer
+    assert '"-f", "null", "-"' in writer

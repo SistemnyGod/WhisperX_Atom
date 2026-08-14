@@ -97,6 +97,16 @@ public sealed partial class TasksPage : Page
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось обновить поручение.")); }
     }
 
+    private void ResetFiltersButton_Click(object sender, RoutedEventArgs e)
+    {
+        SearchBox.Text = string.Empty;
+        ResponsibleFilterBox.Text = string.Empty;
+        StatusFilterBox.SelectedIndex = 0;
+        DeadlineFilterBox.SelectedIndex = 0;
+        MeetingFilterBox.SelectedIndex = 0;
+        UpdateState();
+    }
+
     private void TaskEditor_TextChanged(object sender, TextChangedEventArgs e) { if (!_updatingEditor && _viewModel is not null) _viewModel.EditTaskText = TaskEditor.Text; }
     private void ResponsibleEditor_TextChanged(object sender, TextChangedEventArgs e) { if (!_updatingEditor && _viewModel is not null) _viewModel.EditResponsible = ResponsibleEditor.Text; }
     private void DeadlinePicker_DateChanged(object sender, DatePickerValueChangedEventArgs args)
@@ -175,13 +185,21 @@ public sealed partial class TasksPage : Page
         LoadingRing.IsActive = _viewModel.IsLoading;
         TaskList.Visibility = _viewModel.HasItems ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = _viewModel.HasItems ? Visibility.Collapsed : Visibility.Visible;
-        EmptyTitle.Text = _viewModel.ErrorText.Length > 0 ? "Не удалось загрузить поручения" : "Поручений нет";
-        EmptyDescription.Text = string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? _viewModel.StatusText : _viewModel.ErrorText;
-        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        var hasError = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        var hasFilters = !string.IsNullOrWhiteSpace(SearchBox.Text)
+            || StatusFilterBox.SelectedIndex > 0
+            || DeadlineFilterBox.SelectedIndex > 0
+            || MeetingFilterBox.SelectedIndex > 0
+            || !string.IsNullOrWhiteSpace(ResponsibleFilterBox.Text);
+        EmptyTitle.Text = hasError ? "Не удалось загрузить поручения" : hasFilters ? "Ничего не найдено" : "Поручений нет";
+        EmptyDescription.Text = hasError ? _viewModel.ErrorText : hasFilters ? "Измените условия поиска или сбросьте фильтры." : _viewModel.StatusText;
+        EmptyResetFiltersButton.Visibility = !hasError && hasFilters ? Visibility.Visible : Visibility.Collapsed;
+        ErrorInfoBar.IsOpen = hasError;
         ErrorInfoBar.Message = _viewModel.ErrorText;
         WarningInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.WarningText);
         WarningInfoBar.Message = _viewModel.WarningText;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
+        ResetFiltersButton.IsEnabled = !_viewModel.IsLoading;
         SaveButton.IsEnabled = _viewModel.HasSelection && !_viewModel.IsSaving;
     }
 

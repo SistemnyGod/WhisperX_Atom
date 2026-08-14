@@ -148,8 +148,8 @@ public sealed class RecordingDeliveryCoordinator(
         if (!api.IsConfigured)
         {
             return sessionInfo?.MeetingId is null
-                ? await PersistPendingServerAsync(localSessionId, "API is not configured", cancellationToken)
-                : await PersistFailureAsync(localSessionId, new FinalizationResult(false, "DELIVERY", "SERVER_UNAVAILABLE", true), "API is not configured", cancellationToken);
+                ? await PersistPendingServerAsync(localSessionId, "API is not configured", cancellationToken, "SERVER_NOT_CONFIGURED")
+                : await PersistFailureAsync(localSessionId, new FinalizationResult(false, "DELIVERY", "SERVER_NOT_CONFIGURED", true), "API is not configured", cancellationToken);
         }
 
         try
@@ -219,7 +219,7 @@ public sealed class RecordingDeliveryCoordinator(
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "CONFIRMED",
                 retryCount: 0,
-                nextRetryAtUtc: null,
+                clearNextRetry: true,
                 cancellationToken: cancellationToken);
             await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
             return new FinalizationResult(true, "SERVER_ASSEMBLY", null, false, null, server, null, null, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId);
@@ -234,14 +234,14 @@ public sealed class RecordingDeliveryCoordinator(
         }
     }
 
-    private async Task<FinalizationResult> PersistPendingServerAsync(string sessionId, string detail, CancellationToken cancellationToken)
+    private async Task<FinalizationResult> PersistPendingServerAsync(string sessionId, string detail, CancellationToken cancellationToken, string errorCode = "SERVER_UNAVAILABLE")
     {
         var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken);
         var retryCount = (info?.RetryCount ?? 0) + 1;
         var nextRetry = DateTimeOffset.UtcNow.Add(GetRetryDelay(retryCount));
         await spool.SetFinalizationStateAsync(sessionId,
             deliveryState: "PENDING_SERVER",
-            errorCode: "SERVER_UNAVAILABLE",
+            errorCode: errorCode,
             errorDetail: detail,
             retryCount: retryCount,
             nextRetryAtUtc: nextRetry,
@@ -268,6 +268,7 @@ public sealed class RecordingDeliveryCoordinator(
             errorHttpStatus: result.ErrorHttpStatus,
             errorRetryable: result.Retryable,
             traceId: result.TraceId,
+            clearNextRetry: !result.Retryable,
             cancellationToken: cancellationToken);
         return result with { NextRetryAtUtc = nextRetry };
     }
@@ -300,12 +301,14 @@ public sealed class RecordingDeliveryCoordinator(
         : ex is HttpRequestException or TimeoutException or TaskCanceledException;
 
     private static bool IsServerUnavailable(Exception ex) => ex is AgentApiException api
-        ? string.Equals(api.ErrorCode, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+        ? api.ErrorCode is "SERVER_UNAVAILABLE" or "SERVER_NETWORK_UNREACHABLE" or "SERVER_TIMEOUT"
         : ex is HttpRequestException or TimeoutException or TaskCanceledException;
 
     private static string ClassifyDeliveryError(Exception ex) => ex is AgentApiException api
         ? api.ErrorCode
-        : ex is HttpRequestException or TimeoutException or TaskCanceledException
-            ? "SERVER_UNAVAILABLE"
+        : ex is TimeoutException or TaskCanceledException
+            ? "SERVER_TIMEOUT"
+            : ex is HttpRequestException
+            ? "SERVER_NETWORK_UNREACHABLE"
             : "SERVER_STORAGE_ERROR";
 }

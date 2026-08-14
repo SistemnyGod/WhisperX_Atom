@@ -19,6 +19,11 @@
     <Nullable>enable</Nullable>
     <ApplicationTitle>WhisperX Atom Desktop</ApplicationTitle>
     <AssemblyName>WhisperX.Atom.Desktop</AssemblyName>
+    <!-- Must match the Host build identity shown in runtime diagnostics. -->
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
+    <InformationalVersion>1.0.1+audio-float32-pcm16</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

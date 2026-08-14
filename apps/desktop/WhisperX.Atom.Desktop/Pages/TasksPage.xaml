@@ -7,12 +7,13 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <Grid x:Name="PageRoot" Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,*" RowSpacing="14">
-        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
             <StackPanel Spacing="3">
                 <TextBlock Text="Поручения" Style="{StaticResource PageTitleStyle}" />
                 <TextBlock Text="Общий реестр задач из доступных совещаний" Foreground="{StaticResource MutedTextBrush}" />
             </StackPanel>
-            <Button Grid.Column="1" x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
+            <Button Grid.Column="1" x:Name="ResetFiltersButton" Content="Сбросить фильтры" Style="{StaticResource GhostButtonStyle}" Click="ResetFiltersButton_Click" AutomationProperties.Name="Сбросить фильтры поручений" ToolTipService.ToolTip="Вернуть фильтры к исходным значениям" />
+            <Button Grid.Column="2" x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить поручения" ToolTipService.ToolTip="Загрузить актуальный список поручений" />
         </Grid>
 
         <Grid x:Name="FiltersGrid" Grid.Row="1" ColumnDefinitions="2*,*,*,*,Auto" RowDefinitions="Auto" ColumnSpacing="8" RowSpacing="8">
@@ -67,6 +68,7 @@
                             <SymbolIcon Symbol="Accept" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
                             <TextBlock x:Name="EmptyTitle" Text="Поручений нет" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" />
                             <TextBlock x:Name="EmptyDescription" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center" />
+                            <Button x:Name="EmptyResetFiltersButton" Content="Сбросить фильтры" Style="{StaticResource SecondaryButtonStyle}" Click="ResetFiltersButton_Click" Visibility="Collapsed" HorizontalAlignment="Center" AutomationProperties.Name="Сбросить фильтры поручений" />
                         </StackPanel>
                     </Grid>
                 </Grid>
@@ -81,11 +83,11 @@
                         <TextBox x:Name="ResponsibleEditor" Header="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleEditor_TextChanged" />
                         <DatePicker x:Name="DeadlinePicker" Style="{StaticResource FormDatePickerStyle}" Header="Срок" DateChanged="DeadlinePicker_DateChanged" />
                         <CheckBox x:Name="NoDeadlineCheckBox" Style="{StaticResource FormCheckBoxStyle}" Content="Без срока" Checked="NoDeadlineCheckBox_Changed" Unchecked="NoDeadlineCheckBox_Changed" />
-                        <ComboBox x:Name="StatusEditor" Style="{StaticResource FormComboBoxStyle}" Header="Статус" SelectedValuePath="Content" SelectionChanged="StatusEditor_SelectionChanged">
-                            <ComboBoxItem Content="NEEDS_REVIEW" />
-                            <ComboBoxItem Content="OPEN" />
-                            <ComboBoxItem Content="DONE" />
-                            <ComboBoxItem Content="CANCELLED" />
+                        <ComboBox x:Name="StatusEditor" Style="{StaticResource FormComboBoxStyle}" Header="Статус" SelectedValuePath="Tag" SelectionChanged="StatusEditor_SelectionChanged">
+                            <ComboBoxItem Content="На проверке" Tag="NEEDS_REVIEW" />
+                            <ComboBoxItem Content="Открыто" Tag="OPEN" />
+                            <ComboBoxItem Content="Готово" Tag="DONE" />
+                            <ComboBoxItem Content="Отменено" Tag="CANCELLED" />
                         </ComboBox>
                         <Button x:Name="SaveButton" Content="Сохранить изменения" Style="{StaticResource PrimaryButtonStyle}" Click="SaveButton_Click" IsEnabled="False" />
                         <Button x:Name="EvidenceButton" Content="Открыть источник в стенограмме" Style="{StaticResource SecondaryButtonStyle}" Click="EvidenceButton_Click" Visibility="Collapsed" />

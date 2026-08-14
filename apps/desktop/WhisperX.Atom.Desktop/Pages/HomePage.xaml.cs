@@ -46,7 +46,14 @@ public sealed partial class HomePage : Page
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(HomeViewModel.HasMeetings) or nameof(HomeViewModel.MeetingsMessage) or nameof(HomeViewModel.ErrorText) or nameof(HomeViewModel.RecordingBadgeText) or nameof(HomeViewModel.MediaTimeText))
+        if (e.PropertyName is nameof(HomeViewModel.HasMeetings)
+            or nameof(HomeViewModel.MeetingsMessage)
+            or nameof(HomeViewModel.ErrorText)
+            or nameof(HomeViewModel.IsLoading)
+            or nameof(HomeViewModel.AgentAvailable)
+            or nameof(HomeViewModel.MicrophoneSignalState)
+            or nameof(HomeViewModel.RecordingBadgeText)
+            or nameof(HomeViewModel.MediaTimeText))
             UpdateEmptyState();
     }
 
@@ -57,7 +64,14 @@ public sealed partial class HomePage : Page
         MeetingsEmptyState.Visibility = ViewModel.IsLoading || ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
         MeetingsList.Visibility = ViewModel.IsLoading || !ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
         RefreshButton.IsEnabled = !ViewModel.IsLoading;
-        var statusBrush = (Brush)Application.Current.Resources[ViewModel.AgentAvailable ? "SuccessBrush" : "NeutralStatusBrush"];
+        EmptyImportButton.IsEnabled = ViewModel.ApiAvailable && !ViewModel.IsLoading;
+        QuickImportButton.IsEnabled = ViewModel.ApiAvailable && !ViewModel.IsLoading;
+        var statusBrushKey = !ViewModel.AgentAvailable
+            ? "DangerBrush"
+            : ViewModel.MicrophoneSignalState is "READY_NO_SIGNAL" or "CLIPPING" or "NO_PACKETS"
+                ? "WarningBrush"
+                : "SuccessBrush";
+        var statusBrush = (Brush)Application.Current.Resources[statusBrushKey];
         AgentIndicator.Fill = statusBrush;
         AgentRailIndicator.Fill = statusBrush;
         UpdateRecordingBadge();

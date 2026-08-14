@@ -52,7 +52,10 @@ public sealed partial class LoginWindow : Window
             // instead of opening a shell that cannot record.
             if (!bootstrap.RecorderAvailable)
             {
-                StatusText.Text = $"{bootstrap.Code}: {bootstrap.Message}";
+                // API authentication is still useful when the local Agent is
+                // down: the user must be able to open Settings and recover it.
+                await _authenticated(bootstrap);
+                Close();
                 return;
             }
             await _authenticated(bootstrap);

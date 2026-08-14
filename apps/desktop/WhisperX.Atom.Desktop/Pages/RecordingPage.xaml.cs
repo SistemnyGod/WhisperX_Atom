@@ -75,6 +75,7 @@ public sealed partial class RecordingPage : Page
         ErrorInfoBar.IsOpen = ViewModel.HasError;
         ErrorInfoBar.Message = ViewModel.ErrorMessage;
         ErrorInfoBar.Severity = InfoBarSeverity.Error;
+        RetryUploadInfoButton.Visibility = ViewModel.CanRetryUpload ? Visibility.Visible : Visibility.Collapsed;
         WarningInfoBar.IsOpen = ViewModel.HasWarning;
         WarningInfoBar.Message = ViewModel.WarningMessage;
         WarningInfoBar.Severity = InfoBarSeverity.Warning;
@@ -131,6 +132,8 @@ public sealed partial class RecordingPage : Page
     private async void TaskButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync("ACTION_ITEM"); UpdateError(); }
     private async void StopButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.StopRecordingAsync(); UpdateError(); }
     private async void RetryUploadButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.RetryUploadAsync(); UpdateError(); }
+
+    private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
 
     private void OpenTranscriptButton_Click(object sender, RoutedEventArgs e)
     {

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -11,6 +12,7 @@ public sealed partial class TranscriptsPage : Page
 {
     private TranscriptsViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
+    private CancellationTokenSource? _detailCts;
     private bool _updatingLayout;
 
     public TranscriptsPage()
@@ -42,6 +44,7 @@ public sealed partial class TranscriptsPage : Page
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        CancelDetailLoad();
         _pageCts?.Cancel();
         _pageCts?.Dispose();
         _pageCts = null;
@@ -59,6 +62,7 @@ public sealed partial class TranscriptsPage : Page
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null || _pageCts is null) return;
+        CancelDetailLoad();
         try
         {
             await _viewModel.LoadAsync(_pageCts.Token);
@@ -71,6 +75,12 @@ public sealed partial class TranscriptsPage : Page
             ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось открыть стенограмму.");
             ErrorInfoBar.IsOpen = true;
         }
+    }
+
+    private void ClearSearchButton_Click(object sender, RoutedEventArgs e)
+    {
+        SearchBox.Text = string.Empty;
+        SearchBox.Focus(FocusState.Programmatic);
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -88,9 +98,22 @@ public sealed partial class TranscriptsPage : Page
     private async void TranscriptsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_viewModel is null || _pageCts is null || TranscriptsList.SelectedItem is not TranscriptRegistryItem item) return;
-        try { await _viewModel.LoadSelectedAsync(item, _pageCts.Token); UpdateDetails(); }
-        catch (OperationCanceledException) { }
+        CancelDetailLoad();
+        _detailCts = CancellationTokenSource.CreateLinkedTokenSource(_pageCts.Token);
+        var detailCts = _detailCts;
+        _viewModel.SelectedItem = item;
+        UpdateDetails();
+        try { await _viewModel.LoadSelectedAsync(item, detailCts.Token); UpdateDetails(); }
+        catch (OperationCanceledException) when (detailCts.IsCancellationRequested) { }
         catch (Exception ex) { ErrorInfoBar.Message = UiErrorFormatter.Format(ex); ErrorInfoBar.IsOpen = true; }
+        finally
+        {
+            if (ReferenceEquals(_detailCts, detailCts))
+            {
+                _detailCts.Dispose();
+                _detailCts = null;
+            }
+        }
     }
 
     private void SegmentsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -101,6 +124,8 @@ public sealed partial class TranscriptsPage : Page
 
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
 
+    private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
+
     private void OpenSegmentButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel?.SelectedItem is not { Meeting.Id: var meetingId } item || _viewModel.SelectedSegment is not { } segment)
@@ -108,19 +133,45 @@ public sealed partial class TranscriptsPage : Page
         App.MainWindow.NavigateTo("meetings", new MeetingNavigationTarget(meetingId, segment.Id, segment.StartMs));
     }
 
+    private void CancelDetailLoad()
+    {
+        _detailCts?.Cancel();
+        _detailCts?.Dispose();
+        _detailCts = null;
+    }
+
     private void UpdateState()
     {
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
+        AutomationProperties.SetName(RefreshButton, _viewModel.IsLoading ? "Загрузка стенограмм" : "Обновить стенограммы");
         TranscriptsList.Visibility = _viewModel.HasItems ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = _viewModel.HasItems ? Visibility.Collapsed : Visibility.Visible;
-        EmptyTitle.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? "Не удалось загрузить стенограммы" : "Стенограмм нет";
-        EmptyDescription.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText)
-            ? _viewModel.ErrorText
-            : _viewModel.StatusText;
+        var hasError = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        EmptyTitle.Text = hasError ? "Не удалось загрузить стенограммы" : "Стенограмм нет";
+        var hasSearchNoResults = _viewModel.HasSearchNoResults;
+        if (hasError)
+        {
+            EmptyTitle.Text = "Не удалось загрузить стенограммы";
+            EmptyDescription.Text = _viewModel.ErrorText;
+        }
+        else if (hasSearchNoResults)
+        {
+            EmptyTitle.Text = "Ничего не найдено";
+            EmptyDescription.Text = $"По запросу «{_viewModel.SearchText.Trim()}» совпадений нет.";
+        }
+        else
+        {
+            EmptyTitle.Text = "Стенограмм нет";
+            EmptyDescription.Text = _viewModel.StatusText;
+        }
+        EmptyRetryButton.Visibility = hasError ? Visibility.Visible : Visibility.Collapsed;
+        EmptyRetryButton.IsEnabled = !_viewModel.IsLoading;
+        EmptyClearSearchButton.Visibility = hasSearchNoResults ? Visibility.Visible : Visibility.Collapsed;
+        EmptyClearSearchButton.IsEnabled = !_viewModel.IsLoading;
         ErrorInfoBar.Message = _viewModel.ErrorText;
-        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        ErrorInfoBar.IsOpen = hasError;
         WarningInfoBar.Message = _viewModel.WarningText;
         WarningInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.WarningText);
         UpdateDetails();
@@ -134,6 +185,11 @@ public sealed partial class TranscriptsPage : Page
         DetailsEmptyText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
         SegmentsList.Visibility = _viewModel.HasSegments ? Visibility.Visible : Visibility.Collapsed;
         SegmentEmptyText.Visibility = hasSelection && !_viewModel.HasSegments ? Visibility.Visible : Visibility.Collapsed;
+        SegmentEmptyText.Text = _viewModel.IsLoading
+            ? "Загружаем сегменты стенограммы…"
+            : string.IsNullOrWhiteSpace(_viewModel.SegmentSearchText)
+                ? "Сегменты стенограммы не найдены."
+                : "Сегментов с таким текстом не найдено.";
         OpenSegmentButton.IsEnabled = _viewModel.HasSegmentSelection;
         SelectedSegmentText.Text = _viewModel.SelectedSegment is { } segment
             ? $"{segment.TimeLabel} · {segment.Speaker ?? "Спикер не определён"}\n{segment.Text}"

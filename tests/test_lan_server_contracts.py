@@ -56,6 +56,18 @@ def test_user_bootstrap_and_owner_propagation_are_explicit():
     assert "OwnerUserId" in recorder
 
 
+def test_desktop_recovers_missing_local_agent_identity_without_rotating_healthy_tokens():
+    bootstrap = read("apps/desktop/WhisperX.Atom.Desktop/Services/AgentBootstrapCoordinator.cs")
+    recovery = bootstrap.split("var enrollmentToken = enrollment.Token;", 1)[1].split(
+        "if (!string.IsNullOrWhiteSpace(enrollmentToken))", 1
+    )[0]
+    assert "agentHealth.AgentId is null" in recovery
+    assert "ReenrollAgentAsync(agentId" in recovery
+    assert "AGENT_RECOVERY_REQUIRES_ADMIN" in recovery
+    assert "enrollment.ReenrollRequired" in bootstrap
+    assert bootstrap.index("enrollment.ReenrollRequired") < bootstrap.index("ReenrollAgentAsync(agentId")
+
+
 def test_bootstrap_null_agent_is_typed_and_api_errors_are_json():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
@@ -87,6 +99,22 @@ def test_health_and_version_endpoints_are_public_compatibility_contracts():
     assert 'app.MapGet("/health/ready"' in api
     assert 'app.MapGet("/api/system/version"' in api
     assert "serverTimeUtc" in api
+
+
+def test_readiness_checks_are_concurrent_safe_and_degrade_to_structured_status():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert 'AddHttpClient("nats-readiness"' in api
+    assert 'CreateClient("nats-readiness")' in api
+    assert '$".ready-probe-{Guid.NewGuid():N}"' in api
+    assert 'System readiness worker or operations query failed' in api
+    assert 'IReadOnlyList<WorkerRuntimeRow> workers = Array.Empty<WorkerRuntimeRow>()' in api
+
+
+def test_system_readiness_does_not_report_failed_workers_as_ready_cuda():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert 'string.Equals(worker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase)' in api
+    assert 'var gpuWorkerFailed = gpuWorker is null' in api
+    assert 'var gpuStatus = !cuda || gpuWorkerFailed' in api
 
 
 def test_outbox_and_online_drift_have_durable_dedup_and_fallback_contracts():

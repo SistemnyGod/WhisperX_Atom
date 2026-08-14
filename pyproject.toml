@@ -11,3 +11,6 @@ requires-python = ">=3.12,<3.13"
 [tool.setuptools.packages.find]
 include = ["whisperx_atom*"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

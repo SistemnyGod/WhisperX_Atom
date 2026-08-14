@@ -52,9 +52,26 @@ class JobRepository:
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute(
-                "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-                (status, stage, progress, error, error_code, socket.gethostname(), job_id),
+                "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                (status, stage, progress, error, error_code, socket.gethostname(), status, job_id),
             )
+            if status == "FAILED":
+                connection.execute(
+                    """
+                    UPDATE meetings AS meeting
+                    SET status='FAILED'
+                    FROM jobs AS job
+                    WHERE job.id=%s
+                      AND job.meeting_id=meeting.id
+                      AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM transcripts AS transcript
+                          WHERE transcript.meeting_id=meeting.id
+                            AND transcript.status IN ('READY','PARTIAL_READY')
+                      )
+                    """,
+                    (job_id,),
+                )
 
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
         with psycopg.connect(self.conninfo) as connection:
@@ -102,8 +119,12 @@ class JobRepository:
             version = int(existing[1]) + 1 if existing else 1
             version_kind = "REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"
             transcript_status = result.get("status", "READY")
-            warnings = result.get("warnings", [])
+            result_error_code = str(result.get("error_code") or "").strip().upper() or None
+            warnings = result.get("warnings") or []
             quality = result.get("quality", {})
+            no_speech_detected = result_error_code == "NO_SPEECH_DETECTED" or "NO_SPEECH_DETECTED" in {str(item).upper() for item in warnings}
+            if no_speech_detected and result_error_code is None:
+                result_error_code = "NO_SPEECH_DETECTED"
             transcript_id = connection.execute(
                 "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id",
                 (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), existing[0] if existing else None, version_kind),
@@ -129,7 +150,7 @@ class JobRepository:
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
                     (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
                 )
-            if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"}:
+            if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not no_speech_detected:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
                 prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v1")
                 summary_job = connection.execute(
@@ -160,6 +181,10 @@ class JobRepository:
                         connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)", (message_id, payload))
                 connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))
             else:
-                connection.execute("UPDATE meetings SET status='TRANSCRIPT_READY' WHERE id=%s", (meeting_id,))
-            connection.execute("UPDATE jobs SET status='READY',stage='TRANSCRIPT_READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                connection.execute(
+                    "UPDATE meetings SET status=%s WHERE id=%s",
+                    ("PARTIAL_READY" if no_speech_detected else "TRANSCRIPT_READY", meeting_id),
+                )
+            result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None
+            connection.execute("UPDATE jobs SET status='READY',stage='TRANSCRIPT_READY',progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (result_error_message, result_error_code, job_id))
             return True

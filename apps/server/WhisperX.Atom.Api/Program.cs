@@ -5,11 +5,17 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 using Npgsql;
+using NpgsqlTypes;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
+builder.Services.AddHostedService<OperationalRecoveryService>();
+builder.Services.AddHttpClient("nats-readiness", client => client.Timeout = TimeSpan.FromSeconds(2));
 static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
     || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
     || value.StartsWith("replace-with", StringComparison.OrdinalIgnoreCase)
@@ -117,13 +123,18 @@ app.Use(async (context, next) =>
     }
     finally
     {
-        app.Logger.LogInformation(
-            "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
-            traceId,
-            context.Request.Method,
-            context.Request.Path.Value,
-            context.Response.StatusCode,
-            Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        var path = context.Request.Path.Value ?? string.Empty;
+        var routineProbe = path is "/ready" or "/health"
+            || (path.StartsWith("/api/v1/agents/", StringComparison.OrdinalIgnoreCase)
+                && path.EndsWith("/heartbeat", StringComparison.OrdinalIgnoreCase));
+        if (routineProbe && context.Response.StatusCode < 400)
+            app.Logger.LogDebug(
+                "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
+                traceId, context.Request.Method, path, context.Response.StatusCode, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        else
+            app.Logger.LogInformation(
+                "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
+                traceId, context.Request.Method, path, context.Response.StatusCode, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
     }
 });
 
@@ -280,7 +291,7 @@ app.Use(async (context, next) =>
 
 app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
 app.MapGet("/health", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
-app.MapGet("/health/ready", async () =>
+app.MapGet("/health/ready", async (IHttpClientFactory httpClientFactory) =>
 {
     var postgres = true;
     var nats = true;
@@ -289,7 +300,7 @@ app.MapGet("/health/ready", async () =>
     try
     {
         var natsUrl = builder.Configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        var http = httpClientFactory.CreateClient("nats-readiness");
         nats = (await http.GetAsync(natsUrl)).IsSuccessStatusCode;
     }
     catch { nats = false; }
@@ -297,9 +308,15 @@ app.MapGet("/health/ready", async () =>
     {
         var root = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
         Directory.CreateDirectory(root);
-        var probe = Path.Combine(root, ".ready-probe");
-        await File.WriteAllTextAsync(probe, "ready");
-        File.Delete(probe);
+        var probe = Path.Combine(root, $".ready-probe-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(probe, "ready");
+        }
+        finally
+        {
+            try { File.Delete(probe); } catch { }
+        }
     }
     catch { storage = false; }
     var ready = postgres && nats && storage;
@@ -329,9 +346,11 @@ app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(n
     serverTimeUtc = DateTimeOffset.UtcNow
 }));
 
-app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration) =>
+app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration, IHttpClientFactory httpClientFactory) =>
 {
     var checkedAt = DateTimeOffset.UtcNow;
+    var mediaRoot = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+    var storage = Directory.Exists(mediaRoot);
     var postgres = true;
     try { await db.PingAsync(); }
     catch (Exception ex)
@@ -344,7 +363,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     var natsUrl = configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
     try
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        var http = httpClientFactory.CreateClient("nats-readiness");
         using var response = await http.GetAsync(natsUrl);
         nats = response.IsSuccessStatusCode;
     }
@@ -353,8 +372,21 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         app.Logger.LogDebug(ex, "System readiness NATS check failed");
     }
 
-    var workers = postgres ? await store.ListWorkerRuntimeAsync() : Array.Empty<WorkerRuntimeRow>();
-    var operations = postgres ? await store.GetOperationsSnapshotAsync() : null;
+    IReadOnlyList<WorkerRuntimeRow> workers = Array.Empty<WorkerRuntimeRow>();
+    OperationsSnapshot? operations = null;
+    if (postgres)
+    {
+        try
+        {
+            workers = await store.ListWorkerRuntimeAsync();
+            operations = await store.GetOperationsSnapshotAsync();
+        }
+        catch (Exception ex)
+        {
+            postgres = false;
+            app.Logger.LogWarning(ex, "System readiness worker or operations query failed");
+        }
+    }
     var fresh = workers
         .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
         .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastSeenAt).First(), StringComparer.OrdinalIgnoreCase);
@@ -378,7 +410,8 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     var requiredWorkersReady = new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" }.All(name =>
         fresh.TryGetValue(name, out var worker) &&
         checkedAt.UtcDateTime - worker.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60) &&
-        !string.Equals(worker.Status, "FAILED", StringComparison.OrdinalIgnoreCase));
+        !string.Equals(worker.Status, "FAILED", StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(worker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase));
     var qwenEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     object qwen;
     if (!qwenEnabled)
@@ -411,12 +444,15 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy" }
             : new { status = "READY", reason = "summary_worker_ready" };
     }
-    var gpuStatus = !cuda
+    var gpuWorkerFailed = gpuWorker is null
+        || string.Equals(gpuWorker.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(gpuWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
+    var gpuStatus = !cuda || gpuWorkerFailed
         ? "UNAVAILABLE"
         : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
             ? "BUSY"
             : "READY";
-    var ready = postgres && nats && requiredWorkersReady && cuda;
+    var ready = postgres && nats && storage && requiredWorkersReady && cuda;
 
     return Results.Ok(new
     {
@@ -424,10 +460,14 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         checkedAt,
         components = new
         {
+            gateway = new { status = "READY", checkedAt },
             postgres = new { status = postgres ? "READY" : "UNAVAILABLE" },
             nats = new { status = nats ? "READY" : "UNAVAILABLE" },
+            storage = new { status = storage ? "READY" : "UNAVAILABLE", root = mediaRoot },
+            recordingIngress = new { status = postgres && storage ? "READY" : "UNAVAILABLE", database = postgres ? "READY" : "UNAVAILABLE", storage = storage ? "READY" : "UNAVAILABLE" },
             workers = workerReady,
             cuda = new { status = gpuStatus },
+            whisperx = new { status = requiredWorkersReady && cuda ? "READY" : "UNAVAILABLE", gpu = gpuStatus },
             hfDiarization = new { status = hf },
             recorder = new { status = "OPTIONAL" },
             qwen
@@ -1055,7 +1095,9 @@ app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/mi
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var missing = await store.MissingChunksAsync(agentId, sessionId, trackId, Math.Clamp(expectedCount, 0, 100000));
-    return missing is null ? Results.NotFound() : Results.Ok(new { missing });
+    return missing is null
+        ? Results.NotFound(new { error = "RECORDING_SESSION_NOT_FOUND", retryable = false })
+        : Results.Ok(new { missing });
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid sessionId, FinalizeRecordingRequest? request, HttpContext context, UnifiedProductStore store) =>
@@ -1501,6 +1543,32 @@ public sealed class PasswordService
     }
 }
 
+public sealed class OperationalRecoveryService(
+    Database database,
+    ILogger<OperationalRecoveryService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(1));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await timer.WaitForNextTickAsync(stoppingToken);
+                await database.ReconcileInterruptedWorkAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "operational_recovery_failed");
+            }
+        }
+    }
+}
+
 public sealed class Database(IConfiguration configuration)
 {
     private readonly string _connectionString =
@@ -1537,9 +1605,16 @@ public sealed class Database(IConfiguration configuration)
         await RecoverInterruptedWorkAsync(connection);
     }
 
-    private static async Task RecoverInterruptedWorkAsync(NpgsqlConnection connection)
+    public async Task ReconcileInterruptedWorkAsync(CancellationToken cancellationToken = default)
     {
-        await using var transaction = await connection.BeginTransactionAsync();
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await RecoverInterruptedWorkAsync(connection, cancellationToken);
+    }
+
+    private static async Task RecoverInterruptedWorkAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var jobs = new NpgsqlCommand("""
             UPDATE jobs
             SET status='QUEUED',
@@ -1559,7 +1634,7 @@ public sealed class Database(IConfiguration configuration)
               AND attempt < 1
             """, connection, transaction))
         {
-            await jobs.ExecuteNonQueryAsync();
+            await jobs.ExecuteNonQueryAsync(cancellationToken);
         }
         await using (var exhausted = new NpgsqlCommand("""
             UPDATE jobs
@@ -1574,7 +1649,24 @@ public sealed class Database(IConfiguration configuration)
               AND attempt >= 1
             """, connection, transaction))
         {
-            await exhausted.ExecuteNonQueryAsync();
+            await exhausted.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var failedMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status='FAILED'
+            FROM jobs AS job
+            WHERE job.meeting_id=meeting.id
+              AND job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+              AND job.status='FAILED'
+              AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
+              AND NOT EXISTS (
+                  SELECT 1 FROM transcripts AS transcript
+                  WHERE transcript.meeting_id=meeting.id
+                    AND transcript.status IN ('READY','PARTIAL_READY')
+              )
+            """, connection, transaction))
+        {
+            await failedMeetings.ExecuteNonQueryAsync(cancellationToken);
         }
         await using (var sessions = new NpgsqlCommand("""
             UPDATE recording_sessions AS session
@@ -1585,7 +1677,18 @@ public sealed class Database(IConfiguration configuration)
               AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
             """, connection, transaction))
         {
-            await sessions.ExecuteNonQueryAsync();
+            await sessions.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var interruptedMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status='RECORDING_INTERRUPTED'
+            FROM recording_sessions AS session
+            WHERE session.meeting_id=meeting.id
+              AND session.state='AWAITING_AGENT_RECONNECT'
+              AND meeting.status='RECORDING'
+            """, connection, transaction))
+        {
+            await interruptedMeetings.ExecuteNonQueryAsync(cancellationToken);
         }
         await using (var review = new NpgsqlCommand("""
             UPDATE recording_sessions
@@ -1594,9 +1697,20 @@ public sealed class Database(IConfiguration configuration)
               AND created_at < now() - interval '24 hours'
             """, connection, transaction))
         {
-            await review.ExecuteNonQueryAsync();
+            await review.ExecuteNonQueryAsync(cancellationToken);
         }
-        await transaction.CommitAsync();
+        await using (var reviewMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status='ADMIN_REVIEW'
+            FROM recording_sessions AS session
+            WHERE session.meeting_id=meeting.id
+              AND session.state='ADMIN_REVIEW'
+              AND meeting.status IN ('RECORDING','RECORDING_INTERRUPTED')
+            """, connection, transaction))
+        {
+            await reviewMeetings.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
     }
 
     private static async Task ApplyMigrationsAsync(NpgsqlConnection connection)
@@ -1900,12 +2014,18 @@ public sealed class Database(IConfiguration configuration)
             GROUP BY t.id,m.id,m.title,m.created_at,t.version,t.status,t.quality_score,t.created_at
             ORDER BY m.created_at DESC LIMIT @limit OFFSET @offset
             """, connection);
+        // Explicit types are required for nullable filters. PostgreSQL cannot
+        // infer the type of a NULL parameter used in an `IS NULL` predicate,
+        // which previously made the default `/api/transcripts` request fail
+        // with 42P08 before the Desktop could render the registry.
         command.Parameters.AddWithValue("include_all", includeAll); command.Parameters.AddWithValue("owner", ownerId);
-        command.Parameters.AddWithValue("search", (object?)search ?? DBNull.Value); command.Parameters.AddWithValue("status", (object?)status?.ToUpperInvariant() ?? DBNull.Value);
-        command.Parameters.AddWithValue("date_from", (object?)dateFrom ?? DBNull.Value); command.Parameters.AddWithValue("date_to", (object?)dateTo ?? DBNull.Value);
+        command.Parameters.Add("search", NpgsqlDbType.Text).Value = (object?)search ?? DBNull.Value;
+        command.Parameters.Add("status", NpgsqlDbType.Text).Value = (object?)status?.ToUpperInvariant() ?? DBNull.Value;
+        command.Parameters.Add("date_from", NpgsqlDbType.TimestampTz).Value = (object?)dateFrom ?? DBNull.Value;
+        command.Parameters.Add("date_to", NpgsqlDbType.TimestampTz).Value = (object?)dateTo ?? DBNull.Value;
         command.Parameters.AddWithValue("limit", limit); command.Parameters.AddWithValue("offset", offset);
         await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync()) result.Add(new TranscriptRegistryRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetDateTime(3), reader.GetInt32(4), reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)), reader.GetInt64(8), reader.GetInt32(9), reader.GetInt32(10), reader.GetDateTime(11)));
+        while (await reader.ReadAsync()) result.Add(new TranscriptRegistryRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetDateTime(3), reader.GetInt32(4), reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)), reader.GetInt64(8), checked((int)reader.GetInt64(9)), checked((int)reader.GetInt64(10)), reader.GetDateTime(11)));
         return result;
     }
 
@@ -2223,19 +2343,27 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
         await using var command = new NpgsqlCommand(
-            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
+            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
         var job = ReadJob(reader);
         await reader.CloseAsync();
 
+        await using (var meeting = new NpgsqlCommand(
+            "UPDATE meetings SET status=@status WHERE id=@meeting AND status <> 'CANCELLED'", connection, tx))
+        {
+            meeting.Parameters.AddWithValue("status", job.Type == "SUMMARIZE" ? "SUMMARIZING" : job.Type is "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" ? "TRANSCRIBING" : "INGESTING");
+            meeting.Parameters.AddWithValue("meeting", job.MeetingId);
+            await meeting.ExecuteNonQueryAsync();
+        }
+
         var messageId = Guid.NewGuid();
         await using var publish = job.Type switch
         {
             "SUMMARIZE" => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'llm.summarize',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'transcript_id',t.id,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN LATERAL (SELECT id FROM transcripts WHERE meeting_id=j.meeting_id ORDER BY version DESC LIMIT 1) t ON true WHERE j.id=@id", connection, tx),
-            "TRANSCRIBE" => new NpgsqlCommand(
+            "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
             _ => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),

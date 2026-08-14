@@ -55,6 +55,11 @@ $payload = @{}
 if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $payload.deviceId = $DeviceId }
 $payload.durationMs = $Seconds * 1000
 $probe = Invoke-HostCommand "TEST_AUDIO_SOURCE" $payload
+# TEST_AUDIO_SOURCE can deliberately resolve a fixed endpoint for this probe.
+# Read HEALTH again after it completes so the reported effective endpoint and
+# signal state describe the same selection, not the endpoint that was active
+# when the script started (often the Windows-default Voicemeeter device).
+$health = Get-HostHealth
 $graphProbe = $probe.audioGraphProbe
 $selected = if ($null -ne $graphProbe) { $graphProbe } else { $probe.audioSourceTest }
 $attempt = if ($null -ne $selected) { $selected.attemptDiagnostics } else { $null }
@@ -88,6 +93,9 @@ $report = [ordered]@{
         bytesReceived = if ($null -ne $attempt) { $attempt.bytesReceived } elseif ($null -ne $selected) { $selected.bytesReceived } else { 0 }
         averageRmsDb = if ($null -ne $selected) { $selected.averageRmsDb } else { $null }
         peakDb = if ($null -ne $selected) { $selected.peakDb } else { $null }
+        microphonePeakLinear = if ($null -ne $health -and $null -ne $health.health) { $health.health.microphonePeak } else { $null }
+        microphoneRmsDb = if ($null -ne $health -and $null -ne $health.health) { $health.health.microphoneRmsDb } else { $null }
+        microphoneClipping = if ($null -ne $health -and $null -ne $health.health) { $health.health.microphoneClipping } else { $null }
         durationMs = $Seconds * 1000
         graphCreationStatus = if ($null -ne $attempt) { $attempt.graphCreationStatus } else { $null }
         graphCreated = if ($null -ne $attempt) { $attempt.graphCreated } else { $false }
@@ -113,6 +121,11 @@ $report = [ordered]@{
         nativeFrameBytes = if ($null -ne $attempt) { $attempt.nativeFrameBytes } else { 0 }
         normalizedFrameBytes = if ($null -ne $attempt) { $attempt.normalizedFrameBytes } else { 0 }
         normalizationMode = if ($null -ne $attempt) { $attempt.normalizationMode } else { $null }
+        observedBytesPerSample = if ($null -ne $attempt) { $attempt.observedBytesPerSample } else { $null }
+        observedSampleFormat = if ($null -ne $attempt) { $attempt.observedSampleFormat } else { $null }
+        formatIntegrityVerified = if ($null -ne $attempt) { $attempt.formatIntegrityVerified } else { $false }
+        formatMismatch = if ($null -ne $attempt) { $attempt.formatMismatch } else { $false }
+        nonFiniteSampleCount = if ($null -ne $attempt) { $attempt.nonFiniteSampleCount } else { 0 }
         firstQuantumLatencyMs = if ($null -ne $attempt) { $attempt.firstQuantumLatencyMs } else { $null }
         firstFrameLatencyMs = if ($null -ne $attempt -and $null -ne $attempt.firstFrameLatencyMs) { $attempt.firstFrameLatencyMs } elseif ($null -ne $selected) { $selected.firstFrameLatencyMs } else { $null }
         unrecoverableErrorOccurred = if ($null -ne $attempt) { $attempt.unrecoverableErrorOccurred } else { $false }
@@ -124,6 +137,9 @@ $report = [ordered]@{
         normalizedSampleFormat = if ($null -ne $selected) { $selected.normalizedSampleFormat } else { $null }
         sampleRate = if ($null -ne $selected) { $selected.sampleRate } else { $null }
         channels = if ($null -ne $selected) { $selected.channels } else { $null }
+        effectiveDeviceName = if ($null -ne $health -and $null -ne $health.health) { $health.health.effectiveMicrophoneDeviceName } else { $null }
+        microphoneSignalState = if ($null -ne $health -and $null -ne $health.health) { $health.health.microphoneSignalState } else { $null }
+        runtimeBuildIdentity = if ($null -ne $health -and $null -ne $health.health) { $health.health.runtimeBuildIdentity } else { $null }
         devices = $devices
     }
     gates = [ordered]@{

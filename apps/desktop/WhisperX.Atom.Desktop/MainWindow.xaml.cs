@@ -17,6 +17,8 @@ public sealed partial class MainWindow : Window
     private readonly CancellationTokenSource _statusCts = new();
     private Task? _statusTask;
     private bool _suppressNavigation;
+    private int _agentRecoveryRunning;
+    private DateTimeOffset _nextAgentRecoveryAtUtc = DateTimeOffset.MinValue;
 
     public MainWindow(FrontendServices services)
     {
@@ -174,7 +176,7 @@ public sealed partial class MainWindow : Window
         try { backendAvailable = await backendTask; } catch (OperationCanceledException) { throw; } catch { }
         try { serverVersion = await versionTask; } catch (OperationCanceledException) { throw; } catch { }
         try { processingReadiness = await processingTask; } catch (OperationCanceledException) { throw; } catch { }
-        try { recorderAvailable = (await recorderTask).Ok; } catch (OperationCanceledException) { throw; } catch { }
+        try { recorderAvailable = (await recorderTask).IsReachable; } catch (OperationCanceledException) { throw; } catch { }
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
             QueueAgentRecovery(cancellationToken);
@@ -193,17 +195,34 @@ public sealed partial class MainWindow : Window
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
-        SetRuntimeStatus(backendAvailable, recorderAvailable, processingReady);
+        SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady);
         SetSystemStatus(status.Item1, status.Item2);
     }
 
     private void QueueAgentRecovery(CancellationToken cancellationToken)
     {
+        if (DateTimeOffset.UtcNow < _nextAgentRecoveryAtUtc
+            || Interlocked.CompareExchange(ref _agentRecoveryRunning, 1, 0) != 0)
+            return;
+
         _ = Task.Run(async () =>
         {
-            try { await _services.AgentBootstrap.EnsureAgentReadyAsync(cancellationToken); }
+            try
+            {
+                var status = await _services.AgentBootstrap.EnsureAgentReadyAsync(cancellationToken);
+                _nextAgentRecoveryAtUtc = DateTimeOffset.UtcNow.Add(status.Ready
+                    ? TimeSpan.FromMinutes(1)
+                    : TimeSpan.FromSeconds(15));
+            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-            catch (Exception) { }
+            catch (Exception)
+            {
+                _nextAgentRecoveryAtUtc = DateTimeOffset.UtcNow.AddSeconds(15);
+            }
+            finally
+            {
+                Volatile.Write(ref _agentRecoveryRunning, 0);
+            }
         }, CancellationToken.None);
     }
 
@@ -222,17 +241,38 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void SetRuntimeStatus(bool backendAvailable, bool recorderAvailable, bool processingReady)
+    private void SetRuntimeStatus(bool backendAvailable, bool authenticated, bool recorderAvailable, bool processingReady)
     {
         if (!_uiDispatcherQueue.HasThreadAccess)
         {
-            _uiDispatcherQueue.TryEnqueue(() => SetRuntimeStatus(backendAvailable, recorderAvailable, processingReady));
+            _uiDispatcherQueue.TryEnqueue(() => SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady));
             return;
         }
 
         RecorderStatusText.Text = recorderAvailable ? "Recorder · готов" : "Recorder · недоступен";
-        ServerStatusText.Text = backendAvailable ? "Сервер · доступен" : "Сервер · офлайн";
+        ToolTipService.SetToolTip(
+            RecorderStatusText,
+            recorderAvailable
+                ? "Recorder Agent отвечает. Уровень сигнала и выбранный микрофон доступны на странице «Запись»."
+                : "Recorder Agent не отвечает. Откройте «Настройки» → «Состояние системы» и проверьте локальный сервис.");
+        ServerStatusText.Text = !backendAvailable
+            ? "Сервер · офлайн"
+            : authenticated
+                ? "Сервер · доступен"
+                : "Сервер · требуется вход";
+        ToolTipService.SetToolTip(
+            ServerStatusText,
+            !backendAvailable
+                ? "LAN-сервер не отвечает. Локальная запись может продолжиться, доставка будет повторена позже."
+                : authenticated
+                    ? "LAN-сервер доступен, API-сессия подтверждена."
+                    : "LAN-сервер доступен, но требуется вход в API.");
         WhisperXStatusText.Text = processingReady ? "WhisperX · готов" : "WhisperX · не готов";
+        ToolTipService.SetToolTip(
+            WhisperXStatusText,
+            processingReady
+                ? "WhisperX и обязательные worker-компоненты готовы к транскрибации."
+                : "WhisperX или GPU/worker ещё не готовы. Откройте «Состояние системы» для деталей.");
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)

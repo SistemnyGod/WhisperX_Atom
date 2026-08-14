@@ -19,6 +19,9 @@ public sealed class AgentsViewModel : ObservableObject
     private string _pendingUploadsText = "—";
     private string _microphoneText = "—";
     private string _systemAudioText = "—";
+    private string _processingStatus = "Проверка WhisperX…";
+    private string _gpuStatus = "GPU: проверка…";
+    private string _summaryStatus = "Воркер саммари: проверка…";
     private string _errorText = string.Empty;
     private string _warningText = string.Empty;
     private DesktopAgent? _selectedAgent;
@@ -37,6 +40,9 @@ public sealed class AgentsViewModel : ObservableObject
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
     public string MicrophoneText { get => _microphoneText; private set => SetProperty(ref _microphoneText, value); }
     public string SystemAudioText { get => _systemAudioText; private set => SetProperty(ref _systemAudioText, value); }
+    public string ProcessingStatus { get => _processingStatus; private set => SetProperty(ref _processingStatus, value); }
+    public string GpuStatus { get => _gpuStatus; private set => SetProperty(ref _gpuStatus, value); }
+    public string SummaryStatus { get => _summaryStatus; private set => SetProperty(ref _summaryStatus, value); }
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
     public string WarningText { get => _warningText; private set => SetProperty(ref _warningText, value); }
 
@@ -80,10 +86,10 @@ public sealed class AgentsViewModel : ObservableObject
         try
         {
             var response = await _services.Recorder.GetHealthAsync(cancellationToken);
-            LocalAgentAvailable = response.Ok;
+            LocalAgentAvailable = response.IsReachable;
             LocalAgentStatus = AgentStatusFormatter.Format(response);
             ApplyHealth(response.Health);
-            return response.Ok ? null : response.Error ?? "Recorder Agent не готов к работе.";
+            return response.IsReachable ? null : response.Error ?? "Recorder Agent не готов к работе.";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -104,6 +110,7 @@ public sealed class AgentsViewModel : ObservableObject
             {
                 ApiStatus = "API недоступен";
                 ClearAgents();
+                ClearReadiness();
                 return "Реестр агентов недоступен: API не отвечает.";
             }
 
@@ -111,6 +118,7 @@ public sealed class AgentsViewModel : ObservableObject
             {
                 ApiStatus = "API доступен, требуется вход";
                 ClearAgents();
+                ClearReadiness();
                 return "Войдите в API в настройках, чтобы увидеть зарегистрированные агенты.";
             }
 
@@ -119,6 +127,17 @@ public sealed class AgentsViewModel : ObservableObject
             foreach (var agent in agents.OrderBy(item => item.Name)) Agents.Add(agent);
             SelectedAgent = null;
             ApiStatus = $"API подключён · агентов: {Agents.Count}";
+            try
+            {
+                ApplyReadiness(await _services.Backend.GetProcessingReadinessAsync(cancellationToken));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch
+            {
+                // Component readiness is diagnostic enrichment. A temporary
+                // readiness failure must not hide a successfully loaded agent registry.
+                ClearReadiness();
+            }
             NotifyCollectionStateChanged();
             return null;
         }
@@ -128,6 +147,7 @@ public sealed class AgentsViewModel : ObservableObject
             ApiAvailable = false;
             ApiStatus = "Не удалось загрузить реестр";
             ClearAgents();
+            ClearReadiness();
             return SafeError(ex, "Не удалось загрузить зарегистрированных агентов.");
         }
     }
@@ -171,6 +191,54 @@ public sealed class AgentsViewModel : ObservableObject
         OnPropertyChanged(nameof(UnavailableCountText));
         OnPropertyChanged(nameof(RevokedCountText));
     }
+
+    private void ApplyReadiness(DesktopProcessingReadiness? readiness)
+    {
+        if (readiness is null)
+        {
+            ClearReadiness();
+            return;
+        }
+
+        var components = readiness.Components;
+        var gpu = ComponentStatus(components, "cuda");
+        var worker = ComponentStatus(components, "workers", "gpu-worker");
+        var summary = ComponentStatus(components, "qwen");
+        GpuStatus = $"GPU: {TranslateReadiness(gpu)} · worker: {TranslateReadiness(worker)}";
+        SummaryStatus = $"Воркер саммари: {TranslateReadiness(summary)}";
+        ProcessingStatus = readiness.Ready
+            ? "WhisperX готов к обработке"
+            : "WhisperX требует внимания — откройте диагностику компонентов";
+    }
+
+    private void ClearReadiness()
+    {
+        ProcessingStatus = "WhisperX: нет данных о готовности";
+        GpuStatus = "GPU: нет данных";
+        SummaryStatus = "Воркер саммари: нет данных";
+    }
+
+    private static string ComponentStatus(System.Text.Json.JsonElement root, params string[] path)
+    {
+        var current = root;
+        foreach (var part in path)
+        {
+            if (current.ValueKind != System.Text.Json.JsonValueKind.Object || !current.TryGetProperty(part, out current)) return "UNKNOWN";
+        }
+        if (current.ValueKind == System.Text.Json.JsonValueKind.Object && current.TryGetProperty("status", out var status) && status.ValueKind == System.Text.Json.JsonValueKind.String)
+            return status.GetString() ?? "UNKNOWN";
+        return current.ValueKind == System.Text.Json.JsonValueKind.String ? current.GetString() ?? "UNKNOWN" : "UNKNOWN";
+    }
+
+    private static string TranslateReadiness(string value) => value.ToUpperInvariant() switch
+    {
+        "READY" => "готов",
+        "BUSY" => "занят",
+        "DEGRADED" => "ограничен",
+        "DISABLED" => "отключён",
+        "UNAVAILABLE" => "недоступен",
+        _ => "неизвестно"
+    };
 
     private static string FormatStorage(long free, long total) => free <= 0 || total <= 0
         ? "Нет данных"

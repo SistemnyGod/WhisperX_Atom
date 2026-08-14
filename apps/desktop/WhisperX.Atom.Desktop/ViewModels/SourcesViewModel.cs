@@ -18,7 +18,11 @@ public sealed class SourcesViewModel : ObservableObject
     private string _storageText = "—";
     private string _pendingUploadsText = "—";
     private string _selectedMicrophone = "Не выбрано";
+    private string _effectiveMicrophone = "Нет данных";
+    private string _microphoneSignal = "Сигнал: нет данных";
+    private string _microphoneEmptyMessage = "Активные микрофоны не обнаружены";
     private string _selectedSystemAudio = "Не выбрано";
+    private string _systemAudioEmptyMessage = "Активные устройства вывода не обнаружены";
     private string _backendStatus = "Проверка API…";
     private string _errorText = string.Empty;
     private string _warningText = string.Empty;
@@ -38,7 +42,19 @@ public sealed class SourcesViewModel : ObservableObject
     public string StorageText { get => _storageText; private set => SetProperty(ref _storageText, value); }
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
     public string SelectedMicrophone { get => _selectedMicrophone; private set => SetProperty(ref _selectedMicrophone, value); }
+    public string EffectiveMicrophone
+    {
+        get => _effectiveMicrophone;
+        private set
+        {
+            if (SetProperty(ref _effectiveMicrophone, value)) OnPropertyChanged(nameof(EffectiveMicrophoneLabel));
+        }
+    }
+    public string EffectiveMicrophoneLabel => $"Фактически записывается: {EffectiveMicrophone}";
+    public string MicrophoneSignal { get => _microphoneSignal; private set => SetProperty(ref _microphoneSignal, value); }
+    public string MicrophoneEmptyMessage { get => _microphoneEmptyMessage; private set => SetProperty(ref _microphoneEmptyMessage, value); }
     public string SelectedSystemAudio { get => _selectedSystemAudio; private set => SetProperty(ref _selectedSystemAudio, value); }
+    public string SystemAudioEmptyMessage { get => _systemAudioEmptyMessage; private set => SetProperty(ref _systemAudioEmptyMessage, value); }
     public string BackendStatus { get => _backendStatus; private set => SetProperty(ref _backendStatus, value); }
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
     public string WarningText { get => _warningText; private set => SetProperty(ref _warningText, value); }
@@ -56,11 +72,24 @@ public sealed class SourcesViewModel : ObservableObject
         var backendTask = LoadBackendAsync(cancellationToken);
         await Task.WhenAll(recorderTask, backendTask);
 
-        var issues = new[] { recorderTask.Result, backendTask.Result }
-            .Where(message => !string.IsNullOrWhiteSpace(message))
-            .ToArray();
-        if (issues.Length == 2) ErrorText = string.Join(" ", issues);
-        else if (issues.Length == 1) WarningText = issues[0]!;
+        var recorderIssue = recorderTask.Result;
+        var backendIssue = backendTask.Result;
+        if (!string.IsNullOrWhiteSpace(recorderIssue) && !string.IsNullOrWhiteSpace(backendIssue))
+        {
+            ErrorText = $"{recorderIssue} {backendIssue}";
+        }
+        else if (!string.IsNullOrWhiteSpace(recorderIssue))
+        {
+            // A failed local agent blocks the primary workflow (recording),
+            // so it must not be presented as a dismissible-looking warning.
+            ErrorText = recorderIssue!;
+        }
+        else if (!string.IsNullOrWhiteSpace(backendIssue))
+        {
+            // The local-first recording path remains usable when only the API
+            // is unavailable; keep this a warning and explain the impact.
+            WarningText = backendIssue!;
+        }
         IsLoading = false;
     }
 
@@ -69,11 +98,11 @@ public sealed class SourcesViewModel : ObservableObject
         try
         {
             var response = await _services.Recorder.GetHealthAsync(cancellationToken);
-            AgentAvailable = response.Ok;
+            AgentAvailable = response.IsReachable;
             LocalAgentStatus = AgentStatusFormatter.Format(response);
             RecordingState = TranslateState(response.State);
             ApplyHealth(response.Health);
-            return response.Ok ? null : response.Error ?? "Recorder Agent не готов к работе.";
+            return response.IsReachable ? null : response.Error ?? "Recorder Agent не готов к работе.";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -132,6 +161,10 @@ public sealed class SourcesViewModel : ObservableObject
             ArchiveRoot = "Нет данных";
             StorageText = "Нет данных";
             PendingUploadsText = "—";
+            EffectiveMicrophone = "Нет данных";
+            MicrophoneSignal = "Сигнал: нет данных";
+            MicrophoneEmptyMessage = "Список микрофонов недоступен — проверьте Recorder Agent.";
+            SystemAudioEmptyMessage = "Список системных устройств недоступен — проверьте Recorder Agent.";
             ClearDevices();
             return;
         }
@@ -142,7 +175,17 @@ public sealed class SourcesViewModel : ObservableObject
         ReplaceDevices(Microphones, health.CaptureDevices);
         ReplaceDevices(SystemAudioDevices, health.RenderDevices);
         SelectedMicrophone = ResolveSelectedDevice(Microphones, health.SelectedMicrophoneDeviceId);
+        EffectiveMicrophone = string.IsNullOrWhiteSpace(health.EffectiveMicrophoneDeviceName)
+            ? SelectedMicrophone
+            : health.EffectiveMicrophoneDeviceName!;
+        MicrophoneSignal = FormatSignal(health.MicrophoneSignalState, health.MicrophoneRmsDb, health.MicrophoneSilenceDurationMs);
         SelectedSystemAudio = ResolveSelectedDevice(SystemAudioDevices, health.SelectedSystemAudioDeviceId);
+        MicrophoneEmptyMessage = health.UserReselectRequired
+            ? "Сохранённый микрофон недоступен — выберите устройство заново в разделе «Запись»."
+            : "Активные микрофоны не обнаружены в Windows.";
+        SystemAudioEmptyMessage = string.Equals(health.Error, "AUDIO_SYSTEM_AUDIO_DEFERRED", StringComparison.OrdinalIgnoreCase)
+            ? "Захват системного звука отложен для текущего профиля записи. Микрофон продолжает работать отдельно."
+            : "Активные устройства вывода не обнаружены в Windows.";
         OnPropertyChanged(nameof(HasMicrophones));
         OnPropertyChanged(nameof(HasSystemAudioDevices));
     }
@@ -152,7 +195,11 @@ public sealed class SourcesViewModel : ObservableObject
         Microphones.Clear();
         SystemAudioDevices.Clear();
         SelectedMicrophone = "Недоступно";
+        EffectiveMicrophone = "Недоступно";
+        MicrophoneSignal = "Сигнал: недоступен";
+        MicrophoneEmptyMessage = "Список микрофонов недоступен — проверьте Recorder Agent.";
         SelectedSystemAudio = "Недоступно";
+        SystemAudioEmptyMessage = "Список системных устройств недоступен — проверьте Recorder Agent.";
         OnPropertyChanged(nameof(HasMicrophones));
         OnPropertyChanged(nameof(HasSystemAudioDevices));
     }
@@ -165,8 +212,29 @@ public sealed class SourcesViewModel : ObservableObject
 
     private static string ResolveSelectedDevice(IEnumerable<AudioDeviceOption> devices, string? selectedId)
     {
+        if (string.IsNullOrWhiteSpace(selectedId)) return "Windows по умолчанию";
         var selected = devices.FirstOrDefault(item => string.Equals(item.Id, selectedId, StringComparison.Ordinal));
-        return selected?.DisplayName ?? "Windows по умолчанию";
+        return selected?.DisplayName ?? "Сохранённое устройство недоступно";
+    }
+
+    private static string FormatSignal(string? state, double? rmsDb, long? silenceDurationMs)
+    {
+        var label = state?.ToUpperInvariant() switch
+        {
+            "READY" => "Сигнал обнаружен",
+            "READY_NO_SIGNAL" => "Поток открыт, сигнала нет",
+            "CLIPPING" => "Сигнал перегружен (clipping)",
+            "FORMAT_MISMATCH" => "Несовместимый формат аудиобуфера",
+            "NO_PACKETS" => "Ожидаются аудиокадры",
+            "UNAVAILABLE" => "Микрофон недоступен",
+            _ => "Состояние сигнала проверяется"
+        };
+        var details = rmsDb is double value ? $" · RMS {value:0.0} dB" : string.Empty;
+        if (silenceDurationMs is > 0 && state?.Equals("READY_NO_SIGNAL", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            details += $" · тишина {TimeSpan.FromMilliseconds(silenceDurationMs.Value):mm\\:ss}";
+        }
+        return $"Сигнал: {label}{details}";
     }
 
     private static string TranslateState(string state) => state switch

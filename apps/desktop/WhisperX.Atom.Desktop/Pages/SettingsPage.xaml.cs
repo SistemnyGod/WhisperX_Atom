@@ -28,14 +28,6 @@ public sealed partial class SettingsPage : Page
         UpdateStatus();
     }
 
-    private async void LoginButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel is null) return;
-        await ViewModel.LoginAsync(PasswordBox.Password);
-        PasswordBox.Password = string.Empty;
-        UpdateStatus();
-    }
-
     private async void ChangePasswordButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
@@ -47,15 +39,9 @@ public sealed partial class SettingsPage : Page
 
     private async void CheckBackendButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_services is null) return;
-        try
-        {
-            var ready = await _services.Backend.CheckReadyAsync();
-            StatusInfoBar.Severity = ready ? InfoBarSeverity.Success : InfoBarSeverity.Warning;
-            StatusInfoBar.Message = ready ? "Локальный API доступен." : "Локальный API не отвечает.";
-            StatusInfoBar.IsOpen = true;
-        }
-        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось проверить подключение к API.")); }
+        if (ViewModel is null) return;
+        await ViewModel.CheckBackendAsync();
+        UpdateStatus();
     }
 
     private async void ReconnectAgentButton_Click(object sender, RoutedEventArgs e)
@@ -117,7 +103,11 @@ public sealed partial class SettingsPage : Page
 
     private void UpdateStatus()
     {
-        if (ViewModel is null || string.IsNullOrWhiteSpace(ViewModel.StatusText)) return;
+        if (ViewModel is null) return;
+        LoginHintText.Visibility = ViewModel.IsLoggedIn ? Visibility.Collapsed : Visibility.Visible;
+        PasswordFieldsPanel.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed;
+        ChangePasswordButton.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed;
+        if (string.IsNullOrWhiteSpace(ViewModel.StatusText)) return;
         StatusInfoBar.Severity = ViewModel.StatusText.Contains("ошиб", StringComparison.OrdinalIgnoreCase) || ViewModel.StatusText.Contains("не ", StringComparison.OrdinalIgnoreCase)
             ? InfoBarSeverity.Error : InfoBarSeverity.Informational;
         StatusInfoBar.Message = ViewModel.StatusText;

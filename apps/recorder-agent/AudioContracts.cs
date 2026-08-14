@@ -159,6 +159,11 @@ public sealed class AudioGraphAttemptDiagnostics
     public int? OutputBitsPerSample { get; set; }
     public int? OutputSampleRate { get; set; }
     public int? OutputChannelCount { get; set; }
+    public int? ObservedBytesPerSample { get; set; }
+    public string? ObservedSampleFormat { get; set; }
+    public bool FormatIntegrityVerified { get; set; }
+    public bool FormatMismatch { get; set; }
+    public long NonFiniteSampleCount { get; set; }
     public int? RequestedSamplesPerQuantum { get; set; }
     public int? GraphSamplesPerQuantum { get; set; }
     public long NativeFrameBytes { get; set; }
@@ -197,6 +202,11 @@ public sealed class AudioGraphAttemptDiagnostics
         OutputBitsPerSample = OutputBitsPerSample,
         OutputSampleRate = OutputSampleRate,
         OutputChannelCount = OutputChannelCount,
+        ObservedBytesPerSample = ObservedBytesPerSample,
+        ObservedSampleFormat = ObservedSampleFormat,
+        FormatIntegrityVerified = FormatIntegrityVerified,
+        FormatMismatch = FormatMismatch,
+        NonFiniteSampleCount = NonFiniteSampleCount,
         RequestedSamplesPerQuantum = RequestedSamplesPerQuantum,
         GraphSamplesPerQuantum = GraphSamplesPerQuantum,
         NativeFrameBytes = NativeFrameBytes,
@@ -222,7 +232,36 @@ public sealed record AudioTelemetrySnapshot(
     bool Clipping,
     DateTimeOffset? LastAudioAtUtc,
     long? SilenceDurationMs,
-    bool IsStale = true);
+    bool IsStale = true)
+{
+    // Desktop's waveform contract is a normalized linear amplitude (0..1),
+    // while the legacy health DTO also exposes the human-readable dB value.
+    // Keep both derived from the same normalized PCM16 samples.
+    public double? PeakLinear => PeakDb is double peakDb
+        ? Math.Clamp(Math.Pow(10d, peakDb / 20d), 0d, 1d)
+        : null;
+}
+
+/// <summary>
+/// Short-window signal telemetry used by the live Desktop monitor. It is
+/// deliberately separate from AudioTelemetrySnapshot, whose values are
+/// cumulative diagnostics for the complete capture attempt.
+/// </summary>
+public sealed record LiveAudioTelemetrySnapshot(
+    long Sequence,
+    long MediaTimeMs,
+    double RmsLinear,
+    double PeakLinear,
+    bool Clipping,
+    DateTimeOffset CapturedAtUtc,
+    bool IsStale = false)
+{
+    public double RmsDb => ToDb(RmsLinear);
+    public double PeakDb => ToDb(PeakLinear);
+
+    private static double ToDb(double value)
+        => value <= 0 ? -60d : Math.Clamp(20d * Math.Log10(value), -60d, 0d);
+}
 
 /// <summary>
 /// A normalized frame emitted by an audio engine. The Phase 1 contract is

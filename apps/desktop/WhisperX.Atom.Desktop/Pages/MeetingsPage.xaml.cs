@@ -213,10 +213,24 @@ public sealed partial class MeetingsPage : Page
         UpdateWorkspaceState();
     }
 
+    private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
+
+    private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
+
     private void StatusFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_viewModel is not null && StatusFilterCombo.SelectedItem is string value)
             _viewModel.StatusFilter = value;
+        UpdateListState();
+    }
+
+    private void ClearFiltersButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        SearchBox.Text = string.Empty;
+        StatusFilterCombo.SelectedItem = "Все статусы";
+        _viewModel.SearchText = string.Empty;
+        _viewModel.StatusFilter = "Все статусы";
         UpdateListState();
     }
 
@@ -574,9 +588,29 @@ public sealed partial class MeetingsPage : Page
         ListLoadingRing.IsActive = _viewModel.IsLoading;
         MeetingsList.Visibility = _viewModel.IsLoading || !_viewModel.HasFilteredMeetings ? Visibility.Collapsed : Visibility.Visible;
         ListEmptyState.Visibility = _viewModel.IsLoading || _viewModel.HasFilteredMeetings ? Visibility.Collapsed : Visibility.Visible;
-        ListEmptyTitle.Text = _viewModel.HasMeetings ? "Ничего не найдено" : "Совещаний нет";
-        ListEmptyDescription.Text = string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? _viewModel.StatusText : _viewModel.ErrorText;
-        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        var hasError = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        var hasActiveFilters = !string.IsNullOrWhiteSpace(_viewModel.SearchText)
+            || !string.Equals(_viewModel.StatusFilter, "Все статусы", StringComparison.Ordinal);
+        ClearFiltersButton.Visibility = _viewModel.HasMeetings && hasActiveFilters ? Visibility.Visible : Visibility.Collapsed;
+        ClearFiltersButton.IsEnabled = !_viewModel.IsLoading;
+        if (hasError)
+        {
+            ListEmptyTitle.Text = "Не удалось загрузить совещания";
+            ListEmptyDescription.Text = _viewModel.ErrorText;
+        }
+        else if (_viewModel.HasMeetings && !_viewModel.HasFilteredMeetings)
+        {
+            ListEmptyTitle.Text = "Ничего не найдено";
+            ListEmptyDescription.Text = "Измените запрос или сбросьте фильтры, чтобы увидеть совещания.";
+        }
+        else
+        {
+            ListEmptyTitle.Text = "Совещаний нет";
+            ListEmptyDescription.Text = _viewModel.StatusText;
+        }
+        ListEmptyStartButton.Visibility = hasError || _viewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
+        ListEmptySettingsButton.Visibility = hasError ? Visibility.Visible : Visibility.Collapsed;
+        ErrorInfoBar.IsOpen = hasError;
         ErrorInfoBar.Message = _viewModel.ErrorText;
     }
 

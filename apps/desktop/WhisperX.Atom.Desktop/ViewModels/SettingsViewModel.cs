@@ -33,9 +33,26 @@ public sealed class SettingsViewModel : ObservableObject
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string AgentName { get => _agentName; set => SetProperty(ref _agentName, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
-    public bool IsBusy { get => _isBusy; private set => SetProperty(ref _isBusy, value); }
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (!SetProperty(ref _isBusy, value)) return;
+            OnPropertyChanged(nameof(CanLogin));
+            OnPropertyChanged(nameof(CanChangePassword));
+            OnPropertyChanged(nameof(CanReconnectAgent));
+            OnPropertyChanged(nameof(CanUseActions));
+            OnPropertyChanged(nameof(CanLogout));
+        }
+    }
     public string DiagnosticsPath { get => _diagnosticsPath; private set => SetProperty(ref _diagnosticsPath, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
+    public bool CanLogin => !IsBusy && !IsLoggedIn;
+    public bool CanChangePassword => !IsBusy && IsLoggedIn;
+    public bool CanReconnectAgent => !IsBusy && IsLoggedIn;
+    public bool CanUseActions => !IsBusy;
+    public bool CanLogout => !IsBusy && IsLoggedIn;
     public bool MustChangePassword { get => _mustChangePassword; private set => SetProperty(ref _mustChangePassword, value); }
     public string SessionExpiryText => _services.Backend.SessionExpiresAtUtc is { } expires
         ? $"Сессия действительна до {expires.ToLocalTime():dd.MM.yyyy HH:mm}."
@@ -67,6 +84,10 @@ public sealed class SettingsViewModel : ObservableObject
             SaveSettings(_services.Backend.SessionCookie);
             StatusText = "Вход в локальный API выполнен.";
             OnPropertyChanged(nameof(IsLoggedIn));
+            OnPropertyChanged(nameof(CanLogin));
+            OnPropertyChanged(nameof(CanChangePassword));
+            OnPropertyChanged(nameof(CanReconnectAgent));
+            OnPropertyChanged(nameof(CanLogout));
             var currentUser = await _services.Backend.GetCurrentUserAsync();
             MustChangePassword = currentUser?.MustChangePassword == true;
             if (MustChangePassword) StatusText = "Вход выполнен. Установите новый пароль.";
@@ -280,6 +301,10 @@ public sealed class SettingsViewModel : ObservableObject
         _services.Settings.Save(current with { ProtectedSessionCookie = null, SessionExpiresAtUtc = null, OwnerUserId = null, AgentBootstrapConfirmed = false });
         StatusText = "Выход из API выполнен.";
         OnPropertyChanged(nameof(IsLoggedIn));
+        OnPropertyChanged(nameof(CanLogin));
+        OnPropertyChanged(nameof(CanChangePassword));
+        OnPropertyChanged(nameof(CanReconnectAgent));
+        OnPropertyChanged(nameof(CanLogout));
         OnPropertyChanged(nameof(LoginStatusText));
         OnPropertyChanged(nameof(SessionExpiryText));
         _services.RaiseLoggedOut();
@@ -287,16 +312,40 @@ public sealed class SettingsViewModel : ObservableObject
 
     public async Task SetArchiveRootAsync(string path)
     {
-        var fullPath = Path.GetFullPath(path.Trim());
-        Directory.CreateDirectory(fullPath);
-        ArchiveRoot = fullPath;
-        SaveSettings(_services.Backend.SessionCookie);
         try
         {
+            IsBusy = true;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                StatusText = "Выберите папку архива.";
+                return;
+            }
+            var fullPath = Path.GetFullPath(path.Trim());
+            Directory.CreateDirectory(fullPath);
+            ArchiveRoot = fullPath;
+            SaveSettings(_services.Backend.SessionCookie);
             var response = await _services.Recorder.SetArchiveRootAsync(fullPath);
             StatusText = response.Ok ? "Папка архива сохранена и передана Recorder Agent." : response.Error ?? "Agent не подтвердил папку архива.";
         }
         catch (Exception ex) { StatusText = $"Путь сохранён в Desktop, но Agent недоступен: {SafeError(ex)}"; }
+        finally { IsBusy = false; }
+    }
+
+    public async Task<bool> CheckBackendAsync()
+    {
+        try
+        {
+            IsBusy = true;
+            var ready = await _services.Backend.CheckReadyAsync();
+            StatusText = ready ? "Локальный API доступен." : "Локальный API не отвечает.";
+            return ready;
+        }
+        catch (Exception ex)
+        {
+            StatusText = SafeError(ex, "Не удалось проверить подключение к API.");
+            return false;
+        }
+        finally { IsBusy = false; }
     }
 
     private void SaveSettings(string? cookie)
@@ -308,5 +357,5 @@ public sealed class SettingsViewModel : ObservableObject
             current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed);
     }
 
-    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось выполнить операцию с настройками.");
+    private static string SafeError(Exception ex, string? fallback = null) => UiErrorFormatter.Format(ex, fallback ?? "Не удалось выполнить операцию с настройками.");
 }

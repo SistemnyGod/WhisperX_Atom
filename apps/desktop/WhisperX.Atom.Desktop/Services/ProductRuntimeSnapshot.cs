@@ -61,12 +61,12 @@ public sealed record ProductRuntimeSnapshot(
                 backend is null ? "not checked" : null, backend?.CheckedAt, true),
             ["Recorder"] = new(
                 "Recorder",
-                recorder is null ? ProductRuntimeStatus.Unavailable : recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed,
+                recorder is null ? ProductRuntimeStatus.Unavailable : recorder.IsReachable ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed,
                 recorder?.Error, recorder?.State, now, true),
             ["RecorderHost"] = new(
                 "RecorderHost",
                 recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
-                    ? recorder.Ok && HasCurrentHostCapabilities(recorder.Health) ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
+                    ? recorder.IsReachable && HasCurrentHostCapabilities(recorder.Health) ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
                     : ProductRuntimeStatus.Disabled,
                 recorder?.Health?.RecorderProcessModel == "CURRENT_USER_HOST"
                     ? recorder?.Error ?? (HasCurrentHostCapabilities(recorder?.Health) ? null : "RECORDER_HOST_UPDATE_REQUIRED")
@@ -80,7 +80,7 @@ public sealed record ProductRuntimeSnapshot(
             ["LegacyServiceFallback"] = new(
                 "LegacyServiceFallback",
                 recorder?.Health?.RecorderProcessModel == "WINDOWS_SERVICE"
-                    ? recorder.Ok ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
+                    ? recorder.IsReachable ? ProductRuntimeStatus.Ready : ProductRuntimeStatus.Failed
                     : ProductRuntimeStatus.Disabled,
                 recorder?.Health?.RecorderProcessModel == "WINDOWS_SERVICE" ? recorder?.Error : null,
                 "LEGACY_WASAPI fallback", now, false),

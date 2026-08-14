@@ -432,10 +432,40 @@ public sealed class LocalArchiveWriter(
             await process.WaitForExitAsync(cancellationToken);
             if (process.ExitCode != 0 || !double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration) || duration <= 0)
                 throw new InvalidOperationException($"ffprobe_invalid_audio:{error.Trim()}");
+            if (duration <= 0 || double.IsNaN(duration) || double.IsInfinity(duration))
+                throw new InvalidOperationException("ffprobe_invalid_audio:duration");
         }
         catch (Win32Exception ex)
         {
             throw new InvalidOperationException($"ffprobe_not_found:{_ffprobePath}", ex);
+        }
+
+        // ffprobe validates the container metadata; decode the complete file
+        // as an additional integrity gate so a truncated FLAC cannot be sent
+        // to the server and fail later during ASR.
+        using var decoder = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = _ffmpegPath,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        foreach (var argument in new[] { "-v", "error", "-i", path, "-f", "null", "-" })
+            decoder.StartInfo.ArgumentList.Add(argument);
+        try
+        {
+            if (!decoder.Start()) throw new InvalidOperationException("ffmpeg_start_failed");
+            var decodeError = await decoder.StandardError.ReadToEndAsync(cancellationToken);
+            await decoder.WaitForExitAsync(cancellationToken);
+            if (decoder.ExitCode != 0)
+                throw new InvalidOperationException($"ffmpeg_decode_failed:{decodeError.Trim()}");
+        }
+        catch (Win32Exception ex)
+        {
+            throw new InvalidOperationException($"ffmpeg_not_found:{_ffmpegPath}", ex);
         }
     }
 

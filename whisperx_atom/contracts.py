@@ -24,6 +24,7 @@ class ProcessingResult:
     word_segments: list[dict[str, Any]]
     metadata: dict[str, Any]
     status: str = "READY"
+    error_code: str | None = None
     warnings: list[str] = field(default_factory=list)
     stage_outcomes: dict[str, str] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
@@ -37,6 +38,7 @@ class ProcessingResult:
             "word_segments": self.word_segments,
             "metadata": self.metadata,
             "status": self.status,
+            "error_code": self.error_code,
             "warnings": self.warnings,
             "stage_outcomes": self.stage_outcomes,
             "quality": self.quality,

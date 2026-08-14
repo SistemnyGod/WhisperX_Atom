@@ -149,6 +149,34 @@ def test_legacy_naudio_selection_is_not_persisted_as_an_audiograph_device():
     assert "PersistCurrentConfigurationAsync" in runtime
 
 
+def test_audiograph_microphone_selection_ignores_legacy_system_audio_field():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "RecorderRuntimeMode.IsAudioGraph ? null : _systemAudioDeviceId" in view_model
+    assert "AudioGraph accepts microphone selection" in runtime
+    assert 'Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED"' not in runtime.split(
+        "public Task<AgentIpcResponse> SetAudioDevicesAsync", 1
+    )[1].split("public async Task ReconcileBackgroundAsync", 1)[0]
+
+
+def test_audiograph_health_and_desktop_preserve_live_media_time():
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "public long CurrentMediaTimeMs" in engine
+    assert "MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs" in runtime
+    assert "if (response.MediaTimeMs is long mediaTimeMs)" in view_model
+    assert "resetting the timer to 00:00:00" in view_model
+
+
+def test_server_origin_update_does_not_fail_on_capability_warning():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    update = runtime.split("public async Task<AgentIpcResponse> UpdateServerUrlAsync", 1)[1].split(
+        "public async Task<AgentIpcResponse> SetArchiveRootAsync", 1
+    )[0]
+    assert "return health with { Ok = true, Error = null }" in update
+
+
 def test_audiograph_device_subscription_uses_a_dedicated_long_lived_pipe():
     host = read("apps/recorder-host/RecorderHostRuntime.cs")
     desktop_client = read("apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs")
@@ -205,6 +233,50 @@ def test_audiograph_probe_preserves_attempt_diagnostics_and_duration_mapping():
     assert "[string]$DeviceId = \"\"" in acceptance
     assert "AUDIOGRAPH_FIXED_DEVICE_MISMATCH" in acceptance
     assert "probePayload.deviceId = $DeviceId" in acceptance
+
+
+def test_audiograph_normalizes_observed_float_frames_instead_of_trusting_pcm_metadata():
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    contracts = read("apps/recorder-agent/AudioContracts.cs")
+    assert "NormalizeFrame(nativeBytes, _outputEncodingProperties, _graph?.SamplesPerQuantum)" in engine
+    assert "expectedFloatLength" in engine and "expectedPcmLength" in engine
+    assert "BitConverter.ToSingle(nativeBytes" in engine
+    assert '"FLOAT32_TO_PCM16"' in engine
+    assert "AUDIO_BUFFER_FORMAT_MISMATCH" in engine
+    assert "NonFiniteSampleCount" in contracts
+    assert "ObservedBytesPerSample" in contracts
+    assert "FormatIntegrityVerified" in contracts
+
+
+def test_audiograph_health_exposes_effective_endpoint_signal_and_attempt_diagnostics():
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    diagnostics = read("apps/desktop/WhisperX.Atom.Desktop/Services/ClientRuntimeDiagnostics.cs")
+    assert "EffectiveMicrophoneDeviceName" in protocol
+    assert 'MicrophoneSignalState = "UNKNOWN"' in protocol
+    assert "LastAudioGraphAttempt" in protocol
+    assert '"FORMAT_MISMATCH"' in runtime
+    assert '"READY_NO_SIGNAL"' in runtime
+    assert "RuntimeSid" in runtime and "WindowsSessionId" in runtime
+    assert "health.Health?.LastAudioGraphAttempt" in diagnostics
+
+
+def test_audiograph_waveform_uses_linear_peak_derived_from_normalized_pcm16():
+    contracts = read("apps/recorder-agent/AudioContracts.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "PeakLinear" in contracts
+    assert "Math.Pow(10d, peakDb / 20d)" in contracts
+    assert "liveTelemetry.IsStale ? telemetry.PeakLinear : liveTelemetry.PeakLinear" in runtime
+    assert "LiveTelemetryAsync" in runtime
+
+
+def test_desktop_audio_graph_probe_is_rendered_by_microphone_test_and_selection_keeps_error_code():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "response.AudioGraphProbe is { } graph" in view_model
+    assert "FormatAgentError(response)" in view_model
+    assert "ErrorDetail: probe.ErrorDetail" in runtime
+    assert "AudioGraphProbe: probe" in runtime
 
 
 def test_audiograph_writer_propagates_failures_and_keeps_encoding_off_capture_consumer():

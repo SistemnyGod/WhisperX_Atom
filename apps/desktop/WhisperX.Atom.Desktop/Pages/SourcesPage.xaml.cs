@@ -60,7 +60,7 @@ public sealed partial class SourcesPage : Page
         AgentStatusDot.Fill = StatusBrush(_viewModel.AgentAvailable, _viewModel.IsLoading);
         ApiStatusDot.Fill = StatusBrush(_viewModel.ApiAvailable, _viewModel.IsLoading);
         MicrophoneList.Visibility = _viewModel.HasMicrophones ? Visibility.Visible : Visibility.Collapsed;
-        MicrophoneEmptyText.Visibility = _viewModel.HasMicrophones ? Visibility.Collapsed : Visibility.Visible;
+        MicrophoneEmptyState.Visibility = _viewModel.HasMicrophones ? Visibility.Collapsed : Visibility.Visible;
         SystemAudioList.Visibility = _viewModel.HasSystemAudioDevices ? Visibility.Visible : Visibility.Collapsed;
         SystemAudioEmptyText.Visibility = _viewModel.HasSystemAudioDevices ? Visibility.Collapsed : Visibility.Visible;
         AgentsList.Visibility = _viewModel.HasRegisteredAgents ? Visibility.Visible : Visibility.Collapsed;

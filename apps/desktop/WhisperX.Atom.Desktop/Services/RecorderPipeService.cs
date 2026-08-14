@@ -13,6 +13,9 @@ public sealed class RecorderPipeService : IRecorderService
     public IAsyncEnumerable<AgentIpcResponse> SubscribeAudioDeviceEventsAsync(CancellationToken cancellationToken = default) =>
         _client.SubscribeAsync("SUBSCRIBE_AUDIO_DEVICE_EVENTS", cancellationToken: cancellationToken);
 
+    public IAsyncEnumerable<AgentIpcResponse> SubscribeAudioTelemetryAsync(CancellationToken cancellationToken = default) =>
+        _client.SubscribeAsync("SUBSCRIBE_AUDIO_TELEMETRY", cancellationToken: cancellationToken);
+
     public Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("PREFLIGHT", cancellationToken: cancellationToken);
 

@@ -28,10 +28,10 @@
                 <Grid MinWidth="560" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="20,0,16,0">
                     <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" />
-                        <TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" />
-                        <TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" />
-                        <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" />
+                        <TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" />
+                        <TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" />
+                        <TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" />
+                        <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" ToolTipService.ToolTip="Текущий пользователь и состояние локальной сессии" AutomationProperties.Name="Текущий пользователь" />
                     </StackPanel>
                     <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />
                     <TextBlock x:Name="SystemStatusText" Visibility="Collapsed" Text="Проверка системы" />

@@ -11,8 +11,8 @@
         <controls:PageHeader Title="Совещания" Subtitle="История записей, обработка и результаты встреч">
             <controls:PageHeader.Actions>
                 <StackPanel x:Name="MeetingsActionsPanel" Orientation="Horizontal" Spacing="8">
-                    <Button Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" />
-                    <Button Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" />
+                    <Button Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить список совещаний" ToolTipService.ToolTip="Загрузить актуальный список совещаний" />
+                    <Button Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудиофайл" ToolTipService.ToolTip="Загрузить аудио или видео для обработки" />
                 </StackPanel>
             </controls:PageHeader.Actions>
         </controls:PageHeader>
@@ -25,7 +25,10 @@
                         <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
                     </Grid>
                     <TextBox x:Name="SearchBox" Grid.Row="1" PlaceholderText="Поиск по названию или описанию" Style="{StaticResource SearchInputStyle}" TextChanged="SearchBox_TextChanged" ToolTipService.ToolTip="Ctrl+F — перейти к поиску" />
-                    <ComboBox x:Name="StatusFilterCombo" Grid.Row="2" ItemsSource="{Binding StatusFilters}" SelectedItem="{Binding StatusFilter, Mode=TwoWay}" Style="{StaticResource FormComboBoxStyle}" SelectionChanged="StatusFilterCombo_SelectionChanged" />
+                    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <ComboBox x:Name="StatusFilterCombo" ItemsSource="{Binding StatusFilters}" SelectedItem="{Binding StatusFilter, Mode=TwoWay}" Style="{StaticResource FormComboBoxStyle}" SelectionChanged="StatusFilterCombo_SelectionChanged" />
+                        <Button x:Name="ClearFiltersButton" Grid.Column="1" Content="Сбросить фильтры" Style="{StaticResource SecondaryButtonStyle}" Click="ClearFiltersButton_Click" Visibility="Collapsed" AutomationProperties.Name="Сбросить фильтры совещаний" ToolTipService.ToolTip="Очистить поиск и вернуть все статусы" />
+                    </Grid>
                     <Grid Grid.Row="3" Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="100,*,150">
                         <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
                         <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
@@ -52,6 +55,10 @@
                             <SymbolIcon Symbol="Calendar" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
                             <TextBlock x:Name="ListEmptyTitle" Text="Совещаний нет" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
                             <TextBlock x:Name="ListEmptyDescription" Text="Войдите в API или импортируйте первую запись." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+                            <StackPanel x:Name="ListEmptyActions" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                                <Button x:Name="ListEmptyStartButton" Content="Новая запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" AutomationProperties.Name="Начать новую запись" />
+                                <Button x:Name="ListEmptySettingsButton" Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" Visibility="Collapsed" AutomationProperties.Name="Открыть настройки подключения" />
+                            </StackPanel>
                         </StackPanel>
                         <ProgressRing x:Name="ListLoadingRing" IsActive="False" Width="30" Height="30" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0" />
                     </Grid>
@@ -116,7 +123,7 @@
                                 <TabViewItem Header="Обзор" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20">
                                         <StackPanel Spacing="12">
-                                            <TextBlock Text="Pipeline обработки" Style="{StaticResource SectionTitleStyle}" />
+                                            <TextBlock Text="Этап обработки" Style="{StaticResource SectionTitleStyle}" />
                                             <TextBlock x:Name="OverviewPipelineText" Foreground="{StaticResource MutedTextBrush}" />
                                             <ListView ItemsSource="{Binding Jobs}" SelectionMode="None" BorderThickness="0" MaxHeight="260">
                                                 <ListView.ItemTemplate>
@@ -276,7 +283,7 @@
                                         <TextBlock x:Name="MediaEmptyText" Text="Файлы совещания пока недоступны." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                                         <Border Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="12" CornerRadius="10">
                                             <StackPanel Spacing="8">
-                                                <TextBlock Text="Preview" Style="{StaticResource SectionTitleStyle}" />
+                                                <TextBlock Text="Предпросмотр" Style="{StaticResource SectionTitleStyle}" />
                                                 <MediaPlayerElement x:Name="PreviewPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
                                                 <TextBlock x:Name="PreviewStatusText" Text="Выберите файл с доступным preview." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                             </StackPanel>
@@ -296,7 +303,11 @@
             </Border>
         </Grid>
 
-        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" VerticalAlignment="Top" Margin="10" />
+        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" VerticalAlignment="Top" Margin="10">
+            <InfoBar.ActionButton>
+                <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
+            </InfoBar.ActionButton>
+        </InfoBar>
         <ProgressRing x:Name="LoadingRing" Grid.Row="1" IsActive="False" Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,18,0,0" />
     </Grid>
 </Page>

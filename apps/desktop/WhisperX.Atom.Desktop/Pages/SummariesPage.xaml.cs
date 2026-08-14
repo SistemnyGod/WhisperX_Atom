@@ -103,6 +103,8 @@ public sealed partial class SummariesPage : Page
 
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
 
+    private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
+
     private void OpenMeetingButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel?.SelectedItem is not { Meeting.Id: var meetingId }) return;
@@ -114,12 +116,15 @@ public sealed partial class SummariesPage : Page
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
+        var hasError = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
         SummariesList.Visibility = _viewModel.HasItems ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = _viewModel.HasItems ? Visibility.Collapsed : Visibility.Visible;
-        EmptyTitle.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? "Не удалось загрузить саммари" : "Саммари не найдены";
-        EmptyDescription.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? _viewModel.ErrorText : _viewModel.StatusText;
+        EmptyTitle.Text = hasError ? "Не удалось загрузить саммари" : "Саммари не найдены";
+        EmptyDescription.Text = hasError ? _viewModel.ErrorText : _viewModel.StatusText;
+        EmptyRetryButton.Visibility = hasError ? Visibility.Visible : Visibility.Collapsed;
+        EmptyRetryButton.IsEnabled = !_viewModel.IsLoading;
         ErrorInfoBar.Message = _viewModel.ErrorText;
-        ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
+        ErrorInfoBar.IsOpen = hasError;
         WarningInfoBar.Message = _viewModel.WarningText;
         WarningInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.WarningText);
         UpdateDetails();

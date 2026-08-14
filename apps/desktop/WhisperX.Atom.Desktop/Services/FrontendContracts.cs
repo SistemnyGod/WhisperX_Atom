@@ -28,6 +28,7 @@ public interface IRecorderService
 {
     Task<AgentIpcResponse> GetHealthAsync(CancellationToken cancellationToken = default);
     IAsyncEnumerable<AgentIpcResponse> SubscribeAudioDeviceEventsAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AgentIpcResponse> SubscribeAudioTelemetryAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default);
@@ -149,6 +150,8 @@ public static class AgentStatusFormatter
             "CONNECTED" => "Recorder Agent подключён к серверу",
             "AUTH_REJECTED" => "Recorder Agent: сервер отклонил токен, выполняется восстановление",
             "SERVER_UNAVAILABLE" => "Recorder Agent: сервер недоступен, запись сохраняется локально",
+            "SERVER_NETWORK_UNREACHABLE" => "Recorder Agent: сервер недоступен по сети, запись сохраняется локально",
+            "SERVER_TIMEOUT" => "Recorder Agent: сервер не ответил вовремя, запись сохраняется локально",
             "NOT_CONFIGURED" => "Recorder Agent не настроен",
             "SERVER_ERROR" => "Recorder Agent: ошибка сервера, повторная попытка позже",
             _ => "Recorder Agent: проверка подключения"
@@ -159,6 +162,14 @@ public static class AgentStatusFormatter
 public sealed record AudioDeviceOption(string Id, string Name, bool IsDefault, string State)
 {
     public string DisplayName => IsDefault ? $"{Name} · по умолчанию" : Name;
+
+    public string StateText => State?.ToUpperInvariant() switch
+    {
+        "ACTIVE" or "READY" or "DISCOVERED" => "Доступно",
+        "DEFAULT" => "По умолчанию",
+        "UNAVAILABLE" or "DEVICE_LOST" => "Недоступно",
+        _ => "Проверяется"
+    };
 }
 
 public sealed record RecordingProfileOption(string Code, string DisplayName);

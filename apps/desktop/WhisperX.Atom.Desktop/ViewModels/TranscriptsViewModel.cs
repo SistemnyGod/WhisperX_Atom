@@ -27,7 +27,7 @@ public sealed class TranscriptRegistryItem
     public bool HasQualityWarning => Transcript?.IsPartial == true || Registry?.IsPartial == true;
     public string MeetingTitle => string.IsNullOrWhiteSpace(Meeting.Title) ? "Без названия" : Meeting.Title;
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
-    public string StatusText => Transcript?.Status ?? Registry?.Status ?? "Недоступна";
+    public string StatusText => UiStatusMapper.Text(Transcript?.Status ?? Registry?.Status ?? "UNKNOWN");
     public string SegmentCountText => (Transcript?.Segments.Count ?? Registry?.SegmentCount)?.ToString(CultureInfo.CurrentCulture) ?? "—";
     public string DurationText => Transcript is { Segments.Count: > 0 }
         ? FormatDuration(Transcript.Segments.Max(segment => segment.EndMs))
@@ -104,13 +104,24 @@ public sealed class TranscriptsViewModel : ObservableObject
     }
 
     public bool HasItems => FilteredItems.Count > 0;
+    public bool HasLoadedItems => _allItems.Count > 0;
+    public bool HasSearchNoResults => HasLoadedItems && !HasItems && !string.IsNullOrWhiteSpace(SearchText);
     public bool HasSelection => SelectedItem is not null;
     public bool HasSegments => FilteredSegments.Count > 0;
     public bool HasSegmentSelection => SelectedSegment is not null;
     public string SelectedQualityText => SelectedItem?.QualityText ?? "Качество не рассчитано";
-    public string SelectedQualityWarningText => SelectedItem?.HasQualityWarning == true
-        ? "Стенограмма получена с предупреждениями."
-        : string.Empty;
+    public string SelectedQualityWarningText
+    {
+        get
+        {
+            var warnings = SelectedItem?.Transcript?.Warnings;
+            if (ContainsWarning(warnings, "NO_SPEECH_DETECTED"))
+                return "Аудио сохранено корректно, но речь не обнаружена. Проверьте выбранный микрофон и уровень сигнала.";
+            return SelectedItem?.HasQualityWarning == true
+                ? "Стенограмма получена с предупреждениями. Текст доступен для чтения и экспорта."
+                : string.Empty;
+        }
+    }
     public string SelectedTitle => SelectedItem?.MeetingTitle ?? "Совещание не выбрано";
     public string SelectedStatus => SelectedItem?.StatusText ?? "—";
 
@@ -124,6 +135,7 @@ public sealed class TranscriptsViewModel : ObservableObject
         FilteredItems.Clear();
         FilteredSegments.Clear();
         SelectedItem = null;
+        OnPropertyChanged(nameof(HasLoadedItems));
 
         try
         {
@@ -133,14 +145,17 @@ public sealed class TranscriptsViewModel : ObservableObject
                 return;
             }
 
-            if (!_services.Backend.HasSession)
+            if (!await _services.Backend.EnsureAuthenticatedAsync(cancellationToken))
             {
-                StatusText = "Войдите в API, чтобы загрузить стенограммы.";
+                ErrorText = _services.Backend.AuthState == DesktopAuthState.Offline
+                    ? "Сервер перестал отвечать. Проверьте LAN-подключение и повторите попытку."
+                    : "Сеанс API истёк. Откройте настройки и выполните вход повторно.";
                 return;
             }
 
             var registry = await _services.Backend.GetTranscriptRegistryPageAsync(limit: 200, offset: 0, cancellationToken: cancellationToken);
             _allItems.AddRange(registry.Select(item => new TranscriptRegistryItem(item)));
+            OnPropertyChanged(nameof(HasLoadedItems));
             ApplyFilters();
             StatusText = _allItems.Count == 0
                 ? "Встреч пока нет."
@@ -185,6 +200,7 @@ public sealed class TranscriptsViewModel : ObservableObject
         if (SelectedItem is not null && !FilteredItems.Contains(SelectedItem))
             SelectedItem = null;
         OnPropertyChanged(nameof(HasItems));
+        OnPropertyChanged(nameof(HasSearchNoResults));
     }
 
     private void ApplySegmentFilter()
@@ -198,4 +214,28 @@ public sealed class TranscriptsViewModel : ObservableObject
     }
 
     private static string SafeError(Exception ex, string fallback) => UiErrorFormatter.Format(ex, fallback);
+
+    private static bool ContainsWarning(System.Text.Json.JsonDocument? warnings, string code)
+    {
+        if (warnings is null) return false;
+        return ContainsWarning(warnings.RootElement, code);
+    }
+
+    private static bool ContainsWarning(System.Text.Json.JsonElement element, string code)
+    {
+        if (element.ValueKind == System.Text.Json.JsonValueKind.String)
+            return string.Equals(element.GetString(), code, StringComparison.OrdinalIgnoreCase);
+        if (element.ValueKind == System.Text.Json.JsonValueKind.Array)
+            return element.EnumerateArray().Any(item => ContainsWarning(item, code));
+        if (element.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, code, StringComparison.OrdinalIgnoreCase)
+                && (property.Value.ValueKind == System.Text.Json.JsonValueKind.True
+                    || property.Value.ValueKind == System.Text.Json.JsonValueKind.String))
+                return true;
+            if (ContainsWarning(property.Value, code)) return true;
+        }
+        return false;
+    }
 }

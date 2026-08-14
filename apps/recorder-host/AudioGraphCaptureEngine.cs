@@ -19,6 +19,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private const int SampleRate = RecordingContract.MicrophoneSampleRate;
     private const int Channels = 1;
     private const int BitsPerSample = 16;
+    private static readonly TimeSpan LiveTelemetryWindow = TimeSpan.FromMilliseconds(75);
     // 256 quanta provide a bounded ~2.56 second startup/backpressure window
     // while keeping overrun explicit instead of silently dropping frames.
     private const int QueueCapacity = 256;
@@ -46,6 +47,13 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private bool _clipping;
     private DateTimeOffset? _lastAudioAtUtc;
     private DateTimeOffset? _silenceStartedAtUtc;
+    private long _liveSequence;
+    private double _liveRmsSum;
+    private double _livePeak;
+    private bool _liveClipping;
+    private int _liveFrameCount;
+    private DateTimeOffset _liveWindowStartedAtUtc;
+    private LiveAudioTelemetrySnapshot _liveTelemetry = new(0, 0, 0, 0, false, DateTimeOffset.MinValue, true);
     private int _failureRaised;
     private AudioGraphAttemptDiagnostics _attempt = new();
     private volatile bool _probeMode;
@@ -73,10 +81,32 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
                 double? averageRms = _frameCount == 0 ? null : _rmsSum / _frameCount;
                 double? rmsDb = averageRms is null ? null : ToDb(averageRms.Value);
                 double? peakDb = _peak <= 0 ? null : ToDb(_peak);
-                long? silence = _silenceStartedAtUtc is null || _lastAudioAtUtc is not null && _lastAudioAtUtc > _silenceStartedAtUtc
+                long? silence = _silenceStartedAtUtc is null
                     ? null
                     : (long?)(DateTimeOffset.UtcNow - _silenceStartedAtUtc.Value).TotalMilliseconds;
                 return new AudioTelemetrySnapshot(_frameCount, _bytesReceived, _firstFrameLatencyMs, rmsDb, peakDb, _clipping, _lastAudioAtUtc, silence, _frameCount == 0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Capture timeline for the current AudioGraph session. This is derived
+    /// from samples accepted by the graph, so it remains stable across the
+    /// Desktop's periodic HEALTH requests and pauses without depending on
+    /// wall-clock polling in the UI.
+    /// </summary>
+    public long CurrentMediaTimeMs
+        => Math.Max(0, Interlocked.Read(ref _sampleCursor) * 1000L / SampleRate);
+
+    public LiveAudioTelemetrySnapshot LiveTelemetry
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var stale = _liveTelemetry.CapturedAtUtc == DateTimeOffset.MinValue
+                    || DateTimeOffset.UtcNow - _liveTelemetry.CapturedAtUtc > TimeSpan.FromMilliseconds(750);
+                return _liveTelemetry with { MediaTimeMs = CurrentMediaTimeMs, IsStale = stale };
             }
         }
     }
@@ -108,12 +138,15 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         CancellationToken cancellationToken = default)
     {
         lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
-        await SelectDeviceAsync(selectionMode, deviceId, cancellationToken).ConfigureAwait(false);
-        _probeMode = true;
         var started = Stopwatch.GetTimestamp();
         AudioDeviceProbeResult? result = null;
         try
         {
+            // Keep endpoint resolution inside the probe boundary. A missing
+            // fixed endpoint must still produce AudioGraphProbe diagnostics;
+            // otherwise SET_AUDIO_DEVICES can only report a bare exception.
+            await SelectDeviceAsync(selectionMode, deviceId, cancellationToken).ConfigureAwait(false);
+            _probeMode = true;
             await StartAsync(cancellationToken).ConfigureAwait(false);
             await Task.Delay(duration <= TimeSpan.Zero ? TimeSpan.FromSeconds(2) : duration, cancellationToken).ConfigureAwait(false);
             result = BuildProbeResult(ElapsedMilliseconds(started), null, null);
@@ -141,6 +174,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         var selected = _catalog.Resolve(selectionMode, deviceId);
         if (selected is null || !string.Equals(selected.State, "Active", StringComparison.OrdinalIgnoreCase))
         {
+            // Do not leave the previous endpoint looking effective while a
+            // fixed selection failure is being reported. The caller may
+            // explicitly restore it after the probe, but the probe itself
+            // must describe the failed selection, not stale state.
+            lock (_gate) _selectedDevice = null;
             SetState(AudioCaptureState.DeviceLost);
             throw new InvalidOperationException(selectionMode == AudioSelectionMode.Fixed
                 ? "AUDIO_DEVICE_UNAVAILABLE"
@@ -338,13 +376,18 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
                 if (data is null || bytesToCopy == 0) return;
                 var nativeBytes = new byte[checked((int)bytesToCopy)];
                 Marshal.Copy((IntPtr)data, nativeBytes, 0, checked((int)bytesToCopy));
-                var normalizedBytes = NormalizeToPcm16(nativeBytes, _outputEncodingProperties);
+                var normalized = NormalizeFrame(nativeBytes, _outputEncodingProperties, _graph?.SamplesPerQuantum);
+                var normalizedBytes = normalized.Pcm16;
                 lock (_gate)
                 {
                     _attempt.NonEmptyFrameCount++;
                     _attempt.NativeFrameBytes += nativeBytes.Length;
                     _attempt.NormalizedFrameBytes += normalizedBytes.Length;
-                    _attempt.NormalizationMode ??= ResolveNormalizationMode(_outputEncodingProperties);
+                    _attempt.ObservedBytesPerSample = normalized.ObservedBytesPerSample;
+                    _attempt.ObservedSampleFormat = normalized.ObservedSampleFormat;
+                    _attempt.FormatIntegrityVerified = normalized.FormatIntegrityVerified;
+                    _attempt.NonFiniteSampleCount += normalized.NonFiniteSampleCount;
+                    _attempt.NormalizationMode = normalized.NormalizationMode;
                 }
 
                 var metrics = Measure(normalizedBytes);
@@ -365,6 +408,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
                 Interlocked.Add(ref _sampleCursor, sampleCount);
                 Interlocked.Increment(ref _frameCount);
                 Interlocked.Add(ref _bytesReceived, normalizedBytes.Length);
+                PublishLiveTelemetry(metrics);
                 lock (_gate)
                 {
                     _attempt.BytesReceived = _bytesReceived;
@@ -380,7 +424,15 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         }
         catch (Exception ex)
         {
-            RaiseFailure(AudioGraphErrorMapper.Map(ex), ex.Message, true);
+            if (ex is AudioBufferFormatMismatchException mismatch && mismatch.NonFiniteSampleCount > 0)
+            {
+                lock (_gate) _attempt.NonFiniteSampleCount += mismatch.NonFiniteSampleCount;
+            }
+            var code = AudioGraphErrorMapper.Map(ex);
+            RaiseFailure(code, ex.Message, true);
+            SetState(AudioCaptureState.Failed);
+            _frames.Writer.TryComplete(ex);
+            _graph?.Stop();
         }
     }
 
@@ -460,43 +512,91 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         }
     }
 
-    private static string ResolveNormalizationMode(AudioEncodingProperties? properties)
+    private sealed record NormalizedFrame(
+        byte[] Pcm16,
+        int ObservedBytesPerSample,
+        string ObservedSampleFormat,
+        string NormalizationMode,
+        bool FormatIntegrityVerified,
+        long NonFiniteSampleCount);
+
+    private sealed class AudioBufferFormatMismatchException(string message, long nonFiniteSampleCount = 0)
+        : InvalidOperationException(message)
     {
-        if (properties is null) return "UNKNOWN";
-        if (IsFloat(properties) && properties.BitsPerSample == 32) return "FLOAT32_TO_PCM16";
-        if (IsPcm(properties) && properties.BitsPerSample == 16) return "PCM16_COPY";
-        return "UNSUPPORTED";
+        public long NonFiniteSampleCount { get; } = nonFiniteSampleCount;
     }
 
+    // Kept as a small compatibility seam for diagnostics/tests that exercise
+    // normalization without a live graph quantum size.
     private static byte[] NormalizeToPcm16(byte[] nativeBytes, AudioEncodingProperties? properties)
+        => NormalizeFrame(nativeBytes, properties, null).Pcm16;
+
+    private static NormalizedFrame NormalizeFrame(
+        byte[] nativeBytes,
+        AudioEncodingProperties? properties,
+        int? graphSamplesPerQuantum)
     {
         if (properties is null)
             throw new InvalidOperationException("AUDIO_FORMAT_UNSUPPORTED:output_properties_missing");
         if (properties.SampleRate != SampleRate || properties.ChannelCount != Channels)
             throw new InvalidOperationException($"AUDIO_FORMAT_UNSUPPORTED:{properties.SampleRate}Hz:{properties.ChannelCount}ch");
 
-        if (IsPcm(properties) && properties.BitsPerSample == BitsPerSample)
-        {
-            var usableLength = nativeBytes.Length - nativeBytes.Length % 2;
-            return usableLength == nativeBytes.Length ? nativeBytes : nativeBytes[..usableLength];
-        }
+        var expectedFloatLength = graphSamplesPerQuantum is int quantum
+            ? checked((long)quantum * Channels * sizeof(float))
+            : -1;
+        var expectedPcmLength = graphSamplesPerQuantum is int pcmQuantum
+            ? checked((long)pcmQuantum * Channels * sizeof(short))
+            : -1;
 
-        if (IsFloat(properties) && properties.BitsPerSample == 32)
+        // AudioGraph frame buffers are commonly exposed as IEEE Float32 even
+        // when EncodingProperties reports PCM. Prefer the observed quantum
+        // byte length over the metadata subtype; trusting Subtype here turns
+        // every pair of float bytes into a random-looking PCM16 sample.
+        var observedFloat = nativeBytes.Length == expectedFloatLength
+            || (expectedFloatLength < 0 && nativeBytes.Length % (Channels * sizeof(float)) == 0);
+        var observedPcm = nativeBytes.Length == expectedPcmLength
+            || (expectedPcmLength < 0 && nativeBytes.Length % (Channels * sizeof(short)) == 0);
+
+        if (observedFloat && nativeBytes.Length % sizeof(float) == 0)
         {
             var sampleCount = nativeBytes.Length / sizeof(float);
             var normalized = new byte[sampleCount * sizeof(short)];
+            long nonFinite = 0;
             for (var index = 0; index < sampleCount; index++)
             {
-                var sample = Math.Clamp(BitConverter.ToSingle(nativeBytes, index * sizeof(float)), -1f, 1f);
+                var sample = BitConverter.ToSingle(nativeBytes, index * sizeof(float));
+                if (float.IsNaN(sample) || float.IsInfinity(sample))
+                {
+                    nonFinite++;
+                    continue;
+                }
+                sample = Math.Clamp(sample, -1f, 1f);
                 var pcm = sample <= -1f
                     ? short.MinValue
                     : (short)Math.Round(sample * short.MaxValue, MidpointRounding.AwayFromZero);
                 BitConverter.TryWriteBytes(normalized.AsSpan(index * sizeof(short), sizeof(short)), pcm);
             }
-            return normalized;
+            if (nonFinite > 0)
+                throw new AudioBufferFormatMismatchException(
+                    $"AUDIO_BUFFER_FORMAT_MISMATCH:non_finite_float_samples={nonFinite}", nonFinite);
+            var integrity = expectedFloatLength < 0 || nativeBytes.Length == expectedFloatLength;
+            return new NormalizedFrame(normalized, sizeof(float), "FLOAT32", "FLOAT32_TO_PCM16", integrity, nonFinite);
         }
 
-        throw new InvalidOperationException($"AUDIO_FORMAT_UNSUPPORTED:{properties.Subtype}:{properties.BitsPerSample}");
+        if (observedPcm && nativeBytes.Length % sizeof(short) == 0)
+        {
+            var integrity = expectedPcmLength < 0 || nativeBytes.Length == expectedPcmLength;
+            var usableLength = nativeBytes.Length - nativeBytes.Length % sizeof(short);
+            return new NormalizedFrame(
+                usableLength == nativeBytes.Length ? nativeBytes : nativeBytes[..usableLength],
+                sizeof(short),
+                "PCM16",
+                "PCM16_COPY",
+                integrity,
+                0);
+        }
+
+        throw new InvalidOperationException($"AUDIO_BUFFER_FORMAT_MISMATCH:{properties.Subtype}:{properties.BitsPerSample}:bytes={nativeBytes.Length}:expectedFloat={expectedFloatLength}:expectedPcm={expectedPcmLength}");
     }
 
     private static bool IsFloat(AudioEncodingProperties properties)
@@ -538,6 +638,44 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
             _lastAudioAtUtc = null;
             _silenceStartedAtUtc = null;
             _telemetry = new AudioTelemetrySnapshot(0, 0, null, null, null, false, null, null);
+            _liveSequence = 0;
+            _liveRmsSum = 0;
+            _livePeak = 0;
+            _liveClipping = false;
+            _liveFrameCount = 0;
+            _liveWindowStartedAtUtc = DateTimeOffset.UtcNow;
+            _liveTelemetry = new LiveAudioTelemetrySnapshot(0, 0, 0, 0, false, DateTimeOffset.MinValue, true);
+        }
+    }
+
+    private void PublishLiveTelemetry((double Rms, double Peak, bool Clipping) metrics)
+    {
+        LiveAudioTelemetrySnapshot? snapshot = null;
+        var now = DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            if (_liveFrameCount == 0) _liveWindowStartedAtUtc = now;
+            _liveFrameCount++;
+            _liveRmsSum += metrics.Rms;
+            _livePeak = Math.Max(_livePeak, metrics.Peak);
+            _liveClipping |= metrics.Clipping;
+            if (now - _liveWindowStartedAtUtc < LiveTelemetryWindow) return;
+
+            var rms = _liveFrameCount == 0 ? 0 : _liveRmsSum / _liveFrameCount;
+            snapshot = new LiveAudioTelemetrySnapshot(
+                ++_liveSequence,
+                CurrentMediaTimeMs,
+                Math.Clamp(rms, 0d, 1d),
+                Math.Clamp(_livePeak, 0d, 1d),
+                _liveClipping,
+                now,
+                false);
+            _liveRmsSum = 0;
+            _livePeak = 0;
+            _liveClipping = false;
+            _liveFrameCount = 0;
+            _liveWindowStartedAtUtc = now;
+            _liveTelemetry = snapshot;
         }
     }
 
@@ -557,6 +695,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         {
             _attempt.FinalErrorCode = code;
             _attempt.FinalErrorDetail = detail;
+            _attempt.FormatMismatch |= string.Equals(code, "AUDIO_BUFFER_FORMAT_MISMATCH", StringComparison.OrdinalIgnoreCase);
         }
         CaptureFailed?.Invoke(this, new AudioCaptureFailureEventArgs(code, detail, retryable, DateTimeOffset.UtcNow));
     }
@@ -612,6 +751,8 @@ internal static class AudioGraphErrorMapper
             || message.Contains("IMemoryBufferByteAccess", StringComparison.OrdinalIgnoreCase)
             || message.Contains("WinRT.IInspectable", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_BUFFER_INTEROP_FAILED";
+        if (message.Contains("AUDIO_BUFFER_FORMAT_MISMATCH", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_BUFFER_FORMAT_MISMATCH";
         if (exception is COMException comException && unchecked((uint)comException.HResult) == 0x80070005u)
             return "AUDIO_DEVICE_ACCESS_DENIED";
         if (message.Contains("AUDIO_INPUT_NODE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase)

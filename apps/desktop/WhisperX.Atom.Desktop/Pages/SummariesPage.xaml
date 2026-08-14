@@ -19,7 +19,11 @@
                 </StackPanel>
             </Grid>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
+                </InfoBar.ActionButton>
+            </InfoBar>
             <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
 
             <Grid x:Name="WorkspaceGrid" ColumnDefinitions="*,430" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="540">
@@ -52,10 +56,11 @@
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
-                        <StackPanel x:Name="EmptyState" Padding="20,34" Spacing="6" HorizontalAlignment="Center">
+                        <StackPanel x:Name="EmptyState" Padding="20,34" Spacing="8" HorizontalAlignment="Center" MaxWidth="520">
                             <SymbolIcon Symbol="Document" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
                             <TextBlock x:Name="EmptyTitle" Text="Саммари не найдены" FontWeight="SemiBold" HorizontalAlignment="Center" />
                             <TextBlock x:Name="EmptyDescription" Text="После обработки встречи итог появится здесь." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                            <Button x:Name="EmptyRetryButton" Content="Повторить загрузку" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" HorizontalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Повторить загрузку саммари" ToolTipService.ToolTip="Проверить API и повторить загрузку списка" />
                         </StackPanel>
                     </StackPanel>
                 </Border>

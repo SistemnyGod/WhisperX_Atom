@@ -22,7 +22,7 @@
             <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
             <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
 
-            <Grid x:Name="SummaryGrid" ColumnDefinitions="*,*,*" ColumnSpacing="14">
+            <Grid x:Name="SummaryGrid" ColumnDefinitions="*,*,*,*" ColumnSpacing="14">
                 <Border Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}">
                     <StackPanel Spacing="6">
                         <TextBlock Text="API" Style="{StaticResource EyebrowStyle}" />
@@ -42,12 +42,20 @@
                         <TextBlock Text="АКТИВНЫЕ" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding OnlineCountText}" FontSize="28" FontWeight="SemiBold" />
                         <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
-                            <TextBlock Text="Unavailable:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="Недоступны:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Text="{Binding UnavailableCountText}" FontSize="{StaticResource CaptionTextSize}" />
-                            <TextBlock Text="Revoked:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="Отозваны:" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Text="{Binding RevokedCountText}" FontSize="{StaticResource CaptionTextSize}" />
                         </StackPanel>
                         <TextBlock Text="По статусу, который вернул API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="3" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceGreenBrush}">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="WHISPERX" Style="{StaticResource EyebrowStyle}" />
+                        <TextBlock Text="{Binding ProcessingStatus}" Style="{StaticResource SectionTitleStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding GpuStatus}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding SummaryStatus}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
             </Grid>
@@ -58,7 +66,7 @@
                         <Grid Padding="20,18" ColumnDefinitions="*,Auto">
                             <StackPanel>
                                 <TextBlock Text="Реестр агентов" Style="{StaticResource SectionTitleStyle}" />
-                                <TextBlock Text="Только записи из /api/agents" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
+                                <TextBlock Text="Подключения для текущей сессии API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
                             </StackPanel>
                             <ProgressRing Grid.Column="1" x:Name="LoadingRing" Width="22" Height="22" IsActive="False" />
                         </Grid>
@@ -73,7 +81,7 @@
                                 <DataTemplate>
                                     <Grid Padding="20,12" ColumnDefinitions="1.4*,130,170,*">
                                         <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Column="1" Text="{Binding EffectiveStatus}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{Binding EffectiveStatusText}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
                                         <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
                                         <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                                     </Grid>

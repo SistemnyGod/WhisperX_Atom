@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using WhisperX.Atom.Desktop;
 using WhisperX.Atom.Recorder;
 using WhisperX_Atom_Desktop.Services;
 
@@ -85,13 +86,18 @@ public partial class App : Application
                 }
 
                 if (!bootstrap.RecorderAvailable)
-                    ShowLoginWindow($"{bootstrap.Code}: {bootstrap.Message}");
+                {
+                    // Do not trap an authenticated user in the login window.
+                    // MainWindow exposes Settings and the local-first recording
+                    // state so the Agent can be repaired from inside the app.
+                    ShowMainWindow();
+                }
                 else if (bootstrap.Code == "SERVER_UNAVAILABLE" && !_services.Backend.CanUseOffline)
                     ShowLoginWindow("Первый вход должен быть выполнен при доступном LAN-сервере.");
                 else
                     ShowMainWindow();
             }
-            else if (_services.Backend.CanUseOffline)
+            else if (_services.Backend.AuthState == DesktopAuthState.Offline && _services.Backend.CanUseOffline)
             {
                 // Restore the local-first bootstrap state before showing the
                 // UI. Otherwise RecordingViewModel starts with AgentReady=false
@@ -110,7 +116,9 @@ public partial class App : Application
             }
             else
             {
-                ShowLoginWindow("Требуется вход в LAN-сервер.");
+                ShowLoginWindow(_services.Backend.AuthState == DesktopAuthState.LoginRequired
+                    ? "Сеанс API истёк. Выполните вход повторно."
+                    : "Требуется вход в LAN-сервер.");
             }
         }
         catch (Exception exception)

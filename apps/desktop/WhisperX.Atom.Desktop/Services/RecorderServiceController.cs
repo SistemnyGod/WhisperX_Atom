@@ -57,7 +57,7 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         var pipeReachable = false;
         if (exists && string.Equals(state, "RUNNING", StringComparison.OrdinalIgnoreCase))
         {
-            try { pipeReachable = (await recorder.GetHealthAsync(cancellationToken)).Ok; }
+            try { pipeReachable = (await recorder.GetHealthAsync(cancellationToken)).IsReachable; }
             catch (RecorderIpcException) { }
             catch (IOException) { }
         }

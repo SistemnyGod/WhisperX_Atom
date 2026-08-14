@@ -17,6 +17,9 @@ public sealed class HomeViewModel : ObservableObject
     private string _apiStatus = "Проверка API…";
     private string _agentStatus = "Проверка Recorder Agent…";
     private string _recordingStatus = "Проверяется состояние записи…";
+    private string _effectiveMicrophoneText = "Микрофон ещё не подтверждён";
+    private string _microphoneSignalText = "Сигнал проверяется перед стартом записи";
+    private string _microphoneSignalState = "UNKNOWN";
     private string _storageText = "Ожидание проверки";
     private string _pendingUploadsText = "—";
     private string _archiveText = "Путь архива будет показан после проверки Agent";
@@ -41,6 +44,9 @@ public sealed class HomeViewModel : ObservableObject
     public string ApiStatus { get => _apiStatus; private set => SetProperty(ref _apiStatus, value); }
     public string AgentStatus { get => _agentStatus; private set => SetProperty(ref _agentStatus, value); }
     public string RecordingStatus { get => _recordingStatus; private set => SetProperty(ref _recordingStatus, value); }
+    public string EffectiveMicrophoneText { get => _effectiveMicrophoneText; private set => SetProperty(ref _effectiveMicrophoneText, value); }
+    public string MicrophoneSignalText { get => _microphoneSignalText; private set => SetProperty(ref _microphoneSignalText, value); }
+    public string MicrophoneSignalState { get => _microphoneSignalState; private set => SetProperty(ref _microphoneSignalState, value); }
     public string StorageText { get => _storageText; private set => SetProperty(ref _storageText, value); }
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
     public string ArchiveText { get => _archiveText; private set => SetProperty(ref _archiveText, value); }
@@ -129,13 +135,16 @@ public sealed class HomeViewModel : ObservableObject
             ActiveRecordingsText = response.State is "Recording" or "Paused" ? "1" : "0";
             OnPropertyChanged(nameof(RecordingBadgeText));
             OnPropertyChanged(nameof(MediaTimeText));
-            AgentAvailable = response.Ok;
+            AgentAvailable = response.IsReachable;
             AgentStatus = AgentStatusFormatter.Format(response);
             RecordingStatus = response.State switch
             {
                 "Recording" => "Идёт запись",
                 "Paused" => "Запись приостановлена",
                 "Finalizing" => "Сохранение и отправка записи",
+                "Unavailable" => "Запись недоступна",
+                "Error" => "Ошибка записи",
+                "Checking" => "Проверка Recorder Agent",
                 _ => "Готов к новой записи"
             };
             if (response.Health is { } health)
@@ -143,11 +152,19 @@ public sealed class HomeViewModel : ObservableObject
                 StorageText = FormatStorage(health.FreeBytes, health.TotalBytes);
                 PendingUploadsText = health.PendingUploadSessions.ToString(CultureInfo.InvariantCulture);
                 ArchiveText = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? "Путь архива не передан Agent" : health.ArchiveRoot;
+                EffectiveMicrophoneText = string.IsNullOrWhiteSpace(health.EffectiveMicrophoneDeviceName)
+                    ? string.IsNullOrWhiteSpace(health.SelectedMicrophoneDeviceId) ? "Windows по умолчанию" : "Сохранённое устройство"
+                    : $"{health.EffectiveMicrophoneDeviceName}";
+                MicrophoneSignalState = health.MicrophoneSignalState ?? "UNKNOWN";
+                MicrophoneSignalText = FormatMicrophoneSignal(health.MicrophoneSignalState, health.MicrophoneRmsDb);
             }
             else
             {
                 StorageText = "Нет данных";
                 PendingUploadsText = "—";
+                EffectiveMicrophoneText = "Нет данных от Recorder Agent";
+                MicrophoneSignalState = "UNKNOWN";
+                MicrophoneSignalText = "Сигнал недоступен";
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -162,6 +179,9 @@ public sealed class HomeViewModel : ObservableObject
             RecordingStatus = "Запись недоступна";
             StorageText = "Ожидание проверки";
             PendingUploadsText = "—";
+            EffectiveMicrophoneText = "Микрофон недоступен";
+            MicrophoneSignalState = "UNAVAILABLE";
+            MicrophoneSignalText = "Сигнал недоступен — проверьте Recorder Agent";
             ErrorText = SafeError(ex);
         }
     }
@@ -260,6 +280,21 @@ public sealed class HomeViewModel : ObservableObject
         ? "Нет данных"
         : $"{FormatBytes(free)} свободно из {FormatBytes(total)}";
 
+    private static string FormatMicrophoneSignal(string? state, double? rmsDb)
+    {
+        var label = state?.ToUpperInvariant() switch
+        {
+            "READY" => "Сигнал микрофона обнаружен",
+            "READY_NO_SIGNAL" => "Поток открыт, сигнала нет",
+            "CLIPPING" => "Сигнал перегружен (clipping)",
+            "FORMAT_MISMATCH" => "Несовместимый формат аудиобуфера",
+            "NO_PACKETS" => "Ожидаются аудиокадры",
+            "UNAVAILABLE" => "Сигнал недоступен",
+            _ => "Сигнал проверяется перед стартом записи"
+        };
+        return rmsDb is double value ? $"{label} · RMS {value:0.0} dB" : label;
+    }
+
     internal static string FormatBytes(long bytes)
     {
         if (bytes < 1024L * 1024L) return $"{bytes:N0} Б";
@@ -275,7 +310,7 @@ public sealed class HomeViewModel : ObservableObject
     private static string DisplayStage(string? stage) => stage switch
     {
         "TRANSCRIBING" => "Транскрибация",
-        "ALIGNING" => "Alignment",
+        "ALIGNING" => "Выравнивание",
         "DIARIZING" => "Диаризация",
         "SUMMARIZING" => "Саммари",
         "READY" => "Готово",

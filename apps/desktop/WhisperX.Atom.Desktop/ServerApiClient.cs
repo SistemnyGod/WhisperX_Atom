@@ -51,6 +51,9 @@ public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Sta
 
     [JsonIgnore]
     public string RoomText => RoomId?.ToString() ?? "Не назначена";
+
+    [JsonIgnore]
+    public string EffectiveStatusText => UiStatusMapper.Text(EffectiveStatus);
 }
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
 public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
@@ -82,7 +85,10 @@ public sealed record DesktopJob(
             || errorCode.StartsWith("GPU_", StringComparison.OrdinalIgnoreCase)
             || errorCode.StartsWith("CUDA_", StringComparison.OrdinalIgnoreCase)
             || errorCode.StartsWith("NETWORK_", StringComparison.OrdinalIgnoreCase)
-            || errorCode.StartsWith("SERVER_", StringComparison.OrdinalIgnoreCase));
+            || errorCode.StartsWith("SERVER_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.Equals("TRANSCRIPT_EMPTY", StringComparison.OrdinalIgnoreCase)
+            || errorCode.Equals("TRANSCRIPT_INVALID_TIMECODE", StringComparison.OrdinalIgnoreCase)
+            || errorCode.Equals("AUDIO_PROCESSING_ERROR", StringComparison.OrdinalIgnoreCase));
 }
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
 
@@ -114,6 +120,7 @@ public sealed class DesktopApiException : Exception
 
 public sealed class ServerApiClient : IDisposable
 {
+    private static readonly TimeSpan ApiRequestTimeout = TimeSpan.FromSeconds(10);
     private readonly CookieContainer _cookies = new();
     private readonly HttpClient _http;
     private readonly HttpClient _uploadHttp;
@@ -127,7 +134,11 @@ public sealed class ServerApiClient : IDisposable
     public ServerApiClient(string? baseUrl = null)
     {
         var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies };
-        _http = new HttpClient(handler) { BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())) };
+        _http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())),
+            Timeout = ApiRequestTimeout
+        };
         _uploadHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         var machineConfig = MachineServerConfig.Load();
         var serverOrigin = machineConfig?.Managed == true
@@ -186,6 +197,12 @@ public sealed class ServerApiClient : IDisposable
         }
         catch (HttpRequestException)
         {
+            return false;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // HttpClient.Timeout surfaces as TaskCanceledException. Treat that
+            // as an unavailable backend, but preserve explicit page cancellation.
             return false;
         }
     }
@@ -436,6 +453,11 @@ public sealed class ServerApiClient : IDisposable
                 _authState = DesktopAuthState.Offline;
                 return false;
             }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _authState = DesktopAuthState.Offline;
+                return false;
+            }
         }
         finally { _refreshGate.Release(); }
     }
@@ -449,6 +471,10 @@ public sealed class ServerApiClient : IDisposable
             _authState = DesktopAuthState.Offline;
             throw new DesktopApiException(0, "backend_unavailable", "API недоступен. Локальная запись продолжает работать.");
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+            _authState = DesktopAuthState.Offline;
+            throw new DesktopApiException(0, "backend_timeout", "API не ответил вовремя. Локальная запись продолжает работать.");
+        }
         if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
         response.Dispose();
         if (!await RefreshAsync(observedVersion, cancellationToken))
@@ -457,6 +483,10 @@ public sealed class ServerApiClient : IDisposable
         catch (HttpRequestException) {
             _authState = DesktopAuthState.Offline;
             throw new DesktopApiException(0, "backend_unavailable", "API недоступен. Локальная запись продолжает работать.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+            _authState = DesktopAuthState.Offline;
+            throw new DesktopApiException(0, "backend_timeout", "API не ответил вовремя. Локальная запись продолжает работать.");
         }
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
@@ -601,7 +631,26 @@ public sealed class ServerApiClient : IDisposable
     public async Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/jobs/{jobId}/retry", null, cancellationToken);
-        if (!response.IsSuccessStatusCode) return null;
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var errorCode = $"JOB_RETRY_FAILED_{(int)response.StatusCode}";
+            var retryable = (int)response.StatusCode >= 500;
+            string? traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues) ? traceValues.FirstOrDefault() : null;
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                var root = document.RootElement;
+                if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+                    errorCode = error.GetString() ?? errorCode;
+                if (root.TryGetProperty("retryable", out var retry) && retry.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    retryable = retry.GetBoolean();
+                if (root.TryGetProperty("traceId", out var trace) && trace.ValueKind == JsonValueKind.String)
+                    traceId = trace.GetString() ?? traceId;
+            }
+            catch (JsonException) { }
+            throw new DesktopApiException((int)response.StatusCode, errorCode, errorCode, retryable: retryable, traceId: traceId);
+        }
         return await response.Content.ReadFromJsonAsync<DesktopJob>(_json, cancellationToken);
     }
 

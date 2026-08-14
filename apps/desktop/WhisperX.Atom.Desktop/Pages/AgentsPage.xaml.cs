@@ -88,7 +88,7 @@ public sealed partial class AgentsPage : Page
         LoadingRing.IsActive = _viewModel.IsLoading;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
         AgentsList.Visibility = _viewModel.HasAgents ? Visibility.Visible : Visibility.Collapsed;
-        AgentsEmptyState.Visibility = _viewModel.HasAgents ? Visibility.Collapsed : Visibility.Visible;
+        AgentsEmptyState.Visibility = _viewModel.HasAgents || _viewModel.IsLoading ? Visibility.Collapsed : Visibility.Visible;
         EmptyTitle.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? "Не удалось загрузить реестр" : "Зарегистрированных агентов нет";
         EmptyDescription.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText)
             ? _viewModel.ErrorText
@@ -109,7 +109,7 @@ public sealed partial class AgentsPage : Page
         DetailsEmptyText.Visibility = agent is null ? Visibility.Visible : Visibility.Collapsed;
         if (agent is null) return;
         DetailsName.Text = string.IsNullOrWhiteSpace(agent.Name) ? "Без имени" : agent.Name;
-        DetailsStatus.Text = agent.Status;
+        DetailsStatus.Text = agent.EffectiveStatusText;
         DetailsLastSeen.Text = agent.LastSeenText;
         DetailsRoom.Text = agent.RoomText;
     }

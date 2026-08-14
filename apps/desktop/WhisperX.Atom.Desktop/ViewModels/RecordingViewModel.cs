@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using WhisperX.Atom.Desktop;
 using WhisperX.Atom.Recorder;
@@ -12,6 +13,8 @@ public sealed class RecordingViewModel : ObservableObject
     private CancellationTokenSource? _pollCts;
     private Task? _pollTask;
     private Task? _deviceSubscriptionTask;
+    private Task? _audioTelemetryTask;
+    private Task? _mediaClockTask;
     private RecordingState _state = RecordingState.Checking;
     private string _title = "Новая запись";
     private string? _sessionId;
@@ -48,12 +51,20 @@ public sealed class RecordingViewModel : ObservableObject
     private bool? _systemAudioClipping;
     private bool _microphoneTelemetryStale = true;
     private bool _systemAudioTelemetryStale = true;
+    private string _effectiveMicrophoneName = "Устройство не подтверждено";
+    private string _microphoneSignalState = "UNKNOWN";
     private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
     private IReadOnlyList<double> _systemAudioWaveform = Array.Empty<double>();
     private string _microphoneTestStatus = "Микрофон ещё не проверен.";
     private string _systemAudioTestStatus = "Системный звук ещё не проверен.";
     private bool _deviceListRefreshInProgress;
     private bool _deviceEventStreamSupported;
+    private bool _audioTelemetryStreamSupported;
+    private long _lastLiveTelemetrySequence;
+    private DateTimeOffset _lastLiveTelemetryAtUtc = DateTimeOffset.MinValue;
+    private long _authoritativeMediaTimeMs;
+    private long _mediaClockAnchorTicks;
+    private long _mediaClockAnchorMs;
     private string _processingStatus = "После остановки здесь появится статус WhisperX.";
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
@@ -63,6 +74,8 @@ public sealed class RecordingViewModel : ObservableObject
     private string _localFinalizeState = "PENDING";
     private string _deliveryState = "NOT_STARTED";
     private string? _sessionErrorCode;
+    private string? _sessionTraceId;
+    private DateTimeOffset? _nextRetryAtUtc;
     private bool _sessionRetryable;
     private int _chunksTotal;
     private int _chunksConfirmed;
@@ -84,9 +97,13 @@ public sealed class RecordingViewModel : ObservableObject
         var settings = services.Settings.Load();
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
         _microphoneDeviceId = settings.MicrophoneDeviceId;
-        _systemAudioDeviceId = settings.SystemAudioDeviceId;
+        // AudioGraph does not expose Process Loopback yet. Do not carry a
+        // legacy system-audio endpoint into a microphone-only SET_AUDIO_DEVICES
+        // request: the Host would reject the whole transaction even though the
+        // microphone selection itself is valid.
+        _systemAudioDeviceId = RecorderRuntimeMode.IsAudioGraph ? null : settings.SystemAudioDeviceId;
         _confirmedMicrophoneDeviceId = settings.MicrophoneDeviceId;
-        _confirmedSystemAudioDeviceId = settings.SystemAudioDeviceId;
+        _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
         _recordingProfile = NormalizeRecordingProfile(settings.RecordingProfile);
     }
 
@@ -129,6 +146,10 @@ public sealed class RecordingViewModel : ObservableObject
         _ => "Локальное сохранение ожидает"
     };
     public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
+    public string DeliveryDiagnosticLabel => string.IsNullOrWhiteSpace(_sessionErrorCode)
+        ? "Причина доставки: —"
+        : $"Причина: {_sessionErrorCode}{(_nextRetryAtUtc is DateTimeOffset retry ? $" · следующая попытка {retry.ToLocalTime():HH:mm:ss}" : string.Empty)}";
+    public string DeliveryTraceLabel => string.IsNullOrWhiteSpace(_sessionTraceId) ? string.Empty : $"Trace: {_sessionTraceId}";
     public string ChunkSyncLabel => _chunksTotal == 0
         ? "Чанки: пока не созданы"
         : $"Чанки: {_chunksConfirmed} / {_chunksTotal} подтверждено · ожидают: {_chunksReady + _chunksUploading + _chunksFailed}";
@@ -193,6 +214,18 @@ public sealed class RecordingViewModel : ObservableObject
     public string MicrophoneDbLabel => FormatDb(_microphoneDb);
     public string SystemAudioDbLabel => FormatDb(_systemAudioDb);
     public string MicrophoneTelemetryLabel => FormatTelemetry(_microphoneRmsDb, _microphoneClipping, _microphoneTelemetryStale);
+    public string EffectiveMicrophoneLabel => $"Записывается: {_effectiveMicrophoneName}";
+    public string MicrophoneSignalLabel => _microphoneSignalState switch
+    {
+        "READY" => "Голос записывается",
+        "READY_NO_SIGNAL" => "Поток открыт, сигнала пока нет",
+        "CLIPPING" => "Голос записывается, но уровень перегружен",
+        "FORMAT_MISMATCH" => "Ошибка формата аудиобуфера",
+        "NO_PACKETS" => "Ожидаются аудиокадры от микрофона",
+        "UNAVAILABLE" => "Микрофон недоступен",
+        _ => "Состояние сигнала проверяется"
+    };
+    public string MicrophoneSignalState => _microphoneSignalState;
     public string SystemAudioTelemetryLabel => FormatTelemetry(_systemAudioRmsDb, _systemAudioClipping, _systemAudioTelemetryStale);
     public IReadOnlyList<double> MicrophoneWaveform => _microphoneWaveform;
     public IReadOnlyList<double> SystemAudioWaveform => _systemAudioWaveform;
@@ -224,6 +257,10 @@ public sealed class RecordingViewModel : ObservableObject
     };
     public bool CanStart => (State is RecordingState.Idle or RecordingState.Error)
         && _recorderRuntimeReady && _hasAudioSource && _localStorageReady && AgentReady;
+    public bool CanAttemptStart => State is RecordingState.Idle or RecordingState.Error or RecordingState.Unavailable;
+    public string StartReadinessMessage => CanStart
+        ? "Recorder и микрофон готовы. Запись сохраняется локально даже при временной недоступности сервера."
+        : GetStartBlockedMessage();
     public bool CanPause => State == RecordingState.Recording;
     public bool CanResume => State == RecordingState.Paused;
     public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
@@ -247,6 +284,9 @@ public sealed class RecordingViewModel : ObservableObject
         // listener and make HEALTH/START appear to hang.
         if (RecorderRuntimeMode.IsAudioGraph && _deviceEventStreamSupported)
             _deviceSubscriptionTask = DeviceSubscriptionLoopAsync(_pollCts.Token);
+        if (RecorderRuntimeMode.IsAudioGraph && _audioTelemetryStreamSupported)
+            _audioTelemetryTask = AudioTelemetrySubscriptionLoopAsync(_pollCts.Token);
+        _mediaClockTask = MediaClockLoopAsync(_pollCts.Token);
     }
 
     public async Task StopPollingAsync()
@@ -257,8 +297,12 @@ public sealed class RecordingViewModel : ObservableObject
             _pollCts.Cancel();
             try { if (_pollTask is not null) await _pollTask; } catch (OperationCanceledException) { }
             try { if (_deviceSubscriptionTask is not null) await _deviceSubscriptionTask; } catch (OperationCanceledException) { }
+            try { if (_audioTelemetryTask is not null) await _audioTelemetryTask; } catch (OperationCanceledException) { }
+            try { if (_mediaClockTask is not null) await _mediaClockTask; } catch (OperationCanceledException) { }
             _pollTask = null;
             _deviceSubscriptionTask = null;
+            _audioTelemetryTask = null;
+            _mediaClockTask = null;
             _pollCts.Dispose();
             _pollCts = null;
         }
@@ -292,7 +336,7 @@ public sealed class RecordingViewModel : ObservableObject
             {
                 await foreach (var response in _services.Recorder.SubscribeAudioDeviceEventsAsync(cancellationToken))
                 {
-                    ApplyResponse(response);
+                    ApplyResponse(response, preserveUserFeedback: true);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -313,13 +357,47 @@ public sealed class RecordingViewModel : ObservableObject
         }
     }
 
+    private async Task AudioTelemetrySubscriptionLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await foreach (var response in _services.Recorder.SubscribeAudioTelemetryAsync(cancellationToken))
+                    ApplyLiveTelemetry(response.AudioTelemetry);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (RecorderIpcException) { }
+            catch (IOException) { }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    private async Task MediaClockLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            if (State != RecordingState.Recording || _sessionId is null) continue;
+            if (_lastLiveTelemetryAtUtc == DateTimeOffset.MinValue
+                || DateTimeOffset.UtcNow - _lastLiveTelemetryAtUtc > TimeSpan.FromMilliseconds(500))
+                continue;
+            var elapsedMs = (Stopwatch.GetTimestamp() - _mediaClockAnchorTicks) * 1000d / Stopwatch.Frequency;
+            var estimate = _mediaClockAnchorMs + (long)Math.Clamp(elapsedMs, 0d, 500d);
+            if (estimate > MediaTimeMs.GetValueOrDefault()) MediaTimeMs = estimate;
+        }
+    }
+
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken));
+            ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken), preserveUserFeedback: true);
             OnPropertyChanged(nameof(AgentReady));
             OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(StartReadinessMessage));
             if (_services.Backend.HasSession && !AgentReady && State is (RecordingState.Idle or RecordingState.Error))
             {
                 StatusMessage = _services.AgentBootstrap.LastStatus.Message;
@@ -330,18 +408,56 @@ public sealed class RecordingViewModel : ObservableObject
         {
             WarningMessage = "Recorder Agent занят другой операцией; текущая запись продолжается.";
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             State = RecordingState.Unavailable;
             StatusMessage = "Подключите Recorder Agent и повторите проверку устройств.";
-            ErrorMessage = SafeError(ex);
+            // Background health polling updates the persistent state text but
+            // must not flash and then erase an InfoBar every two seconds.
+            // A user-initiated START below surfaces the same failure until the
+            // user retries it.
             OnPropertyChanged(nameof(AgentStatus));
+            OnPropertyChanged(nameof(StartReadinessMessage));
         }
     }
 
     public async Task<bool> StartRecordingAsync()
     {
-        if (!CanStart) return false;
+        if (!CanAttemptStart) return false;
+        if (!CanStart)
+        {
+            ErrorMessage = string.Empty;
+            WarningMessage = string.Empty;
+            State = RecordingState.Checking;
+            StatusMessage = "Проверяю и запускаю локальный Recorder Host…";
+            try
+            {
+                var host = await _services.RecorderService.StartAsync();
+                if (!host.PipeReachable)
+                {
+                    State = RecordingState.Unavailable;
+                    ErrorMessage = MapRecordingError(host.Error ?? "RECORDER_HOST_UNAVAILABLE");
+                    StatusMessage = "Recorder Host не готов. Запись не запущена.";
+                    return false;
+                }
+
+                await RefreshAsync();
+                if (!CanStart)
+                {
+                    State = RecordingState.Error;
+                    ErrorMessage = GetStartBlockedMessage();
+                    StatusMessage = "Устраните указанную причину и повторите запуск записи.";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                State = RecordingState.Unavailable;
+                ErrorMessage = SafeError(ex);
+                StatusMessage = "Recorder Host не готов. Запись не запущена.";
+                return false;
+            }
+        }
         // A new recording reuses this ViewModel. Stop observers for the
         // previous session before clearing its UI state; the Agent continues
         // delivering that session in the background, but its tracker must not
@@ -354,7 +470,15 @@ public sealed class RecordingViewModel : ObservableObject
         LocalFinalizeState = "PENDING";
         DeliveryState = "NOT_STARTED";
         _sessionErrorCode = null;
+        _sessionTraceId = null;
+        _nextRetryAtUtc = null;
         _sessionRetryable = false;
+        _lastLiveTelemetrySequence = 0;
+        _lastLiveTelemetryAtUtc = DateTimeOffset.MinValue;
+        _authoritativeMediaTimeMs = 0;
+        _mediaClockAnchorMs = 0;
+        _mediaClockAnchorTicks = Stopwatch.GetTimestamp();
+        MediaTimeMs = 0;
         ProcessingError = string.Empty;
         TranscriptStatus = "Стенограмма ещё не запущена.";
         TranscriptSegments.Clear();
@@ -527,6 +651,18 @@ public sealed class RecordingViewModel : ObservableObject
         try
         {
             var response = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId);
+            if (response.AudioGraphProbe is { } graph)
+            {
+                MicrophoneTestStatus = !graph.Ready
+                    ? $"Проверка не пройдена: {MapRecordingError(graph.ErrorCode ?? response.Error)}."
+                    : !graph.SignalDetected
+                        ? $"Поток открыт: кадров {graph.FrameCount}, но сигнал не обнаружен."
+                        : graph.Clipping
+                            ? $"Сигнал обнаружен, но есть clipping. Пик: {graph.PeakDb:0} dB."
+                            : $"Микрофон работает. Средний уровень: {graph.AverageRmsDb:0} dB, пик: {graph.PeakDb:0} dB.";
+                await RefreshAsync();
+                return;
+            }
             var result = response.AudioSourceTest;
             MicrophoneTestStatus = result is null
                 ? "Не удалось получить результат проверки."
@@ -589,9 +725,12 @@ public sealed class RecordingViewModel : ObservableObject
 
     private async Task SaveAndSyncDevicesAsync(string? previousMicrophoneId, string? previousSystemAudioId, bool microphoneChanged, bool systemChanged)
     {
+        AgentIpcResponse? response = null;
         try
         {
-            var response = await _services.Recorder.SetAudioDevicesAsync(_microphoneDeviceId, _systemAudioDeviceId);
+            response = await _services.Recorder.SetAudioDevicesAsync(
+                _microphoneDeviceId,
+                RecorderRuntimeMode.IsAudioGraph ? null : _systemAudioDeviceId);
             if (!response.Ok) throw new InvalidOperationException(response.Error ?? "Agent не подтвердил устройства.");
             ApplyResponse(response);
             await RefreshAsync();
@@ -615,9 +754,19 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedSystemAudioId));
             ErrorMessage = ex is InvalidOperationException { Message: "DEVICE_SELECTION_NOT_CONFIRMED" }
                 ? "Recorder Agent не подтвердил выбранное устройство. Возвращено предыдущее значение."
+                : response is { Ok: false }
+                    ? FormatAgentError(response)
                 : SafeError(ex);
             try { await _services.Recorder.SetAudioDevicesAsync(previousMicrophoneId, previousSystemAudioId); } catch { }
         }
+    }
+
+    private static string FormatAgentError(AgentIpcResponse response)
+    {
+        var message = MapRecordingError(response.Error);
+        return string.IsNullOrWhiteSpace(response.ErrorDetail)
+            ? message
+            : $"{message} ({response.ErrorDetail})";
     }
 
     private async Task StartProcessingPollingAsync(Guid meetingId)
@@ -712,6 +861,8 @@ public sealed class RecordingViewModel : ObservableObject
         DeliveryState = session.DeliveryState;
         ArchivePath = session.ArchivePath;
         _sessionErrorCode = session.ErrorCode;
+        _sessionTraceId = session.TraceId;
+        _nextRetryAtUtc = session.NextRetryAtUtc;
         _sessionRetryable = session.Retryable;
         if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)
             && !HasServerAcceptedRecording(session))
@@ -759,6 +910,8 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(ChunkSyncLabel));
         OnPropertyChanged(nameof(PendingBytesLabel));
         OnPropertyChanged(nameof(PendingAgeLabel));
+        OnPropertyChanged(nameof(DeliveryDiagnosticLabel));
+        OnPropertyChanged(nameof(DeliveryTraceLabel));
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(AgentStatus));
     }
@@ -904,6 +1057,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             "UPLOAD_CONNECTION_LOST" => "Соединение с сервером загрузки потеряно. Загрузка продолжится с последнего подтверждённого блока.",
             "MEDIA_NO_AUDIO" => "В файле не найден аудиосигнал.",
+            "NO_SPEECH_DETECTED" => "Аудио сохранено, но речь не обнаружена. Проверьте выбранный микрофон и уровень сигнала.",
             "MODEL_ACCESS_ERROR" => "Модель WhisperX недоступна. Проверьте HF-токен и права доступа к модели.",
             "CUDA_UNAVAILABLE" => "GPU CUDA недоступна. Проверьте драйвер NVIDIA и конфигурацию workers.",
             "CUDA_OOM" => "На GPU недостаточно видеопамяти для этой модели WhisperX.",
@@ -922,20 +1076,31 @@ public sealed class RecordingViewModel : ObservableObject
         _services.Settings.Save(current with { ArchiveRoot = ArchiveRoot, MicrophoneDeviceId = _microphoneDeviceId, SystemAudioDeviceId = _systemAudioDeviceId, RecordingProfile = _recordingProfile });
     }
 
-    private void ApplyResponse(AgentIpcResponse response)
+    private void ApplyResponse(AgentIpcResponse response, bool preserveUserFeedback = false)
     {
         _lastAgentResponse = response;
         var parsedState = response.Ok ? ParseState(response.State) : RecordingState.Error;
-        ErrorMessage = !response.Ok || parsedState == RecordingState.Error
-            ? MapRecordingError(response.Error)
-            : string.Empty;
-        WarningMessage = response.Ok && parsedState != RecordingState.Error && !string.IsNullOrWhiteSpace(response.Error)
-            ? MapRecordingError(response.Error)
-            : string.Empty;
+        if (!preserveUserFeedback)
+        {
+            ErrorMessage = !response.Ok || parsedState == RecordingState.Error
+                ? MapRecordingError(response.Error)
+                : string.Empty;
+            WarningMessage = response.Ok && parsedState != RecordingState.Error && !string.IsNullOrWhiteSpace(response.Error)
+                ? MapRecordingError(response.Error)
+                : string.Empty;
+        }
         State = response.Ok ? parsedState : RecordingState.Error;
         SessionId = response.SessionId ?? SessionId;
         MeetingId = response.MeetingId ?? MeetingId;
-        MediaTimeMs = response.MediaTimeMs;
+        // Older Hosts did not include media time in HEALTH responses. Keep
+        // the last live value while a recording is active instead of
+        // resetting the timer to 00:00:00 on every two-second refresh.
+        if (response.MediaTimeMs is long mediaTimeMs)
+            SetAuthoritativeMediaTime(mediaTimeMs);
+        else if (parsedState is not (RecordingState.Recording or RecordingState.Paused)
+            && _sessionId is null
+            && response.SessionStatus is null)
+            MediaTimeMs = null;
             if (response.Health is { } health)
         {
             _pendingUploads = health.PendingUploadSessions;
@@ -946,6 +1111,9 @@ public sealed class RecordingViewModel : ObservableObject
                 : string.Equals(health.CaptureEngine, "LEGACY_WASAPI", StringComparison.OrdinalIgnoreCase);
             _deviceEventStreamSupported = health.Capabilities?.Contains(
                 AgentIpcProtocol.DeviceEventStreamCapability,
+                StringComparer.OrdinalIgnoreCase) == true;
+            _audioTelemetryStreamSupported = health.Capabilities?.Contains(
+                AgentIpcProtocol.AudioTelemetryStreamCapability,
                 StringComparer.OrdinalIgnoreCase) == true;
             if (string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
                 && (health.Capabilities is null
@@ -967,24 +1135,37 @@ public sealed class RecordingViewModel : ObservableObject
             _storageFreePercent = health.StorageFreePercent;
             RecordingProfileManaged = health.RecordingProfileManaged;
             RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
-            _microphoneDb = health.MicrophoneDb;
+            if (!_audioTelemetryStreamSupported || State is not (RecordingState.Recording or RecordingState.Paused))
+            {
+                _microphoneDb = health.MicrophoneDb;
+                _microphoneRmsDb = health.MicrophoneRmsDb;
+                _microphoneClipping = health.MicrophoneClipping;
+                _microphoneTelemetryStale = health.MicrophoneTelemetryStale;
+            }
             _systemAudioDb = health.SystemAudioDb;
-            _microphoneRmsDb = health.MicrophoneRmsDb;
             _systemAudioRmsDb = health.SystemAudioRmsDb;
-            _microphoneClipping = health.MicrophoneClipping;
             _systemAudioClipping = health.SystemAudioClipping;
-            _microphoneTelemetryStale = health.MicrophoneTelemetryStale;
+            _effectiveMicrophoneName = string.IsNullOrWhiteSpace(health.EffectiveMicrophoneDeviceName)
+                ? "Устройство не подтверждено"
+                : health.EffectiveMicrophoneDeviceName!;
+            _microphoneSignalState = health.MicrophoneSignalState;
             _systemAudioTelemetryStale = health.SystemAudioTelemetryStale;
-            _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, health.MicrophonePeak);
+            if (!_audioTelemetryStreamSupported)
+                _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, health.MicrophonePeak);
             _systemAudioWaveform = AppendWaveformSample(_systemAudioWaveform, health.SystemAudioPeak);
             OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(StartReadinessMessage));
             OnPropertyChanged(nameof(SystemAudioCaptureAvailable));
+            OnPropertyChanged(nameof(EffectiveMicrophoneLabel));
+            OnPropertyChanged(nameof(MicrophoneSignalLabel));
+            OnPropertyChanged(nameof(MicrophoneSignalState));
             OnPropertyChanged(nameof(PendingUploadsLabel));
             OnPropertyChanged(nameof(EncoderBacklogLabel));
             OnPropertyChanged(nameof(BackgroundDeliveryLabel));
             OnPropertyChanged(nameof(RawReadyLabel));
             OnPropertyChanged(nameof(RawEncoderReadyLabel));
             OnPropertyChanged(nameof(StorageWatermarkLabel));
+            UpdateMicrophoneSignalFeedback(health);
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             // The AudioGraph Host rejected a legacy NAudio device identity.
             // Keep DEFAULT as the effective strategy instead of making the UI
@@ -1012,7 +1193,21 @@ public sealed class RecordingViewModel : ObservableObject
                 WarningMessage = "Выберите или подтвердите микрофон Windows по умолчанию перед следующей записью.";
             }
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
-            _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
+            if (RecorderRuntimeMode.IsAudioGraph)
+            {
+                // Clear a legacy WASAPI render endpoint as soon as the Host
+                // confirms AudioGraph. This keeps later microphone changes
+                // independent from the deferred system-audio feature.
+                if (_systemAudioDeviceId is not null || _confirmedSystemAudioDeviceId is not null)
+                {
+                    _systemAudioDeviceId = null;
+                    _confirmedSystemAudioDeviceId = null;
+                    SaveSettings();
+                    OnPropertyChanged(nameof(SelectedSystemAudioId));
+                }
+            }
+            else
+                _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
             if (_confirmedMicrophoneDeviceId is null) _confirmedMicrophoneDeviceId = health.SelectedMicrophoneDeviceId;
             if (_confirmedSystemAudioDeviceId is null) _confirmedSystemAudioDeviceId = health.SelectedSystemAudioDeviceId;
             _deviceListRefreshInProgress = true;
@@ -1068,6 +1263,40 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(AgentStatus));
+    }
+
+    private void ApplyLiveTelemetry(AgentIpcAudioTelemetry? telemetry)
+    {
+        if (telemetry is null || telemetry.Sequence <= _lastLiveTelemetrySequence) return;
+        _lastLiveTelemetrySequence = telemetry.Sequence;
+        _lastLiveTelemetryAtUtc = DateTimeOffset.UtcNow;
+        _microphoneDb = telemetry.PeakDb;
+        _microphoneRmsDb = telemetry.RmsDb;
+        _microphoneClipping = telemetry.Clipping;
+        _microphoneTelemetryStale = telemetry.IsStale;
+        _microphoneSignalState = telemetry.SignalState;
+        _effectiveMicrophoneName = string.IsNullOrWhiteSpace(telemetry.EffectiveDeviceName)
+            ? _effectiveMicrophoneName
+            : telemetry.EffectiveDeviceName!;
+        _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, telemetry.PeakLinear);
+        if (_sessionId is not null) SetAuthoritativeMediaTime(telemetry.MediaTimeMs);
+        OnPropertyChanged(nameof(MicrophoneLevel));
+        OnPropertyChanged(nameof(MicrophoneDbLabel));
+        OnPropertyChanged(nameof(MicrophoneTelemetryLabel));
+        OnPropertyChanged(nameof(MicrophoneSignalLabel));
+        OnPropertyChanged(nameof(MicrophoneSignalState));
+        OnPropertyChanged(nameof(MicrophoneWaveform));
+        OnPropertyChanged(nameof(MicrophoneTelemetryStale));
+        OnPropertyChanged(nameof(EffectiveMicrophoneLabel));
+    }
+
+    private void SetAuthoritativeMediaTime(long mediaTimeMs)
+    {
+        var monotonic = Math.Max(_authoritativeMediaTimeMs, Math.Max(0, mediaTimeMs));
+        _authoritativeMediaTimeMs = monotonic;
+        _mediaClockAnchorMs = monotonic;
+        _mediaClockAnchorTicks = Stopwatch.GetTimestamp();
+        if (MediaTimeMs is null || monotonic >= MediaTimeMs.Value) MediaTimeMs = monotonic;
     }
 
     private static bool UpdateDevices(IReadOnlyList<AgentIpcAudioDevice>? source, ObservableCollection<AudioDeviceOption> target, string? selectedId, string unavailableLabel)
@@ -1131,6 +1360,8 @@ public sealed class RecordingViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(value)) return "Recorder Agent сообщил об ошибке.";
         var code = value.Trim().ToUpperInvariant();
+        var legacyDetailSeparator = code.IndexOf(':');
+        if (legacyDetailSeparator > 0) code = code[..legacyDetailSeparator];
         return code switch
         {
             "RECORDER_HOST_NOT_RUNNING" => "Recorder Host не запущен. Перезапустите приложение или установите актуальный пакет.",
@@ -1138,11 +1369,16 @@ public sealed class RecordingViewModel : ObservableObject
             "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "IPC_VERSION_INCOMPATIBLE" => "Установленная версия Recorder Host несовместима с Desktop или требует перезапуска. Завершите старый Host и запустите актуальный установщик.",
             "RECORDER_IPC_ACCESS_DENIED" => "Доступ Desktop к Recorder Host запрещён ACL named pipe. Перезапустите Host под текущим пользователем.",
             "AUDIO_DEFAULT_ENDPOINT_MISSING" or "AUDIO_DEVICE_UNAVAILABLE" => "Windows не предоставила доступное устройство записи. Выберите микрофон или подтвердите устройство по умолчанию.",
+            "SELECTED_DEVICE_UNAVAILABLE" or "AUDIO_DEVICE_NOT_READY" or "AUDIO_DEVICE_NOT_FOUND" => "Выбранный микрофон недоступен. Выберите активное устройство из списка и повторите проверку.",
+            "AUDIO_DEVICE_INACTIVE" or "AUDIO_DEVICE_LOST" => "Выбранный микрофон отключён или стал недоступен. Подключите его и выберите заново.",
+            "AUDIO_INPUT_NODE_CREATE_FAILED" => "Windows не смогла открыть входной узел микрофона. Закройте приложения, использующие микрофон, и проверьте разрешения Windows.",
+            "AUDIO_GRAPH_CREATE_FAILED" => "Windows не смогла создать AudioGraph для микрофона. Перезапустите Recorder Host и проверьте аудиодрайвер.",
+            "AUDIO_BUFFER_FORMAT_MISMATCH" => "Recorder получил аудиобуфер неожиданного формата. Обновите Recorder Host до актуального установщика.",
+            "AUDIO_NO_FRAMES" or "AUDIO_CALLBACK_TIMEOUT" => "Микрофон найден, но аудиокадры не поступают. Проверьте разрешение микрофона и устройство по умолчанию.",
             "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
             "MICROPHONE_PROBE_REQUIRED" or "microphone_probe_required" => "Микрофон найден, но ещё не подтверждён реальным захватом. Нажмите «Проверить микрофон».",
             "SYSTEM_AUDIO_PROBE_REQUIRED" or "system_audio_probe_required" => "Системный аудиопоток ещё не подтверждён реальным захватом. Нажмите «Проверить системный звук».",
             "AUDIO_NO_DATA" => "Поток открылся, но за время проверки не пришёл ни один аудиопакет.",
-            "AUDIO_CALLBACK_TIMEOUT" => "Аудиопоток открылся, но первый буфер не пришёл вовремя. Проверьте устройство и разрешения Windows.",
             "AUDIO_DEVICE_ACCESS_DENIED" => "Windows не разрешила доступ к аудиоустройству. Проверьте разрешение микрофона и классических приложений.",
             "AUDIO_FORMAT_UNSUPPORTED" => "Формат аудиоустройства не поддерживается Recorder Agent.",
             "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Проверьте свободное место и доступ к архиву.",
@@ -1161,6 +1397,11 @@ public sealed class RecordingViewModel : ObservableObject
             "DEVICE_SELECTION_NOT_CONFIRMED" => "Recorder Agent не подтвердил выбранное устройство. Предыдущее устройство восстановлено.",
             "AGENT_HEARTBEAT_STALE" => "Recorder Agent не подтвердил свежее подключение к серверу.",
             "AGENT_SERVER_UNAVAILABLE" => "Recorder Agent не подключён к LAN-серверу. Локальная запись останется доступной после подтверждённой привязки.",
+            "SERVER_NOT_CONFIGURED" => "Адрес сервера не задан. Укажите LAN-origin в настройках или переустановите пакет с конфигурацией сервера.",
+            "SERVER_NETWORK_UNREACHABLE" => "Сервер недоступен по сети. Проверьте Wi‑Fi/LAN, адрес сервера и брандмауэр. Локальная запись продолжается.",
+            "SERVER_TIMEOUT" => "Сервер не ответил вовремя. Запись сохранена локально, следующая попытка будет выполнена автоматически.",
+            "UPLOAD_RETRY_PENDING" => "Запись сохранена локально и ожидает повторной отправки.",
+            "PROCESSING_UNAVAILABLE" => "Аудио принято, но очередь WhisperX сейчас недоступна. Доставка и обработка будут повторены.",
             "OWNER_REQUIRED" => "Для серверной записи не определён владелец. Выполните вход в приложение.",
             "OWNER_AUTHORIZATION_REJECTED" => "Пользователь больше не может отправлять эту запись. Локальная копия сохранена.",
             "MEETING_OWNER_MISMATCH" => "Запись принадлежит другому пользователю и не может быть отправлена из этого сеанса.",
@@ -1175,6 +1416,8 @@ public sealed class RecordingViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(CanStart));
+        OnPropertyChanged(nameof(CanAttemptStart));
+        OnPropertyChanged(nameof(StartReadinessMessage));
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanResume));
         OnPropertyChanged(nameof(CanMark));
@@ -1183,6 +1426,42 @@ public sealed class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(CanSelectDevices));
         OnPropertyChanged(nameof(CanSelectRecordingProfile));
         OnPropertyChanged(nameof(AgentStatus));
+    }
+
+    private string GetStartBlockedMessage()
+    {
+        if (State is RecordingState.Starting or RecordingState.Checking)
+            return "Подождите завершения проверки Recorder Host и микрофона.";
+        if (State is RecordingState.Recording or RecordingState.Paused)
+            return "Запись уже идёт. Завершите текущую запись перед запуском новой.";
+        if (State == RecordingState.Finalizing)
+            return "Дождитесь локального сохранения текущей записи.";
+        if (!_recorderRuntimeReady)
+            return "Recorder Host недоступен или требует обновления. Нажмите «Начать запись», чтобы повторить его запуск.";
+        if (!_hasAudioSource)
+            return "Микрофон не готов. Проверьте устройство или выберите микрофон заново.";
+        if (!_localStorageReady)
+            return "Недостаточно свободного места либо папка локального архива недоступна.";
+        if (!AgentReady)
+            return MapRecordingError(_services.AgentBootstrap.LastStatus.Code);
+        return "Recorder пока не готов к запуску записи.";
+    }
+
+    private void UpdateMicrophoneSignalFeedback(AgentIpcHealth health)
+    {
+        if (State is not (RecordingState.Recording or RecordingState.Paused)) return;
+        if (!string.Equals(health.MicrophoneSignalState, "READY_NO_SIGNAL", StringComparison.OrdinalIgnoreCase))
+        {
+            if (WarningMessage.StartsWith("Микрофонный поток открыт", StringComparison.Ordinal))
+                WarningMessage = string.Empty;
+            return;
+        }
+
+        var silenceMs = health.MicrophoneSilenceDurationMs ?? 0;
+        if (silenceMs >= 8_000)
+            WarningMessage = silenceMs >= 30_000
+                ? "Микрофонный поток открыт, но уже 30 секунд не содержит сигнала. Проверьте выбранное устройство Windows. Запись продолжается."
+                : "Микрофонный поток открыт, но сигнал не обнаружен. Проверьте, что выбран физический микрофон. Запись продолжается.";
     }
 
     private static string FormatMediaTime(long milliseconds) => TimeSpan.FromMilliseconds(Math.Max(0, milliseconds)).ToString(@"hh\:mm\:ss");

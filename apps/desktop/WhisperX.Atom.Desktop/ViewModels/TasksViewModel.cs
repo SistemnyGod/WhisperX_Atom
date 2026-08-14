@@ -20,7 +20,7 @@ public sealed class TaskRegistryItem
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
     public string TaskText => Task.Task;
     public string ResponsibleText => string.IsNullOrWhiteSpace(Task.Responsible) ? "Ответственный не указан" : Task.Responsible!;
-    public string StatusText => Task.Status;
+    public string StatusText => UiStatusMapper.Text(Task.Status);
     public string DeadlineText => Task.Deadline.HasValue
         ? Task.Deadline.Value.ToLocalTime().ToString("dd.MM.yyyy", CultureInfo.CurrentCulture)
         : "Без срока";

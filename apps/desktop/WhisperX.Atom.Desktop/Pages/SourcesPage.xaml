@@ -14,13 +14,21 @@
                     <TextBlock Text="Recorder Agent, устройства записи и серверные агенты" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
                 </StackPanel>
                 <StackPanel x:Name="SourcesActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                    <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="OpenRecordingButton_Click" />
-                    <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
+                    <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="OpenRecordingButton_Click" AutomationProperties.Name="Открыть запись" ToolTipService.ToolTip="Перейти к выбору микрофона и записи" />
+                    <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить источники" ToolTipService.ToolTip="Повторно проверить Recorder Agent, устройства и API" />
                 </StackPanel>
             </Grid>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Открыть настройки" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения" ToolTipService.ToolTip="Проверить API, Recorder Agent и локальный сервис" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Повторить проверку" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Повторить проверку источников" />
+                </InfoBar.ActionButton>
+            </InfoBar>
 
             <Grid x:Name="StatusGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
                 <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}">
@@ -36,16 +44,20 @@
                                 <TextBlock Text="{Binding LocalAgentStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
-                        <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="18">
-                            <StackPanel>
-                                <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                <TextBlock Text="{Binding RecordingState}" Margin="0,3,0,0" />
-                            </StackPanel>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                <TextBlock Text="{Binding PendingUploadsText}" Margin="0,3,0,0" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Grid>
+                        <StackPanel Grid.Row="2" Spacing="8">
+                            <Grid ColumnDefinitions="*,*" ColumnSpacing="18">
+                                <StackPanel>
+                                    <TextBlock Text="Состояние" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding RecordingState}" Margin="0,3,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding PendingUploadsText}" Margin="0,3,0,0" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding MicrophoneSignal}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
                         <StackPanel Grid.Row="3" Spacing="3">
                             <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" />
@@ -78,6 +90,7 @@
                             <TextBlock Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap">
                                 <Run Text="Выбрано: " /><Run Text="{Binding SelectedMicrophone}" />
                             </TextBlock>
+                            <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                         <ListView x:Name="MicrophoneList" ItemsSource="{Binding Microphones}" SelectionMode="None" MaxHeight="260" BorderThickness="0">
                             <ListView.ItemTemplate>
@@ -87,12 +100,15 @@
                                             <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="{Binding State}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding StateText}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
-                        <TextBlock x:Name="MicrophoneEmptyText" Text="Активные микрофоны не обнаружены" Foreground="{StaticResource MutedTextBrush}" Padding="20,14,20,20" />
+                        <StackPanel x:Name="MicrophoneEmptyState" Padding="20,14,20,20" Spacing="8">
+                            <TextBlock x:Name="MicrophoneEmptyText" Text="{Binding MicrophoneEmptyMessage}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <Button Content="Проверить Recorder Agent" Style="{StaticResource CardButtonStyle}" Click="RefreshButton_Click" HorizontalAlignment="Left" AutomationProperties.Name="Проверить Recorder Agent" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
@@ -112,12 +128,12 @@
                                             <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="{Binding State}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding StateText}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
-                        <TextBlock x:Name="SystemAudioEmptyText" Text="Активные устройства вывода не обнаружены" Foreground="{StaticResource MutedTextBrush}" Padding="20,14,20,20" />
+                        <TextBlock x:Name="SystemAudioEmptyText" Text="{Binding SystemAudioEmptyMessage}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" Padding="20,14,20,20" />
                     </StackPanel>
                 </Border>
             </Grid>
@@ -127,7 +143,7 @@
                     <Grid Padding="20,18" ColumnDefinitions="*,Auto">
                         <StackPanel>
                             <TextBlock Text="Серверные агенты" Style="{StaticResource SectionTitleStyle}" />
-                            <TextBlock Text="Только реальные записи из /api/agents" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
+                            <TextBlock Text="Зарегистрированные подключения текущей API-сессии" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
                         </StackPanel>
                         <Button Grid.Column="1" Content="Настроить подключение" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" />
                     </Grid>
@@ -142,17 +158,18 @@
                             <DataTemplate>
                                 <Grid Padding="20,12" ColumnDefinitions="1.4*,110,150,*">
                                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding EffectiveStatusText}" Foreground="{StaticResource AccentBrush}" />
                                     <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
                                     <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <StackPanel x:Name="AgentsEmptyState" Padding="20,26" Spacing="6" HorizontalAlignment="Center">
+                    <StackPanel x:Name="AgentsEmptyState" Padding="20,26" Spacing="8" HorizontalAlignment="Center">
                         <SymbolIcon Symbol="Contact" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
                         <TextBlock Text="Зарегистрированных агентов нет" FontWeight="SemiBold" HorizontalAlignment="Center" />
                         <TextBlock Text="Войдите в API или зарегистрируйте Recorder Agent в настройках." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                        <Button Content="Открыть настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" HorizontalAlignment="Center" AutomationProperties.Name="Открыть настройки подключения" />
                     </StackPanel>
                 </StackPanel>
             </Border>

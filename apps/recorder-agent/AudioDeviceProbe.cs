@@ -30,6 +30,7 @@ public static class AudioDeviceProbe
             "AUDIO_NO_DATA" => "NO_PACKETS",
             "AUDIO_DEVICE_ACCESS_DENIED" => "ACCESS_BLOCKED",
             "AUDIO_FORMAT_UNSUPPORTED" => "OPEN_FAILED",
+            "AUDIO_BUFFER_FORMAT_MISMATCH" => "FORMAT_MISMATCH",
             "DEVICE_INACTIVE" or "AUDIO_SOURCE_UNAVAILABLE" => "DEVICE_LOST",
             _ => result.CaptureState
         };

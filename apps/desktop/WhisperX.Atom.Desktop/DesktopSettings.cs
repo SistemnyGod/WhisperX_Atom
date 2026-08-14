@@ -16,7 +16,7 @@ public sealed record DesktopSettings(
     Guid? OwnerUserId = null,
     bool AgentBootstrapConfirmed = false)
 {
-    private const string FallbackLanApiUrl = "http://192.168.2.194:8080";
+    private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public static string FilePath => Path.Combine(
@@ -38,7 +38,7 @@ public sealed record DesktopSettings(
 
     public static string DefaultApiUrl() => MachineServerConfig.ManagedServerOriginOrNull()
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
-        ?? FallbackLanApiUrl;
+        ?? UnconfiguredApiUrl;
 
     public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false)
     {

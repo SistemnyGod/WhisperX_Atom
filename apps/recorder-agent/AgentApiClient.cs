@@ -45,7 +45,10 @@ public sealed class AgentApiException : Exception
 
 public sealed class AgentApiClient : IDisposable
 {
-    private const string FallbackLanServerUrl = "http://192.168.2.194:8080";
+    // An unconfigured installation must not silently target a machine-specific
+    // LAN address. The loopback sink is never contacted while IsConfigured is
+    // false and lets the Host expose a stable SERVER_NOT_CONFIGURED state.
+    private const string UnconfiguredServerSink = "http://127.0.0.1:0/";
     private readonly HttpClient _http = CreateHttpClient(TimeSpan.FromSeconds(8));
     // Chunk uploads may legitimately carry long recordings over a busy LAN;
     // keep a separate policy from the short control client.
@@ -108,6 +111,7 @@ public sealed class AgentApiClient : IDisposable
     public Guid InstallationId => _installationId;
     public Guid? AgentId => _agentId == Guid.Empty ? null : _agentId;
     public string ServerConnectionState => _serverConnectionState;
+    public string ServerOrigin => _baseUri.ToString().TrimEnd('/');
     public DateTimeOffset? LastHeartbeatAtUtc => _lastHeartbeatAtUtc;
     public string? LastServerError => _lastServerError;
     public DateTimeOffset NextHeartbeatAtUtc => _nextHeartbeatAtUtc;
@@ -283,22 +287,26 @@ public sealed class AgentApiClient : IDisposable
                 return true;
             }
 
-            _lastServerError = response.StatusCode == HttpStatusCode.Unauthorized ? "agent_authentication_required" : $"http_{(int)response.StatusCode}";
-            _serverConnectionState = response.StatusCode == HttpStatusCode.Unauthorized ? "AUTH_REJECTED" : "SERVER_ERROR";
+            _lastServerError = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                ? "AGENT_AUTH_REJECTED"
+                : response.StatusCode == HttpStatusCode.RequestTimeout ? "SERVER_TIMEOUT" : $"http_{(int)response.StatusCode}";
+            _serverConnectionState = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                ? "AUTH_REJECTED"
+                : response.StatusCode == HttpStatusCode.RequestTimeout ? "SERVER_TIMEOUT" : "SERVER_ERROR";
             ScheduleHeartbeatRetry();
             return false;
         }
         catch (HttpRequestException ex)
         {
             _lastServerError = ex.GetType().Name;
-            _serverConnectionState = "SERVER_UNAVAILABLE";
+            _serverConnectionState = "SERVER_NETWORK_UNREACHABLE";
             ScheduleHeartbeatRetry();
             return false;
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            _lastServerError = "control_request_timeout";
-            _serverConnectionState = "SERVER_UNAVAILABLE";
+            _lastServerError = "SERVER_TIMEOUT";
+            _serverConnectionState = "SERVER_TIMEOUT";
             ScheduleHeartbeatRetry();
             return false;
         }
@@ -747,6 +755,15 @@ public sealed class AgentApiClient : IDisposable
         }
         catch (JsonException) { }
         if (string.Equals(errorCode, "AUTH_REJECTED", StringComparison.OrdinalIgnoreCase)) errorCode = "AGENT_AUTH_REJECTED";
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            errorCode = "AGENT_AUTH_REJECTED";
+            retryable = false;
+        }
+        else if (response.StatusCode == HttpStatusCode.RequestTimeout)
+            errorCode = "SERVER_TIMEOUT";
+        else if ((int)response.StatusCode >= 500 && string.Equals(errorCode, fallbackCode, StringComparison.OrdinalIgnoreCase))
+            errorCode = "SERVER_UNAVAILABLE";
         throw new AgentApiException(errorCode, retryable, response.StatusCode, traceId, detail);
     }
 
@@ -768,7 +785,7 @@ public sealed class AgentApiClient : IDisposable
         var runtimeUrl = Environment.GetEnvironmentVariable("WHISPERX_API_URL")?.Trim();
         if (IsHttpUrl(runtimeUrl)) return runtimeUrl!.TrimEnd('/') + "/";
 
-        return FallbackLanServerUrl + "/";
+        return UnconfiguredServerSink;
     }
 
     private void TryPersistMigratedConfiguration(AgentConfiguration config, Uri serverUri)

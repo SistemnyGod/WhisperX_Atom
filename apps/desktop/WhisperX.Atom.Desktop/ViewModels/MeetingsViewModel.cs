@@ -546,16 +546,16 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         _ => "Требует проверки"
     };
 
-    private static string DisplayStatus(string status) => status switch
-    {
-        "READY" => "Готово",
-        "RUNNING" => "В обработке",
-        "FAILED" => "Ошибка",
-        "CANCELLED" => "Отменено",
-        _ => string.IsNullOrWhiteSpace(status) ? "—" : status
-    };
+    private static string DisplayStatus(string status) => string.IsNullOrWhiteSpace(status) ? "—" : UiStatusMapper.Text(status);
 
-    private static string DisplayStage(string stage) => string.IsNullOrWhiteSpace(stage) ? "Этап не указан" : stage;
+    private static string DisplayStage(string stage)
+    {
+        if (string.IsNullOrWhiteSpace(stage)) return "Этап не указан";
+        var mapped = UiStatusMapper.Text(stage);
+        return string.Equals(mapped, "Состояние не определено", StringComparison.Ordinal)
+            ? stage
+            : mapped;
+    }
     private static bool IsRetryable(string status) => status.Equals("FAILED", StringComparison.OrdinalIgnoreCase) || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось загрузить данные совещания.");
 }

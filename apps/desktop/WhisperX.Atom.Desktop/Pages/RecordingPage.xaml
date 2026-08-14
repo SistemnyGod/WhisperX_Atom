@@ -27,13 +27,23 @@
                         </Border>
                     </Grid>
                     <StackPanel x:Name="RecordingActionsPanel" Orientation="Horizontal" Spacing="8">
-                        <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanStart}" Click="StartButton_Click" AutomationProperties.Name="Начать запись" ToolTipService.ToolTip="Запустить локальную запись" />
+                        <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanAttemptStart}" Click="StartButton_Click" AutomationProperties.Name="Начать запись" ToolTipService.ToolTip="Запустить локальную запись" />
                         <Button x:Name="PauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanPause}" Click="PauseResumeButton_Click" ToolTipService.ToolTip="Приостановить или продолжить запись" />
                         <Button Content="Метка" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="MarkerButton_Click" AutomationProperties.Name="Добавить метку" ToolTipService.ToolTip="Добавить временную метку" />
                         <Button Content="Решение" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="DecisionButton_Click" AutomationProperties.Name="Добавить решение" ToolTipService.ToolTip="Зафиксировать решение встречи" />
                         <Button Content="Задача" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanMark}" Click="TaskButton_Click" AutomationProperties.Name="Добавить задачу" ToolTipService.ToolTip="Зафиксировать задачу встречи" />
                         <Button Content="Завершить" Style="{StaticResource DangerButtonStyle}" IsEnabled="{Binding CanStop}" Click="StopButton_Click" AutomationProperties.Name="Завершить запись" ToolTipService.ToolTip="Остановить запись и запустить сохранение" />
                     </StackPanel>
+                    <TextBlock Text="{Binding StartReadinessMessage}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                    <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Состояние Recorder Agent" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding AgentStatus}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="Настройки" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" VerticalAlignment="Center" AutomationProperties.Name="Открыть настройки Recorder Agent" ToolTipService.ToolTip="Проверить подключение Agent и локального сервиса" />
+                        </Grid>
+                    </Border>
                 </StackPanel>
             </Border>
 
@@ -54,14 +64,17 @@
                             <StackPanel Grid.Row="3" Spacing="8">
                                 <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                                 <controls:AudioLevelMeter Label="Микрофон" Level="{Binding MicrophoneLevel}" DbText="{Binding MicrophoneDbLabel}" />
-                                <controls:AudioWaveformMonitor Samples="{Binding MicrophoneWaveform}" IsStale="{Binding MicrophoneTelemetryStale}" Height="74" />
+                                <controls:AudioWaveformMonitor Samples="{Binding MicrophoneWaveform}" SignalState="{Binding MicrophoneSignalState}" IsStale="{Binding MicrophoneTelemetryStale}" Height="74" />
+                                <TextBlock Text="{Binding MicrophoneSignalLabel}" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
+                                <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding MicrophoneSignalLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                 <TextBlock Text="{Binding MicrophoneTelemetryLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             </StackPanel>
                         </Grid>
                     </Border>
 
                     <InfoBar x:Name="ErrorInfoBar" IsOpen="False" IsClosable="False" Severity="Error">
-                        <InfoBar.ActionButton><Button Content="Повторить отправку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" /></InfoBar.ActionButton>
+                        <InfoBar.ActionButton><Button x:Name="RetryUploadInfoButton" Content="Повторить отправку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" AutomationProperties.Name="Повторить отправку записи" ToolTipService.ToolTip="Повторить доставку сохранённых аудиоданных" /></InfoBar.ActionButton>
                     </InfoBar>
                     <Button Content="Открыть локальный архив" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="{Binding CanOpenLocalArchive}" Click="OpenArchiveButton_Click" HorizontalAlignment="Left" />
                     <InfoBar x:Name="WarningInfoBar" IsOpen="False" IsClosable="False" Severity="Warning" />
@@ -71,8 +84,8 @@
                             <Grid ColumnDefinitions="*,Auto"><TextBlock Text="Локальное сохранение" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="{Binding LocalFinalizeStatusLabel}" Grid.Column="1" Foreground="{StaticResource SuccessBrush}" /></Grid>
                             <Grid x:Name="LifeCycleGrid" ColumnDefinitions="*,*,*,*,*" ColumnSpacing="8">
                                 <TextBlock Text="1 · Проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="1" Text="2 · Первый frame" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                <TextBlock Grid.Column="2" Text="3 · Durable chunk" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="2 · Первый аудиокадр" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="2" Text="3 · Чанк сохранён" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 <TextBlock Grid.Column="3" Text="4 · Master FLAC" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 <TextBlock Grid.Column="4" Text="5 · Доставка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                             </Grid>
@@ -131,6 +144,8 @@
                             <TextBlock Text="{Binding PendingUploadsLabel}" />
                             <TextBlock Text="{Binding ChunkSyncLabel}" Foreground="{StaticResource TextSecondaryBrush}" />
                             <TextBlock Text="{Binding PendingBytesLabel}" Foreground="{StaticResource TextSecondaryBrush}" />
+                            <TextBlock Text="{Binding DeliveryDiagnosticLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding DeliveryTraceLabel}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <Button x:Name="RetryUploadPanelButton" Content="Повторить отправку" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanRetryUpload}" Click="RetryUploadButton_Click" />
                         </StackPanel>
                     </Border>

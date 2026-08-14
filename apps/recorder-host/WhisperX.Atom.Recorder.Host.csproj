@@ -12,6 +12,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>WhisperX.Atom.Recorder.Host</AssemblyName>
     <RootNamespace>WhisperX.Atom.Recorder.Host</RootNamespace>
+    <!-- Keep the runtime identity stable and visibly tied to the AudioGraph
+         Float32 capture fix. Desktop uses the same identity when validating
+         that the launched Host is the binary that was built for this release. -->
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
+    <InformationalVersion>1.0.1+audio-float32-pcm16</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

@@ -27,6 +27,22 @@ def test_registry_filters_are_server_side():
         assert clause in sql
 
 
+def test_registry_reads_postgres_counts_as_bigint():
+    program = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    method = program.rsplit("public async Task<IReadOnlyList<TranscriptRegistryRow>> ListTranscriptRegistryAsync", 1)[1].split("public async Task<MeetingRow?>", 1)[0]
+    assert "checked((int)reader.GetInt64(9))" in method
+    assert "checked((int)reader.GetInt64(10))" in method
+    assert "reader.GetInt32(9)" not in method
+    assert "reader.GetInt32(10)" not in method
+
+
+def test_registry_types_nullable_filters_for_postgres_null_inference():
+    program = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    method = program.rsplit("public async Task<IReadOnlyList<TranscriptRegistryRow>> ListTranscriptRegistryAsync", 1)[1].split("public async Task<MeetingRow?>", 1)[0]
+    assert "NpgsqlDbType.Text" in method
+    assert method.count("NpgsqlDbType.TimestampTz") == 2
+
+
 def test_desktop_load_uses_one_registry_request_not_n_detail_requests():
     vm = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/TranscriptsViewModel.cs")
     load = vm.split("public async Task LoadAsync", 1)[1].split("public async Task LoadSelectedAsync", 1)[0]
@@ -34,6 +50,14 @@ def test_desktop_load_uses_one_registry_request_not_n_detail_requests():
     assert "GetTranscriptAsync" not in load
     detail = vm.split("public async Task LoadSelectedAsync", 1)[1]
     assert detail.count("GetTranscriptAsync") == 1
+
+
+def test_desktop_validates_the_restored_session_before_loading_registry():
+    vm = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/TranscriptsViewModel.cs")
+    load = vm.split("public async Task LoadAsync", 1)[1].split("public async Task LoadSelectedAsync", 1)[0]
+    assert "EnsureAuthenticatedAsync" in load
+    assert "AuthState == DesktopAuthState.Offline" in load
+    assert "HasSession" not in load
 
 
 def test_client_exposes_a_paged_registry_request():

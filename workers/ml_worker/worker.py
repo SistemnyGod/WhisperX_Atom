@@ -29,6 +29,7 @@ async def resident_llm_detected() -> bool:
     except (OSError, asyncio.TimeoutError):
         return False
 LOGGER = logging.getLogger("whisperx.gpu-worker")
+RESIDENT_LLM_RETRY_DELAY_SECONDS = max(5, int(os.getenv("GPU_RESIDENT_LLM_RETRY_DELAY_SECONDS", "15")))
 
 
 def resolve_storage_path(storage_key: str) -> Path:
@@ -48,6 +49,8 @@ def resolve_storage_path(storage_key: str) -> Path:
 
 def error_code_for(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
+    if "no speech" in text or "no_speech_detected" in text:
+        return "NO_SPEECH_DETECTED"
     if "transcript_empty" in text:
         return "TRANSCRIPT_EMPTY"
     if "invalid_timecode" in text:
@@ -64,6 +67,8 @@ def error_code_for(exc: Exception) -> str:
         return "MODEL_ACCESS_ERROR"
     if "no_audio" in text or "no audio" in text:
         return "MEDIA_NO_AUDIO"
+    if "invalid data" in text or "moov atom not found" in text or "could not find codec parameters" in text:
+        return "MEDIA_INVALID"
     if "ffmpeg" in text or "audio" in text:
         return "AUDIO_PROCESSING_ERROR"
     return "GPU_PROCESSING_FAILED"
@@ -201,6 +206,11 @@ async def run() -> None:
                 async with maintain_message(message, on_tick=lambda: asyncio.to_thread(worker._repository.renew_lease, job_id, message_id)):
                     await worker.handle(payload)
                 await message.ack()
+            except ResidentLlmConflict:
+                # The job is deliberately returned to QUEUED by handle(). A
+                # delayed NAK prevents a resident llama-server from turning
+                # the pull consumer into a tight redelivery loop.
+                await message.nak(delay=RESIDENT_LLM_RETRY_DELAY_SECONDS)
             except Exception:
                 await message.nak()
 

@@ -4,6 +4,7 @@ import gc
 import os
 import copy
 import subprocess
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,19 @@ class ProcessingService:
                 ctx.register_temp(ctx.asr_audio_path)
             ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
 
+            # A valid PCM file with no measurable signal is a normal terminal
+            # outcome, not an ASR failure. Detect it before loading/running the
+            # model so silent recordings cannot be reported as a generic
+            # TRANSCRIPT_EMPTY (and do not spend GPU time on an empty decode).
+            if _is_silent_pcm(ctx.asr_audio_path):
+                report("TRANSCRIBING", 30)
+                return _build_no_speech_result(
+                    request,
+                    config,
+                    duration_seconds,
+                    ctx.asr_preprocessing,
+                )
+
             report("TRANSCRIBING", 30)
             primary_result: dict[str, Any] = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
             primary_report = build_transcript_quality_report(primary_result, duration_seconds, thresholds)
@@ -71,6 +85,13 @@ class ProcessingService:
 
             selected_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             selected_gate = quality_gate(selected_report, thresholds)
+            if not (result.get("segments") or result.get("word_segments")) and _is_silent_pcm(ctx.asr_audio_path):
+                return _build_no_speech_result(
+                    request,
+                    config,
+                    duration_seconds,
+                    ctx.asr_preprocessing,
+                )
             if not selected_gate["valid"]:
                 raise ValueError(selected_report.reasons[0] if selected_report.reasons else "TRANSCRIPT_EMPTY")
             ctx.asr_result = result
@@ -231,6 +252,66 @@ def _probe_duration_seconds(path: Path) -> float | None:
         return duration if duration > 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def _is_silent_pcm(path: Path | None, threshold: float = 0.003) -> bool:
+    """Return True only for a readable PCM WAV with no measurable signal."""
+    if path is None or not path.is_file():
+        return False
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getsampwidth() != 2 or source.getnchannels() < 1:
+                return False
+            total = 0
+            sum_squares = 0.0
+            while True:
+                block = source.readframes(max(1, source.getframerate() * 5))
+                if not block:
+                    break
+                values = memoryview(block).cast("h")
+                total += len(values)
+                sum_squares += sum((value / 32768.0) ** 2 for value in values)
+            return total > 0 and (sum_squares / total) ** 0.5 < threshold
+    except (OSError, EOFError, ValueError):
+        return False
+
+
+def _build_no_speech_result(
+    request: ProcessingRequest,
+    config: Any,
+    duration_seconds: float | None,
+    preprocessing: dict[str, Any] | None,
+) -> ProcessingResult:
+    quality = {
+        "quality_score": 0.0,
+        "reasons": ["NO_SPEECH_DETECTED"],
+        "segment_count": 0,
+        "word_count": 0,
+        "duration_seconds": duration_seconds,
+        "audio_signal": "SILENT_PCM",
+        "asr_preprocessing": preprocessing or {},
+    }
+    return ProcessingResult(
+        job_id=request.job_id,
+        language=config.language,
+        text="",
+        segments=[],
+        word_segments=[],
+        metadata={
+            "model": config.asr_model,
+            "backend": config.asr_backend,
+            "device": config.device,
+            "compute_type": config.compute_type,
+            "processing_profile": request.profile,
+            "audio_signal": "SILENT_PCM",
+            **(preprocessing or {}),
+        },
+        status="PARTIAL_READY",
+        error_code="NO_SPEECH_DETECTED",
+        warnings=["NO_SPEECH_DETECTED"],
+        stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "SKIPPED", "DIARIZATION": "SKIPPED"},
+        quality=quality,
+    )
 
 
 def validate_transcript_result(result: dict[str, Any], media_duration_seconds: float | None = None, tolerance_seconds: float = 2.0) -> dict[str, Any]:

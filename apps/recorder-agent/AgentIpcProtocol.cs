@@ -13,6 +13,7 @@ public static class AgentIpcProtocol
 
     public const string ConcurrentRequestsCapability = "CONCURRENT_REQUESTS";
     public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
+    public const string AudioTelemetryStreamCapability = "AUDIO_TELEMETRY_STREAM_V1";
 
     public static string CurrentBuildIdentity
     {
@@ -90,7 +91,19 @@ public sealed record AgentIpcResponse(
     AudioSourceTestResult? AudioSourceTest = null,
     AudioDeviceProbeResult? AudioGraphProbe = null,
     int MinimumSupportedProtocolVersion = AgentIpcProtocol.MinimumSupportedVersion,
-    int CurrentProtocolVersion = AgentIpcProtocol.Version);
+    int CurrentProtocolVersion = AgentIpcProtocol.Version,
+    string? ErrorDetail = null,
+    AgentIpcAudioTelemetry? AudioTelemetry = null)
+{
+    /// <summary>
+    /// True when the local IPC endpoint answered with a state payload. Health
+    /// may be accompanied by a warning (for example deferred system audio),
+    /// so command success must not be used as a liveness signal.
+    /// </summary>
+    public bool IsReachable => Health is not null || Ok;
+
+    public bool HasMicrophoneCapture => Health?.MicrophoneCaptureReady == true || Health?.AudioGraphReady == true;
+}
 
 public sealed record AgentIpcHealth(
     bool Microphone,
@@ -163,7 +176,14 @@ public sealed record AgentIpcHealth(
     // endpoint Windows resolved for the current Host runtime.
     string? EffectiveMicrophoneDeviceId = null,
     string? RuntimeBuildIdentity = null,
-    IReadOnlyList<string>? Capabilities = null);
+    IReadOnlyList<string>? Capabilities = null,
+    string? EffectiveMicrophoneDeviceName = null,
+    string MicrophoneSignalState = "UNKNOWN",
+    AudioGraphAttemptDiagnostics? LastAudioGraphAttempt = null,
+    string? RuntimeUser = null,
+    string? RuntimeSid = null,
+    int? WindowsSessionId = null,
+    string? ServerOrigin = null);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
@@ -182,6 +202,20 @@ public sealed record AgentIpcAudioDevice(
     int? ValidBitsPerSample = null,
     string? NormalizedSampleFormat = null,
     DateTimeOffset? LastSeenAtUtc = null);
+
+public sealed record AgentIpcAudioTelemetry(
+    long Sequence,
+    long MediaTimeMs,
+    double RmsLinear,
+    double PeakLinear,
+    double RmsDb,
+    double PeakDb,
+    bool Clipping,
+    string SignalState,
+    string? EffectiveDeviceId,
+    string? EffectiveDeviceName,
+    DateTimeOffset CapturedAtUtc,
+    bool IsStale = false);
 
 public sealed record AgentPreflightResult(
     bool Ready,

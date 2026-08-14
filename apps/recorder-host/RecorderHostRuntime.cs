@@ -106,15 +106,32 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         }
     }
 
-    public async Task<AgentIpcResponse> HealthAsync(CancellationToken cancellationToken = default)
+    public Task<AgentIpcResponse> HealthAsync(CancellationToken cancellationToken = default)
     {
-        await _engine.DeviceCatalog.ReconcileAsync(cancellationToken).ConfigureAwait(false);
+        // DeviceWatcher is the authoritative live source and already keeps this
+        // cache current. A synchronous FindAllAsync reconciliation can stall in
+        // the Windows device stack; HEALTH must remain a bounded IPC operation
+        // because Desktop uses it for readiness and before every user action.
+        cancellationToken.ThrowIfCancellationRequested();
         var devices = _engine.DeviceCatalog.Devices.Select(ToIpcDevice).ToArray();
         var archiveRoot = _storage.ArchiveRoot;
         var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(archiveRoot))!);
         var telemetry = _engine.Telemetry;
+        var liveTelemetry = _engine.LiveTelemetry;
         var effectiveDevice = _engine.SelectedDevice;
         var ready = effectiveDevice is not null && _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed;
+        var attempt = _engine.LastAttemptDiagnostics;
+        var signalState = !ready
+            ? "UNAVAILABLE"
+            : attempt.FormatMismatch
+                ? "FORMAT_MISMATCH"
+                : (!liveTelemetry.IsStale && liveTelemetry.Clipping || liveTelemetry.IsStale && telemetry.Clipping)
+                    ? "CLIPPING"
+                    : (!liveTelemetry.IsStale ? liveTelemetry.RmsDb : telemetry.RmsDb) is null
+                        ? "NO_PACKETS"
+                        : (!liveTelemetry.IsStale ? liveTelemetry.RmsDb : telemetry.RmsDb) <= -50
+                            ? "READY_NO_SIGNAL"
+                            : "READY";
         var systemAudioDeferred = _storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY";
         var health = new AgentIpcHealth(
             Microphone: ready,
@@ -132,14 +149,14 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             // must not persist the transient endpoint id as a FIXED choice.
             SelectedMicrophoneDeviceId: _storage.MicrophoneDeviceId,
             SelectedSystemAudioDeviceId: null,
-            MicrophonePeak: telemetry.PeakDb,
-            MicrophoneDb: telemetry.RmsDb,
-            MicrophoneRms: telemetry.RmsDb,
-            MicrophoneRmsDb: telemetry.RmsDb,
-            MicrophoneClipping: telemetry.Clipping,
+            MicrophonePeak: liveTelemetry.IsStale ? telemetry.PeakLinear : liveTelemetry.PeakLinear,
+            MicrophoneDb: liveTelemetry.IsStale ? telemetry.RmsDb : liveTelemetry.PeakDb,
+            MicrophoneRms: liveTelemetry.IsStale ? telemetry.RmsDb : liveTelemetry.RmsDb,
+            MicrophoneRmsDb: liveTelemetry.IsStale ? telemetry.RmsDb : liveTelemetry.RmsDb,
+            MicrophoneClipping: liveTelemetry.IsStale ? telemetry.Clipping : liveTelemetry.Clipping,
             MicrophoneLastAudioAtUtc: telemetry.LastAudioAtUtc,
             MicrophoneSilenceDurationMs: telemetry.SilenceDurationMs,
-            MicrophoneTelemetryStale: telemetry.IsStale,
+            MicrophoneTelemetryStale: liveTelemetry.IsStale,
             ActiveSessionId: _sessionId,
             InstallationId: _api.InstallationId,
             AgentId: _api.AgentId,
@@ -156,12 +173,60 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             Capabilities: new[]
             {
                 AgentIpcProtocol.ConcurrentRequestsCapability,
-                AgentIpcProtocol.DeviceEventStreamCapability
+                AgentIpcProtocol.DeviceEventStreamCapability,
+                AgentIpcProtocol.AudioTelemetryStreamCapability
             },
+            EffectiveMicrophoneDeviceName: effectiveDevice?.Name,
+            MicrophoneSignalState: signalState,
+            LastAudioGraphAttempt: attempt,
+            RuntimeUser: Environment.UserName,
+            RuntimeSid: System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value,
+            WindowsSessionId: Process.GetCurrentProcess().SessionId,
+            ServerOrigin: _api.ServerOrigin,
             MicrophoneCaptureReady: ready,
             MicrophoneCaptureState: _engine.State.ToString());
-        return new AgentIpcResponse(!systemAudioDeferred, _engine.State.ToString(), _sessionId,
-            systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null, health);
+        return Task.FromResult(new AgentIpcResponse(
+            !systemAudioDeferred,
+            _engine.State.ToString(),
+            _sessionId,
+            systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null,
+            health,
+            MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs));
+    }
+
+    public Task<AgentIpcResponse> LiveTelemetryAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var telemetry = _engine.LiveTelemetry;
+        var device = _engine.SelectedDevice;
+        var signalState = device is null
+            ? "UNAVAILABLE"
+            : telemetry.IsStale
+                ? "NO_PACKETS"
+                : telemetry.Clipping
+                    ? "CLIPPING"
+                    : telemetry.RmsDb <= -50 ? "READY_NO_SIGNAL" : "READY";
+        var payload = new AgentIpcAudioTelemetry(
+            telemetry.Sequence,
+            telemetry.MediaTimeMs,
+            telemetry.RmsLinear,
+            telemetry.PeakLinear,
+            telemetry.RmsDb,
+            telemetry.PeakDb,
+            telemetry.Clipping,
+            signalState,
+            device?.Id,
+            device?.Name,
+            telemetry.CapturedAtUtc,
+            telemetry.IsStale);
+        return Task.FromResult(new AgentIpcResponse(
+            true,
+            _engine.State.ToString(),
+            _sessionId,
+            null,
+            null,
+            MediaTimeMs: _sessionId is null ? null : telemetry.MediaTimeMs,
+            AudioTelemetry: payload));
     }
 
     public async Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default)
@@ -274,6 +339,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             try
             {
                 await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
+                // AudioGraph replaces its completed frame channel for every
+                // capture start. Bind the durable consumer only after that
+                // reset; binding it in writer.StartAsync consumes the previous
+                // session's channel forever while the live queue overruns.
+                writer.BeginConsuming();
                 await writer.FirstDurableBytes.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -283,7 +353,15 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             }
 
             await _spool.AddEventAsync(sessionId, "FIRST_AUDIO_PACKET", cancellationToken: cancellationToken).ConfigureAwait(false);
-            return new AgentIpcResponse(true, "RECORDING", sessionId, null, null, meetingId, null, AgentIpcProtocol.Version);
+            return new AgentIpcResponse(
+                true,
+                "RECORDING",
+                sessionId,
+                null,
+                null,
+                meetingId,
+                _engine.CurrentMediaTimeMs,
+                AgentIpcProtocol.Version);
         }
         catch (Exception ex)
         {
@@ -318,13 +396,24 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         {
             if (_sessionId is null) return Error("RECORDING_NOT_ACTIVE");
             var sessionId = _sessionId;
+            var mediaTimeMs = _engine.CurrentMediaTimeMs;
             await StopCoreAsync(cancellationToken).ConfigureAwait(false);
             // STOP is a local durability boundary. Network binding, uploads and
             // server media finalization are retried by RecorderHostWorker after
             // LOCAL_READY and must not block the user's recording workflow.
             var result = await _delivery.FinalizeLocalAsync(sessionId, cancellationToken).ConfigureAwait(false);
             var status = await GetSessionStatusAsync(sessionId, cancellationToken).ConfigureAwait(false);
-            return new AgentIpcResponse(result.Success, result.Stage, sessionId, result.ErrorCode, null, status.MeetingId, null, AgentIpcProtocol.Version, null, status);
+            return new AgentIpcResponse(
+                result.Success,
+                result.Stage,
+                sessionId,
+                result.ErrorCode,
+                null,
+                status.MeetingId,
+                mediaTimeMs,
+                AgentIpcProtocol.Version,
+                null,
+                status);
         }
         catch (Exception ex) { return Error(AudioGraphErrorMapper.Map(ex), ex.Message); }
         finally { _gate.Release(); }
@@ -381,7 +470,15 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             if (!probe.Ready)
             {
                 await RestoreEngineSelectionAsync(previous).ConfigureAwait(false);
-                return Error(probe.ErrorCode ?? (mode == AudioSelectionMode.Fixed ? "SELECTED_DEVICE_UNAVAILABLE" : "AUDIO_DEVICE_NOT_READY"), probe.ErrorDetail);
+                var code = probe.ErrorCode ?? (mode == AudioSelectionMode.Fixed ? "SELECTED_DEVICE_UNAVAILABLE" : "AUDIO_DEVICE_NOT_READY");
+                return new AgentIpcResponse(
+                    false,
+                    probe.CaptureState,
+                    null,
+                    code,
+                    null,
+                    AudioGraphProbe: probe,
+                    ErrorDetail: probe.ErrorDetail);
             }
 
             _storage.SetAudioDevices(mode == AudioSelectionMode.Fixed ? deviceId : null, null);
@@ -438,8 +535,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         string? systemAudioDeviceId,
         CancellationToken cancellationToken = default)
     {
-        if (!string.IsNullOrWhiteSpace(systemAudioDeviceId))
-            return Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", "Process Loopback is intentionally outside the microphone migration.");
+        // A Desktop upgraded from the legacy WASAPI runtime may still carry a
+        // system-audio endpoint id. Process Loopback is deferred in the
+        // AudioGraph phase, but that stale optional field must not reject the
+        // Agent identity and token that are required for every server call.
+        // The Host deliberately ignores it and continues to advertise
+        // SystemAudio=false in health/preflight.
         _storage.SetArchiveRoot(archiveRoot);
         await _api.ConfigureAsync(serverUrl, agentId, token, cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(microphoneDeviceId))
@@ -470,7 +571,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     public async Task<AgentIpcResponse> UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default)
     {
         await _api.UpdateServerUrlAsync(serverUrl, cancellationToken).ConfigureAwait(false);
-        return await HealthAsync(cancellationToken).ConfigureAwait(false);
+        var health = await HealthAsync(cancellationToken).ConfigureAwait(false);
+        // Updating the LAN origin is successful once the durable Agent
+        // configuration was written. A capability warning (for example the
+        // intentionally deferred system-audio track) must not be surfaced as
+        // a failed server-address update in Settings.
+        return health with { Ok = true, Error = null };
     }
 
     public async Task<AgentIpcResponse> SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default)
@@ -494,41 +600,95 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     }
 
     public Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default)
-        => string.IsNullOrWhiteSpace(systemAudioDeviceId)
-            ? SelectDeviceAsync(microphoneDeviceId, cancellationToken)
-            : Task.FromResult(Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED", "Process Loopback is intentionally outside the microphone migration."));
+        // AudioGraph accepts microphone selection. The Desktop deliberately
+        // sends null for the deferred system-audio field; keep the Host
+        // tolerant of older Desktop builds that may still echo a stale render
+        // endpoint while changing only the microphone.
+        => SelectDeviceAsync(microphoneDeviceId, cancellationToken);
 
     public async Task ReconcileBackgroundAsync(CancellationToken cancellationToken)
     {
+        IReadOnlyList<string> sessions;
+        string? activeSession = null;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_sessionId is not null) return;
-            using var lease = RecorderRuntimeLease.Acquire(_api.InstallationId);
-            await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
-            foreach (var sessionId in await _spool.SessionsNeedingRecoveryAsync(cancellationToken).ConfigureAwait(false))
+            activeSession = _sessionId;
+            if (activeSession is not null)
             {
-                try { await _delivery.RunAsync(sessionId, cancellationToken).ConfigureAwait(false); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Recorder Host background delivery is pending. Session={SessionId}", sessionId); }
+                sessions = Array.Empty<string>();
             }
-            if (_api.IsConfigured)
+            else
             {
-                var root = _storage.ArchiveRoot;
-                var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root))!);
-                await _api.HeartbeatAsync(new DeviceHealthSnapshot(
-                    _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed,
-                    _engine.DeviceCatalog.Devices.Count,
-                    false,
-                    0,
-                    drive.IsReady ? drive.AvailableFreeSpace : 0,
-                    drive.IsReady ? drive.TotalSize : 0,
-                    root,
-                    null,
-                    _engine.DeviceCatalog.Devices.Select(ToIpcDevice).ToArray(),
-                    Array.Empty<AgentIpcAudioDevice>()), cancellationToken).ConfigureAwait(false);
+                using var lease = RecorderRuntimeLease.Acquire(_api.InstallationId);
+                await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
+                sessions = await _spool.SessionsNeedingRecoveryAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var sessionId in sessions)
+                {
+                    var session = await _spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
+                    if (session?.State is "RECORDING" or "PAUSED")
+                    {
+                        // A current-user Host can be terminated by logoff,
+                        // update or a crash. Such a session is no longer live:
+                        // close its durable lifecycle before archive/delivery
+                        // recovery so it does not remain displayed as recording
+                        // forever and get retried as an active session.
+                        await _spool.SetSessionStateAsync(sessionId, "FINALIZING", cancellationToken).ConfigureAwait(false);
+                        await _spool.AddEventAsync(
+                            sessionId,
+                            "RECORDER_RECOVERED_AFTER_RESTART",
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                    }
+                }
             }
         }
         finally { _gate.Release(); }
+
+        if (_api.IsConfigured && activeSession is not null)
+        {
+            try
+            {
+                // Completed chunks are safe to upload while capture continues;
+                // finalization remains strictly stop-scoped.
+                await _api.UploadPendingChunksAsync(_spool, activeSession, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Active recording upload is pending; local chunks remain authoritative. Session={SessionId}", activeSession);
+            }
+        }
+
+        // Archive assembly and network delivery can take minutes. They are
+        // session-scoped and must not hold the capture gate: otherwise START
+        // waits behind every historical retry and the Desktop times out while
+        // a recording may already be opening.
+        using (var deliveryGate = new SemaphoreSlim(2, 2))
+        {
+            var deliveryTasks = sessions.Select(async sessionId =>
+            {
+                await deliveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try { await _delivery.RunAsync(sessionId, cancellationToken).ConfigureAwait(false); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Recorder Host background delivery is pending. Session={SessionId}", sessionId); }
+                finally { deliveryGate.Release(); }
+            }).ToArray();
+            await Task.WhenAll(deliveryTasks).ConfigureAwait(false);
+        }
+        if (_api.IsConfigured)
+        {
+            var root = _storage.ArchiveRoot;
+            var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root))!);
+            await _api.HeartbeatAsync(new DeviceHealthSnapshot(
+                _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed,
+                _engine.DeviceCatalog.Devices.Count,
+                false,
+                0,
+                drive.IsReady ? drive.AvailableFreeSpace : 0,
+                drive.IsReady ? drive.TotalSize : 0,
+                root,
+                null,
+                _engine.DeviceCatalog.Devices.Select(ToIpcDevice).ToArray(),
+                Array.Empty<AgentIpcAudioDevice>()), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task<RecordingSessionStatus> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken)
@@ -614,7 +774,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         device.LastSeenAtUtc);
 
     private static AgentIpcResponse Error(string error, string? detail = null) =>
-        new(false, "ERROR", null, error + (string.IsNullOrWhiteSpace(detail) ? string.Empty : $":{detail}"), null);
+        new(false, "ERROR", null, error, null, ErrorDetail: detail);
 }
 
 internal sealed class AudioGraphSessionWriter
@@ -673,7 +833,6 @@ internal sealed class AudioGraphSessionWriter
             // the bounded queue while SQLite/file initialization is running.
             await EnsureChunkAsync(0).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            _worker = Task.Run(ProcessAsync);
             _encoderWorker = Task.Run(ProcessEncodingAsync);
         }
         catch
@@ -681,6 +840,12 @@ internal sealed class AudioGraphSessionWriter
             await DisposeRawAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    public void BeginConsuming()
+    {
+        if (_consumer is null) throw new InvalidOperationException("AUDIO_WRITER_NOT_STARTED");
+        _worker ??= Task.Run(ProcessAsync);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -977,6 +1142,13 @@ public sealed class RecorderHostPipeServer : BackgroundService
             return;
         }
 
+        if (request.ProtocolVersion == AgentIpcProtocol.Version
+            && string.Equals(request.Command, "SUBSCRIBE_AUDIO_TELEMETRY", StringComparison.OrdinalIgnoreCase))
+        {
+            await StreamAudioTelemetryAsync(pipe, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var response = request.ProtocolVersion != AgentIpcProtocol.Version
             ? new AgentIpcResponse(false, "ERROR", null, "IPC_VERSION_INCOMPATIBLE", null,
                 ProtocolVersion: AgentIpcProtocol.Version,
@@ -1027,6 +1199,26 @@ public sealed class RecorderHostPipeServer : BackgroundService
         {
             _runtime.DeviceChanged -= handler;
             events.Writer.TryComplete();
+        }
+    }
+
+    private async Task StreamAudioTelemetryAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    {
+        // The capture callback never writes to this pipe. A slow Desktop only
+        // delays its own telemetry connection and cannot block AudioGraph.
+        await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(50));
+        try
+        {
+            await writer.WriteLineAsync(JsonSerializer.Serialize(await _runtime.LiveTelemetryAsync(cancellationToken).ConfigureAwait(false), _json)).ConfigureAwait(false);
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await writer.WriteLineAsync(JsonSerializer.Serialize(await _runtime.LiveTelemetryAsync(cancellationToken).ConfigureAwait(false), _json)).ConfigureAwait(false);
+            }
+        }
+        catch (IOException)
+        {
+            _logger.LogDebug("Recorder Host audio telemetry subscriber disconnected.");
         }
     }
 
