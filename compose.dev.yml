@@ -97,6 +97,10 @@ services:
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       NATS_URL: nats://nats:4222
+      # Keep the durable heartbeat name explicit in Compose as well as in the
+      # image.  This prevents stale images from reporting an always-unhealthy
+      # runtime_healthcheck after a Docker restart.
+      WORKER_NAME: outbox-relay
       WORKER_INSTANCE_ID: outbox-relay
     depends_on:
       api:
@@ -129,6 +133,9 @@ services:
       IMPORT_INTERVAL_SECONDS: ${IMPORT_INTERVAL_SECONDS:-5}
       IMPORT_BATCH_SIZE: ${IMPORT_BATCH_SIZE:-8}
       IMPORT_MAX_STABLE_PATHS: ${IMPORT_MAX_STABLE_PATHS:-2048}
+      # Do not rely solely on Dockerfile ENV: LAN deployments may reuse an
+      # older image while the healthcheck contract is already updated.
+      WORKER_NAME: import-worker
       WORKER_INSTANCE_ID: import-worker
     depends_on:
       api:
@@ -151,6 +158,7 @@ services:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       MEDIA_ROOT: /data
       NATS_URL: nats://nats:4222
+      WORKER_NAME: media-worker
       WORKER_INSTANCE_ID: media-worker
     depends_on:
       postgres:
