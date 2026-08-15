@@ -340,12 +340,14 @@ public sealed class SpoolStore
         bool? errorRetryable = null,
         string? traceId = null,
         bool clearNextRetry = false,
+        bool clearError = false,
+        bool preserveError = false,
         CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE recording_sessions SET local_finalize_state=COALESCE($local,local_finalize_state), delivery_state=COALESCE($delivery,delivery_state), archive_path=COALESCE($archive,archive_path), last_error_code=$code, last_error_detail=$detail, retry_count=COALESCE($retry,retry_count), next_retry_at=CASE WHEN $clearNext=1 THEN NULL WHEN $next IS NOT NULL THEN $next ELSE next_retry_at END, last_error_http_status=$httpStatus, last_error_retryable=$retryable, trace_id=COALESCE($trace,trace_id) WHERE id=$id";
+        command.CommandText = "UPDATE recording_sessions SET local_finalize_state=COALESCE($local,local_finalize_state), delivery_state=COALESCE($delivery,delivery_state), archive_path=COALESCE($archive,archive_path), last_error_code=CASE WHEN $preserveError=1 THEN last_error_code WHEN $clearError=1 THEN NULL ELSE $code END, last_error_detail=CASE WHEN $preserveError=1 THEN last_error_detail WHEN $clearError=1 THEN NULL ELSE $detail END, retry_count=COALESCE($retry,retry_count), next_retry_at=CASE WHEN $clearNext=1 THEN NULL WHEN $next IS NOT NULL THEN $next ELSE next_retry_at END, last_error_http_status=CASE WHEN $preserveError=1 THEN last_error_http_status WHEN $clearError=1 THEN NULL ELSE $httpStatus END, last_error_retryable=CASE WHEN $preserveError=1 THEN last_error_retryable WHEN $clearError=1 THEN NULL ELSE $retryable END, trace_id=COALESCE($trace,trace_id) WHERE id=$id";
         command.Parameters.AddWithValue("$local", (object?)localFinalizeState ?? DBNull.Value);
         command.Parameters.AddWithValue("$delivery", (object?)deliveryState ?? DBNull.Value);
         command.Parameters.AddWithValue("$archive", (object?)archivePath ?? DBNull.Value);
@@ -354,6 +356,8 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$retry", (object?)retryCount ?? DBNull.Value);
         command.Parameters.AddWithValue("$next", (object?)nextRetryAtUtc?.ToString("O") ?? DBNull.Value);
         command.Parameters.AddWithValue("$clearNext", clearNextRetry ? 1 : 0);
+        command.Parameters.AddWithValue("$clearError", clearError ? 1 : 0);
+        command.Parameters.AddWithValue("$preserveError", preserveError ? 1 : 0);
         command.Parameters.AddWithValue("$httpStatus", (object?)errorHttpStatus ?? DBNull.Value);
         command.Parameters.AddWithValue("$retryable", (object?)(errorRetryable.HasValue ? (errorRetryable.Value ? 1 : 0) : null) ?? DBNull.Value);
         command.Parameters.AddWithValue("$trace", (object?)traceId ?? DBNull.Value);

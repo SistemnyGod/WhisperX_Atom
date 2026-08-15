@@ -135,6 +135,9 @@ def test_local_archive_updates_do_not_erase_delivery_retry_schedule():
     delivery = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
     assert "WHEN $clearNext=1 THEN NULL WHEN $next IS NOT NULL THEN $next ELSE next_retry_at" in spool
     assert 'command.Parameters.AddWithValue("$clearNext"' in spool
+    assert 'CASE WHEN $preserveError=1 THEN last_error_code' in spool
+    assert 'clearError: true' in delivery
+    assert 'preserveError: true' in delivery
     confirmed = delivery.split('deliveryState: "CONFIRMED"', 1)[1].split(");", 1)[0]
     assert "clearNextRetry: true" in confirmed
     persist_failure = delivery.split("private async Task<FinalizationResult> PersistFailureAsync", 1)[1]

@@ -154,6 +154,19 @@ try {
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
     if ($null -eq $status) { throw "AUDIOGRAPH_STATUS_MISSING" }
+    # A server-delivery gate must not stop at LOCAL_READY.  The recorder is
+    # intentionally local-first, but this acceptance scenario also verifies
+    # that the background bind/upload/finalize path reaches a durable terminal
+    # state before the test Host is torn down.  Keep the local-only gate fast.
+    if ($ServerDelivery) {
+        $deliveryDeadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
+        do {
+            if ($status.deliveryState -in @("CONFIRMED", "DELIVERY_FAILED")) { break }
+            Start-Sleep -Seconds 2
+            $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
+            $status = $statusResponse.sessionStatus
+        } while ($null -ne $status -and [DateTimeOffset]::UtcNow -lt $deliveryDeadline)
+    }
     $archivePath = [string]$status.archivePath
     $archiveExists = -not [string]::IsNullOrWhiteSpace($archivePath) -and (Test-Path -LiteralPath $archivePath -PathType Container)
     $archiveFiles = if ($archiveExists) { @(Get-ChildItem -LiteralPath $archivePath -Recurse -File -ErrorAction SilentlyContinue) } else { @() }
@@ -206,7 +219,9 @@ try {
     $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
     Write-Host "AudioGraph local report: $reportPath"
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or -not $report.result.durationWithinTolerance -or $deliveryFailed) {
+    $deliveryIncomplete = $ServerDelivery -and $report.result.deliveryState -ne "CONFIRMED"
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or -not $report.result.durationWithinTolerance -or $deliveryFailed -or $deliveryIncomplete) {
+        if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }

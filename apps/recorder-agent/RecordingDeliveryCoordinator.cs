@@ -38,6 +38,7 @@ public sealed class RecordingDeliveryCoordinator(
             deliveryState: deliveryState,
             errorCode: null,
             errorDetail: null,
+            clearError: true,
             cancellationToken: cancellationToken);
 
         var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken);
@@ -76,6 +77,7 @@ public sealed class RecordingDeliveryCoordinator(
         await spool.SetFinalizationStateAsync(localSessionId,
             localFinalizeState: "FINALIZING_LOCAL",
             deliveryState: "NOT_REQUESTED",
+            clearError: true,
             cancellationToken: cancellationToken);
 
         var archiveTask = CreateLocalArchiveAsync(localSessionId, cancellationToken);
@@ -126,10 +128,9 @@ public sealed class RecordingDeliveryCoordinator(
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_READY",
                 archivePath: archivePath,
-                errorCode: null,
-                errorDetail: null,
                 retryCount: 0,
                 nextRetryAtUtc: null,
+                preserveError: true,
                 cancellationToken: cancellationToken);
             return ("LOCAL_READY", archivePath);
         }
@@ -146,6 +147,7 @@ public sealed class RecordingDeliveryCoordinator(
                     errorCode: "ENCODING_PENDING",
                     errorDetail: "FLAC chunks are still being encoded",
                     nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
+                    preserveError: true,
                     cancellationToken: cancellationToken);
                 return ("LOCAL_READY", previous?.ArchivePath);
             }
@@ -154,6 +156,7 @@ public sealed class RecordingDeliveryCoordinator(
                 localFinalizeState: "LOCAL_FAILED",
                 errorCode: code,
                 errorDetail: ex.Message,
+                preserveError: true,
                 cancellationToken: cancellationToken);
             logger.LogWarning(ex, "Local archive failed; continuing server delivery. Session={SessionId}", localSessionId);
             return ("LOCAL_FAILED", null);
@@ -198,7 +201,7 @@ public sealed class RecordingDeliveryCoordinator(
         {
             if (serverSessionId is not Guid server)
             {
-                await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "BINDING", cancellationToken: cancellationToken);
+                await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "BINDING", preserveError: true, cancellationToken: cancellationToken);
                 var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
                 if (tracks.Count == 0)
                     return await PersistFailureAsync(localSessionId,
@@ -217,6 +220,7 @@ public sealed class RecordingDeliveryCoordinator(
 
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "UPLOADING",
+                preserveError: true,
                 cancellationToken: cancellationToken);
             await api.UploadPendingChunksAsync(spool, localSessionId, cancellationToken);
             var blockedChunkError = await spool.GetBlockedChunkErrorAsync(localSessionId, cancellationToken);
@@ -229,7 +233,7 @@ public sealed class RecordingDeliveryCoordinator(
             }
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
 
-            await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", cancellationToken: cancellationToken);
+            await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", preserveError: true, cancellationToken: cancellationToken);
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (!finalized.Accepted)
             {
@@ -243,6 +247,7 @@ public sealed class RecordingDeliveryCoordinator(
                 deliveryState: "WAITING_SERVER_ASSEMBLY",
                 retryCount: 0,
                 nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(10),
+                preserveError: true,
                 cancellationToken: cancellationToken);
 
             var mediaStatus = await api.GetServerMediaStatusAsync(server, cancellationToken);
@@ -262,6 +267,7 @@ public sealed class RecordingDeliveryCoordinator(
                 deliveryState: "CONFIRMED",
                 retryCount: 0,
                 clearNextRetry: true,
+                clearError: true,
                 cancellationToken: cancellationToken);
             await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
             return new FinalizationResult(true, "SERVER_ASSEMBLY", null, false, null, server, null, null, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId);

@@ -292,7 +292,7 @@ public sealed class AgentPipeHost(
         var stage = "LOCAL_FINALIZATION";
         try
         {
-            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "FINALIZING_LOCAL", deliveryState: "NOT_REQUESTED");
+            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "FINALIZING_LOCAL", deliveryState: "NOT_REQUESTED", preserveError: true);
             await stop.LocalFinalization;
             stage = "LOCAL_ARCHIVE";
             var result = await FinalizeAsync(stop.SessionId, CancellationToken.None);
