@@ -1,4 +1,12 @@
 .git
+artifacts
+apps
+vendor
+scripts
+tests
+.pytest*
+tmp-test
+.tmp-*
 .env
 .env.*
 !.env.example

@@ -1,4 +1,5 @@
-FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+ARG GPU_BASE_IMAGE=pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+FROM ${GPU_BASE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv
 COPY workers/ml_worker/requirements.gpu.txt /srv/ml-requirements.txt
@@ -6,7 +7,14 @@ COPY workers/ml_worker/requirements.gpu.txt /srv/ml-requirements.txt
 # ML packages without the legacy desktop/Web dependency bundle.
 RUN pip install --no-cache-dir --no-deps whisperx==3.7.5 pyannote.audio==3.3.2
 RUN pip install --no-cache-dir -r /srv/ml-requirements.txt
-COPY . /srv
+# Keep the GPU image build context small and deterministic. The previous
+# COPY . /srv pulled the whole monorepo, including artifacts and app build
+# outputs, into every worker build. These are the runtime modules imported by
+# the ML worker and WhisperX pipeline.
+COPY workers /srv/workers
+COPY whisperx_atom /srv/whisperx_atom
+COPY app /srv/app
+COPY diarization_quality.py glossary_utils.py local_io.py media_binaries.py processing_runtime.py transcription_quality.py hotwords.txt /srv/
 COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
 COPY workers/ml_worker/healthcheck.py /srv/workers/ml_worker/healthcheck.py
 ENV PYTHONPATH=/srv
