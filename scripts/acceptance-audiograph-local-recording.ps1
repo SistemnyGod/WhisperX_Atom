@@ -7,6 +7,10 @@ param(
     [int]$FinalizeTimeoutSeconds = 90,
     [string]$DeviceId = "",
     [switch]$ServerDelivery,
+    # Raw-first STOP is allowed to return before background FLAC/archive work
+    # completes.  Use this switch for the explicit no-encoder smoke gate;
+    # normal release gates continue waiting for the installed encoder.
+    [switch]$AllowPendingArchive,
     [switch]$StopHost,
     [switch]$DevelopmentHost,
     [string]$DevelopmentDataRoot = "",
@@ -167,11 +171,29 @@ try {
             $status = $statusResponse.sessionStatus
         } while ($null -ne $status -and [DateTimeOffset]::UtcNow -lt $deliveryDeadline)
     }
-    $archivePath = [string]$status.archivePath
-    $archiveExists = -not [string]::IsNullOrWhiteSpace($archivePath) -and (Test-Path -LiteralPath $archivePath -PathType Container)
-    $archiveFiles = if ($archiveExists) { @(Get-ChildItem -LiteralPath $archivePath -Recurse -File -ErrorAction SilentlyContinue) } else { @() }
-    $flacFiles = @($archiveFiles | Where-Object Extension -ieq ".flac")
-    $masterPath = if ($archiveExists) { Join-Path $archivePath "export\master.flac" } else { $null }
+
+    # LOCAL_READY is the durable raw boundary.  With the regular installed
+    # release we also wait for the asynchronous encoder/archive so that the
+    # duration check is meaningful.  The no-encoder smoke gate opts out with
+    # -AllowPendingArchive and validates only the raw-first contract.
+    $archiveDeadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
+    $archivePath = $null
+    $archiveExists = $false
+    $archiveFiles = @()
+    $flacFiles = @()
+    $masterPath = $null
+    do {
+        $archivePath = [string]$status.archivePath
+        $archiveExists = -not [string]::IsNullOrWhiteSpace($archivePath) -and (Test-Path -LiteralPath $archivePath -PathType Container)
+        $archiveFiles = if ($archiveExists) { @(Get-ChildItem -LiteralPath $archivePath -Recurse -File -ErrorAction SilentlyContinue) } else { @() }
+        $flacFiles = @($archiveFiles | Where-Object Extension -ieq ".flac")
+        $masterPath = if ($archiveExists) { Join-Path $archivePath "export\master.flac" } else { $null }
+        $archiveReady = $archiveExists -and $flacFiles.Count -gt 0 -and $masterPath -and (Test-Path -LiteralPath $masterPath -PathType Leaf)
+        if ($AllowPendingArchive -or $archiveReady -or [DateTimeOffset]::UtcNow -ge $archiveDeadline) { break }
+        Start-Sleep -Seconds 2
+        $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
+        $status = $statusResponse.sessionStatus
+    } while ($null -ne $status)
     $durationSeconds = $null
     if ($masterPath -and (Test-Path -LiteralPath $masterPath -PathType Leaf)) {
         $ffprobePath = Join-Path ([IO.Path]::GetDirectoryName($hostPath)) "ffprobe.exe"
@@ -203,6 +225,9 @@ try {
             localFinalizeState = [string]$status.localFinalizeState
             localChunkCount = [int]$status.localChunkCount
             archiveExists = $archiveExists
+            archiveReady = $archiveReady
+            archiveState = [string]$status.archiveState
+            encodingState = [string]$status.encodingState
             flacFileCount = $flacFiles.Count
             durationSeconds = $durationSeconds
             durationDeltaSeconds = $durationDeltaSeconds
@@ -220,7 +245,8 @@ try {
     Write-Host "AudioGraph local report: $reportPath"
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
     $deliveryIncomplete = $ServerDelivery -and $report.result.deliveryState -ne "CONFIRMED"
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or -not $report.result.durationWithinTolerance -or $deliveryFailed -or $deliveryIncomplete) {
+    $archiveRequired = -not $AllowPendingArchive
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or ($archiveRequired -and ($report.result.flacFileCount -le 0 -or -not $report.result.archiveReady -or -not $report.result.durationWithinTolerance)) -or $deliveryFailed -or $deliveryIncomplete) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
