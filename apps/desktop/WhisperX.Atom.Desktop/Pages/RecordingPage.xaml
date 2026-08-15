@@ -89,6 +89,8 @@
                                 <TextBlock Grid.Column="4" Text="5 · Доставка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                             </Grid>
                             <TextBlock Text="{Binding DeliveryStatusLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding EncodingStatusLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding ArchiveStatusLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                             <TextBlock Text="{Binding StorageWatermarkLabel}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Border>

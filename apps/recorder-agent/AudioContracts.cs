@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Threading.Channels;
 
 namespace WhisperX.Atom.Recorder;
@@ -173,6 +174,14 @@ public sealed class AudioGraphAttemptDiagnostics
     public long? FirstQuantumLatencyMs { get; set; }
     public long? FirstFrameLatencyMs { get; set; }
 
+    // Realtime pipeline counters. These are monotonic for the current
+    // capture attempt and intentionally remain optional for older Hosts.
+    public long FramesProduced { get; set; }
+    public long FramesConsumed { get; set; }
+    public int CurrentQueueDepth { get; set; }
+    public int MaximumQueueDepth { get; set; }
+    public long PipelineOverruns { get; set; }
+
     public bool UnrecoverableErrorOccurred { get; set; }
     public int? UnrecoverableErrorHResult { get; set; }
     public string? FinalCaptureState { get; set; }
@@ -215,6 +224,11 @@ public sealed class AudioGraphAttemptDiagnostics
         BytesReceived = BytesReceived,
         FirstQuantumLatencyMs = FirstQuantumLatencyMs,
         FirstFrameLatencyMs = FirstFrameLatencyMs,
+        FramesProduced = FramesProduced,
+        FramesConsumed = FramesConsumed,
+        CurrentQueueDepth = CurrentQueueDepth,
+        MaximumQueueDepth = MaximumQueueDepth,
+        PipelineOverruns = PipelineOverruns,
         UnrecoverableErrorOccurred = UnrecoverableErrorOccurred,
         UnrecoverableErrorHResult = UnrecoverableErrorHResult,
         FinalCaptureState = FinalCaptureState,
@@ -276,7 +290,44 @@ public sealed record AudioFrame(
     double Rms,
     double Peak,
     bool Clipping,
-    AudioStreamFormat? Format = null);
+    AudioStreamFormat? Format = null) : IDisposable
+{
+    /// <summary>Number of valid bytes in <see cref="Pcm16Bytes"/>.</summary>
+    public int Pcm16Length { get; init; } = Pcm16Bytes.Length;
+
+    /// <summary>Optional owner for an ArrayPool-rented buffer.</summary>
+    public PooledAudioBuffer? BufferOwner { get; init; }
+
+    public ReadOnlyMemory<byte> Pcm16Memory => Pcm16Bytes.AsMemory(0, Math.Min(Pcm16Length, Pcm16Bytes.Length));
+
+    public void Dispose() => BufferOwner?.Dispose();
+}
+
+/// <summary>
+/// Single-owner lease for a pooled audio buffer. The lease is transferred to
+/// AudioFrame and returned exactly once when the consumer has persisted it or
+/// the queue rejects the frame.
+/// </summary>
+public sealed class PooledAudioBuffer : IDisposable
+{
+    private byte[]? _buffer;
+
+    public PooledAudioBuffer(byte[] buffer, int length)
+    {
+        _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+        Length = Math.Clamp(length, 0, buffer.Length);
+    }
+
+    public int Length { get; }
+
+    public byte[] Buffer => _buffer ?? throw new ObjectDisposedException(nameof(PooledAudioBuffer));
+
+    public void Dispose()
+    {
+        var buffer = Interlocked.Exchange(ref _buffer, null);
+        if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
+    }
+}
 
 public sealed record AudioFramePacket(
     long Sequence,

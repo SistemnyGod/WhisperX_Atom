@@ -85,6 +85,9 @@ class GpuWorker:
         self._gpu_lease = PostgresGpuLease(self._repository.conninfo)
         self._heartbeat = heartbeat
 
+    def close(self) -> None:
+        self._service.close()
+
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         async with self._semaphore:
             job_id = str(message["job_id"])
@@ -117,18 +120,35 @@ class GpuWorker:
                 self._repository.update_job(job_id, "RUNNING", stage, value)
 
             failure_code: str | None = None
+            draft_holder: dict[str, str | None] = {"id": None}
+
+            def persist_asr_draft(draft: dict[str, Any]) -> None:
+                draft_holder["id"] = self._repository.persist_asr_draft(job_id, str(message["meeting_id"]), draft)
+
             try:
                 if await resident_llm_detected():
                     raise ResidentLlmConflict("resident_llama_server_must_be_stopped_before_transcription")
                 LOGGER.info("job=%s waiting for GPU lease path=%s", job_id, request.media_path)
                 async with self._gpu_lease:
                     LOGGER.info("job=%s acquired GPU lease", job_id)
-                    result = await asyncio.to_thread(self._service.process, request, progress)
+                    oom_attempt = 0
+                    while True:
+                        try:
+                            result = await asyncio.to_thread(self._service.process, request, progress, persist_asr_draft)
+                            break
+                        except Exception as exc:
+                            if error_code_for(exc) != "CUDA_OOM" or oom_attempt >= 1:
+                                raise
+                            oom_attempt += 1
+                            LOGGER.warning("job=%s CUDA_OOM; cleared resident pipeline and retrying once", job_id)
                 LOGGER.info("job=%s released GPU lease", job_id)
                 payload = result.to_dict()
                 payload["correlation_id"] = message.get("correlation_id") or payload.get("correlation_id")
                 payload["meeting_id"] = str(message["meeting_id"])
                 payload["processing_job_id"] = job_id
+                if draft_holder["id"]:
+                    payload["source_transcript_id"] = draft_holder["id"]
+                    payload["version_kind"] = "ENRICHED"
                 LOGGER.info("transcript result correlation_id=%s meeting_id=%s job_id=%s", payload.get("correlation_id"), payload["meeting_id"], job_id)
                 persisted = await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)
                 if not persisted:
@@ -200,6 +220,9 @@ async def run() -> None:
     subscription = await jetstream.pull_subscribe("ml.transcribe", durable="whisperx-gpu")
     heartbeat.set_state("READY")
     while True:
+        # Keep large-v3 resident between jobs, but release it after the
+        # configured idle window so another GPU workload can make progress.
+        worker._service.release_idle()
         for message in await fetch_available(subscription, nats.errors.TimeoutError):
             job_id: str | None = None
             try:

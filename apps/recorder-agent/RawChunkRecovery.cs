@@ -161,6 +161,9 @@ public sealed class RawChunkRecovery(
                 }
 
                 var existingEnd = await spool.GetNextTrackStartSampleAsync(trackId, cancellationToken);
+                // Rows created before startSample/sampleCount were persisted
+                // used the historical ten-second interval. Do not reinterpret
+                // old sessions when the current segment setting changes.
                 var estimatedStart = (long)sequence * trackInfo.SampleRate * RecordingContract.ChunkDurationSeconds;
                 var startSample = exactName ? exactStartSample : Math.Max(existingEnd, estimatedStart);
                 var directory = Path.GetDirectoryName(rawPath)!;

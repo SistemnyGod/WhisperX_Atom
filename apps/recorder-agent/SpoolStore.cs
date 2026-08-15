@@ -591,12 +591,14 @@ public sealed class SpoolStore
         return result;
     }
 
-    public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(CancellationToken cancellationToken = default)
+    public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(string? sessionId = null, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT status,COUNT(*),COALESCE(SUM(raw_size_bytes),0),MIN(updated_at) FROM recording_raw_chunks WHERE status NOT IN ('READY','DISCARDED') GROUP BY status";
+        var sessionFilter = string.IsNullOrWhiteSpace(sessionId) ? "" : " AND session_id=$session";
+        command.CommandText = $"SELECT status,COUNT(*),COALESCE(SUM(raw_size_bytes),0),MIN(updated_at) FROM recording_raw_chunks WHERE status NOT IN ('READY','DISCARDED'){sessionFilter} GROUP BY status";
+        if (!string.IsNullOrWhiteSpace(sessionId)) command.Parameters.AddWithValue("$session", sessionId);
         var counts = new Dictionary<string, (int Count, long Bytes)>(StringComparer.OrdinalIgnoreCase);
         DateTimeOffset? oldest = null;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -609,14 +611,17 @@ public sealed class SpoolStore
         var rawReady = counts.GetValueOrDefault("RAW_READY").Count;
         var encoding = counts.GetValueOrDefault("ENCODING").Count;
         var failed = counts.GetValueOrDefault("ENCODE_FAILED").Count;
-        var diskFallback = await GetUnregisteredClosedRawBacklogAsync(cancellationToken);
+        var diskFallback = string.IsNullOrWhiteSpace(sessionId)
+            ? await GetUnregisteredClosedRawBacklogAsync(cancellationToken)
+            : (Count: 0, Bytes: 0L, Oldest: (DateTimeOffset?)null);
         writing += diskFallback.Count;
         if (diskFallback.Oldest is not null && (oldest is null || diskFallback.Oldest < oldest)) oldest = diskFallback.Oldest;
         var pending = writing + rawReady + encoding + failed;
         double? ageMs = oldest is null ? null : Math.Max(0, (DateTimeOffset.UtcNow - oldest.Value).TotalMilliseconds);
         var health = pending > 10 || ageMs is > 120_000d ? "CRITICAL" : pending > 3 ? "LAGGING" : "HEALTHY";
         await using var readyCommand = connection.CreateCommand();
-        readyCommand.CommandText = "SELECT COUNT(*) FROM recording_chunks WHERE status='READY'";
+        readyCommand.CommandText = $"SELECT COUNT(*) FROM recording_chunks WHERE status='READY'{(string.IsNullOrWhiteSpace(sessionId) ? "" : " AND session_id=$session")}";
+        if (!string.IsNullOrWhiteSpace(sessionId)) readyCommand.Parameters.AddWithValue("$session", sessionId);
         var readyForUpload = Convert.ToInt32(await readyCommand.ExecuteScalarAsync(cancellationToken));
         return new RawChunkBacklog(pending, writing, encoding, failed, counts.Values.Sum(item => item.Bytes) + diskFallback.Bytes, ageMs, health, rawReady, readyForUpload);
     }
@@ -943,7 +948,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-         command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL AND next_retry_at <= $now)) AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state IN ('RECORDING','PAUSED')) OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER') AND (next_retry_at IS NULL OR next_retry_at <= $now)) OR (local_finalize_state='LOCAL_READY' AND delivery_state='PENDING_SERVER' AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
+         command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL AND next_retry_at <= $now)) AND (((local_finalize_state<>'LOCAL_FAILED') AND ((next_retry_at IS NOT NULL AND next_retry_at <= $now) OR (next_retry_at IS NULL AND local_finalize_state IN ('PENDING','FINALIZING_LOCAL')) OR (next_retry_at IS NULL AND state IN ('RECORDING','PAUSED')) OR (next_retry_at IS NULL AND state='FINALIZING' AND (finished_at IS NULL OR finished_at <= $cutoff)))) OR (local_finalize_state='LOCAL_FAILED' AND delivery_state IN ('RECONCILING','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER') AND (next_retry_at IS NULL OR next_retry_at <= $now)) OR (local_finalize_state='LOCAL_READY' AND delivery_state IN ('PENDING_SERVER','NOT_REQUESTED') AND (next_retry_at IS NULL OR next_retry_at <= $now))) ORDER BY started_at";
         command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.AddMinutes(-2).ToString("O"));
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         var result = new List<string>();

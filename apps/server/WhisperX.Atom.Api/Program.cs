@@ -1754,7 +1754,8 @@ public sealed class Database(IConfiguration configuration)
             SET status='FAILED'
             FROM jobs AS job
             WHERE job.meeting_id=meeting.id
-              AND job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+              AND (job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                   OR job.type IN ('TRANSCRIBE_ASR','TRANSCRIPT_ENRICH'))
               AND job.status='FAILED'
               AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
               AND NOT EXISTS (
@@ -2441,7 +2442,7 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
         await using var command = new NpgsqlCommand(
-            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
+            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR' WHEN type IN ('TRANSCRIBE_ASR','TRANSCRIPT_ENRICH') THEN 'READY_FOR_ASR' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
@@ -2451,7 +2452,7 @@ public sealed class Database(IConfiguration configuration)
         await using (var meeting = new NpgsqlCommand(
             "UPDATE meetings SET status=@status WHERE id=@meeting AND status <> 'CANCELLED'", connection, tx))
         {
-            meeting.Parameters.AddWithValue("status", job.Type == "SUMMARIZE" ? "SUMMARIZING" : job.Type is "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" ? "TRANSCRIBING" : "INGESTING");
+            meeting.Parameters.AddWithValue("status", job.Type == "SUMMARIZE" ? "SUMMARIZING" : job.Type is "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" or "TRANSCRIBE_ASR" or "TRANSCRIPT_ENRICH" ? "TRANSCRIBING" : "INGESTING");
             meeting.Parameters.AddWithValue("meeting", job.MeetingId);
             await meeting.ExecuteNonQueryAsync();
         }
@@ -2461,7 +2462,7 @@ public sealed class Database(IConfiguration configuration)
         {
             "SUMMARIZE" => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'llm.summarize',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'transcript_id',t.id,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN LATERAL (SELECT id FROM transcripts WHERE meeting_id=j.meeting_id ORDER BY version DESC LIMIT 1) t ON true WHERE j.id=@id", connection, tx),
-            "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" => new NpgsqlCommand(
+            "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" or "TRANSCRIBE_ASR" or "TRANSCRIPT_ENRICH" => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
             _ => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),

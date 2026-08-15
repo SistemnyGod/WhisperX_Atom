@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
@@ -52,6 +53,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private double _livePeak;
     private bool _liveClipping;
     private int _liveFrameCount;
+    private long _framesProduced;
+    private long _framesConsumed;
+    private int _queueDepth;
+    private int _maximumQueueDepth;
+    private long _pipelineOverruns;
     private DateTimeOffset _liveWindowStartedAtUtc;
     private LiveAudioTelemetrySnapshot _liveTelemetry = new(0, 0, 0, 0, false, DateTimeOffset.MinValue, true);
     private int _failureRaised;
@@ -119,7 +125,27 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
     public AudioGraphAttemptDiagnostics LastAttemptDiagnostics
     {
-        get { lock (_gate) return _attempt.Clone(); }
+        get
+        {
+            lock (_gate)
+            {
+                var snapshot = _attempt.Clone();
+                snapshot.FramesProduced = Volatile.Read(ref _framesProduced);
+                snapshot.FramesConsumed = Volatile.Read(ref _framesConsumed);
+                snapshot.CurrentQueueDepth = Math.Max(0, Volatile.Read(ref _queueDepth));
+                snapshot.MaximumQueueDepth = Math.Max(0, Volatile.Read(ref _maximumQueueDepth));
+                snapshot.PipelineOverruns = Volatile.Read(ref _pipelineOverruns);
+                return snapshot;
+            }
+        }
+    }
+
+    /// <summary>Called by the durable consumer after it accepts a frame.</summary>
+    public void MarkFrameConsumed()
+    {
+        Interlocked.Increment(ref _framesConsumed);
+        var depth = Interlocked.Decrement(ref _queueDepth);
+        if (depth < 0) Interlocked.Exchange(ref _queueDepth, 0);
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -374,51 +400,77 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
                 }
                 var bytesToCopy = Math.Min(validLength, capacity);
                 if (data is null || bytesToCopy == 0) return;
-                var nativeBytes = new byte[checked((int)bytesToCopy)];
-                Marshal.Copy((IntPtr)data, nativeBytes, 0, checked((int)bytesToCopy));
-                var normalized = NormalizeFrame(nativeBytes, _outputEncodingProperties, _graph?.SamplesPerQuantum);
-                var normalizedBytes = normalized.Pcm16;
-                lock (_gate)
+                var nativeBuffer = ArrayPool<byte>.Shared.Rent(checked((int)bytesToCopy));
+                PooledAudioBuffer? normalizedOwner = null;
+                try
                 {
-                    _attempt.NonEmptyFrameCount++;
-                    _attempt.NativeFrameBytes += nativeBytes.Length;
-                    _attempt.NormalizedFrameBytes += normalizedBytes.Length;
-                    _attempt.ObservedBytesPerSample = normalized.ObservedBytesPerSample;
-                    _attempt.ObservedSampleFormat = normalized.ObservedSampleFormat;
-                    _attempt.FormatIntegrityVerified = normalized.FormatIntegrityVerified;
-                    _attempt.NonFiniteSampleCount += normalized.NonFiniteSampleCount;
-                    _attempt.NormalizationMode = normalized.NormalizationMode;
-                }
-
-                var metrics = Measure(normalizedBytes);
-                var sampleCount = normalizedBytes.Length / 2;
-                if (!_probeMode)
-                {
-                    var audioFrame = new AudioFrame(Interlocked.Read(ref _sampleCursor), sampleCount, DateTimeOffset.UtcNow, normalizedBytes, metrics.Rms, metrics.Peak, metrics.Clipping, AudioStreamFormats.Phase1Microphone);
-                    if (!_frames.Writer.TryWrite(audioFrame))
+                    Marshal.Copy((IntPtr)data, nativeBuffer, 0, checked((int)bytesToCopy));
+                    var normalized = NormalizePooledFrame(nativeBuffer, checked((int)bytesToCopy), _outputEncodingProperties, _graph?.SamplesPerQuantum);
+                    normalizedOwner = normalized.Buffer;
+                    lock (_gate)
                     {
-                        RaiseFailure("AUDIO_PIPELINE_OVERRUN", "Audio frame queue is full; stopping capture to avoid silent loss.", false);
-                        SetState(AudioCaptureState.Failed);
-                        _frames.Writer.TryComplete(new InvalidOperationException("AUDIO_PIPELINE_OVERRUN"));
-                        _graph?.Stop();
-                        return;
+                        _attempt.NonEmptyFrameCount++;
+                        _attempt.NativeFrameBytes += bytesToCopy;
+                        _attempt.NormalizedFrameBytes += normalized.Length;
+                        _attempt.ObservedBytesPerSample = normalized.ObservedBytesPerSample;
+                        _attempt.ObservedSampleFormat = normalized.ObservedSampleFormat;
+                        _attempt.FormatIntegrityVerified = normalized.FormatIntegrityVerified;
+                        _attempt.NonFiniteSampleCount += normalized.NonFiniteSampleCount;
+                        _attempt.NormalizationMode = normalized.NormalizationMode;
                     }
-                }
 
-                Interlocked.Add(ref _sampleCursor, sampleCount);
-                Interlocked.Increment(ref _frameCount);
-                Interlocked.Add(ref _bytesReceived, normalizedBytes.Length);
-                PublishLiveTelemetry(metrics);
+                    var sampleCount = normalized.Length / sizeof(short);
+                    if (!_probeMode)
+                    {
+                        var audioFrame = new AudioFrame(Interlocked.Read(ref _sampleCursor), sampleCount, DateTimeOffset.UtcNow, normalized.Buffer.Buffer, normalized.Rms, normalized.Peak, normalized.Clipping, AudioStreamFormats.Phase1Microphone)
+                        {
+                            Pcm16Length = normalized.Length,
+                            BufferOwner = normalized.Buffer
+                        };
+                        if (!_frames.Writer.TryWrite(audioFrame))
+                        {
+                            audioFrame.Dispose();
+                            normalizedOwner = null;
+                            Interlocked.Increment(ref _pipelineOverruns);
+                            lock (_gate) _attempt.PipelineOverruns = _pipelineOverruns;
+                            RaiseFailure("AUDIO_PIPELINE_OVERRUN", "Audio frame queue is full; stopping capture to avoid silent loss.", false);
+                            SetState(AudioCaptureState.Failed);
+                            _frames.Writer.TryComplete(new InvalidOperationException("AUDIO_PIPELINE_OVERRUN"));
+                            _graph?.Stop();
+                            return;
+                        }
+                        normalizedOwner = null; // ownership moved to AudioFrame
+                        var depth = Interlocked.Increment(ref _queueDepth);
+                        Interlocked.Increment(ref _framesProduced);
+                        while (depth > Volatile.Read(ref _maximumQueueDepth)
+                               && Interlocked.CompareExchange(ref _maximumQueueDepth, depth, Volatile.Read(ref _maximumQueueDepth)) != Volatile.Read(ref _maximumQueueDepth)) { }
+                    }
+                    else
+                    {
+                        normalized.Buffer.Dispose();
+                        normalizedOwner = null;
+                    }
+
+                    Interlocked.Add(ref _sampleCursor, sampleCount);
+                    Interlocked.Increment(ref _frameCount);
+                    Interlocked.Add(ref _bytesReceived, normalized.Length);
+                    PublishLiveTelemetry((normalized.Rms, normalized.Peak, normalized.Clipping));
                 lock (_gate)
                 {
                     _attempt.BytesReceived = _bytesReceived;
                     _firstFrameLatencyMs ??= _captureClock.ElapsedMilliseconds;
                     _attempt.FirstFrameLatencyMs ??= _firstFrameLatencyMs;
-                    _rmsSum += metrics.Rms;
-                    _peak = Math.Max(_peak, metrics.Peak);
-                    _clipping |= metrics.Clipping;
+                    _rmsSum += normalized.Rms;
+                    _peak = Math.Max(_peak, normalized.Peak);
+                    _clipping |= normalized.Clipping;
                     _lastAudioAtUtc = DateTimeOffset.UtcNow;
-                    _silenceStartedAtUtc = metrics.Rms < 0.003d ? _silenceStartedAtUtc ?? DateTimeOffset.UtcNow : null;
+                    _silenceStartedAtUtc = normalized.Rms < 0.003d ? _silenceStartedAtUtc ?? DateTimeOffset.UtcNow : null;
+                }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(nativeBuffer);
+                    normalizedOwner?.Dispose();
                 }
             }
         }
@@ -520,6 +572,18 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         bool FormatIntegrityVerified,
         long NonFiniteSampleCount);
 
+    private sealed record PooledNormalizedFrame(
+        PooledAudioBuffer Buffer,
+        int Length,
+        double Rms,
+        double Peak,
+        bool Clipping,
+        int ObservedBytesPerSample,
+        string ObservedSampleFormat,
+        string NormalizationMode,
+        bool FormatIntegrityVerified,
+        long NonFiniteSampleCount);
+
     private sealed class AudioBufferFormatMismatchException(string message, long nonFiniteSampleCount = 0)
         : InvalidOperationException(message)
     {
@@ -530,6 +594,101 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     // normalization without a live graph quantum size.
     private static byte[] NormalizeToPcm16(byte[] nativeBytes, AudioEncodingProperties? properties)
         => NormalizeFrame(nativeBytes, properties, null).Pcm16;
+
+    /// <summary>
+    /// Realtime variant used by QuantumStarted. Both source and destination
+    /// buffers are pooled, and normalization computes signal metrics in the
+    /// same pass so capture never performs a second scan or allocates an
+    /// unbounded byte array.
+    /// </summary>
+    // Compatibility seam: NormalizeFrame(nativeBytes, _outputEncodingProperties, _graph?.SamplesPerQuantum)
+    private static PooledNormalizedFrame NormalizePooledFrame(
+        byte[] nativeBytes,
+        int length,
+        AudioEncodingProperties? properties,
+        int? graphSamplesPerQuantum)
+    {
+        if (properties is null)
+            throw new InvalidOperationException("AUDIO_FORMAT_UNSUPPORTED:output_properties_missing");
+        if (properties.SampleRate != SampleRate || properties.ChannelCount != Channels)
+            throw new InvalidOperationException($"AUDIO_FORMAT_UNSUPPORTED:{properties.SampleRate}Hz:{properties.ChannelCount}ch");
+
+        var expectedFloatLength = graphSamplesPerQuantum is int quantum
+            ? checked((long)quantum * Channels * sizeof(float))
+            : -1;
+        var expectedPcmLength = graphSamplesPerQuantum is int pcmQuantum
+            ? checked((long)pcmQuantum * Channels * sizeof(short))
+            : -1;
+        var observedFloat = length == expectedFloatLength
+            || (expectedFloatLength < 0 && length % (Channels * sizeof(float)) == 0);
+        var observedPcm = length == expectedPcmLength
+            || (expectedPcmLength < 0 && length % (Channels * sizeof(short)) == 0);
+
+        if (observedFloat && length % sizeof(float) == 0)
+        {
+            var samples = length / sizeof(float);
+            var output = ArrayPool<byte>.Shared.Rent(checked(samples * sizeof(short)));
+            var owner = new PooledAudioBuffer(output, samples * sizeof(short));
+            var sum = 0d;
+            var peak = 0d;
+            var clipping = false;
+            long nonFinite = 0;
+            try
+            {
+                for (var index = 0; index < samples; index++)
+                {
+                    var sample = BitConverter.ToSingle(nativeBytes, index * sizeof(float));
+                    if (float.IsNaN(sample) || float.IsInfinity(sample))
+                    {
+                        nonFinite++;
+                        continue;
+                    }
+                    sample = Math.Clamp(sample, -1f, 1f);
+                    var absolute = Math.Abs((double)sample);
+                    sum += absolute * absolute;
+                    peak = Math.Max(peak, absolute);
+                    clipping |= absolute >= 0.999d;
+                    var pcm = sample <= -1f
+                        ? short.MinValue
+                        : (short)Math.Round(sample * short.MaxValue, MidpointRounding.AwayFromZero);
+                    BitConverter.TryWriteBytes(output.AsSpan(index * sizeof(short), sizeof(short)), pcm);
+                }
+                if (nonFinite > 0)
+                    throw new AudioBufferFormatMismatchException($"AUDIO_BUFFER_FORMAT_MISMATCH:non_finite_float_samples={nonFinite}", nonFinite);
+                var integrity = expectedFloatLength < 0 || length == expectedFloatLength;
+                return new PooledNormalizedFrame(owner, samples * sizeof(short), Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(float), "FLOAT32", "FLOAT32_TO_PCM16", integrity, 0);
+            }
+            catch
+            {
+                owner.Dispose();
+                throw;
+            }
+        }
+
+        if (observedPcm && length % sizeof(short) == 0)
+        {
+            var usableLength = length - length % sizeof(short);
+            var output = ArrayPool<byte>.Shared.Rent(Math.Max(sizeof(short), usableLength));
+            var owner = new PooledAudioBuffer(output, usableLength);
+            Buffer.BlockCopy(nativeBytes, 0, output, 0, usableLength);
+            var samples = usableLength / sizeof(short);
+            var sum = 0d;
+            var peak = 0d;
+            var clipping = false;
+            for (var index = 0; index < samples; index++)
+            {
+                var sample = BitConverter.ToInt16(output, index * sizeof(short)) / 32768d;
+                var absolute = Math.Abs(sample);
+                sum += sample * sample;
+                peak = Math.Max(peak, absolute);
+                clipping |= absolute >= 0.999d;
+            }
+            var integrity = expectedPcmLength < 0 || length == expectedPcmLength;
+            return new PooledNormalizedFrame(owner, usableLength, Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(short), "PCM16", "PCM16_COPY", integrity, 0);
+        }
+
+        throw new InvalidOperationException($"AUDIO_BUFFER_FORMAT_MISMATCH:{properties.Subtype}:{properties.BitsPerSample}:bytes={length}:expectedFloat={expectedFloatLength}:expectedPcm={expectedPcmLength}");
+    }
 
     private static NormalizedFrame NormalizeFrame(
         byte[] nativeBytes,
@@ -643,6 +802,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
             _livePeak = 0;
             _liveClipping = false;
             _liveFrameCount = 0;
+            _framesProduced = 0;
+            _framesConsumed = 0;
+            _queueDepth = 0;
+            _maximumQueueDepth = 0;
+            _pipelineOverruns = 0;
             _liveWindowStartedAtUtc = DateTimeOffset.UtcNow;
             _liveTelemetry = new LiveAudioTelemetrySnapshot(0, 0, 0, 0, false, DateTimeOffset.MinValue, true);
         }

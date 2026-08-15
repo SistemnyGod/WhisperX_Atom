@@ -755,6 +755,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var info = await _spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
         var counts = await _spool.GetChunkCountsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         var metrics = await _spool.GetChunkDeliveryMetricsAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var rawBacklog = await _spool.GetRawChunkBacklogAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var encodingState = rawBacklog.Encoding > 0 || rawBacklog.Ready > 0 ? "ENCODING"
+            : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
+        var archiveState = string.IsNullOrWhiteSpace(info?.ArchivePath)
+            ? info?.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
+            : "READY";
         return new RecordingSessionStatus(
             sessionId,
             info?.MeetingId,
@@ -777,7 +783,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             metrics.Uploading,
             metrics.Failed,
             metrics.BytesPending,
-            metrics.OldestPendingAgeSeconds);
+            metrics.OldestPendingAgeSeconds,
+            encodingState,
+            archiveState);
     }
 
     public async ValueTask DisposeAsync()
@@ -839,8 +847,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 internal sealed class AudioGraphSessionWriter
 {
     private const int SampleRate = RecordingContract.MicrophoneSampleRate;
-    private const int ChunkSamples = SampleRate * RecordingContract.ChunkDurationSeconds;
-    private const int EncoderQueueCapacity = 8;
+    private readonly int _chunkSamples = SampleRate * RecordingContract.GetChunkDurationSeconds();
     private readonly string _sessionId;
     private readonly string _trackId;
     private readonly SpoolStore _spool;
@@ -848,9 +855,17 @@ internal sealed class AudioGraphSessionWriter
     private readonly AudioGraphCaptureEngine _engine;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _notStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateBounded<RawChunkWorkItem>(new BoundedChannelOptions(EncoderQueueCapacity)
+    // Replaced the legacy EncoderQueueCapacity = 8 / Channel.CreateBounded<RawChunkWorkItem>
+    // FullMode = BoundedChannelFullMode.Wait boundary with SQLite-backed RAW_READY scheduling so capture never waits
+    // for FFmpeg.
+    private readonly Channel<RawFinalizeWorkItem> _rawFinalizeQueue = Channel.CreateUnbounded<RawFinalizeWorkItem>(new UnboundedChannelOptions
     {
-        FullMode = BoundedChannelFullMode.Wait,
+        SingleReader = true,
+        SingleWriter = true,
+        AllowSynchronousContinuations = false
+    });
+    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateUnbounded<RawChunkWorkItem>(new UnboundedChannelOptions
+    {
         SingleReader = true,
         SingleWriter = true,
         AllowSynchronousContinuations = false
@@ -858,6 +873,7 @@ internal sealed class AudioGraphSessionWriter
     private AudioFrameDurableConsumer? _consumer;
     private CancellationTokenSource _stop = new();
     private Task? _worker;
+    private Task? _rawFinalizerWorker;
     private Task? _encoderWorker;
     private FileStream? _raw;
     private string? _rawPart;
@@ -892,6 +908,7 @@ internal sealed class AudioGraphSessionWriter
             // the bounded queue while SQLite/file initialization is running.
             await EnsureChunkAsync(0).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            _rawFinalizerWorker = Task.Run(ProcessRawFinalizationAsync);
             _encoderWorker = Task.Run(ProcessEncodingAsync);
         }
         catch
@@ -926,18 +943,9 @@ internal sealed class AudioGraphSessionWriter
                 try { await _worker.ConfigureAwait(false); } catch { }
             }
         }
-        if (_encoderWorker is not null)
-        {
-            try { await _encoderWorker.WaitAsync(cancellationToken).ConfigureAwait(false); }
-            catch (Exception ex)
-            {
-                failure ??= ex;
-                _stop.Cancel();
-                _encoderQueue.Writer.TryComplete(ex);
-                try { await _encoderWorker.ConfigureAwait(false); } catch { }
-            }
-        }
-        _stop.Dispose();
+        // Encoding is intentionally backgrounded. LOCAL_READY is the raw
+        // durability contract; Desktop can show ENCODING/FLAC_READY later.
+        // Do not make STOP wait for FFmpeg or a slow disk hash.
         if (failure is not null) throw failure;
     }
 
@@ -948,13 +956,14 @@ internal sealed class AudioGraphSessionWriter
             var consumer = _consumer ?? throw new InvalidOperationException("AUDIO_WRITER_NOT_STARTED");
             await consumer.RunAsync(_engine.Frames, ConsumeFrameAsync, _stop.Token).ConfigureAwait(false);
             if (_sampleCount > 0) await CompleteChunkAsync().ConfigureAwait(false);
-            _encoderQueue.Writer.TryComplete();
-            if (_encoderWorker is not null) await _encoderWorker.ConfigureAwait(false);
+            _rawFinalizeQueue.Writer.TryComplete();
+            if (_rawFinalizerWorker is not null) await _rawFinalizerWorker.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
         catch (Exception ex)
         {
             _logger.LogError(ex, "AudioGraph local writer failed. Session={SessionId}", _sessionId);
+            _rawFinalizeQueue.Writer.TryComplete(ex);
             _encoderQueue.Writer.TryComplete(ex);
             try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
@@ -962,26 +971,72 @@ internal sealed class AudioGraphSessionWriter
         finally { await DisposeRawAsync().ConfigureAwait(false); }
     }
 
+    private async Task ProcessRawFinalizationAsync()
+    {
+        Exception? failure = null;
+        try
+        {
+            await foreach (var work in _rawFinalizeQueue.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
+            {
+                await work.Stream.FlushAsync().ConfigureAwait(false);
+                work.Stream.Flush(flushToDisk: true);
+                await work.Stream.DisposeAsync().ConfigureAwait(false);
+                var raw = work.Chunk;
+                File.Move(raw.RawPath + ".part", raw.RawPath, true);
+                var rawSize = new FileInfo(raw.RawPath).Length;
+                var rawSha = FlacEncoder.ComputeSha256(raw.RawPath);
+                // Durable transition metadata is "PCM_S16LE", 16, "RAW_READY";
+                // the SQLite row is updated before FLAC encoding is queued.
+                await _spool.SetRawChunkStateAsync(_sessionId, _trackId, raw.Sequence, "RAW_READY", rawSize, rawSha, sampleCount: raw.SampleCount).ConfigureAwait(false);
+                await _encoderQueue.Writer.WriteAsync(new RawChunkWorkItem(raw with { RawSizeBytes = rawSize, RawSha256 = rawSha }), _stop.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            failure = ex;
+            _logger.LogError(ex, "AudioGraph raw finalizer failed. Session={SessionId}", _sessionId);
+        }
+        finally
+        {
+            _encoderQueue.Writer.TryComplete(failure);
+        }
+        if (failure is not null) throw failure;
+    }
+
     private async Task ProcessEncodingAsync()
     {
         try
         {
             await foreach (var work in _encoderQueue.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
-                await EncodeChunkAsync(work).ConfigureAwait(false);
+            {
+                try
+                {
+                    await EncodeChunkAsync(work).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // Keep RAW_READY recoverable in SQLite. A single FFmpeg
+                    // failure must not stop capture or discard later chunks.
+                    _logger.LogError(ex, "AudioGraph chunk encoding failed; raw chunk remains recoverable. Session={SessionId} Sequence={Sequence}", _sessionId, work.Chunk.Sequence);
+                }
+            }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
         catch (Exception ex)
         {
             _logger.LogError(ex, "AudioGraph chunk encoder failed. Session={SessionId}", _sessionId);
-            try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
-            throw;
         }
     }
 
     private async Task ConsumeFrameAsync(AudioFrame frame)
     {
         await AppendAsync(frame).ConfigureAwait(false);
-        if (_sampleCount >= ChunkSamples) await CompleteChunkAsync().ConfigureAwait(false);
+        // Count a frame only after the writer accepted its bytes. This keeps
+        // produced/consumed and queue-depth telemetry honest when a disk
+        // failure interrupts the durable consumer.
+        _engine.MarkFrameConsumed();
+        if (_sampleCount >= _chunkSamples) await CompleteChunkAsync().ConfigureAwait(false);
     }
 
     private async Task AppendAsync(AudioFrame frame)
@@ -990,7 +1045,7 @@ internal sealed class AudioGraphSessionWriter
         var format = frame.Format ?? AudioStreamFormats.Phase1Microphone;
         if (format.SampleRate != SampleRate || format.Channels != 1 || format.SampleType != AudioSampleType.Pcm16)
             throw new InvalidOperationException("AUDIO_FORMAT_UNSUPPORTED");
-        await _raw!.WriteAsync(frame.Pcm16Bytes).ConfigureAwait(false);
+        await _raw!.WriteAsync(frame.Pcm16Memory).ConfigureAwait(false);
         _sampleCount += frame.SampleCount;
         if (Stopwatch.GetTimestamp() - _lastDurabilityCheckpointTimestamp >= DurabilityCheckpointTicks)
         {
@@ -1025,19 +1080,18 @@ internal sealed class AudioGraphSessionWriter
     private async Task CompleteChunkAsync()
     {
         if (_raw is null || _rawPart is null || _rawPath is null || _outputPath is null) return;
-        await _raw.FlushAsync().ConfigureAwait(false);
-        _raw.Flush(true);
-        await _raw.DisposeAsync().ConfigureAwait(false);
+        var stream = _raw;
+        var raw = new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, _sampleCount, SampleRate, 1, "room-microphone", "PCM_S16LE", 16, "WRITING", 0, null, null, "PCM_S16", null, 16);
         _raw = null;
-        File.Move(_rawPart, _rawPath, true);
-        var rawSize = new FileInfo(_rawPath).Length;
-        var rawSha = FlacEncoder.ComputeSha256(_rawPath);
-        await _spool.SetRawChunkStateAsync(_sessionId, _trackId, _sequence, "RAW_READY", rawSize, rawSha, sampleCount: _sampleCount).ConfigureAwait(false);
-        var raw = new RawRecordingChunk(Guid.NewGuid().ToString("N"), _sessionId, _trackId, _sequence, _rawPath, _outputPath, _startSample, _sampleCount, SampleRate, 1, "room-microphone", "PCM_S16LE", 16, "RAW_READY", rawSize, rawSha, null, "PCM_S16", null, 16);
-        await _encoderQueue.Writer.WriteAsync(new RawChunkWorkItem(raw), _stop.Token).ConfigureAwait(false);
+        if (!_rawFinalizeQueue.Writer.TryWrite(new RawFinalizeWorkItem(raw, stream)))
+        {
+            stream.Dispose();
+            throw new InvalidOperationException("RAW_FINALIZER_UNAVAILABLE");
+        }
         _sequence++;
         _rawPart = _rawPath = _outputPath = null;
         _sampleCount = 0;
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 
     private async Task EncodeChunkAsync(RawChunkWorkItem work)
@@ -1069,6 +1123,7 @@ internal sealed class AudioGraphSessionWriter
     }
 }
 
+internal sealed record RawFinalizeWorkItem(RawRecordingChunk Chunk, FileStream Stream);
 internal sealed record RawChunkWorkItem(RawRecordingChunk Chunk);
 
 public sealed class RecorderHostPipeServer : BackgroundService

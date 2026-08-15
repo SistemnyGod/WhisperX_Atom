@@ -255,7 +255,9 @@ public sealed record RecordingSessionStatus(
     int ChunksUploading = 0,
     int ChunksFailed = 0,
     long BytesPending = 0,
-    double? OldestPendingAgeSeconds = null);
+    double? OldestPendingAgeSeconds = null,
+    string EncodingState = "PENDING",
+    string ArchiveState = "PENDING");
 
 public sealed record FinalizationResult(
     bool Success,

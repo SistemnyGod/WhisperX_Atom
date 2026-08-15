@@ -9,6 +9,9 @@ import psycopg
 from psycopg.types.json import Jsonb
 from diarization_quality import normalize_speaker_label
 
+ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
+ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
+
 
 class JobRepository:
     def __init__(self) -> None:
@@ -35,7 +38,7 @@ class JobRepository:
                     SET lease_expires_at=now() - interval '1 second', worker_id=NULL
                     FROM jobs AS job
                     WHERE inbox.job_id=job.id
-                      AND job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                      AND job.type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
                       AND job.status IN ('QUEUED','RUNNING')
                       AND (
                           job.status='QUEUED'
@@ -51,7 +54,8 @@ class JobRepository:
                     UPDATE jobs
                     SET status='QUEUED',
                         stage=CASE
-                            WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR'
+                            WHEN type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR'
+                            WHEN type='TRANSCRIPT_ENRICH' THEN 'TRANSCRIPT_ENRICH'
                             ELSE stage
                         END,
                         worker_id=NULL,
@@ -59,7 +63,7 @@ class JobRepository:
                         last_heartbeat=NULL,
                         error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
                         updated_at=now()
-                    WHERE type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                    WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
                       AND status='RUNNING'
                       AND (
                           last_heartbeat IS NULL
@@ -149,6 +153,48 @@ class JobRepository:
             ).fetchone()
             return str(row[0]) if row and row[0] else None
 
+    def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
+        """Persist the ASR-only Transcript V1 before alignment/diarization.
+
+        The job id is embedded in quality metadata as an idempotency key. A
+        worker retry therefore returns the same draft instead of creating a
+        second V1. Enrichment later creates V2 and never mutates this row.
+        """
+        with psycopg.connect(self.conninfo) as connection:
+            with connection.transaction():
+                meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
+                if meeting is None or str(meeting[0]) == "CANCELLED":
+                    raise RuntimeError("MEETING_CANCELLED")
+                job = connection.execute("SELECT status FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+                if job is None or str(job[0]) == "CANCELLED":
+                    raise RuntimeError("TRANSCRIBE_JOB_CANCELLED")
+                existing = connection.execute(
+                    "SELECT id FROM transcripts WHERE meeting_id=%s AND version_kind='ASR_DRAFT' AND quality_metadata->>'processing_job_id'=%s ORDER BY version DESC LIMIT 1",
+                    (meeting_id, job_id),
+                ).fetchone()
+                if existing:
+                    return str(existing[0])
+                version_row = connection.execute("SELECT COALESCE(MAX(version),0)+1 FROM transcripts WHERE meeting_id=%s", (meeting_id,)).fetchone()
+                version = int(version_row[0])
+                quality = dict(draft.get("quality") or {})
+                quality["processing_job_id"] = job_id
+                warnings = list(draft.get("warnings") or [])
+                result_error_code = str(draft.get("error_code") or "").strip().upper() or None
+                transcript_id = connection.execute(
+                    "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,'PARTIAL_READY',%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,NULL,'ASR_DRAFT') RETURNING id",
+                    (meeting_id, version, draft.get("language"), (draft.get("metadata") or {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), (draft.get("metadata") or {}).get("processing_profile"), (draft.get("metadata") or {}).get("selected_asr_pass")),
+                ).fetchone()[0]
+                for ordinal, segment in enumerate(draft.get("segments", [])):
+                    connection.execute(
+                        "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words) VALUES(gen_random_uuid(),%s,%s,%s,%s,NULL,'UNKNOWN',%s,%s,%s)",
+                        (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", []))),
+                    )
+                connection.execute(
+                    "UPDATE jobs SET stage='ASR_READY',progress=45,error_code=%s,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    (result_error_code, job_id),
+                )
+                return str(transcript_id)
+
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
         with psycopg.connect(self.conninfo) as connection:
             # Serialize transcript versions and summary-job creation per meeting.
@@ -170,7 +216,10 @@ class JobRepository:
                 connection.execute("UPDATE jobs SET pipeline_correlation_id=%s WHERE id=%s", (correlation_id, job_id))
             existing = connection.execute("SELECT id, version FROM transcripts WHERE meeting_id=%s ORDER BY version DESC LIMIT 1", (meeting_id,)).fetchone()
             version = int(existing[1]) + 1 if existing else 1
-            version_kind = "REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"
+            source_transcript_id = result.get("source_transcript_id") or (existing[0] if existing else None)
+            # Legacy reprocessing keeps version_kind = "REPROCESSED";
+            # enrichment jobs explicitly override it with "ENRICHED".
+            version_kind = str(result.get("version_kind") or ("REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"))
             transcript_status = result.get("status", "READY")
             result_error_code = str(result.get("error_code") or "").strip().upper() or None
             warnings = result.get("warnings") or []
@@ -180,7 +229,7 @@ class JobRepository:
                 result_error_code = "NO_SPEECH_DETECTED"
             transcript_id = connection.execute(
                 "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id",
-                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), existing[0] if existing else None, version_kind),
+                (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), source_transcript_id, version_kind),
             ).fetchone()[0]
             speakers: dict[str, str] = {}
             for segment in result.get("segments", []):
@@ -239,5 +288,6 @@ class JobRepository:
                     ("PARTIAL_READY" if no_speech_detected else "TRANSCRIPT_READY", meeting_id),
                 )
             result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None
-            connection.execute("UPDATE jobs SET status='READY',stage='TRANSCRIPT_READY',progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (result_error_message, result_error_code, job_id))
+            final_stage = "ENRICHED_READY" if version_kind == "ENRICHED" else "ASR_READY"
+            connection.execute("UPDATE jobs SET status='READY',stage=%s,progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (final_stage, result_error_message, result_error_code, job_id))
             return True

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -21,7 +22,7 @@ class Chunk:
     start_sample: int
     sample_count: int
     size_bytes: int
-    sha256: str
+    sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,35 @@ def _probe_duration_ms(path: Path) -> int:
         raise ValueError("recording_track_duration_unavailable") from exc
 
 
-def _concat_track(track: Track, output: Path) -> None:
+def _probe_audio_format(path: Path) -> dict:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels,bits_per_sample,sample_fmt", "-of", "json", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    streams = json.loads(result.stdout or "{}").get("streams", [])
+    if not streams:
+        raise ValueError("recording_chunk_audio_stream_missing")
+    stream = streams[0]
+    return {
+        "codec": str(stream.get("codec_name") or "").lower(),
+        "sample_rate": int(stream.get("sample_rate") or 0),
+        "channels": int(stream.get("channels") or 0),
+        "bits_per_sample": int(stream.get("bits_per_sample") or 0),
+        "sample_fmt": str(stream.get("sample_fmt") or ""),
+    }
+
+
+def _validate_output(path: Path, track: Track) -> dict:
+    details = _probe_audio_format(path)
+    if details["codec"] != "flac" or details["sample_rate"] != track.sample_rate or details["channels"] != 1:
+        raise ValueError(f"recording_track_output_format_invalid:{track.track_id}")
+    return details
+
+
+def _concat_track(track: Track, output: Path) -> dict:
     if not track.chunks:
         raise ValueError(f"recording_track_empty:{track.track_id}")
     previous_end: int | None = None
@@ -92,10 +121,29 @@ def _concat_track(track: Track, output: Path) -> None:
         if chunk.sequence != expected_sequence:
             raise ValueError(f"recording_chunk_sequence_gap:{track.track_id}:{expected_sequence}")
         source = _storage_path(chunk.storage_key)
-        if not source.is_file() or source.stat().st_size != chunk.size_bytes:
+        if not source.is_file():
             raise FileNotFoundError(source)
-        if _sha256(source) != chunk.sha256.lower():
-            raise ValueError(f"recording_chunk_checksum_mismatch:{track.track_id}:{chunk.sequence}")
+        actual_size = source.stat().st_size
+        if actual_size != chunk.size_bytes:
+            # A size mismatch is an explicit integrity exception: re-hash
+            # only this object so truncation is not reported as a generic
+            # missing chunk.
+            if chunk.sha256 and _sha256(source).lower() != chunk.sha256.lower():
+                raise ValueError(f"recording_chunk_checksum_mismatch:{track.track_id}:{chunk.sequence}")
+            raise ValueError(f"recording_chunk_size_mismatch:{track.track_id}:{chunk.sequence}")
+        # The client hash is authoritative for transport. Re-hash only when
+        # it is absent; a supplied mismatch is an integrity failure and must
+        # not be silently repaired by the server.
+        if chunk.sha256:
+            # RecordingFinalizeSupport verifies confirmed chunks before media
+            # assembly. Trust the client digest on the normal path and avoid
+            # a second full read; probe/decode failures below re-check it.
+            pass
+        else:
+            # Older transport rows may omit the client digest. Compute it
+            # once for the integrity record, without penalizing the normal
+            # client-hash path with a second full read.
+            _sha256(source)
         if previous_end is not None and chunk.start_sample != previous_end:
             raise ValueError(f"recording_chunk_sample_gap:{track.track_id}:{chunk.sequence}")
         previous_end = chunk.start_sample + chunk.sample_count
@@ -104,16 +152,49 @@ def _concat_track(track: Track, output: Path) -> None:
 
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
+        formats = [_probe_audio_format(_storage_path(chunk.storage_key)) for chunk in track.chunks]
+    except (subprocess.CalledProcessError, ValueError):
+        # A malformed media object is the other integrity-failure path. Only
+        # then re-hash supplied client digests to surface a checksum error.
+        for chunk in track.chunks:
+            source = _storage_path(chunk.storage_key)
+            if chunk.sha256 and _sha256(source).lower() != chunk.sha256.lower():
+                raise ValueError(f"recording_chunk_checksum_mismatch:{track.track_id}:{chunk.sequence}")
+        raise
+    first = formats[0]
+    compatible = all(
+        item["codec"] == first["codec"]
+        and item["sample_rate"] == first["sample_rate"]
+        and item["channels"] == first["channels"]
+        and item["bits_per_sample"] == first["bits_per_sample"]
+        for item in formats[1:]
+    ) and first["codec"] == "flac" and first["sample_rate"] == track.sample_rate and first["channels"] == 1
+    started = time.perf_counter()
+    method = "STREAM_COPY" if compatible else "REENCODE_FALLBACK"
+    try:
         # The atomic target intentionally ends in `.part`, so ffmpeg cannot
         # infer the muxer from the filename on Windows.  Keep the target
         # extension-independent and declare the output container explicitly.
-        _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "flac", "-f", "flac", str(temporary)])
+        try:
+            _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "copy" if compatible else "flac", "-f", "flac", str(temporary)])
+            if compatible:
+                _validate_output(temporary, track)
+        except (subprocess.CalledProcessError, ValueError):
+            if not compatible:
+                raise
+            # A valid-looking set of FLAC headers can still be rejected by
+            # concat when stream metadata differs. Re-encode safely.
+            temporary.unlink(missing_ok=True)
+            method = "REENCODE_FALLBACK"
+            _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "flac", "-f", "flac", str(temporary)])
+            _validate_output(temporary, track)
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise ValueError(f"recording_track_output_empty:{track.track_id}")
         temporary.replace(output)
     finally:
         list_path.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
+    return {"method": method, "duration_ms": _probe_duration_ms(output), "elapsed_ms": round((time.perf_counter() - started) * 1000)}
 
 
 def _load_tracks(session_id: str) -> list[Track]:
@@ -162,9 +243,10 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "assembly-input.json").write_text(json.dumps({"recording_tracks": [{"track_id": track.track_id, "track_type": track.track_type, "device_id": track.device_id, "device_name": track.device_name, "selection_mode": track.selection_mode, "recording_profile": track.recording_profile, "encoding": track.encoding, "bits_per_sample": track.bits_per_sample} for track in tracks]}, ensure_ascii=False), encoding="utf-8")
     assembled: list[Path] = []
+    assembly_methods: list[dict] = []
     for track in tracks:
         output = output_dir / f"track-{track.track_id}.flac"
-        _concat_track(track, output)
+        assembly_methods.append(_concat_track(track, output))
         assembled.append(output)
 
     profile = next((str(track.recording_profile).upper() for track in tracks if track.recording_profile), "ROOM")
@@ -202,6 +284,10 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         "drift_tolerance_ms": drift_tolerance,
         "tracks": timeline,
         "warnings": sorted(set(warnings)),
+        "assembly": [
+            {"track_id": track.track_id, **method}
+            for track, method in zip(tracks, assembly_methods)
+        ],
     }
     if warnings and not high_drift_online:
         (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")

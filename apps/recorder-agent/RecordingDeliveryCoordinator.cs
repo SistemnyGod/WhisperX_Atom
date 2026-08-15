@@ -40,6 +40,29 @@ public sealed class RecordingDeliveryCoordinator(
             errorDetail: null,
             cancellationToken: cancellationToken);
 
+        // AudioGraph STOP is a raw durability boundary. FLAC encoding may
+        // still be running in the background, so do not turn a temporarily
+        // empty FLAC spool into LOCAL_FAILED. The background reconciler will
+        // build the archive as soon as RAW_READY chunks become FLAC_READY.
+        var readyChunks = await spool.GetChunkCountsAsync(localSessionId, cancellationToken);
+        if (readyChunks.Total == 0)
+        {
+            await spool.SetFinalizationStateAsync(localSessionId,
+                localFinalizeState: "LOCAL_READY",
+                deliveryState: deliveryState,
+                errorCode: null,
+                errorDetail: "RAW_READY; FLAC encoding continues in background",
+                cancellationToken: cancellationToken);
+            return new FinalizationResult(
+                true,
+                "LOCAL_READY",
+                ArchivePath: null,
+                LocalArchiveState: "LOCAL_READY",
+                DeliveryState: deliveryState,
+                ServerFinalizeState: "PENDING",
+                MediaState: "PENDING");
+        }
+
         var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken);
         if (archiveResult.State == "LOCAL_READY")
         {
@@ -128,6 +151,20 @@ public sealed class RecordingDeliveryCoordinator(
         }
         catch (Exception ex)
         {
+            if (ex.Message.Contains("recording_chunks_not_found", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("recording_chunks_incomplete", StringComparison.OrdinalIgnoreCase))
+            {
+                // Encoder is still producing FLAC from RAW_READY. Keep the
+                // local boundary successful and ask the next reconciliation
+                // tick to retry archive assembly.
+                await spool.SetFinalizationStateAsync(localSessionId,
+                    localFinalizeState: "LOCAL_READY",
+                    errorCode: "ENCODING_PENDING",
+                    errorDetail: "FLAC chunks are still being encoded",
+                    nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
+                    cancellationToken: cancellationToken);
+                return ("LOCAL_READY", previous?.ArchivePath);
+            }
             var code = ClassifyLocalArchiveError(ex);
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_FAILED",

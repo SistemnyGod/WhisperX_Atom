@@ -24,8 +24,17 @@ public sealed class AudioFrameDurableConsumer
         {
             await foreach (var frame in frames.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                await durableWrite(frame).ConfigureAwait(false);
-                _firstDurableWrite.TrySetResult(true);
+                try
+                {
+                    await durableWrite(frame).ConfigureAwait(false);
+                    _firstDurableWrite.TrySetResult(true);
+                }
+                finally
+                {
+                    // AudioGraph may transfer an ArrayPool lease with the
+                    // frame. Returning it here also covers writer failures.
+                    frame.Dispose();
+                }
             }
         }
         catch (Exception ex)

@@ -6,7 +6,9 @@ param(
     [int]$FinalizeTimeoutSeconds = 90,
     [string]$DeviceId = "",
     [switch]$ServerDelivery,
-    [switch]$StopHost
+    [switch]$StopHost,
+    [switch]$DevelopmentHost,
+    [string]$InstalledHostPath = "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +20,71 @@ $env:AUDIO_CAPTURE_ENGINE = "AUDIOGRAPH"
 $hostWasStarted = $false
 $localSessionId = $null
 $stopRequested = $false
+$hostProcessId = $null
+$hostPath = $null
+$hostBuild = $null
+
+function Get-ProductVersion([string]$path) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+        return [string](Get-Item -LiteralPath $path).VersionInfo.ProductVersion
+    }
+    catch { return $null }
+}
+
+function Get-HostProcesses {
+    @(Get-Process -Name "WhisperX.Atom.Recorder.Host" -ErrorAction SilentlyContinue | ForEach-Object {
+        $path = $null
+        try { $path = [IO.Path]::GetFullPath($_.Path) } catch { }
+        [pscustomobject]@{ Process = $_; Path = $path; Build = Get-ProductVersion $path }
+    })
+}
+
+function Ensure-ReleaseHost {
+    if ($DevelopmentHost) {
+        $script = Join-Path $repo "scripts\start-recorder-host.ps1"
+        & $script -ReadyTimeoutSeconds 20
+        $scriptProcess = Get-HostProcesses | Select-Object -First 1
+        if ($null -ne $scriptProcess) {
+            $scriptProcess.Process.Id | Set-Content -LiteralPath (Join-Path $repo "artifacts\runtime\recorder-host.pid") -Encoding ascii
+            $scriptProcess
+        }
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $InstalledHostPath -PathType Leaf)) {
+        throw "RECORDER_HOST_BUILD_MISMATCH: installed Host was not found at '$InstalledHostPath'"
+    }
+    $expectedPath = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $InstalledHostPath).Path)
+    $expectedBuild = Get-ProductVersion $expectedPath
+    $running = @(Get-HostProcesses)
+    if ($running.Count -gt 0) {
+        $wrong = $running | Where-Object { -not $_.Path -or $_.Path -ne $expectedPath }
+        if ($wrong.Count -gt 0) {
+            throw "RECORDER_HOST_BUILD_MISMATCH: running Host path '$($wrong[0].Path)' does not match '$expectedPath'"
+        }
+        $wrongBuild = $running | Where-Object { $expectedBuild -and $_.Build -and $_.Build -ne $expectedBuild }
+        if ($wrongBuild.Count -gt 0) {
+            throw "RECORDER_HOST_BUILD_MISMATCH: running Host build '$($wrongBuild[0].Build)' does not match '$expectedBuild'"
+        }
+        $hostProcessId = [int]$running[0].Process.Id
+        $hostPath = $expectedPath
+        $hostBuild = $expectedBuild
+        return $running[0]
+    }
+
+    $startScript = Join-Path $repo "scripts\start-recorder-host.ps1"
+    & $startScript -ExecutablePath $expectedPath -ReadyTimeoutSeconds 20
+    $started = Get-HostProcesses | Select-Object -First 1
+    if ($null -eq $started -or $started.Path -ne $expectedPath -or ($expectedBuild -and $started.Build -ne $expectedBuild)) {
+        $actual = if ($null -eq $started) { "none" } else { "$($started.Path) ($($started.Build))" }
+        throw "RECORDER_HOST_BUILD_MISMATCH: expected '$expectedPath' ($expectedBuild), actual '$actual'"
+    }
+    $hostProcessId = [int]$started.Process.Id
+    $hostPath = $started.Path
+    $hostBuild = $started.Build
+    return $started
+}
 
 function Invoke-HostCommand([string]$Command, [hashtable]$Payload = @{}) {
     $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
@@ -36,9 +103,11 @@ function Invoke-HostCommand([string]$Command, [hashtable]$Payload = @{}) {
 
 try {
     New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-    $hostScript = Join-Path $repo "scripts\start-recorder-host.ps1"
-    & $hostScript -ReadyTimeoutSeconds 20
+    $hostInfo = Ensure-ReleaseHost
     $hostWasStarted = $true
+    if ([string]::IsNullOrWhiteSpace($hostPath) -and $null -ne $hostInfo) { $hostPath = [string]$hostInfo.Path }
+    if ($null -eq $hostProcessId -and $null -ne $hostInfo) { $hostProcessId = [int]$hostInfo.Process.Id }
+    if ([string]::IsNullOrWhiteSpace($hostBuild) -and $null -ne $hostInfo) { $hostBuild = [string]$hostInfo.Build }
 
     $health = Invoke-HostCommand "HEALTH"
     if ($health.ok -ne $true) { throw "AUDIOGRAPH_HEALTH_FAILED: $($health.error)" }
@@ -96,6 +165,7 @@ try {
             selectedDeviceName = [string]$probeResult.deviceName
         }
         session = [ordered]@{ localSessionId = $localSessionId; requestedSeconds = $Seconds; startState = [string]$start.state; stopState = [string]$stop.state }
+        host = [ordered]@{ path = $hostPath; processId = $hostProcessId; buildIdentity = $hostBuild; developmentMode = [bool]$DevelopmentHost }
         result = [ordered]@{
             firstFrameConfirmed = ([string]$start.state -match "RECORDING")
             localFinalizeState = [string]$status.localFinalizeState
@@ -120,10 +190,12 @@ try {
 }
 finally {
     if ($hostWasStarted -and $StopHost) {
-        $pidPath = Join-Path $repo "artifacts\runtime\recorder-host.pid"
-        if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
-            $hostPid = [int](Get-Content -LiteralPath $pidPath -Raw)
-            Stop-Process -Id $hostPid -Force -ErrorAction SilentlyContinue
+        if ($DevelopmentHost) {
+            $pidPath = Join-Path $repo "artifacts\runtime\recorder-host.pid"
+            if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
+                $hostPid = [int](Get-Content -LiteralPath $pidPath -Raw)
+                Stop-Process -Id $hostPid -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }

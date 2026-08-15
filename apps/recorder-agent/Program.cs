@@ -83,7 +83,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         try
         {
         await spool.InitializeAsync(stoppingToken);
-        logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.ChunkDurationSeconds, api.IsConfigured);
+        logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.GetChunkDurationSeconds(), api.IsConfigured);
         await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
         var recoveryCompleted = false;
         if (api.IsConfigured)

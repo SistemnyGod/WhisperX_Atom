@@ -870,7 +870,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
             var frameBytes = Math.Max(1, _format.BlockAlign);
             var usable = pcm.Length - pcm.Length % frameBytes;
             var offset = 0;
-            var targetSamples = Math.Max(1, _format.SampleRate * RecordingContract.ChunkDurationSeconds);
+            var targetSamples = Math.Max(1, _format.SampleRate * RecordingContract.GetChunkDurationSeconds());
             while (offset < usable)
             {
                 EnsureOpen();
@@ -972,7 +972,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
             if (sampleCount <= 0) continue;
             var startSample = exactName
                 ? exactStartSample
-                : checked((long)sequence * _format.SampleRate * RecordingContract.ChunkDurationSeconds);
+                : checked((long)sequence * _format.SampleRate * RecordingContract.GetChunkDurationSeconds());
             if (!exactName)
                 _logger.LogWarning("RAW_CHUNK_LEGACY_TIMELINE_INFERRED Session={SessionId} Track={TrackId} Sequence={Sequence}", _sessionId, _trackId, sequence);
             await ProcessChunkAsync(new PendingRawChunk(Guid.NewGuid().ToString("N"), sequence, rawPath, startSample, sampleCount));

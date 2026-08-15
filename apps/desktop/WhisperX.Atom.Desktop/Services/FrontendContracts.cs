@@ -151,6 +151,7 @@ public static class AgentStatusFormatter
                 "RECORDER_IPC_ACCESS_DENIED" => "Recorder Agent: доступ к локальному IPC запрещён",
                 "RECORDER_IPC_TIMEOUT" or "RECORDER_HOST_PIPE_UNRESPONSIVE" => "Recorder Agent: локальный Host не отвечает",
                 "RECORDER_HOST_NOT_RUNNING" => "Recorder Agent: локальный Host не запущен",
+                "RECORDER_HOST_BUILD_MISMATCH" or "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" => "Recorder Agent: установлена другая сборка Host; требуется обновление",
                 "AUDIO_INPUT_NODE_CREATE_FAILED" => "Recorder Agent: Windows не создала вход микрофона",
                 "AUDIO_GRAPH_UNRECOVERABLE" => "Recorder Agent: AudioGraph аварийно остановил захват",
                 "AUDIO_PIPELINE_OVERRUN" => "Recorder Agent: обработка аудиокадров не успевает за захватом",
@@ -160,6 +161,9 @@ public static class AgentStatusFormatter
                 "AUDIO_BUFFER_FORMAT_MISMATCH" => "Recorder Agent: несовместимый формат аудиобуфера",
                 "SERVER_NETWORK_UNREACHABLE" => "Recorder Agent: сервер недоступен по сети; запись сохраняется локально",
                 "SERVER_TIMEOUT" => "Recorder Agent: сервер не ответил вовремя; запись сохраняется локально",
+                "SERVER_NOT_CONFIGURED" => "Recorder Agent: адрес LAN-сервера не настроен",
+                "PROCESSING_UNAVAILABLE" => "Recorder Agent: WhisperX worker временно недоступен; запись сохранена локально",
+                "UPLOAD_RETRY_PENDING" => "Recorder Agent: отправка ожидает повторной попытки",
                 "AGENT_AUTH_REJECTED" => "Recorder Agent: сервер отклонил авторизацию",
                 _ when !string.IsNullOrWhiteSpace(response.Error) => $"Recorder Agent: {response.Error}",
                 _ => "Recorder Agent: локальный сервис сообщил об ошибке"

@@ -335,7 +335,7 @@ public sealed class AgentPipeHost(
         }
         catch (Exception ex) { logger.LogDebug(ex, "Background delivery counters are not available while reporting health."); }
         var rawBacklog = new RawChunkBacklog(0, 0, 0, 0, 0);
-        try { rawBacklog = await spool.GetRawChunkBacklogAsync(cancellationToken); }
+        try { rawBacklog = await spool.GetRawChunkBacklogAsync(cancellationToken: cancellationToken); }
         catch (Exception ex) { logger.LogDebug(ex, "Raw chunk backlog is not available while reporting health."); }
         var visible = VisibleStatus();
         RecordingSessionStatus? sessionStatus = null;

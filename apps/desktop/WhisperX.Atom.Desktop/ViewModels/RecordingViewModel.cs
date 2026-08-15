@@ -72,6 +72,8 @@ public sealed class RecordingViewModel : ObservableObject
     private AgentIpcResponse? _lastAgentResponse;
     private string? _archivePath;
     private string _localFinalizeState = "PENDING";
+    private string _encodingState = "PENDING";
+    private string _archiveState = "PENDING";
     private string _deliveryState = "NOT_STARTED";
     private string? _sessionErrorCode;
     private string? _sessionTraceId;
@@ -137,15 +139,29 @@ public sealed class RecordingViewModel : ObservableObject
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) OnPropertyChanged(nameof(CanOpenLocalArchive)); } }
     public string LocalFinalizeState { get => _localFinalizeState; private set { if (SetProperty(ref _localFinalizeState, value)) OnPropertyChanged(nameof(LocalFinalizeStatusLabel)); } }
+    public string EncodingState { get => _encodingState; private set { if (SetProperty(ref _encodingState, value)) OnPropertyChanged(nameof(EncodingStatusLabel)); } }
+    public string ArchiveState { get => _archiveState; private set { if (SetProperty(ref _archiveState, value)) OnPropertyChanged(nameof(ArchiveStatusLabel)); } }
     public string DeliveryState { get => _deliveryState; private set { if (SetProperty(ref _deliveryState, value)) OnPropertyChanged(nameof(DeliveryStatusLabel)); } }
     public string LocalFinalizeStatusLabel => _localFinalizeState.ToUpperInvariant() switch
     {
         "FINALIZING_LOCAL" => "Локальный master собирается",
-        "LOCAL_READY" => "Локальный master сохранён",
+        "LOCAL_READY" => "Запись сохранена",
         "LOCAL_FAILED" => "Локальная сборка не завершена",
         _ => "Локальное сохранение ожидает"
     };
     public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
+    public string EncodingStatusLabel => _encodingState.ToUpperInvariant() switch
+    {
+        "ENCODING" => "Подготовка локального файла",
+        "FLAC_READY" => "Чанки готовы",
+        _ => "Ожидание кодирования"
+    };
+    public string ArchiveStatusLabel => _archiveState.ToUpperInvariant() switch
+    {
+        "READY" => "Архив готов",
+        "PENDING" => "Собирается после записи",
+        _ => "Архив ожидает"
+    };
     public string DeliveryDiagnosticLabel => string.IsNullOrWhiteSpace(_sessionErrorCode)
         ? "Причина доставки: —"
         : $"Причина: {_sessionErrorCode}{(_nextRetryAtUtc is DateTimeOffset retry ? $" · следующая попытка {retry.ToLocalTime():HH:mm:ss}" : string.Empty)}";
@@ -468,6 +484,8 @@ public sealed class RecordingViewModel : ObservableObject
         WarningMessage = string.Empty;
         ArchivePath = null;
         LocalFinalizeState = "PENDING";
+        EncodingState = "PENDING";
+        ArchiveState = "PENDING";
         DeliveryState = "NOT_STARTED";
         _sessionErrorCode = null;
         _sessionTraceId = null;
@@ -858,6 +876,8 @@ public sealed class RecordingViewModel : ObservableObject
         SessionId = session.SessionId;
         MeetingId = session.MeetingId ?? MeetingId;
         LocalFinalizeState = session.LocalFinalizeState;
+        EncodingState = session.EncodingState;
+        ArchiveState = session.ArchiveState;
         DeliveryState = session.DeliveryState;
         ArchivePath = session.ArchivePath;
         _sessionErrorCode = session.ErrorCode;

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import gc
 import logging
 import os
 import copy
 import subprocess
+import threading
+import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .contracts import ProcessingRequest, ProcessingResult, ProgressCallback
 from .transcript_quality import (
@@ -26,11 +27,73 @@ LOGGER = logging.getLogger("whisperx.processing")
 class ProcessingService:
     """Server-facing adapter around the proven legacy WhisperX pipeline."""
 
-    def process(self, request: ProcessingRequest, progress: ProgressCallback | None = None) -> ProcessingResult:
+    IDLE_CACHE_SECONDS = max(60, int(os.getenv("WHISPERX_PIPELINE_IDLE_SECONDS", "900")))
+
+    def __init__(self) -> None:
+        self._pipeline: Any | None = None
+        self._pipeline_fingerprint: tuple[Any, ...] | None = None
+        self._last_used_monotonic = 0.0
+        self._lock = threading.Lock()
+
+    def _get_pipeline(self, config: Any) -> Any:
+        fingerprint = (
+            config.asr_model,
+            config.asr_backend,
+            config.device,
+            config.compute_type,
+            bool(config.enable_alignment),
+            bool(config.enable_diarization),
+        )
+        with self._lock:
+            if self._pipeline is None or self._pipeline_fingerprint != fingerprint:
+                self._clear_pipeline_locked(clear_cuda=self._pipeline is not None)
+                from app.transcription_pipeline import TranscriptionPipeline
+
+                self._pipeline = TranscriptionPipeline(config)
+                self._pipeline_fingerprint = fingerprint
+            self._last_used_monotonic = time.monotonic()
+            return self._pipeline
+
+    def release_idle(self, force: bool = False) -> bool:
+        with self._lock:
+            if self._pipeline is None:
+                return False
+            if not force and time.monotonic() - self._last_used_monotonic < self.IDLE_CACHE_SECONDS:
+                return False
+            self._clear_pipeline_locked(clear_cuda=True)
+            return True
+
+    def close(self) -> None:
+        self.release_idle(force=True)
+
+    def _clear_pipeline_locked(self, clear_cuda: bool) -> None:
+        pipeline, self._pipeline = self._pipeline, None
+        self._pipeline_fingerprint = None
+        self._last_used_monotonic = 0.0
+        if pipeline is not None:
+            try:
+                pipeline.cache.clear()
+            except Exception:
+                LOGGER.debug("pipeline_cache_cleanup_failed", exc_info=True)
+        if clear_cuda:
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                LOGGER.debug("cuda_cache_cleanup_failed", exc_info=True)
+
+    def process(
+        self,
+        request: ProcessingRequest,
+        progress: ProgressCallback | None = None,
+        asr_ready: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProcessingResult:
         if not request.media_path.is_file():
             raise FileNotFoundError(request.media_path)
 
-        from app.transcription_pipeline import PipelineContext, PipelineConfig, TranscriptionPipeline
+        from app.transcription_pipeline import PipelineContext, PipelineConfig
 
         def report(stage: str, value: int) -> None:
             if progress:
@@ -43,9 +106,20 @@ class ProcessingService:
         config.enable_alignment = True
         config.enable_diarization = os.getenv("DIARIZATION_MODE", "preferred").lower() != "disabled"
         thresholds = TranscriptQualityThresholds.from_env()
-        pipeline = TranscriptionPipeline(config)
+        pipeline = self._get_pipeline(config)
+        # The resident object owns model caches, while request-scoped language
+        # and speaker limits remain mutable per job.
+        pipeline.config.language = config.language
+        pipeline.config.min_speakers = config.min_speakers
+        pipeline.config.max_speakers = config.max_speakers
+        pipeline.config.enable_alignment = config.enable_alignment
+        pipeline.config.enable_diarization = config.enable_diarization
         ctx = PipelineContext(job_id=request.job_id, audio_path=request.media_path)
         duration_seconds = _probe_duration_seconds(request.media_path)
+
+        def emit_asr_ready(result: ProcessingResult) -> None:
+            if asr_ready:
+                asr_ready(result.to_dict())
 
         try:
             report("NORMALIZING", 10)
@@ -60,12 +134,14 @@ class ProcessingService:
             # TRANSCRIPT_EMPTY (and do not spend GPU time on an empty decode).
             if _is_silent_pcm(ctx.asr_audio_path):
                 report("TRANSCRIBING", 30)
-                return _build_no_speech_result(
+                no_speech = _build_no_speech_result(
                     request,
                     config,
                     duration_seconds,
                     ctx.asr_preprocessing,
                 )
+                emit_asr_ready(no_speech)
+                return no_speech
 
             report("TRANSCRIBING", 30)
             primary_result: dict[str, Any] = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
@@ -90,14 +166,41 @@ class ProcessingService:
             selected_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             selected_gate = quality_gate(selected_report, thresholds)
             if not (result.get("segments") or result.get("word_segments")) and _is_silent_pcm(ctx.asr_audio_path):
-                return _build_no_speech_result(
+                no_speech = _build_no_speech_result(
                     request,
                     config,
                     duration_seconds,
                     ctx.asr_preprocessing,
                 )
+                emit_asr_ready(no_speech)
+                return no_speech
             if not selected_gate["valid"]:
                 raise ValueError(selected_report.reasons[0] if selected_report.reasons else "TRANSCRIPT_EMPTY")
+            asr_segments = copy.deepcopy(result.get("segments", []))
+            for segment in asr_segments:
+                if not segment.get("speaker"):
+                    segment["speaker"] = "UNKNOWN"
+            asr_text = " ".join(str(item.get("text", "")).strip() for item in asr_segments if item.get("text")).strip()
+            emit_asr_ready(ProcessingResult(
+                job_id=request.job_id,
+                language=result.get("language") or config.language,
+                text=asr_text,
+                segments=asr_segments,
+                word_segments=copy.deepcopy(result.get("word_segments", [])),
+                metadata={
+                    "model": config.asr_model,
+                    "backend": config.asr_backend,
+                    "device": config.device,
+                    "compute_type": config.compute_type,
+                    "processing_profile": request.profile,
+                    "selected_asr_pass": selected_pass,
+                    "asr_preprocessing": ctx.asr_preprocessing,
+                },
+                status="PARTIAL_READY",
+                warnings=[],
+                stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"},
+                quality=selected_report.to_dict(),
+            ))
             ctx.asr_result = result
             asr_recovery_result = copy.deepcopy(result)
             # ASR reasons drive fallback selection, but alignment can legitimately
@@ -232,17 +335,20 @@ class ProcessingService:
                 stage_outcomes=stage_outcomes,
                 quality=quality,
             )
+        except Exception as exc:
+            if _is_cuda_oom(exc):
+                # Release only on a real OOM. Successful jobs retain the
+                # resident model cache for the next ASR request.
+                with self._lock:
+                    self._clear_pipeline_locked(clear_cuda=True)
+            raise
         finally:
             pipeline._cleanup_ctx(ctx)
-            pipeline.cache.clear()
-            gc.collect()
-            try:
-                import torch
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                LOGGER.debug("cuda_cache_cleanup_failed job_id=%s", request.job_id, exc_info=True)
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "cuda" in text and ("out of memory" in text or "oom" in text)
 
 
 def _probe_duration_seconds(path: Path) -> float | None:
