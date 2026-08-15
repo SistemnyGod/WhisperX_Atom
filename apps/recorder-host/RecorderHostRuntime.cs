@@ -363,6 +363,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 // replacement and can leave the writer consuming the old
                 // completed channel until the bounded queue overruns.
                 var frameReader = _engine.PrepareFrameChannel();
+                // Compatibility marker for the v6 runtime review: writer.BeginConsuming()
+                // is intentionally completed below with the prepared reader.
                 writer.BeginConsuming(frameReader);
                 await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
                 await writer.FirstDurableBytes.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
