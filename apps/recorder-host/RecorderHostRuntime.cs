@@ -356,12 +356,14 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             await writer.StartAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                // AudioGraph replaces its completed frame channel for every
-                // capture start. The writer has been created against that new
-                // channel by writer.StartAsync; bind it before AudioGraph
-                // emits frames so a delayed scheduler cannot fill the queue
-                // and falsely report AUDIO_PIPELINE_OVERRUN.
-                writer.BeginConsuming();
+                // Bind the durable consumer to the exact channel that this
+                // session will use before AudioGraph can emit its first
+                // quantum.  AudioGraph creates a fresh channel per start;
+                // resolving the property inside a background task races that
+                // replacement and can leave the writer consuming the old
+                // completed channel until the bounded queue overruns.
+                var frameReader = _engine.PrepareFrameChannel();
+                writer.BeginConsuming(frameReader);
                 await _engine.StartAsync(cancellationToken).ConfigureAwait(false);
                 await writer.FirstDurableBytes.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
             }
@@ -895,6 +897,7 @@ internal sealed class AudioGraphSessionWriter
         AllowSynchronousContinuations = false
     });
     private AudioFrameDurableConsumer? _consumer;
+    private ChannelReader<AudioFrame>? _frameReader;
     private CancellationTokenSource _stop = new();
     private Task? _worker;
     private Task? _rawFinalizerWorker;
@@ -950,9 +953,10 @@ internal sealed class AudioGraphSessionWriter
         }
     }
 
-    public void BeginConsuming()
+    public void BeginConsuming(ChannelReader<AudioFrame> frameReader)
     {
         if (_consumer is null) throw new InvalidOperationException("AUDIO_WRITER_NOT_STARTED");
+        _frameReader = frameReader ?? throw new ArgumentNullException(nameof(frameReader));
         _worker ??= Task.Run(ProcessAsync);
     }
 
@@ -986,7 +990,8 @@ internal sealed class AudioGraphSessionWriter
         try
         {
             var consumer = _consumer ?? throw new InvalidOperationException("AUDIO_WRITER_NOT_STARTED");
-            await consumer.RunAsync(_engine.Frames, ConsumeFrameAsync, _stop.Token).ConfigureAwait(false);
+            var frames = _frameReader ?? throw new InvalidOperationException("AUDIO_WRITER_FRAME_CHANNEL_NOT_BOUND");
+            await consumer.RunAsync(frames, ConsumeFrameAsync, _stop.Token).ConfigureAwait(false);
             if (_sampleCount > 0) await CompleteChunkAsync().ConfigureAwait(false);
             _rawFinalizeQueue.Writer.TryComplete();
             if (_rawFinalizerWorker is not null) await _rawFinalizerWorker.ConfigureAwait(false);

@@ -29,6 +29,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private readonly object _gate = new();
     private readonly Stopwatch _captureClock = new();
     private Channel<AudioFrame> _frames = CreateChannel();
+    // The writer binds to this channel before AudioGraph.Start() can emit its
+    // first quantum.  Keeping the preparation flag separate avoids a race
+    // where the consumer observes the previous completed channel while
+    // StartAsync replaces it for the new session.
+    private bool _frameChannelPrepared;
     private AudioGraph? _graph;
     private AudioDeviceInputNode? _inputNode;
     private AudioFrameOutputNode? _outputNode;
@@ -118,6 +123,15 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     }
 
     public ChannelReader<AudioFrame> Frames => _frames.Reader;
+
+    public ChannelReader<AudioFrame> PrepareFrameChannel()
+    {
+        if (State is AudioCaptureState.Recording or AudioCaptureState.Paused)
+            throw new InvalidOperationException("AUDIO_CAPTURE_ALREADY_RUNNING");
+        _frames = CreateChannel();
+        _frameChannelPrepared = true;
+        return _frames.Reader;
+    }
 
     public event EventHandler<AudioDeviceChangedEventArgs>? DeviceStateChanged;
 
@@ -239,7 +253,9 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         await DisposeGraphAsync().ConfigureAwait(false);
         ResetTelemetry();
         lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
-        _frames = CreateChannel();
+        if (!_frameChannelPrepared)
+            _frames = CreateChannel();
+        _frameChannelPrepared = false;
         _failureRaised = 0;
         SetState(AudioCaptureState.Starting);
 
