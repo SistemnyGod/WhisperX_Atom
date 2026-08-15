@@ -39,51 +39,30 @@ public sealed class RecordingDeliveryCoordinator(
             : "PENDING_SERVER";
         await spool.SetSessionStateAsync(localSessionId, "FINALIZING", cancellationToken);
         await spool.SetFinalizationStateAsync(localSessionId,
-            localFinalizeState: "FINALIZING_LOCAL",
+            // LOCAL_READY is the durable PCM boundary. FLAC/master creation
+            // is intentionally a background concern and must not make STOP
+            // wait for FFmpeg, ffprobe or a slow archive volume.
+            localFinalizeState: "LOCAL_READY",
             deliveryState: deliveryState,
             errorCode: null,
             errorDetail: null,
             clearError: true,
             cancellationToken: cancellationToken);
-
-        var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken);
-        if (archiveResult.State == "LOCAL_READY")
-        {
-            return new FinalizationResult(
-                true,
-                "LOCAL_READY",
-                ArchivePath: archiveResult.ArchivePath,
-                LocalArchiveState: "LOCAL_READY",
-                DeliveryState: deliveryState,
-                ServerFinalizeState: "PENDING",
-                MediaState: "PENDING");
-        }
-
-        var failed = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
-        await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken);
         return new FinalizationResult(
-            false,
-            "LOCAL_FINALIZE",
-            failed?.ErrorCode ?? "LOCAL_FINALIZE_FAILED",
-            false,
-            ArchivePath: failed?.ArchivePath,
-            ErrorMessage: failed?.ErrorDetail,
-            LocalArchiveState: "LOCAL_FAILED",
+            true,
+            "LOCAL_READY",
+            ArchivePath: null,
+            LocalArchiveState: "LOCAL_READY",
             DeliveryState: deliveryState,
-            ServerFinalizeState: "NOT_REQUESTED",
+            ServerFinalizeState: "PENDING",
             MediaState: "PENDING");
     }
 
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
-        // The caller reaches this method only after RecordingStopHandle's
-        // LocalFinalization has drained all per-chunk FLAC encoders. From here
-        // on, the master/preview archive is optional and must not gate upload.
-        await spool.SetFinalizationStateAsync(localSessionId,
-            localFinalizeState: "FINALIZING_LOCAL",
-            deliveryState: "NOT_REQUESTED",
-            clearError: true,
-            cancellationToken: cancellationToken);
+        // The caller reaches this method after the raw durability boundary.
+        // Keep LOCAL_READY stable while optional archive assembly and server
+        // delivery run in parallel.
 
         var archiveTask = CreateLocalArchiveAsync(localSessionId, cancellationToken);
         var deliveryTask = DeliverToServerAsync(localSessionId, cancellationToken);

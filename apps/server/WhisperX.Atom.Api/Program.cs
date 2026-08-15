@@ -1822,17 +1822,34 @@ public sealed class Database(IConfiguration configuration)
     {
         await using (var table = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())", connection))
             await table.ExecuteNonQueryAsync();
+        await using (var checksums = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS schema_migration_checksums(version text PRIMARY KEY REFERENCES schema_migrations(version) ON DELETE CASCADE, sha256 text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now())", connection))
+            await checksums.ExecuteNonQueryAsync();
         var directory = Path.Combine(AppContext.BaseDirectory, "Migrations");
         if (!Directory.Exists(directory))
             throw new DirectoryNotFoundException($"Migration directory not found: {directory}");
         foreach (var file in Directory.GetFiles(directory, "*.sql").OrderBy(Path.GetFileName, StringComparer.Ordinal))
         {
             var version = Path.GetFileNameWithoutExtension(file);
+            var sql = await File.ReadAllTextAsync(file);
+            var checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
             await using var check = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=@version)", connection);
             check.Parameters.AddWithValue("version", version);
             if ((bool)(await check.ExecuteScalarAsync())!)
+            {
+                await using var known = new NpgsqlCommand("SELECT sha256 FROM schema_migration_checksums WHERE version=@version", connection);
+                known.Parameters.AddWithValue("version", version);
+                var stored = await known.ExecuteScalarAsync();
+                if (stored is string knownChecksum && !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"MIGRATION_CHECKSUM_MISMATCH:{version}");
+                if (stored is null or DBNull)
+                {
+                    await using var recordChecksum = new NpgsqlCommand("INSERT INTO schema_migration_checksums(version,sha256) VALUES(@version,@sha256) ON CONFLICT(version) DO NOTHING", connection);
+                    recordChecksum.Parameters.AddWithValue("version", version);
+                    recordChecksum.Parameters.AddWithValue("sha256", checksum);
+                    await recordChecksum.ExecuteNonQueryAsync();
+                }
                 continue;
-            var sql = await File.ReadAllTextAsync(file);
+            }
             await using var transaction = await connection.BeginTransactionAsync();
             await using (var migration = new NpgsqlCommand(sql, connection, transaction))
                 await migration.ExecuteNonQueryAsync();
@@ -1840,6 +1857,12 @@ public sealed class Database(IConfiguration configuration)
             {
                 record.Parameters.AddWithValue("version", version);
                 await record.ExecuteNonQueryAsync();
+            }
+            await using (var recordChecksum = new NpgsqlCommand("INSERT INTO schema_migration_checksums(version,sha256) VALUES(@version,@sha256)", connection, transaction))
+            {
+                recordChecksum.Parameters.AddWithValue("version", version);
+                recordChecksum.Parameters.AddWithValue("sha256", checksum);
+                await recordChecksum.ExecuteNonQueryAsync();
             }
             await transaction.CommitAsync();
         }

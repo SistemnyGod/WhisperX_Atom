@@ -5,6 +5,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+if ([string]::IsNullOrWhiteSpace($gitCommit)) { throw "Unable to resolve release commit; refusing to publish an unidentified runtime." }
+$dirtyFiles = @(& git -C $repoRoot status --porcelain 2>$null)
+if ($dirtyFiles.Count -gt 0 -and $env:WHISPERX_ALLOW_DIRTY_RELEASE -notin @("1", "true", "yes")) {
+    throw "Working tree is dirty; commit the release or set WHISPERX_ALLOW_DIRTY_RELEASE only for an explicit development package."
+}
+$buildIdentity = "1.0.1+$gitCommit"
+Write-Host "Publishing build identity $buildIdentity"
 $output = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
 if ([string]::IsNullOrWhiteSpace($output) -or $output -eq $repoRoot -or $output.Length -lt ($repoRoot.Length + 8)) {
     throw "Refusing unsafe output path: $output"
@@ -26,9 +34,10 @@ $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 # WinUI 3 is published as an unpackaged self-contained directory. Keeping the
 # runtime files beside the exe avoids single-file extraction into a temp folder
 # and keeps the Inno Setup payload transparent to endpoint protection.
-$desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", "-o", $desktopOut) + $publishRestoreArgs
-$servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $serviceOut) + $publishRestoreArgs
-$recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", "-o", $recorderHostOut) + $publishRestoreArgs
+$identityArg = "-p:WhisperXBuildIdentity=$buildIdentity"
+$desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", $identityArg, "-o", $desktopOut) + $publishRestoreArgs
+$servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $serviceOut) + $publishRestoreArgs
+$recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     & dotnet publish @Arguments
     $exitCode = [int]$LASTEXITCODE

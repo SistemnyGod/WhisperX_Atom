@@ -183,7 +183,16 @@ public sealed record AgentIpcHealth(
     string? RuntimeUser = null,
     string? RuntimeSid = null,
     int? WindowsSessionId = null,
-    string? ServerOrigin = null);
+    string? ServerOrigin = null,
+    // Additive v6 diagnostics. Startup/recovery are independent from capture;
+    // a DEGRADED recovery state must not make the microphone unavailable.
+    string StartupState = "UNKNOWN",
+    string RecoveryState = "NOT_STARTED",
+    int RecoveryPendingCount = 0,
+    string EncoderState = "UNKNOWN",
+    int RawFinalizerQueueDepth = 0,
+    int RawFinalizerMaximumDepth = 0,
+    int RawFinalizerCapacity = 0);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
@@ -264,7 +273,21 @@ public sealed record RecordingSessionStatus(
     long BytesPending = 0,
     double? OldestPendingAgeSeconds = null,
     string EncodingState = "PENDING",
-    string ArchiveState = "PENDING");
+    string ArchiveState = "PENDING",
+    int RawChunkCount = 0,
+    int RawWritingCount = 0,
+    int RawReadyCount = 0,
+    int RawEncodingCount = 0,
+    int RawCompletedCount = 0,
+    int RawFailedCount = 0,
+    long RawBytes = 0,
+    double? RawOldestPendingAgeSeconds = null,
+    string RawBacklogHealth = "HEALTHY",
+    int RawFinalizerQueueDepth = 0,
+    int RawFinalizerMaximumDepth = 0,
+    int RawFinalizerCapacity = 0,
+    string? ArchiveErrorCode = null,
+    string? ArchiveErrorDetail = null);
 
 public sealed record FinalizationResult(
     bool Success,

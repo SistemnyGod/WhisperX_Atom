@@ -153,6 +153,31 @@ class JobRepository:
             ).fetchone()
             return str(row[0]) if row and row[0] else None
 
+    def job_type(self, job_id: str) -> str | None:
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute("SELECT type FROM jobs WHERE id=%s", (job_id,)).fetchone()
+            return str(row[0]) if row and row[0] else None
+
+    def input_transcript_id(self, job_id: str) -> str | None:
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute("SELECT input_transcript_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
+            return str(row[0]) if row and row[0] else None
+
+    def complete_asr_job(self, job_id: str, meeting_id: str) -> None:
+        """Close an ASR-only job without creating a second transcript version."""
+        with psycopg.connect(self.conninfo) as connection:
+            with connection.transaction():
+                error_row = connection.execute("SELECT error_code FROM jobs WHERE id=%s", (job_id,)).fetchone()
+                no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
+                connection.execute(
+                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code='NO_SPEECH_DETECTED' THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    (job_id,),
+                )
+                connection.execute(
+                    "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
+                    ("PARTIAL_READY" if no_speech else "TRANSCRIPT_READY", meeting_id),
+                )
+
     def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
         """Persist the ASR-only Transcript V1 before alignment/diarization.
 
@@ -165,7 +190,7 @@ class JobRepository:
                 meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
                 if meeting is None or str(meeting[0]) == "CANCELLED":
                     raise RuntimeError("MEETING_CANCELLED")
-                job = connection.execute("SELECT status FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+                job = connection.execute("SELECT status,type,pipeline_correlation_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
                 if job is None or str(job[0]) == "CANCELLED":
                     raise RuntimeError("TRANSCRIBE_JOB_CANCELLED")
                 existing = connection.execute(
@@ -193,6 +218,31 @@ class JobRepository:
                     "UPDATE jobs SET stage='ASR_READY',progress=45,error_code=%s,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                     (result_error_code, job_id),
                 )
+                # ASR-only jobs expose V1 immediately and enqueue enrichment
+                # separately. The partial transcript is never mutated by V2.
+                if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code != "NO_SPEECH_DETECTED":
+                    media = connection.execute(
+                        "SELECT a.asr_storage_key FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
+                        (job_id,),
+                    ).fetchone()
+                    storage_key = str(media[0]) if media and media[0] else None
+                    enrichment = connection.execute(
+                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'TRANSCRIPT_ENRICH','QUEUED','ASR_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id",
+                        (meeting_id, transcript_id, job[2]),
+                    ).fetchone()
+                    if enrichment:
+                        message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
+                        payload = json.dumps({
+                            "message_id": str(message_id),
+                            "job_id": str(enrichment[0]),
+                            "meeting_id": meeting_id,
+                            "transcript_id": str(transcript_id),
+                            "stage": "ASR_READY",
+                            "storage_key": storage_key,
+                            "correlation_id": str(job[2]) if job[2] else None,
+                        })
+                        connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'ml.transcribe',%s::jsonb)", (message_id, payload))
+                    connection.execute("UPDATE meetings SET status='TRANSCRIPT_READY' WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')", (meeting_id,))
                 return str(transcript_id)
 
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:

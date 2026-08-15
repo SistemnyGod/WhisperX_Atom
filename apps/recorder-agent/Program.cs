@@ -40,6 +40,9 @@ try
     builder.Services.AddSingleton<SessionFinalizationCoordinator>();
     builder.Services.AddSingleton<RecordingDeliveryCoordinator>();
     builder.Services.AddSingleton<RawChunkRecovery>();
+    builder.Services.AddSingleton<RawEncoderWakeSignal>();
+    builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
+    builder.Services.AddHostedService<GlobalRawEncoderWorker>();
     builder.Services.AddHostedService<AgentPipeHost>();
     builder.Services.AddHostedService<RecorderWorker>();
     builder.Services.AddWindowsService(options => options.ServiceName = "WhisperX Atom Recorder Agent");
@@ -71,6 +74,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         {
             _runtimeLease = RecorderRuntimeLease.Acquire(api.InstallationId);
             RecorderServiceRuntime.SetActive(true);
+            RecorderRuntimeActivity.SetActive(true);
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains("RECORDER_RUNTIME_LEASE_HELD", StringComparison.OrdinalIgnoreCase))
         {
@@ -192,6 +196,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         finally
         {
             RecorderServiceRuntime.SetActive(false);
+            RecorderRuntimeActivity.SetActive(false);
             _runtimeLease?.Dispose();
             _runtimeLease = null;
         }

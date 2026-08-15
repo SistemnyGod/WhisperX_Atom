@@ -90,6 +90,14 @@ public sealed class RecordingViewModel : ObservableObject
     private int _backgroundFailedSessions;
     private int _rawChunksReady;
     private int _rawChunksReadyForUpload;
+    private int _rawChunkCount;
+    private int _rawWritingCount;
+    private int _rawEncodingCount;
+    private int _rawFinalizerQueueDepth;
+    private int _rawFinalizerCapacity;
+    private string _startupState = "UNKNOWN";
+    private string _recoveryState = "NOT_STARTED";
+    private string _encoderState = "UNKNOWN";
     private string _storageWatermarkState = "NORMAL";
     private double _storageFreePercent;
 
@@ -194,6 +202,16 @@ public sealed class RecordingViewModel : ObservableObject
         : _rawChunksFailed > 0
             ? $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · ошибок: {_rawChunksFailed}"
             : $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · {FormatBytes(_rawChunksBytes)}";
+    public string RecorderRecoveryLabel => _recoveryState.ToUpperInvariant() switch
+    {
+        "RUNNING" => "Восстановление старых сегментов…",
+        "DEGRADED" => "Восстановление требует внимания; запись доступна",
+        "READY" => "Восстановление завершено",
+        _ => _startupState.Equals("READY", StringComparison.OrdinalIgnoreCase) ? "Recorder готов" : "Recorder запускается"
+    };
+    public string RawPipelineLabel => _rawChunkCount == 0
+        ? "Аудиосегменты ещё не созданы"
+        : $"PCM: {_rawChunkCount} · запись: {_rawWritingCount} · кодирование: {_rawEncodingCount} · очередь финализатора: {_rawFinalizerQueueDepth}/{Math.Max(1, _rawFinalizerCapacity)}";
     public string StorageWatermarkLabel => _storageWatermarkState switch
     {
         "BLOCK_RECORDING" => $"Хранилище: запись заблокирована · свободно {_storageFreePercent:F1}%",
@@ -938,11 +956,17 @@ public sealed class RecordingViewModel : ObservableObject
         _chunksFailed = session.ChunksFailed;
         _bytesPending = session.BytesPending;
         _oldestPendingAgeSeconds = session.OldestPendingAgeSeconds;
+        _rawChunkCount = session.RawChunkCount;
+        _rawWritingCount = session.RawWritingCount;
+        _rawEncodingCount = session.RawEncodingCount;
+        _rawFinalizerQueueDepth = session.RawFinalizerQueueDepth;
+        _rawFinalizerCapacity = session.RawFinalizerCapacity;
         OnPropertyChanged(nameof(ChunkSyncLabel));
         OnPropertyChanged(nameof(PendingBytesLabel));
         OnPropertyChanged(nameof(PendingAgeLabel));
         OnPropertyChanged(nameof(DeliveryDiagnosticLabel));
         OnPropertyChanged(nameof(DeliveryTraceLabel));
+        OnPropertyChanged(nameof(RawPipelineLabel));
         OnPropertyChanged(nameof(StateTitle));
         OnPropertyChanged(nameof(AgentStatus));
     }
@@ -962,8 +986,10 @@ public sealed class RecordingViewModel : ObservableObject
                 try
                 {
                     var jobs = await _services.Backend.GetJobsAsync(meetingId, cancellationToken);
-                    var job = jobs.Where(IsTranscriptJob)
-                        .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault();
+                    var job = jobs.Where(IsTranscriptJob).Where(IsAsrJob)
+                        .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault()
+                        ?? jobs.Where(IsEnrichmentJob)
+                            .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault();
                     if (job is not null && !string.Equals(job.Status, "READY", StringComparison.OrdinalIgnoreCase) && !string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
                         await _services.Backend.WaitForJobEventsAsync(Guid.Parse(job.Id), cancellationToken);
                 }
@@ -1003,10 +1029,15 @@ public sealed class RecordingViewModel : ObservableObject
         var transcriptTask = _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
         await Task.WhenAll(jobsTask, transcriptTask);
         var jobs = await jobsTask;
-        var job = jobs.Where(IsTranscriptJob)
+        var asrJob = jobs.Where(IsTranscriptJob).Where(IsAsrJob)
             .OrderByDescending(item => item.Attempt)
             .ThenByDescending(item => item.Progress)
             .FirstOrDefault();
+        var enrichmentJob = jobs.Where(IsEnrichmentJob)
+            .OrderByDescending(item => item.Attempt)
+            .ThenByDescending(item => item.Progress)
+            .FirstOrDefault();
+        var job = asrJob ?? enrichmentJob;
         var transcript = await transcriptTask;
 
         if (job is not null)
@@ -1014,7 +1045,14 @@ public sealed class RecordingViewModel : ObservableObject
             ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
             ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
             if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = MapProcessingError(job.Error);
-            if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ReferenceEquals(job, enrichmentJob) && asrJob is not null)
+                {
+                    WarningMessage = "Стенограмма V1 готова, но разметка спикеров пока недоступна.";
+                }
+                else return true;
+            }
         }
         else
         {
@@ -1023,6 +1061,15 @@ public sealed class RecordingViewModel : ObservableObject
 
         if (transcript is not null)
         {
+            // V1 is useful even while V2 enrichment is running or has failed.
+            // Surface that state independently of whichever job is selected
+            // for the progress line so a failed diarization never hides text.
+            if (enrichmentJob is not null
+                && string.Equals(enrichmentJob.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
+                && transcript.Status is "PARTIAL_READY" or "READY")
+            {
+                WarningMessage = "Стенограмма V1 готова, но разметка спикеров пока недоступна.";
+            }
             TranscriptStatus = DisplayTranscriptStatus(transcript.Status);
             if (transcript.Warnings is { } warningDocument && warningDocument.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
                 WarningMessage = string.Join("; ", warningDocument.RootElement.EnumerateArray().Select(item => MapProcessingError(item.GetString() ?? string.Empty)));
@@ -1042,9 +1089,15 @@ public sealed class RecordingViewModel : ObservableObject
         return false;
     }
 
-    private static bool IsTranscriptJob(DesktopJob job) =>
+    private static bool IsAsrJob(DesktopJob job) =>
         string.Equals(job.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(job.Type, "TRANSCRIBE_ASR", StringComparison.OrdinalIgnoreCase)
         || string.Equals(job.Type, "TRANSCRIBE_REPROCESS", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsEnrichmentJob(DesktopJob job) =>
+        string.Equals(job.Type, "TRANSCRIPT_ENRICH", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTranscriptJob(DesktopJob job) => IsAsrJob(job) || IsEnrichmentJob(job);
 
     private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
     {
@@ -1162,6 +1215,9 @@ public sealed class RecordingViewModel : ObservableObject
             _backgroundFailedSessions = health.BackgroundFailedSessions;
             _rawChunksReady = health.RawChunksReady;
             _rawChunksReadyForUpload = health.RawChunksReadyForUpload;
+            _startupState = health.StartupState;
+            _recoveryState = health.RecoveryState;
+            _encoderState = health.EncoderState;
             _storageWatermarkState = health.StorageWatermarkState;
             _storageFreePercent = health.StorageFreePercent;
             RecordingProfileManaged = health.RecordingProfileManaged;
@@ -1195,6 +1251,8 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(BackgroundDeliveryLabel));
             OnPropertyChanged(nameof(RawReadyLabel));
             OnPropertyChanged(nameof(RawEncoderReadyLabel));
+            OnPropertyChanged(nameof(RecorderRecoveryLabel));
+            OnPropertyChanged(nameof(RawPipelineLabel));
             OnPropertyChanged(nameof(StorageWatermarkLabel));
             UpdateMicrophoneSignalFeedback(health);
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
@@ -1396,6 +1454,10 @@ public sealed class RecordingViewModel : ObservableObject
         return code switch
         {
             "RECORDER_HOST_NOT_RUNNING" => "Recorder Host не запущен. Перезапустите приложение или установите актуальный пакет.",
+            "RECORDER_HOST_INIT_FAILED" => "Recorder Host запущен, но не завершил инициализацию. Откройте диагностику и проверьте точный код запуска.",
+            "SPOOL_READONLY" => "Локальное хранилище Recorder доступно только для чтения. Проверьте права папки Agent и перезапустите Host.",
+            "RECORDER_RUNTIME_LEASE_HELD" => "Другой Recorder уже владеет локальным хранилищем. Закройте legacy Service или второй Host и повторите запуск.",
+            "RECORDER_HOST_NOT_INITIALIZED" => "Recorder Host ещё запускается. Повторите команду через несколько секунд.",
             "RECORDER_HOST_BUILD_MISMATCH" => "Запущен Recorder Host из другой папки или сборки. Закройте посторонний Host и запустите установленный пакет.",
             "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_IPC_TIMEOUT" => "Recorder Host запущен, но не отвечает по IPC. Закройте старый Host и запустите актуальную версию.",
             "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "IPC_VERSION_INCOMPATIBLE" => "Установленная версия Recorder Host несовместима с Desktop или требует перезапуска. Завершите старый Host и запустите актуальный установщик.",

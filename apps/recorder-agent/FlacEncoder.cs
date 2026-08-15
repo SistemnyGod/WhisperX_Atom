@@ -58,6 +58,40 @@ internal static class FlacEncoder
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    public static async Task<bool> ValidateAsync(string ffprobePath, string path, RawRecordingChunk expected, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length <= 0) return false;
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = ffprobePath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        process.StartInfo.ArgumentList.Add("-v"); process.StartInfo.ArgumentList.Add("error");
+        process.StartInfo.ArgumentList.Add("-select_streams"); process.StartInfo.ArgumentList.Add("a:0");
+        process.StartInfo.ArgumentList.Add("-show_entries"); process.StartInfo.ArgumentList.Add("stream=sample_rate,channels");
+        process.StartInfo.ArgumentList.Add("-of"); process.StartInfo.ArgumentList.Add("csv=p=0");
+        process.StartInfo.ArgumentList.Add(path);
+        try
+        {
+            if (!process.Start()) return false;
+            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (process.ExitCode != 0) return false;
+            var values = output.Trim().Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            return values.Length >= 2
+                && int.TryParse(values[0], out var rate) && rate == expected.SampleRate
+                && int.TryParse(values[1], out var channels) && channels == expected.Channels;
+        }
+        catch (System.ComponentModel.Win32Exception) { return false; }
+    }
+
     private static AudioSampleType ParseSampleType(string encoding, int bitsPerSample, string? sourceSubFormat)
     {
         if (string.Equals(encoding, "FLOAT32", StringComparison.OrdinalIgnoreCase)

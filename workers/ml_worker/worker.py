@@ -112,8 +112,12 @@ class GpuWorker:
                     self._heartbeat.set_job(None)
                     self._heartbeat.set_state("READY")
                 return None
+            job_type = self._repository.job_type(job_id) or str(message.get("job_type") or "TRANSCRIBE")
+            asr_only_job = job_type == "TRANSCRIBE_ASR"
+            enrichment_job = job_type == "TRANSCRIPT_ENRICH"
             self._repository.update_job(job_id, "RUNNING", "TRANSCRIBING", 20)
-            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=message.get("profile", "meeting"), min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
+            request_profile = "asr" if asr_only_job else ("enrich" if enrichment_job else message.get("profile", "meeting"))
+            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=request_profile, min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
 
             def progress(stage: str, value: int) -> None:
                 LOGGER.info("job=%s stage=%s progress=%s", job_id, stage, value)
@@ -134,7 +138,8 @@ class GpuWorker:
                     oom_attempt = 0
                     while True:
                         try:
-                            result = await asyncio.to_thread(self._service.process, request, progress, persist_asr_draft)
+                            draft_callback = None if enrichment_job else persist_asr_draft
+                            result = await asyncio.to_thread(self._service.process, request, progress, draft_callback)
                             break
                         except Exception as exc:
                             if error_code_for(exc) != "CUDA_OOM" or oom_attempt >= 1:
@@ -146,8 +151,22 @@ class GpuWorker:
                 payload["correlation_id"] = message.get("correlation_id") or payload.get("correlation_id")
                 payload["meeting_id"] = str(message["meeting_id"])
                 payload["processing_job_id"] = job_id
+                if asr_only_job:
+                    # The callback persisted PARTIAL_READY V1 immediately
+                    # after ASR. Closing this job must not create a second
+                    # transcript version; enrichment is a separate job.
+                    if not draft_holder["id"]:
+                        draft_holder["id"] = self._repository.persist_asr_draft(job_id, str(message["meeting_id"]), payload)
+                    await asyncio.to_thread(self._repository.complete_asr_job, job_id, str(message["meeting_id"]))
+                    payload["transcript_id"] = draft_holder["id"]
+                    payload["version_kind"] = "ASR_DRAFT"
+                    LOGGER.info("ASR draft ready transcript=%s meeting_id=%s job_id=%s", draft_holder["id"], payload["meeting_id"], job_id)
+                    return payload
                 if draft_holder["id"]:
                     payload["source_transcript_id"] = draft_holder["id"]
+                    payload["version_kind"] = "ENRICHED"
+                elif enrichment_job:
+                    payload["source_transcript_id"] = message.get("transcript_id") or self._repository.input_transcript_id(job_id)
                     payload["version_kind"] = "ENRICHED"
                 LOGGER.info("transcript result correlation_id=%s meeting_id=%s job_id=%s", payload.get("correlation_id"), payload["meeting_id"], job_id)
                 persisted = await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)

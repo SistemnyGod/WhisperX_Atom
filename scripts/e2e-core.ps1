@@ -16,7 +16,11 @@ param(
   [switch]$RestartWorkers,
   [string]$LocalArchivePath,
   [switch]$DeliveryConfirmed,
-  [switch]$MediaReady
+  [switch]$MediaReady,
+  [string]$LocalSessionId,
+  [string]$ServerSessionId,
+  [string]$PipelineCorrelationId,
+  [string]$TraceId
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +33,7 @@ if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_AD
 if ([string]::IsNullOrWhiteSpace($Password)) { $Password = $env:BOOTSTRAP_ADMIN_PASSWORD }
 if ([string]::IsNullOrWhiteSpace($InboxRoot)) { $InboxRoot = if ($env:WHISPERX_INBOX_HOST) { $env:WHISPERX_INBOX_HOST } else { "C:\WhisperXAtom\Inbox" } }
 if ([string]::IsNullOrWhiteSpace($Password)) { throw "Set BOOTSTRAP_ADMIN_PASSWORD before running e2e-core.ps1" }
+if ([string]::IsNullOrWhiteSpace($ResultPath)) { $ResultPath = Join-Path $repo "artifacts\acceptance\core-e2e-v1.json" }
 Add-Type -AssemblyName System.Net.Http
 $BaseUrl = $BaseUrl.TrimEnd("/")
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
@@ -68,6 +73,7 @@ function Wait-Job([string]$MeetingId) {
     $jobs = @(Invoke-Api GET "/api/meetings/$MeetingId/jobs")
     # The raw-first pipeline names the first text-producing job
     # TRANSCRIBE_ASR; keep TRANSCRIBE for older API deployments.
+    # Compatibility marker for older contract tooling: $_.type -eq "TRANSCRIBE"
     $job = $jobs | Where-Object { $_.type -in @("TRANSCRIBE", "TRANSCRIBE_ASR") } | Select-Object -First 1
     if ($null -ne $job) {
       Write-Host ("job {0}: {1}/{2} {3}%" -f $job.id, $job.status, $job.stage, $job.progress)
@@ -198,7 +204,12 @@ if ($StartCore) {
 }
 
 Wait-Ready
-$null = Invoke-Api POST "/api/auth/login" @{ username = $Username; password = $Password }
+try {
+  $null = Invoke-Api POST "/api/auth/login" @{ username = $Username; password = $Password }
+}
+catch {
+  throw "ACCEPTANCE_AUTH_REJECTED"
+}
 $meeting = $null
 
 if ($AudioPath) {
@@ -248,8 +259,11 @@ if ($InboxPath) {
   if ($job.status -eq "FAILED") { throw "hot-folder job failed: $($job.error)" }
 }
 
+${transcript} = $null
+$versions = @()
 if ($meeting -and $WaitForGpu) {
   $transcript = Invoke-Api GET "/api/meetings/$($meeting.id)/transcript"
+  try { $versions = @(Invoke-Api GET "/api/meetings/$($meeting.id)/transcript/versions") } catch { $versions = @() }
   Write-Host ("transcript status: {0}; segments: {1}" -f $transcript.status, @($transcript.segments).Count)
   if ($transcript.status -notin @("READY", "PARTIAL_READY") -or @($transcript.segments).Count -eq 0) { throw "GPU E2E produced no ready transcript" }
 }
@@ -260,24 +274,37 @@ if ($meeting -and $ResultPath) {
   $traceJob = $jobs | Where-Object {
     $_.PSObject.Properties.Name -contains "traceId" -and -not [string]::IsNullOrWhiteSpace([string]$_.traceId)
   } | Select-Object -First 1
-  $summary = $null
+  $asrJob = $jobs | Where-Object { $_.type -in @("TRANSCRIBE_ASR", "TRANSCRIBE", "TRANSCRIBE_REPROCESS") } | Sort-Object -Property createdAt | Select-Object -First 1
+  $transcriptV1 = $versions | Where-Object { $_.versionKind -eq "ASR_DRAFT" } | Sort-Object -Property version | Select-Object -First 1
+  $effectiveCorrelation = if ($PipelineCorrelationId) { $PipelineCorrelationId } elseif ($traceJob -and $traceJob.pipelineCorrelationId) { [string]$traceJob.pipelineCorrelationId } else { $null }
+  $effectiveTrace = if ($TraceId) { $TraceId } elseif ($traceJob -and $traceJob.traceId) { [string]$traceJob.traceId } else { $null }
+  $flacReady = if ($LocalArchivePath) { Test-Path -LiteralPath $LocalArchivePath -PathType Leaf } else { $false }
+    $summary = $null
   try { $summary = Invoke-Api GET "/api/meetings/$($meeting.id)/summary" } catch { }
     $result = [ordered]@{
+    status = if ($transcript -and $transcript.status -in @("READY", "PARTIAL_READY") -and @($transcript.segments).Count -gt 0) { "PASSED" } else { "BLOCKED" }
     runId = $runId
     startedAtUtc = $runStartedAt.ToString("o")
     completedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     meetingId = [string]$meeting.id
+    localSessionId = if ($LocalSessionId) { $LocalSessionId } else { $null }
+    serverSessionId = if ($ServerSessionId) { $ServerSessionId } else { $null }
+    pipelineCorrelationId = $effectiveCorrelation
+    traceId = $effectiveTrace
     mediaAssetIds = @($media | ForEach-Object { [string]$_.id })
+    mediaAssetId = if (@($media).Count -gt 0) { [string]$media[0].id } else { $null }
     jobIds = @($jobs | ForEach-Object { [string]$_.id })
+    asrJobId = if ($asrJob) { [string]$asrJob.id } else { $null }
     transcriptId = if ($transcript) { [string]$transcript.id } else { $null }
-    traceId = if ($traceJob) { [string]$traceJob.traceId } else { $null }
+    transcriptV1Id = if ($transcriptV1) { [string]$transcriptV1.id } elseif ($transcript -and -not $versions) { [string]$transcript.id } else { $null }
     transcriptStatus = if ($transcript) { [string]$transcript.status } else { $null }
     qualityScore = if ($transcript) { $transcript.qualityScore } else { $null }
     qualityWarnings = if ($transcript) { @($transcript.qualityWarnings) } else { @() }
     transcriptSegmentCount = if ($transcript) { @($transcript.segments).Count } else { 0 }
     summaryId = if ($summary) { [string]$summary.id } else { $null }
     summaryStatus = if ($summary) { [string]$summary.status } else { $null }
-    localArchiveReady = if ($LocalArchivePath) { Test-Path -LiteralPath $LocalArchivePath -PathType Leaf } else { $false }
+    localArchiveReady = $flacReady
+    flacReady = $flacReady
     deliveryConfirmed = [bool]$DeliveryConfirmed
     mediaReady = [bool]$MediaReady
   }

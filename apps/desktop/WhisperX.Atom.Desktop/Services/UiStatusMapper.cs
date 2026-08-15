@@ -74,7 +74,10 @@ public static class UiStatusMapper
             ["SERVER_TIMEOUT"] = new("SERVER_TIMEOUT", "Сервер не ответил вовремя", UiStatusKind.Warning),
             ["SERVER_NOT_CONFIGURED"] = new("SERVER_NOT_CONFIGURED", "Сервер не настроен", UiStatusKind.Warning),
             ["UPLOAD_RETRY_PENDING"] = new("UPLOAD_RETRY_PENDING", "Ожидается повторная отправка", UiStatusKind.Warning),
-            ["PROCESSING_UNAVAILABLE"] = new("PROCESSING_UNAVAILABLE", "Обработка WhisperX недоступна", UiStatusKind.Warning)
+            ["PROCESSING_UNAVAILABLE"] = new("PROCESSING_UNAVAILABLE", "Обработка WhisperX недоступна", UiStatusKind.Warning),
+            ["RECORDER_HOST_INIT_FAILED"] = new("RECORDER_HOST_INIT_FAILED", "Recorder Host не завершил инициализацию", UiStatusKind.Error),
+            ["SPOOL_READONLY"] = new("SPOOL_READONLY", "Локальное хранилище доступно только для чтения", UiStatusKind.Error),
+            ["RECORDER_RUNTIME_LEASE_HELD"] = new("RECORDER_RUNTIME_LEASE_HELD", "Другой Recorder уже владеет хранилищем", UiStatusKind.Warning)
         });
 
     public static UiStatus Map(string? code)

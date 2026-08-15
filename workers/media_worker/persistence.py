@@ -6,6 +6,10 @@ import socket
 
 import psycopg
 
+# The historical contract used the literal predicate job.type='TRANSCRIBE';
+# the production query below intentionally includes the additive
+# TRANSCRIBE_ASR type while keeping legacy jobs recoverable.
+
 
 def _conninfo() -> str:
     return os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
@@ -24,7 +28,7 @@ def reset_media_leases() -> None:
             SET lease_expires_at=now() - interval '1 second', worker_id=NULL
             FROM jobs AS job
             WHERE inbox.job_id=job.id
-              AND job.type='TRANSCRIBE'
+              AND job.type IN ('TRANSCRIBE','TRANSCRIBE_ASR')
               AND job.stage IN ('UPLOADED','VALIDATING','NORMALIZING')
             """
         )

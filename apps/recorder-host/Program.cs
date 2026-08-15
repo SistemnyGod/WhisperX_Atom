@@ -51,7 +51,10 @@ builder.Services.AddSingleton<IAudioCaptureEngine>(services => services.GetRequi
 builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
 builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
 builder.Services.AddSingleton<RecorderHostRuntime>();
+builder.Services.AddSingleton<RawEncoderWakeSignal>();
+builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
 builder.Services.AddHostedService<RecorderHostPipeServer>();
+builder.Services.AddHostedService<GlobalRawEncoderWorker>();
 builder.Services.AddHostedService<RecorderHostWorker>();
 
 await builder.Build().RunAsync();
@@ -60,7 +63,25 @@ public sealed class RecorderHostWorker(RecorderHostRuntime runtime, ILogger<Reco
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+        // Recovery is intentionally deferred until after the pipe listener is
+        // live.  A bounded first pass must not delay HEALTH/START availability.
+        try
+        {
+            await runtime.WaitForInitializationAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            // The pipe remains available and reports the stable startup code;
+            // recovery must not spin against an unavailable SQLite/device
+            // runtime or hide the original failure in repeated warnings.
+            logger.LogWarning(ex, "Recorder Host background recovery disabled because startup failed.");
+            return;
+        }
+        await Task.Delay(TimeSpan.FromMilliseconds(100), stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await runtime.ReconcileBackgroundAsync(stoppingToken).ConfigureAwait(false); }

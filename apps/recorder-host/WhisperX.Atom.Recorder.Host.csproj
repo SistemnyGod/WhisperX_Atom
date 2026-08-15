@@ -18,7 +18,8 @@
     <Version>1.0.1</Version>
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
     <FileVersion>1.0.1.0</FileVersion>
-    <InformationalVersion>1.0.1+audio-float32-pcm16</InformationalVersion>
+    <WhisperXBuildIdentity Condition="'$(WhisperXBuildIdentity)' == ''">1.0.1+audio-float32-pcm16</WhisperXBuildIdentity>
+    <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +32,7 @@
     <Compile Include="..\recorder-agent\RecorderToolPaths.cs" Link="RecorderCore\RecorderToolPaths.cs" />
     <Compile Include="..\recorder-agent\SessionFinalizationCoordinator.cs" Link="RecorderCore\SessionFinalizationCoordinator.cs" />
     <Compile Include="..\recorder-agent\RawChunkFileName.cs" Link="RecorderCore\RawChunkFileName.cs" />
+    <Compile Include="..\recorder-agent\GlobalRawEncoderWorker.cs" Link="RecorderCore\GlobalRawEncoderWorker.cs" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
   </ItemGroup>

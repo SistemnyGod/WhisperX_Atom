@@ -10,6 +10,7 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 
 $transcriptionRoot = Join-Path $repo "artifacts\transcription-mvp"
+$coreEvidencePath = Join-Path $repo "artifacts\acceptance\core-e2e-v1.json"
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repo "artifacts\release" }
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
@@ -34,13 +35,14 @@ function Get-JsonProperty($object, [string]$name) {
     return $object.PSObject.Properties[$name].Value
 }
 
-$resultFiles = if ($ResultRoot -and (Test-Path -LiteralPath $ResultRoot)) {
-    @(Get-ChildItem -LiteralPath $ResultRoot -Recurse -File -Filter "run-*.json" | Sort-Object FullName)
-} else { @() }
-$results = @($resultFiles | ForEach-Object {
-    try { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json }
-    catch { $null }
-} | Where-Object { $null -ne $_ })
+$coreEvidence = if (Test-Path -LiteralPath $coreEvidencePath -PathType Leaf) {
+    try { Get-Content -LiteralPath $coreEvidencePath -Raw | ConvertFrom-Json } catch { $null }
+} else { $null }
+
+# A core gate is one correlated chain. Do not merge unrelated historical
+# transcription-mvp runs: that can make a stale ASR result appear to belong to
+# the current local recording.
+$results = if ($null -ne $coreEvidence) { @($coreEvidence) } else { @() }
 
 $coreComponents = @("postgres", "nats", "api", "mediaWorker", "hostGpuWorker", "cuda", "whisperX")
 $runtimeReady = $true
@@ -65,17 +67,20 @@ $chains = @($results | ForEach-Object {
     $summaryId = [string](Get-JsonProperty $_ "summaryId")
     $transcriptReady = ($transcriptStatus -in @("READY", "PARTIAL_READY")) -and ($transcriptSegmentCount -gt 0)
     [pscustomobject]@{
-        runId = [string](Get-JsonProperty $_ "runId")
+        runId = [string](Get-JsonProperty $_ "pipelineCorrelationId")
+        localSessionId = [string](Get-JsonProperty $_ "localSessionId")
+        serverSessionId = [string](Get-JsonProperty $_ "serverSessionId")
         meetingId = [string](Get-JsonProperty $_ "meetingId")
-        mediaAssetIds = @((Get-JsonProperty $_ "mediaAssetIds") | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-        jobIds = @((Get-JsonProperty $_ "jobIds") | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-        transcriptId = [string](Get-JsonProperty $_ "transcriptId")
+        mediaAssetIds = @((Get-JsonProperty $_ "mediaAssetId") | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        jobIds = @((Get-JsonProperty $_ "asrJobId") | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        transcriptId = [string](Get-JsonProperty $_ "transcriptV1Id")
         traceId = [string](Get-JsonProperty $_ "traceId")
         transcriptReady = $transcriptReady
         summaryReady = ($summaryStatus -eq "READY") -and (-not [string]::IsNullOrWhiteSpace($summaryId))
-        localArchiveReady = [bool](Get-JsonProperty $_ "localArchiveReady")
+        localArchiveReady = [bool](Get-JsonProperty $_ "flacReady")
         deliveryConfirmed = [bool](Get-JsonProperty $_ "deliveryConfirmed")
         mediaReady = [bool](Get-JsonProperty $_ "mediaReady")
+        pipelineCorrelationId = [string](Get-JsonProperty $_ "pipelineCorrelationId")
     }
 })
 
@@ -121,6 +126,15 @@ $acceptanceReady = $acceptanceBlockers.Count -eq 0
 # long endurance and recovery hardening remain part of the full gate below.
 $coreAcceptanceScenarios = @("e2e-5m")
 $coreAcceptanceBlockers = [System.Collections.Generic.List[string]]::new()
+$coreAcceptanceBlockers.Add("CORE_E2E_V1_MISSING")
+if ($null -ne $coreEvidence) {
+    $coreAcceptanceBlockers.Remove("CORE_E2E_V1_MISSING")
+    if ([string](Get-JsonProperty $coreEvidence "status") -notin @("READY", "PASSED", "GREEN")) { $coreAcceptanceBlockers.Add("CORE_E2E_V1_NOT_READY") }
+    foreach ($field in @("localSessionId","serverSessionId","meetingId","mediaAssetId","asrJobId","transcriptV1Id","traceId","pipelineCorrelationId")) {
+        if ([string]::IsNullOrWhiteSpace([string](Get-JsonProperty $coreEvidence $field))) { $coreAcceptanceBlockers.Add("CORE_E2E_V1_$($field.ToUpperInvariant())_MISSING") }
+    }
+    if ([string](Get-JsonProperty $coreEvidence "transcriptStatus") -notin @("PARTIAL_READY","READY")) { $coreAcceptanceBlockers.Add("CORE_E2E_V1_TRANSCRIPT_NOT_READY") }
+}
 foreach ($scenario in $coreAcceptanceScenarios) {
     $scenarioRoot = Join-Path $acceptanceRoot $scenario
     $evidence = @(Get-ChildItem -LiteralPath $scenarioRoot -Recurse -File -Filter "*.json" -ErrorAction SilentlyContinue)
@@ -175,6 +189,7 @@ $coreStatus = if ($coreReasons.Count -eq 0) { "END_TO_END_CORE_READY" } else { "
 $audit = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     resultRoot = if ($ResultRoot) { [string]$ResultRoot } else { $null }
+    coreEvidence = if (Test-Path -LiteralPath $coreEvidencePath -PathType Leaf) { $coreEvidencePath } else { $null }
     doctorReport = if ($doctorPath -and (Test-Path -LiteralPath $doctorPath)) { $doctorPath } else { $null }
     runtime = [ordered]@{ ready = $runtimeReady; reasons = @($runtimeReasons) }
     evidence = [ordered]@{

@@ -147,6 +147,7 @@ try {
     $stop = Invoke-HostCommand "STOP"
     $stopRequested = $true
     if ($stop.ok -ne $true) { throw "AUDIOGRAPH_STOP_FAILED: $($stop.error)" }
+    $postStopHealth = Invoke-HostCommand "HEALTH"
 
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
     $status = $null
@@ -224,6 +225,13 @@ try {
             firstFrameConfirmed = ([string]$start.state -match "RECORDING")
             localFinalizeState = [string]$status.localFinalizeState
             localChunkCount = [int]$status.localChunkCount
+            rawChunkCount = [int]$status.rawChunkCount
+            rawWritingCount = [int]$status.rawWritingCount
+            rawReadyCount = [int]$status.rawReadyCount
+            rawEncodingCount = [int]$status.rawEncodingCount
+            rawFailedCount = [int]$status.rawFailedCount
+            rawBacklogHealth = [string]$status.rawBacklogHealth
+            pipelineOverruns = if ($null -ne $postStopHealth.health.lastAudioGraphAttempt) { [int]$postStopHealth.health.lastAudioGraphAttempt.pipelineOverruns } else { 0 }
             archiveExists = $archiveExists
             archiveReady = $archiveReady
             archiveState = [string]$status.archiveState
@@ -246,7 +254,10 @@ try {
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
     $deliveryIncomplete = $ServerDelivery -and $report.result.deliveryState -ne "CONFIRMED"
     $archiveRequired = -not $AllowPendingArchive
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or ($archiveRequired -and ($report.result.flacFileCount -le 0 -or -not $report.result.archiveReady -or -not $report.result.durationWithinTolerance)) -or $deliveryFailed -or $deliveryIncomplete) {
+    $rawGatePassed = $report.result.rawChunkCount -gt 0 -and $report.result.rawWritingCount -eq 0 -and $report.result.pipelineOverruns -eq 0
+    $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
+    $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $report.result.localChunkCount -gt 0
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }

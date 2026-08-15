@@ -582,7 +582,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         // A second finalize must return the existing pipeline instead of resetting a
         // session that is already ingesting or has reached a terminal state.
         var storageKey = $"/data/recordings/{sessionId:N}";
-        await using (var existing = new NpgsqlCommand("SELECT j.id,a.id FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE a.storage_key=@key AND a.source_type='recorder_session' AND j.type='TRANSCRIBE' ORDER BY j.created_at DESC LIMIT 1", connection, tx))
+        await using (var existing = new NpgsqlCommand("SELECT j.id,a.id FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE a.storage_key=@key AND a.source_type='recorder_session' AND j.type IN ('TRANSCRIBE_ASR','TRANSCRIBE') ORDER BY j.created_at DESC LIMIT 1", connection, tx))
         {
             existing.Parameters.AddWithValue("key", storageKey);
             await using var existingReader = await existing.ExecuteReaderAsync();
@@ -638,7 +638,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var jobId = Guid.NewGuid();
         await using var job = new NpgsqlCommand("""
             INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage)
-            VALUES(@id,@meeting,@asset,'TRANSCRIBE','QUEUED','INGEST')
+            VALUES(@id,@meeting,@asset,'TRANSCRIBE_ASR','QUEUED','INGEST')
             ON CONFLICT (media_asset_id,type) WHERE media_asset_id IS NOT NULL DO NOTHING
             """, connection, tx);
         job.Parameters.AddWithValue("id", jobId);
@@ -646,7 +646,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         job.Parameters.AddWithValue("asset", assetId);
         await job.ExecuteNonQueryAsync();
 
-        await using var jobLookup = new NpgsqlCommand("SELECT id FROM jobs WHERE media_asset_id=@asset AND type='TRANSCRIBE'", connection, tx);
+        await using var jobLookup = new NpgsqlCommand("SELECT id FROM jobs WHERE media_asset_id=@asset AND type IN ('TRANSCRIBE_ASR','TRANSCRIBE') ORDER BY CASE WHEN type='TRANSCRIBE_ASR' THEN 0 ELSE 1 END LIMIT 1", connection, tx);
         jobLookup.Parameters.AddWithValue("asset", assetId);
         jobId = (Guid)(await jobLookup.ExecuteScalarAsync())!;
         var pipelineCorrelationId = await GetPipelineCorrelationIdAsync(connection, tx, sessionId);
@@ -700,7 +700,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             SELECT rs.id,rs.meeting_id,rs.state,a.id,a.status,j.id,j.status,j.stage
             FROM recording_sessions rs
             LEFT JOIN media_assets a ON a.storage_key=@storage AND a.source_type='recorder_session'
-            LEFT JOIN jobs j ON j.media_asset_id=a.id AND j.type='TRANSCRIBE'
+            LEFT JOIN jobs j ON j.media_asset_id=a.id AND j.type IN ('TRANSCRIBE_ASR','TRANSCRIBE')
             WHERE rs.id=@session AND rs.agent_id=@agent
             ORDER BY j.created_at DESC NULLS LAST
             LIMIT 1
@@ -1057,8 +1057,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var runningJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'");
         var failedJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='FAILED' AND updated_at >= now()-interval '24 hours'");
         var staleLeases = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE lease_expires_at IS NOT NULL AND lease_expires_at < now() AND status NOT IN ('READY','FAILED','CANCELLED')");
-        var activeGpuJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIPT_ENRICH','SUMMARIZE') AND status IN ('QUEUED','RUNNING')");
-        var failedGpuJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIPT_ENRICH','SUMMARIZE') AND status='FAILED' AND updated_at >= now()-interval '24 hours' AND (error_code LIKE 'GPU_%' OR error_code LIKE 'CUDA_%')");
+        var activeGpuJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE') AND status IN ('QUEUED','RUNNING')");
+        var failedGpuJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE') AND status='FAILED' AND updated_at >= now()-interval '24 hours' AND (error_code LIKE 'GPU_%' OR error_code LIKE 'CUDA_%')");
         var pendingOutbox = await ScalarLongAsync("SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL");
         var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
         var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");

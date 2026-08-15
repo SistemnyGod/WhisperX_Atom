@@ -103,8 +103,9 @@ class ProcessingService:
         config.language = request.language or config.language
         config.min_speakers = max(1, request.min_speakers)
         config.max_speakers = max(config.min_speakers, request.max_speakers)
-        config.enable_alignment = True
-        config.enable_diarization = os.getenv("DIARIZATION_MODE", "preferred").lower() != "disabled"
+        asr_only = str(request.profile or "").strip().lower() in {"asr", "asr_draft", "transcribe_asr"}
+        config.enable_alignment = not asr_only
+        config.enable_diarization = not asr_only and os.getenv("DIARIZATION_MODE", "preferred").lower() != "disabled"
         thresholds = TranscriptQualityThresholds.from_env()
         pipeline = self._get_pipeline(config)
         # The resident object owns model caches, while request-scoped language

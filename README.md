@@ -23,7 +23,7 @@ WhisperX Atom — локальная система записи совещан�
 
 ## Быстрый старт
 
-1. Установите Docker Desktop, .NET 10 SDK, Python 3.12 с рабочим CUDA/WhisperX окружением и FFmpeg.
+1. Установите Docker Desktop, .NET 10 SDK и Python 3.12 с рабочим CUDA/WhisperX окружением. FFmpeg/ffprobe нужны для фонового FLAC/master, но их временная недоступность не блокирует локальную запись.
 2. Создайте локальную конфигурацию:
 
    ```powershell

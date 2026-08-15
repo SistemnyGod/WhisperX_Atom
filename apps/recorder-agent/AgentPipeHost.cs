@@ -14,6 +14,7 @@ public sealed class AgentPipeHost(
     AgentStorageSettings storage,
     RecordingDeliveryCoordinator delivery,
     DeviceHealthMonitor deviceHealth,
+    RawFinalizerQueueMetrics rawFinalizerMetrics,
     ILogger<AgentPipeHost> logger) : BackgroundService
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -420,6 +421,13 @@ public sealed class AgentPipeHost(
         if (info is null) return null;
         var counts = await spool.GetChunkCountsAsync(sessionId, cancellationToken);
         var metrics = await spool.GetChunkDeliveryMetricsAsync(sessionId, cancellationToken);
+        var rawBacklog = await spool.GetRawChunkBacklogAsync(sessionId, cancellationToken);
+        rawBacklog = rawBacklog with
+        {
+            FinalizerQueueDepth = rawFinalizerMetrics.Depth,
+            FinalizerMaximumDepth = rawFinalizerMetrics.MaximumDepth,
+            FinalizerCapacity = rawFinalizerMetrics.Capacity
+        };
         var serverSessionId = await spool.GetServerSessionIdAsync(sessionId, cancellationToken);
         var capture = string.Equals(recorder.SessionId, sessionId, StringComparison.Ordinal)
             ? state.State.ToString().ToUpperInvariant()
@@ -442,11 +450,26 @@ public sealed class AgentPipeHost(
         if (string.IsNullOrWhiteSpace(delivery)) delivery = serverSessionId is null ? (info.MeetingId is null ? "NOT_REQUESTED" : api.IsConfigured ? "BINDING" : "WAITING_FOR_API") : counts.Pending > 0 ? "SYNCING" : "WAITING_SERVER";
         var errorCode = _finalizationErrors.TryGetValue(sessionId, out var finalizationError) ? finalizationError : info.ErrorCode;
         var error = errorCode is null ? null : SafeErrorText(errorCode);
+        var encodingState = rawBacklog.Pending > 0
+            ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
+            : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
+        var archiveState = info.LocalFinalizeState == "LOCAL_FAILED"
+            ? "FAILED"
+            : string.IsNullOrWhiteSpace(info.ArchivePath)
+                ? info.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
+                : "READY";
         return new RecordingSessionStatus(sessionId, info.MeetingId, capture, delivery,
             counts.Total, counts.Confirmed, counts.Pending, error, serverSessionId,
             info.LocalFinalizeState, info.ArchivePath, errorCode, IsRetryableCode(errorCode), info.NextRetryAtUtc,
             info.MediaAssetId, info.ProcessingJobId, info.TraceId,
-            metrics.Ready, metrics.Uploading, metrics.Failed, metrics.BytesPending, metrics.OldestPendingAgeSeconds);
+            metrics.Ready, metrics.Uploading, metrics.Failed, metrics.BytesPending, metrics.OldestPendingAgeSeconds,
+            encodingState, archiveState,
+            rawBacklog.Total, rawBacklog.Writing, rawBacklog.Ready, rawBacklog.Encoding, rawBacklog.Completed,
+            rawBacklog.Failed, rawBacklog.Bytes,
+            rawBacklog.OldestPendingAgeMs is null ? null : rawBacklog.OldestPendingAgeMs.Value / 1000d,
+            rawBacklog.Health, rawBacklog.FinalizerQueueDepth, rawBacklog.FinalizerMaximumDepth, rawBacklog.FinalizerCapacity,
+            archiveState == "FAILED" ? errorCode : null,
+            archiveState == "FAILED" ? error : null);
     }
 
     private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED";

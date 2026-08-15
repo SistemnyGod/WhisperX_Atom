@@ -60,7 +60,7 @@ The legacy Service pipe `WhisperXAtomAgent` remains supported for the explicit `
 | --- | --- |
 | `STATUS` | Краткое состояние capture |
 | `HEALTH` | Устройства, storage, Agent/server state, peaks и backlog |
-| `PREFLIGHT` | Проверка microphone, system audio, FFmpeg, spool, archive и места |
+| `PREFLIGHT` | Проверка microphone, spool, archive и места; FFmpeg/ffprobe возвращаются как отдельная `EncodingReady` capability и не блокируют локальный START |
 | `GET_SESSION_STATUS` | Capture/delivery, local/confirmed/pending chunks и server session |
 | `CONFIGURE` | Передача Agent URL/id/token и настроек |
 | `SET_ARCHIVE_ROOT` | Изменение локального архива |

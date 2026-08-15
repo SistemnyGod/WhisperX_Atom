@@ -12,8 +12,8 @@ public sealed class RecordingCoordinator : IAsyncDisposable
 {
     private readonly LegacyRecordingCoordinator _legacy;
 
-    public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, ILogger<RecordingCoordinator> logger)
-        => _legacy = new LegacyRecordingCoordinator(spool, state, storage, logger);
+    public RecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, ILogger<RecordingCoordinator> logger)
+        => _legacy = new LegacyRecordingCoordinator(spool, state, storage, encoderWake, rawFinalizerMetrics, logger);
 
     public string? SessionId => _legacy.SessionId;
     public AudioSourceTestResult? LastMicrophoneProbe => _legacy.LastMicrophoneProbe;

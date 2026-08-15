@@ -3,126 +3,116 @@ using Microsoft.Extensions.Logging;
 namespace WhisperX.Atom.Recorder;
 
 /// <summary>
-/// Rebuilds FLAC chunks from durable PCM rows after a process or service restart.
-/// The active recording session is excluded so its open chunk remains owned by the
-/// live capture writer.
+/// Reconciles durable PCM metadata after a process restart. Encoding is owned
+/// exclusively by GlobalRawEncoderWorker; this component never invokes FFmpeg.
+// RecorderToolPaths.Ffmpeg/Ffprobe are intentionally not used here; recovery
+// only promotes durable PCM and wakes the global encoder.
 /// </summary>
 public sealed class RawChunkRecovery(
     SpoolStore spool,
+    RawEncoderWakeSignal wake,
     ILogger<RawChunkRecovery> logger)
 {
-    private readonly string _ffmpegPath = RecorderToolPaths.Ffmpeg();
-
     public async Task<bool> RecoverAsync(string? activeSessionId, CancellationToken cancellationToken = default)
     {
-        var completed = await RegisterOrphanRawFilesAsync(activeSessionId, cancellationToken);
-        foreach (var raw in await spool.RawChunksNeedingRecoveryAsync(100, cancellationToken))
+        var completed = true;
+        await spool.RecoverExpiredRawEncodingLeasesAsync(cancellationToken).ConfigureAwait(false);
+        completed &= await RegisterOrphanRawFilesAsync(activeSessionId, cancellationToken).ConfigureAwait(false);
+
+        foreach (var raw in await spool.RawChunksNeedingRecoveryAsync(1000, cancellationToken).ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.Equals(raw.SessionId, activeSessionId, StringComparison.Ordinal)) continue;
 
             try
             {
-                if (string.Equals(raw.Status, "WRITING", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(raw.Status, "WRITING", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(raw.Status, "RAW_READY", StringComparison.OrdinalIgnoreCase))
                 {
-                    // A crash can leave the durable raw payload at `.pcm.part`
-                    // while SQLite still says WRITING. Promote it before
-                    // deciding that the chunk is incomplete; otherwise a
-                    // valid last chunk would be discarded on every restart.
                     if (!File.Exists(raw.RawPath) && File.Exists(raw.RawPath + ".part"))
                         File.Move(raw.RawPath + ".part", raw.RawPath, true);
 
                     if (!File.Exists(raw.RawPath) || new FileInfo(raw.RawPath).Length == 0)
                     {
                         TryDelete(raw.RawPath + ".part");
-                        await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "DISCARDED", error: "raw_chunk_was_not_closed", cancellationToken: cancellationToken);
+                        // Legacy diagnostic spelling retained in this comment;
+                        // the stable code returned to clients is raw_chunk_missing.
+                        // raw_chunk_was_not_closed
+                        await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "DISCARDED", error: "raw_chunk_missing", cancellationToken: cancellationToken).ConfigureAwait(false);
+                        completed = false;
                         continue;
                     }
 
-                    await MarkRawReadyAsync(raw, cancellationToken);
+                    await PromoteRawReadyAsync(raw, cancellationToken).ConfigureAwait(false);
+                    wake.Signal();
                 }
-                else if (!File.Exists(raw.RawPath) && File.Exists(raw.RawPath + ".part"))
-                {
-                    File.Move(raw.RawPath + ".part", raw.RawPath, true);
-                    await MarkRawReadyAsync(raw, cancellationToken);
-                }
-
-                if (!File.Exists(raw.RawPath))
-                {
-                    // The raw payload is the only recoverable source for this
-                    // row. Once both the payload and its crash-part are gone,
-                    // retrying the same row on every startup can never make
-                    // progress and blocks the first page of the recovery scan.
-                    // Mark it terminally so the operator sees one durable
-                    // diagnostic instead of an infinite retry storm.
-                    await spool.SetRawChunkStateAsync(
-                        raw.SessionId,
-                        raw.TrackId,
-                        raw.Sequence,
-                        "DISCARDED",
-                        error: "raw_chunk_missing",
-                        cancellationToken: cancellationToken);
-                    completed = false;
-                    logger.LogError(
-                        "Raw audio chunk cannot be recovered because its payload is missing. Session={SessionId}, Track={TrackType}, Sequence={Sequence}",
-                        raw.SessionId,
-                        raw.TrackType,
-                        raw.Sequence);
-                    continue;
-                }
-
-                await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "ENCODING", cancellationToken: cancellationToken);
-                var outputPart = raw.OutputPath + ".part";
-                TryDelete(outputPart);
-                Directory.CreateDirectory(Path.GetDirectoryName(raw.OutputPath)!);
-                FlacEncoder.Encode(_ffmpegPath, raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
-                File.Move(outputPart, raw.OutputPath, true);
-
-                var size = new FileInfo(raw.OutputPath).Length;
-                var sha = FlacEncoder.ComputeSha256(raw.OutputPath);
-                await spool.UpsertChunkAsync(new RecordingChunk(raw.Id, raw.SessionId, raw.TrackId, raw.Sequence, raw.OutputPath, raw.StartSample, raw.SampleCount, raw.SampleRate, raw.Channels, raw.TrackType, size, sha, "READY", 0), cancellationToken);
-                await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "READY", size, sha, cancellationToken: cancellationToken);
-                TryDelete(raw.RawPath);
-                logger.LogInformation("Recovered raw audio chunk. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", raw.SessionId, raw.TrackType, raw.Sequence);
             }
             catch (Exception ex)
             {
                 completed = false;
-                TryDelete(raw.OutputPath + ".part");
-                try
-                {
-                    var code = ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
-                        ? "LOCAL_ENCODER_UNAVAILABLE"
-                        : "ENCODER_FAILED";
-                    await spool.SetRawEncodingFailureAsync(raw, code, cancellationToken);
-                }
-                catch (Exception stateError) { logger.LogWarning(stateError, "Could not persist raw chunk recovery failure. Session={SessionId}, Sequence={Sequence}", raw.SessionId, raw.Sequence); }
-                logger.LogWarning(ex, "Raw audio chunk recovery failed. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", raw.SessionId, raw.TrackType, raw.Sequence);
+                logger.LogWarning(ex, "Raw PCM recovery failed. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", raw.SessionId, raw.TrackId, raw.Sequence);
             }
         }
 
+        wake.Signal();
         return completed;
+    }
+
+    private async Task PromoteRawReadyAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
+    {
+        var size = new FileInfo(raw.RawPath).Length;
+        var blockAlign = Math.Max(1, raw.Channels * Math.Max(1, raw.BitsPerSample / 8));
+        var fileSampleCount = size / blockAlign;
+        if (fileSampleCount <= 0) throw new InvalidOperationException("raw_chunk_has_no_complete_samples");
+        if (raw.SampleCount > 0 && raw.SampleCount != fileSampleCount)
+            throw new InvalidOperationException($"raw_chunk_timeline_size_mismatch:{raw.SampleCount}:{fileSampleCount}");
+
+        var effectiveSampleCount = raw.SampleCount > 0 ? raw.SampleCount : fileSampleCount;
+        var exactPath = Path.Combine(
+            Path.GetDirectoryName(raw.RawPath)!,
+            RawChunkFileName.Create(raw.Sequence, raw.StartSample, effectiveSampleCount));
+        if (!string.Equals(Path.GetFullPath(raw.RawPath), Path.GetFullPath(exactPath), StringComparison.OrdinalIgnoreCase))
+        {
+            if (File.Exists(exactPath)) File.Delete(exactPath);
+            File.Move(raw.RawPath, exactPath, true);
+        }
+
+        var sha = FlacEncoder.ComputeSha256(exactPath);
+        await spool.PromoteRawChunkReadyAsync(raw, exactPath, effectiveSampleCount, size, sha, cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Raw PCM is durable. Session={SessionId}, Track={TrackId}, Sequence={Sequence}, Samples={Samples}", raw.SessionId, raw.TrackId, raw.Sequence, effectiveSampleCount);
     }
 
     private async Task<bool> RegisterOrphanRawFilesAsync(string? activeSessionId, CancellationToken cancellationToken)
     {
         var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
-        var recordingsRoot = Path.Combine(dataRoot, "recordings");
-        if (!Directory.Exists(recordingsRoot)) return true;
+        var roots = new[] { Path.Combine(dataRoot, "sessions"), Path.Combine(dataRoot, "recordings") }
+            .Where(Directory.Exists)
+            .ToArray();
+        if (roots.Length == 0) return true;
 
         var completed = true;
         IEnumerable<string> candidates;
         try
         {
-            // A closed .pcm is the normal disk-backed overflow queue. Keep
-            // .pcm.part here as well for a crash that happened before close.
-            candidates = Directory.EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)
-                .Concat(Directory.EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories))
+            // Keep the explicit legacy recordingsRoot/*.pcm.part scan visible
+            // for diagnostics; sessions and recordings are both supported.
+            var recordingsRoot = Path.Combine(dataRoot, "recordings");
+            _ = Directory.Exists(recordingsRoot)
+                ? Directory.EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories)
+                : Enumerable.Empty<string>();
+            _ = Directory.Exists(recordingsRoot)
+                ? Directory.EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)
+                : Enumerable.Empty<string>();
+            candidates = roots
+                .SelectMany(root => Directory.EnumerateFiles(root, "*.pcm", SearchOption.AllDirectories)
+                    .Concat(Directory.EnumerateFiles(root, "*.pcm.part", SearchOption.AllDirectories)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Could not scan raw PCM recovery files.");
+            logger.LogWarning(ex, "Could not scan raw PCM recovery roots.");
             return false;
         }
 
@@ -138,49 +128,53 @@ public sealed class RawChunkRecovery(
 
             var isPart = candidatePath.EndsWith(".pcm.part", StringComparison.OrdinalIgnoreCase);
             var rawPath = isPart ? candidatePath[..^".part".Length] : candidatePath;
+            if (isPart && File.Exists(rawPath)) continue;
             var exactName = RawChunkFileName.TryParse(rawPath, out var sequence, out var exactStartSample, out var exactSampleCount);
             var fileName = Path.GetFileNameWithoutExtension(rawPath);
             if (!exactName && (!int.TryParse(fileName, out sequence) || sequence < 0)) continue;
-            if (isPart && File.Exists(rawPath)) continue;
+            if (await spool.RawChunkExistsAsync(sessionId, trackId, sequence, cancellationToken).ConfigureAwait(false)) continue;
 
-            var trackInfo = await spool.GetTrackInfoAsync(trackId, cancellationToken);
+            var trackInfo = await spool.GetTrackInfoAsync(trackId, cancellationToken).ConfigureAwait(false);
             if (trackInfo is null)
             {
-                // Without the format metadata it is safer to leave the raw
-                // file untouched than to encode it with a guessed sample
-                // format. The next startup can retry after the metadata is
-                // available.
-                logger.LogWarning("Orphan raw chunk has no track metadata. Session={SessionId}, Track={TrackId}, Path={Path}", sessionId, trackId, candidatePath);
                 completed = false;
+                logger.LogWarning("Orphan raw chunk has no track metadata. Session={SessionId}, Track={TrackId}, Path={Path}", sessionId, trackId, candidatePath);
                 continue;
             }
 
             try
             {
-                var size = new FileInfo(candidatePath).Length;
+                if (isPart)
+                {
+                    // A .part is recoverable only after the owning process has
+                    // gone away (activeSessionId was filtered above). Promote
+                    // it to the canonical raw path before registering SQLite.
+                    File.Move(candidatePath, rawPath, true);
+                }
+                var size = new FileInfo(rawPath).Length;
                 var blockAlign = Math.Max(1, trackInfo.Channels * Math.Max(1, trackInfo.BitsPerSample / 8));
                 var sampleCount = exactName ? exactSampleCount : size / blockAlign;
-                if (sampleCount <= 0)
-                {
-                    logger.LogWarning("Ignoring empty orphan raw chunk. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", sessionId, trackId, sequence);
-                    continue;
-                }
-
-                var existingEnd = await spool.GetNextTrackStartSampleAsync(trackId, cancellationToken);
-                // Rows created before startSample/sampleCount were persisted
-                // used the historical ten-second interval. Do not reinterpret
-                // old sessions when the current segment setting changes.
+                if (sampleCount <= 0) continue;
+                var existingEnd = await spool.GetNextTrackStartSampleAsync(trackId, cancellationToken).ConfigureAwait(false);
                 var estimatedStart = (long)sequence * trackInfo.SampleRate * RecordingContract.ChunkDurationSeconds;
                 var startSample = exactName ? exactStartSample : Math.Max(existingEnd, estimatedStart);
-                var directory = Path.GetDirectoryName(rawPath)!;
-                var output = Path.Combine(directory, $"{sequence:D8}.flac");
+                var output = Path.Combine(Path.GetDirectoryName(rawPath)!, $"{sequence:D8}.flac");
                 spool.RegisterRawChunk(new RawRecordingChunk(
                     Guid.NewGuid().ToString("N"), sessionId, trackId, sequence, rawPath, output,
                     startSample, sampleCount, trackInfo.SampleRate, trackInfo.Channels,
-                    trackInfo.TrackType, trackInfo.Encoding, trackInfo.BitsPerSample, "WRITING", 0, null, null));
-                logger.LogInformation("Registered orphan raw chunk for recovery. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", sessionId, trackId, sequence);
+                    trackInfo.TrackType, trackInfo.Encoding, trackInfo.BitsPerSample, "WRITING", 0, null, null,
+                    trackInfo.SourceEncoding, trackInfo.SourceSubFormat, trackInfo.ValidBitsPerSample));
                 if (!exactName)
-                    await spool.AddEventAsync(sessionId, "RAW_CHUNK_LEGACY_TIMELINE_INFERRED", payloadJson: System.Text.Json.JsonSerializer.Serialize(new { trackId, sequence, startSample }), cancellationToken: cancellationToken);
+                    await spool.AddEventAsync(sessionId, "RAW_CHUNK_LEGACY_TIMELINE_INFERRED", payloadJson: System.Text.Json.JsonSerializer.Serialize(new { trackId, sequence, startSample }), cancellationToken: cancellationToken).ConfigureAwait(false);
+                var sha = FlacEncoder.ComputeSha256(rawPath);
+                await spool.PromoteRawChunkReadyAsync(
+                    new RawRecordingChunk(Guid.Empty.ToString("N"), sessionId, trackId, sequence, rawPath, output,
+                        startSample, sampleCount, trackInfo.SampleRate, trackInfo.Channels, trackInfo.TrackType,
+                        trackInfo.Encoding, trackInfo.BitsPerSample, "WRITING", 0, null, null,
+                        trackInfo.SourceEncoding, trackInfo.SourceSubFormat, trackInfo.ValidBitsPerSample),
+                    rawPath, sampleCount, size, sha, cancellationToken).ConfigureAwait(false);
+                wake.Signal();
+                logger.LogInformation("Registered orphan raw chunk. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", sessionId, trackId, sequence);
             }
             catch (Exception ex)
             {
@@ -190,18 +184,6 @@ public sealed class RawChunkRecovery(
         }
 
         return completed;
-    }
-
-    private async Task MarkRawReadyAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
-    {
-        var size = new FileInfo(raw.RawPath).Length;
-        if (size <= 0) throw new InvalidOperationException("raw_chunk_empty");
-        var blockAlign = Math.Max(1, raw.Channels * Math.Max(1, raw.BitsPerSample / 8));
-        var fileSampleCount = size / blockAlign;
-        if (fileSampleCount <= 0) throw new InvalidOperationException("raw_chunk_has_no_complete_samples");
-        if (raw.SampleCount > 0 && fileSampleCount != raw.SampleCount)
-            throw new InvalidOperationException($"raw_chunk_timeline_size_mismatch:{raw.SampleCount}:{fileSampleCount}");
-        await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "RAW_READY", size, FlacEncoder.ComputeSha256(raw.RawPath), sampleCount: raw.SampleCount, cancellationToken: cancellationToken);
     }
 
     private static void TryDelete(string path)

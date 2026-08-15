@@ -7,13 +7,14 @@
     <Version>1.0.1</Version>
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
     <FileVersion>1.0.1.0</FileVersion>
-    <InformationalVersion>1.0.1+audio-float32-pcm16</InformationalVersion>
+    <WhisperXBuildIdentity Condition="'$(WhisperXBuildIdentity)' == ''">1.0.1+audio-float32-pcm16</WhisperXBuildIdentity>
+    <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioContracts.cs;AudioConfigurationV2.cs;MachineServerConfig.cs;RecorderRuntimeLease.cs;RecorderRuntimeResolver.cs;LegacyWasapiCaptureEngine.cs;LegacyWasapiDeviceProbe.cs;AudioRuntimeProbe\**" />
+    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioContracts.cs;AudioConfigurationV2.cs;MachineServerConfig.cs;RecorderRuntimeLease.cs;RecorderRuntimeResolver.cs;RecorderRuntimeActivity.cs;RawFinalizerQueueMetrics.cs;LegacyWasapiCaptureEngine.cs;LegacyWasapiDeviceProbe.cs;AudioRuntimeProbe\**" />
     <ProjectReference Include="WhisperX.Atom.Recorder.Core.csproj" />
     <!-- NAudio is isolated to the legacy Windows adapter and probe. It is not
          part of Recorder.Core or the AudioGraph Host. -->
