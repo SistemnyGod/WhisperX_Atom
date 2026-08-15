@@ -24,6 +24,17 @@ def test_assistant_context_accepts_ready_and_partial_transcripts():
     assert "SELECT status FROM meetings WHERE id=@meeting" not in store
 
 
+def test_assistant_modes_are_additive_and_general_chat_is_transcript_independent():
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/027_assistant_modes.sql")
+    worker = read("workers/summary_worker/assistant.py")
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "GENERAL_CHAT" in migration and "MEETING_MEMORY" in migration and "CURRENT_MEETING" in migration
+    assert "ADD COLUMN IF NOT EXISTS assistant_mode" in migration
+    assert 'assistant_mode == "GENERAL_CHAT"' in worker
+    assert "assistant_context_empty" in worker  # meeting mode remains source-gated
+    assert "request.AssistantMode" in api
+
+
 def test_conversation_api_is_user_scoped_and_has_message_sse():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     assert 'app.MapGet("/api/assistant/conversations"' in api

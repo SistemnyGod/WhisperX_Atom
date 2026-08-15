@@ -1284,8 +1284,8 @@ app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRe
     var scope = request.ScopeType?.Trim().ToUpperInvariant();
     if (scope == "GLOBAL" && !IsPrivileged(context)) return Results.Forbid();
     if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
-    if (scope is not ("MEETING" or "GLOBAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
-    var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId);
+    if (scope is not ("MEETING" or "GLOBAL" or "GENERAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
+    var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId, request.AssistantMode);
     return conversation is null ? Results.BadRequest(new { error = "assistant_context_not_ready" }) : Results.Created($"/api/assistant/conversations/{conversation.Id}", conversation);
 });
 app.MapGet("/api/assistant/conversations/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
@@ -1342,9 +1342,15 @@ app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, Http
 {
     if (request.MeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
         return Results.NotFound();
-    if (request.MeetingId is null && !IsPrivileged(context) && !context.Items.ContainsKey("voice_host"))
+    var mode = request.AssistantMode?.Trim().ToUpperInvariant();
+    if (mode == "GENERAL_CHAT")
+    {
+        if (CurrentUserId(context) is null) return Results.Unauthorized();
+        if (request.MeetingId is not null) return Results.BadRequest(new { error = "general_chat_cannot_use_meeting" });
+    }
+    else if (request.MeetingId is null && !IsPrivileged(context) && !context.Items.ContainsKey("voice_host"))
         return Results.BadRequest(new { error = "meeting_required" });
-    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query, CurrentUserId(context));
+    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query, CurrentUserId(context), request.AssistantMode);
     return query is null ? Results.BadRequest(new { error = "meeting_not_ready_or_query_invalid" }) : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
 });
 app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
@@ -1499,8 +1505,8 @@ public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, Date
 public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
-public record AssistantQueryRequest(string Query, Guid? MeetingId);
-public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId);
+public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
+public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
 public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);

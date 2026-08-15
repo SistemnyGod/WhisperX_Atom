@@ -90,7 +90,7 @@ public sealed record DesktopJob(
             || errorCode.Equals("TRANSCRIPT_INVALID_TIMECODE", StringComparison.OrdinalIgnoreCase)
             || errorCode.Equals("AUDIO_PROCESSING_ERROR", StringComparison.OrdinalIgnoreCase));
 }
-public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY");
 
 public enum DesktopAuthState
 {
@@ -682,9 +682,9 @@ public sealed class ServerApiClient : IDisposable
         return await response.Content.ReadFromJsonAsync<List<DesktopAssistantConversation>>(_json, cancellationToken) ?? [];
     }
 
-    public async Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default)
+    public async Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, string? assistantMode = null, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/conversations", new { title, scopeType, meetingId }, cancellationToken);
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/conversations", new { title, scopeType, meetingId, assistantMode }, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantConversation>(_json, cancellationToken);
     }
@@ -752,9 +752,9 @@ public sealed class ServerApiClient : IDisposable
         || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
         || status.Equals("NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase);
 
-    public async Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default)
+    public async Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, string? assistantMode = null, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/queries", new { query, meetingId }, cancellationToken);
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/queries", new { query, meetingId, assistantMode }, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantQuery>(_json, cancellationToken);
     }

@@ -41,6 +41,23 @@ public sealed class AudioGraphDeviceCatalog : IAudioDeviceCatalog
         _watcher.Start();
 
         using var registration = cancellationToken.Register(() => _enumerationCompleted.TrySetCanceled(cancellationToken));
+        // DeviceWatcher can fail to deliver EnumerationCompleted in an
+        // unpackaged/current-user process (for example immediately after a
+        // Windows audio endpoint restart). Do not keep the Recorder Host in
+        // a half-started state with no IPC pipe forever. The direct
+        // FindAllAsync reconciliation is authoritative and provides a safe
+        // fallback when the watcher notification is lost.
+        var completed = await Task.WhenAny(
+            _enumerationCompleted.Task,
+            Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)).ConfigureAwait(false);
+        if (completed != _enumerationCompleted.Task)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await ReconcileAsync(cancellationToken).ConfigureAwait(false);
+            IsReady = true;
+            return;
+        }
+
         await _enumerationCompleted.Task.ConfigureAwait(false);
         IsReady = true;
         await ReconcileAsync(cancellationToken).ConfigureAwait(false);

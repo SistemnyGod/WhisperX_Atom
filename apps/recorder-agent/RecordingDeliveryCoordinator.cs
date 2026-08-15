@@ -40,29 +40,6 @@ public sealed class RecordingDeliveryCoordinator(
             errorDetail: null,
             cancellationToken: cancellationToken);
 
-        // AudioGraph STOP is a raw durability boundary. FLAC encoding may
-        // still be running in the background, so do not turn a temporarily
-        // empty FLAC spool into LOCAL_FAILED. The background reconciler will
-        // build the archive as soon as RAW_READY chunks become FLAC_READY.
-        var readyChunks = await spool.GetChunkCountsAsync(localSessionId, cancellationToken);
-        if (readyChunks.Total == 0)
-        {
-            await spool.SetFinalizationStateAsync(localSessionId,
-                localFinalizeState: "LOCAL_READY",
-                deliveryState: deliveryState,
-                errorCode: null,
-                errorDetail: "RAW_READY; FLAC encoding continues in background",
-                cancellationToken: cancellationToken);
-            return new FinalizationResult(
-                true,
-                "LOCAL_READY",
-                ArchivePath: null,
-                LocalArchiveState: "LOCAL_READY",
-                DeliveryState: deliveryState,
-                ServerFinalizeState: "PENDING",
-                MediaState: "PENDING");
-        }
-
         var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken);
         if (archiveResult.State == "LOCAL_READY")
         {
@@ -138,6 +115,13 @@ public sealed class RecordingDeliveryCoordinator(
         }
         try
         {
+            // A background recovery pass can race the STOP continuation while
+            // the last PCM chunk is still being encoded. Never assemble a
+            // permanent archive from that moving set: it would silently omit
+            // the tail (the archive could look valid while being 30 seconds
+            // shorter than the sample-based recording timer).
+            if (!await WaitForEncodedChunksAsync(localSessionId, cancellationToken))
+                throw new InvalidOperationException("recording_chunks_incomplete");
             var archivePath = await archive.CreateAsync(localSessionId, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_READY",
@@ -174,6 +158,27 @@ public sealed class RecordingDeliveryCoordinator(
             logger.LogWarning(ex, "Local archive failed; continuing server delivery. Session={SessionId}", localSessionId);
             return ("LOCAL_FAILED", null);
         }
+    }
+
+    private async Task<bool> WaitForEncodedChunksAsync(string localSessionId, CancellationToken cancellationToken)
+    {
+        var stableSignature = string.Empty;
+        var stableReads = 0;
+        for (var attempt = 0; attempt < 120; attempt++)
+        {
+            var raw = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken);
+            var chunks = await spool.GetArchiveChunksAsync(localSessionId, cancellationToken);
+            if (raw.Pending == 0 && raw.Writing == 0 && raw.Encoding == 0 && chunks.Count > 0)
+            {
+                var signature = string.Join("|", chunks.Select(chunk =>
+                    $"{chunk.TrackId}:{chunk.Sequence}:{chunk.StartSample}:{chunk.SampleCount}:{chunk.SizeBytes}:{chunk.Sha256}"));
+                if (signature == stableSignature) stableReads++;
+                else { stableSignature = signature; stableReads = 1; }
+                if (stableReads >= 2) return true;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+        }
+        return false;
     }
 
     private async Task<FinalizationResult> DeliverToServerAsync(string localSessionId, CancellationToken cancellationToken)

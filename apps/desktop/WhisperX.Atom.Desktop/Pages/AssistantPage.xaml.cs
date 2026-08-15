@@ -24,7 +24,7 @@ public sealed partial class AssistantPage : Page
         _viewModel = new AssistantViewModel(_services);
         DataContext = _viewModel;
         _viewModel.PropertyChanged += ViewModel_PropertyChanged;
-        try { await _viewModel.LoadAsync(_pageCts.Token); ContextBox.SelectedItem = _viewModel.SelectedContext; UpdateState(); }
+        try { await _viewModel.LoadAsync(_pageCts.Token); ModeBox.SelectedItem = _viewModel.SelectedMode; ContextBox.SelectedItem = _viewModel.SelectedContext; UpdateState(); }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить ИИ-помощника.")); }
     }
@@ -55,7 +55,20 @@ public sealed partial class AssistantPage : Page
 
     private void ContextBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_viewModel is not null) _viewModel.SelectedContext = ContextBox.SelectedItem as AssistantContextOption;
+        if (_viewModel is null) return;
+        var context = ContextBox.SelectedItem as AssistantContextOption;
+        _viewModel.SelectedContext = context;
+        if (context is not null)
+        {
+            var mode = _viewModel.Modes.FirstOrDefault(item => item.Value == (context.IsGlobal ? "MEETING_MEMORY" : "CURRENT_MEETING"));
+            if (mode is not null && !ReferenceEquals(ModeBox.SelectedItem, mode)) ModeBox.SelectedItem = mode;
+        }
+    }
+
+    private void ModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is not null) _viewModel.SelectedMode = ModeBox.SelectedItem as AssistantModeOption;
+        if (_viewModel is not null) ContextBox.SelectedItem = _viewModel.SelectedContext;
     }
 
     private void MessagesList_SelectionChanged(object sender, SelectionChangedEventArgs e)

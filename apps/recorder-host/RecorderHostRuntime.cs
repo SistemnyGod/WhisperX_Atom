@@ -64,9 +64,15 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         // it must obey the same installation-scoped ownership boundary as
         // START and the background delivery worker.
         using var initializationLease = RecorderRuntimeLease.Acquire(_api.InstallationId);
+        _logger.LogInformation(
+            "Recorder Host initialization started. DataRoot={DataRoot}",
+            Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT"));
         await _spool.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Recorder Host spool initialized.");
         await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Recorder Host stale chunk recovery completed.");
         await _engine.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Recorder Host AudioGraph device catalog initialized.");
 
         // Phase 1 supports ROOM/MIC_ONLY. Migrate an existing legacy profile
         // before advertising readiness; system audio is never dropped silently.
@@ -1166,7 +1172,9 @@ public sealed class RecorderHostPipeServer : BackgroundService
         {
             try
             {
+                _logger.LogInformation("Recorder Host IPC listener creating pipe.");
                 var pipe = RecorderHostPipeSecurity.CreateServer();
+                _logger.LogInformation("Recorder Host IPC listener waiting for client.");
                 try
                 {
                     await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);

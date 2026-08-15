@@ -34,8 +34,16 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -RecorderHostDirectory ""{app}\RecorderHost"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-RecorderHostUser.ps1"" -RecorderHostPath ""{app}\RecorderHost\WhisperX.Atom.Recorder.Host.exe"""; Flags: runasoriginaluser runhidden waituntilterminated
-Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; Description: "Launch WhisperX Atom"; Flags: runasoriginaluser nowait postinstall skipifsilent
+; The per-user config script is deliberately fire-and-forget. Inno Setup is
+; elevated, while this script must run in the original user's DPAPI/profile
+; scope; waiting for the runasoriginaluser hand-off can deadlock the UAC
+; broker and leave the installer looking hung after all files were copied.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-RecorderHostUser.ps1"" -RecorderHostPath ""{app}\RecorderHost\WhisperX.Atom.Recorder.Host.exe"""; Flags: runasoriginaluser runhidden nowait
+; Do not auto-launch Desktop from the elevated Setup process. A Desktop
+; process started here can inherit a high-integrity token after UAC and then
+; start a high-integrity Recorder Host, which blocks the normal user Desktop
+; from opening the Host pipe. The user starts the installed shortcut after
+; Setup has exited, guaranteeing a matching medium-integrity user session.
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Uninstall-Service.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveWhisperXAtomService"

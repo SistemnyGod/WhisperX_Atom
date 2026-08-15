@@ -11,7 +11,10 @@
             <StackPanel Spacing="3">
                 <TextBlock Text="ИИ-помощник" Style="{StaticResource PageTitleStyle}" />
                 <TextBlock Text="Постоянные диалоги по готовым стенограммам с подтверждёнными источниками" Foreground="{StaticResource MutedTextBrush}" />
-                <ComboBox x:Name="ContextBox" Header="Контекст нового чата" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" Width="360" Margin="0,8,0,0" SelectionChanged="ContextBox_SelectionChanged" />
+                <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,8,0,0">
+                    <ComboBox x:Name="ModeBox" Header="Режим" ItemsSource="{Binding Modes}" DisplayMemberPath="Label" Width="190" SelectionChanged="ModeBox_SelectionChanged" />
+                    <ComboBox x:Name="ContextBox" Header="Контекст" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" Width="270" SelectionChanged="ContextBox_SelectionChanged" />
+                </StackPanel>
             </StackPanel>
             <Button x:Name="NewChatButton" Grid.Column="1" Content="Новый чат" Style="{StaticResource PrimaryButtonStyle}" Click="NewChatButton_Click" />
         </Grid>
@@ -22,7 +25,7 @@
             <Border x:Name="ConversationCard" Style="{StaticResource CardStyle}" Padding="12">
                 <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
                     <TextBlock Text="Чаты" Style="{StaticResource SectionTitleStyle}" />
-                    <TextBlock Grid.Row="1" Text="Контекст фиксируется при создании чата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="1" Text="Режим и контекст фиксируются при создании чата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                     <ListView x:Name="ConversationsList" Grid.Row="2" ItemsSource="{Binding Conversations}" SelectionMode="Single" SelectionChanged="ConversationsList_SelectionChanged" BorderThickness="0">
                         <ListView.ItemTemplate>
                             <DataTemplate>
@@ -58,9 +61,9 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <TextBlock x:Name="ChatEmptyText" Grid.Row="1" Text="Выберите чат и задайте вопрос по стенограмме." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    <TextBlock x:Name="ChatEmptyText" Grid.Row="1" Text="Выберите чат и задайте вопрос." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" />
                     <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                        <TextBox x:Name="QuestionBox" Header="Вопрос" PlaceholderText="Задайте вопрос по совещанию" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
+                        <TextBox x:Name="QuestionBox" Header="Вопрос" PlaceholderText="Задайте вопрос помощнику" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
                         <Button x:Name="AskButton" Grid.Column="1" Content="Спросить" VerticalAlignment="Bottom" Style="{StaticResource PrimaryButtonStyle}" Click="AskButton_Click" />
                     </Grid>
                     <TextBlock x:Name="StatusText" Grid.Row="3" Text="" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />

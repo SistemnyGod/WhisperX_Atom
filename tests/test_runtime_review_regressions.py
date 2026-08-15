@@ -57,6 +57,16 @@ def test_host_ipc_maps_acl_denial_and_uses_exact_configured_user_sid():
     assert "allowed-user.sid" in security
 
 
+def test_host_startup_has_bounded_device_watcher_and_cleans_unresponsive_process():
+    catalog = read("apps/recorder-host/AudioGraphDeviceCatalog.cs")
+    launcher = read("scripts/start-recorder-host.ps1")
+    assert "TimeSpan.FromSeconds(10)" in catalog
+    assert "Task.WhenAny" in catalog
+    assert "await ReconcileAsync(cancellationToken)" in catalog
+    assert "Stop-Process -Id $process.Id -Force" in launcher
+    assert "RECORDER_PIPE_NOT_READY" in launcher
+
+
 def test_host_health_advertises_build_identity_and_concurrent_ipc_capabilities():
     protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")

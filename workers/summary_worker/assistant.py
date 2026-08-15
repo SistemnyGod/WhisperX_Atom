@@ -57,10 +57,10 @@ class AssistantRepository:
                     (socket.gethostname(), message_id),
                 )
 
-    def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None] | None:
+    def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None, str] | None:
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
-            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None) if row else None
+            row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id,assistant_mode FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
+            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY")) if row else None
 
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with psycopg.connect(self.conninfo) as connection:
@@ -146,14 +146,14 @@ class AssistantRepository:
             used += len(value)
         return result
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int]]) -> None:
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int]], assistant_mode: str) -> None:
         evidence_ids = [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
         evidence_ids = list(dict.fromkeys(value for value in evidence_ids if value in valid))[:8]
         answer = str(result.get("answer", "")).strip()
         voice = str(result.get("voice_answer", answer)).strip()
         voice = re.split(r"(?<=[.!?])\s+", voice)
         voice = " ".join(voice[:3])[:500].strip()
-        status = "READY" if evidence_ids else "NEEDS_REVIEW"
+        status = "READY" if assistant_mode == "GENERAL_CHAT" or evidence_ids else "NEEDS_REVIEW"
         evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
         with psycopg.connect(self.conninfo) as connection:
             row = connection.execute(
@@ -183,18 +183,33 @@ class AssistantWorker:
         row = self.repository.query(query_id)
         if row is None or row[2] in {"READY", "FAILED", "NEEDS_REVIEW"}:
             return
-        query, meeting_id, _, conversation_id, user_message_id, _ = row
+        query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
         try:
-            context, valid = await asyncio.to_thread(self.repository.context, meeting_id, query)
-            if not context:
-                raise RuntimeError("assistant_context_empty")
+            if assistant_mode == "GENERAL_CHAT":
+                context, valid = "", {}
+                system_prompt = (
+                    "Отвечай по-русски как доброжелательный универсальный помощник. "
+                    "Это обычный чат, поэтому можно объяснять общие темы и помогать с текстами. "
+                    "Не выдавай внутренние данные приложения за факты и верни только JSON с answer, voice_answer и evidence_segment_ids. "
+                    "Для обычного чата evidence_segment_ids должен быть пустым массивом."
+                )
+                user_content = f"Вопрос: {query}"
+            else:
+                context, valid = await asyncio.to_thread(self.repository.context, meeting_id, query)
+                if not context:
+                    raise RuntimeError("assistant_context_empty")
+                system_prompt = (
+                    "Отвечай по-русски. Используй только приведённые сегменты стенограмм. "
+                    "Не выдумывай факты. Верни только JSON с answer, voice_answer и evidence_segment_ids."
+                )
+                user_content = f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"
             history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
             messages = [
-                {"role": "system", "content": "Отвечай по-русски. Используй только приведённые сегменты. Не выдумывай факты. Верни только JSON с answer, voice_answer и evidence_segment_ids."},
+                {"role": "system", "content": system_prompt},
                 *history,
-                {"role": "user", "content": f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"},
+                {"role": "user", "content": user_content},
             ]
             async with self.lease:
                 server = LocalLlamaServer()
@@ -203,7 +218,7 @@ class AssistantWorker:
                     result = await LlamaCppClient(server.base_url, self.model_alias).invoke_json(messages, ASSISTANT_SCHEMA)
                 finally:
                     await asyncio.to_thread(server.stop)
-            await asyncio.to_thread(self.repository.persist, query_id, result, valid)
+            await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode)
         except Exception as exc:
             self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())
             LOGGER.exception("assistant query failed: %s", query_id)

@@ -21,6 +21,13 @@ public sealed class AssistantContextOption
     public bool IsGlobal => string.IsNullOrWhiteSpace(MeetingId);
 }
 
+public sealed class AssistantModeOption
+{
+    public AssistantModeOption(string label, string value) { Label = label; Value = value; }
+    public string Label { get; }
+    public string Value { get; }
+}
+
 public sealed class AssistantViewModel : ObservableObject
 {
     private readonly FrontendServices _services;
@@ -35,12 +42,19 @@ public sealed class AssistantViewModel : ObservableObject
     private string _voiceAnswerText = string.Empty;
     private string _roleText = string.Empty;
     private AssistantContextOption? _selectedContext;
+    private AssistantModeOption? _selectedMode;
     private DesktopAssistantConversation? _selectedConversation;
     private DesktopAssistantMessage? _selectedMessage;
 
     public AssistantViewModel(FrontendServices services) => _services = services;
 
     public ObservableCollection<AssistantContextOption> Contexts { get; } = [];
+    public ObservableCollection<AssistantModeOption> Modes { get; } =
+    [
+        new("Обычный чат", "GENERAL_CHAT"),
+        new("Память совещаний", "MEETING_MEMORY"),
+        new("Текущее совещание", "CURRENT_MEETING")
+    ];
     public ObservableCollection<DesktopAssistantConversation> Conversations { get; } = [];
     public ObservableCollection<DesktopAssistantMessage> Messages { get; } = [];
     public ObservableCollection<AssistantEvidenceItem> Evidence { get; } = [];
@@ -72,6 +86,21 @@ public sealed class AssistantViewModel : ObservableObject
         }
     }
 
+    public AssistantModeOption? SelectedMode
+    {
+        get => _selectedMode;
+        set
+        {
+            if (!SetProperty(ref _selectedMode, value)) return;
+            OnPropertyChanged(nameof(IsGeneralChat));
+            OnPropertyChanged(nameof(IsMeetingMemory));
+            OnPropertyChanged(nameof(IsCurrentMeeting));
+            if (value?.Value == "GENERAL_CHAT") SelectedContext = null;
+            else if (value?.Value == "MEETING_MEMORY") SelectedContext = Contexts.FirstOrDefault(item => item.IsGlobal);
+            else if (value?.Value == "CURRENT_MEETING") SelectedContext = Contexts.FirstOrDefault(item => !item.IsGlobal);
+        }
+    }
+
     public DesktopAssistantConversation? SelectedConversation
     {
         get => _selectedConversation;
@@ -93,6 +122,9 @@ public sealed class AssistantViewModel : ObservableObject
     }
 
     public bool IsGlobalContext => SelectedContext?.IsGlobal == true;
+    public bool IsGeneralChat => SelectedMode?.Value == "GENERAL_CHAT";
+    public bool IsMeetingMemory => SelectedMode?.Value == "MEETING_MEMORY";
+    public bool IsCurrentMeeting => SelectedMode?.Value == "CURRENT_MEETING";
     public string? SelectedMeetingId => SelectedContext?.MeetingId;
 
     public async Task LoadAsync(CancellationToken cancellationToken = default)
@@ -120,9 +152,15 @@ public sealed class AssistantViewModel : ObservableObject
             }
             IsGlobalAllowed = user.IsPrivileged;
             RoleText = $"Роль API: {user.Role}";
+            if (!IsGlobalAllowed)
+            {
+                var memoryMode = Modes.FirstOrDefault(item => item.Value == "MEETING_MEMORY");
+                if (memoryMode is not null) Modes.Remove(memoryMode);
+            }
             await LoadContextsAsync(cancellationToken);
+            SelectedMode = Modes.FirstOrDefault();
             await LoadConversationsAsync(cancellationToken);
-            StatusText = HasConversations ? "Выберите чат или создайте новый." : "Создайте чат по готовой стенограмме.";
+            StatusText = HasConversations ? "Выберите чат или создайте новый." : "Выберите режим и создайте чат.";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { ErrorText = SafeError(ex); }
@@ -139,22 +177,22 @@ public sealed class AssistantViewModel : ObservableObject
 
     public async Task CreateConversationAsync(CancellationToken cancellationToken = default)
     {
-        if (SelectedContext is null)
+        if (!IsGeneralChat && SelectedContext is null)
         {
             ErrorText = "Выберите встречу или глобальный контекст.";
             return;
         }
-        if (SelectedContext.IsGlobal && !IsGlobalAllowed)
+        if (IsMeetingMemory && !IsGlobalAllowed)
         {
             ErrorText = "Глобальный контекст доступен только Administrator и Operator.";
             return;
         }
-        var scope = SelectedContext.IsGlobal ? "GLOBAL" : "MEETING";
-        Guid? meetingId = Guid.TryParse(SelectedContext.MeetingId, out var parsed) ? parsed : null;
-        var conversation = await _services.Backend.CreateAssistantConversationAsync("Новый чат", scope, meetingId, cancellationToken);
+        var scope = IsGeneralChat ? "GENERAL" : IsMeetingMemory ? "GLOBAL" : "MEETING";
+        Guid? meetingId = IsCurrentMeeting && Guid.TryParse(SelectedContext?.MeetingId, out var parsed) ? parsed : null;
+        var conversation = await _services.Backend.CreateAssistantConversationAsync("Новый чат", scope, meetingId, SelectedMode?.Value, cancellationToken);
         if (conversation is null)
         {
-            ErrorText = "Для этого контекста ещё нет пригодной стенограммы.";
+            ErrorText = IsGeneralChat ? "Не удалось создать обычный чат." : "Для этого контекста ещё нет пригодной стенограммы.";
             return;
         }
         Conversations.Insert(0, conversation);

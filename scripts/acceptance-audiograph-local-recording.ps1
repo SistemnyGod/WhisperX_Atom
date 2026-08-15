@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(10, 300)]
+    # Long gates are intentional: the release plan requires 30 s, 15 min and 60 min runs.
+    [ValidateRange(10, 3600)]
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]
     [int]$FinalizeTimeoutSeconds = 90,
@@ -8,6 +9,7 @@ param(
     [switch]$ServerDelivery,
     [switch]$StopHost,
     [switch]$DevelopmentHost,
+    [string]$DevelopmentDataRoot = "",
     [string]$InstalledHostPath = "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe"
 )
 
@@ -43,7 +45,11 @@ function Get-HostProcesses {
 function Ensure-ReleaseHost {
     if ($DevelopmentHost) {
         $script = Join-Path $repo "scripts\start-recorder-host.ps1"
-        & $script -ReadyTimeoutSeconds 20
+        $startArgs = @{ ReadyTimeoutSeconds = 20 }
+        if (-not [string]::IsNullOrWhiteSpace($DevelopmentDataRoot)) {
+            $startArgs.DataRoot = [IO.Path]::GetFullPath($DevelopmentDataRoot)
+        }
+        & $script @startArgs
         $scriptProcess = Get-HostProcesses | Select-Object -First 1
         if ($null -ne $scriptProcess) {
             $scriptProcess.Process.Id | Set-Content -LiteralPath (Join-Path $repo "artifacts\runtime\recorder-host.pid") -Encoding ascii
@@ -152,6 +158,19 @@ try {
     $archiveExists = -not [string]::IsNullOrWhiteSpace($archivePath) -and (Test-Path -LiteralPath $archivePath -PathType Container)
     $archiveFiles = if ($archiveExists) { @(Get-ChildItem -LiteralPath $archivePath -Recurse -File -ErrorAction SilentlyContinue) } else { @() }
     $flacFiles = @($archiveFiles | Where-Object Extension -ieq ".flac")
+    $masterPath = if ($archiveExists) { Join-Path $archivePath "export\master.flac" } else { $null }
+    $durationSeconds = $null
+    if ($masterPath -and (Test-Path -LiteralPath $masterPath -PathType Leaf)) {
+        $ffprobePath = Join-Path ([IO.Path]::GetDirectoryName($hostPath)) "ffprobe.exe"
+        if (Test-Path -LiteralPath $ffprobePath -PathType Leaf) {
+            $durationText = (& $ffprobePath -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $masterPath 2>$null | Select-Object -First 1)
+            $parsedDuration = 0d
+            if ([double]::TryParse([string]$durationText, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsedDuration)) {
+                $durationSeconds = [math]::Round($parsedDuration, 3)
+            }
+        }
+    }
+    $durationDeltaSeconds = if ($null -eq $durationSeconds) { $null } else { [math]::Round([math]::Abs($durationSeconds - $Seconds), 3) }
     $report = [ordered]@{
         schemaVersion = 1
         gate = "AUDIOGRAPH_LOCAL_RECORDING"
@@ -172,6 +191,9 @@ try {
             localChunkCount = [int]$status.localChunkCount
             archiveExists = $archiveExists
             flacFileCount = $flacFiles.Count
+            durationSeconds = $durationSeconds
+            durationDeltaSeconds = $durationDeltaSeconds
+            durationWithinTolerance = $null -ne $durationDeltaSeconds -and $durationDeltaSeconds -le 0.1
             deliveryState = [string]$status.deliveryState
             errorCode = [string]$status.errorCode
             serverSessionId = [string]$status.serverSessionId
@@ -184,7 +206,7 @@ try {
     $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
     Write-Host "AudioGraph local report: $reportPath"
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or $deliveryFailed) {
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or $report.result.localChunkCount -le 0 -or $report.result.flacFileCount -le 0 -or -not $report.result.archiveExists -or -not $report.result.durationWithinTolerance -or $deliveryFailed) {
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }

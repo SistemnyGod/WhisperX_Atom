@@ -56,6 +56,14 @@ def test_archive_and_server_delivery_start_in_parallel_after_encoder_drain():
     assert "MediaState" in read("apps/recorder-agent/AgentIpcProtocol.cs")
 
 
+def test_archive_finalization_waits_for_a_stable_encoded_chunk_set():
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "WaitForEncodedChunksAsync" in coordinator
+    assert "raw.Pending == 0 && raw.Writing == 0 && raw.Encoding == 0" in coordinator
+    assert "recording_chunks_incomplete" in coordinator
+    assert "stableReads >= 2" in coordinator
+
+
 def test_desktop_maps_finalize_codes_and_never_displays_raw_finalize_error():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml")

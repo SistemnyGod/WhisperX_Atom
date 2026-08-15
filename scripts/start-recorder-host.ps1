@@ -221,4 +221,13 @@ do {
     }
 } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
+# A process that never exposed its IPC endpoint is not a usable runtime. Do
+# not leave it behind: the next launch would mistake it for an owner and
+# return RECORDER_HOST_PIPE_UNRESPONSIVE instead of the original startup
+# failure. This is safe because no recording can have started before HEALTH
+# was reachable.
+if ($null -ne $process -and (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+}
 throw "RECORDER_PIPE_NOT_READY"

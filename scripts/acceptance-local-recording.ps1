@@ -2,7 +2,7 @@
 param(
     [ValidateSet("LegacyWasapi", "AudioGraph")]
     [string]$CaptureEngine = "AudioGraph",
-    [ValidateRange(10, 300)]
+    [ValidateRange(10, 3600)]
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]
     [int]$FinalizeTimeoutSeconds = 90

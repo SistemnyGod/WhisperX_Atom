@@ -66,13 +66,13 @@ public interface IBackendService : IDisposable
     Task<bool> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAgent>> GetAgentsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default);
-    Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAssistantMessage>> GetAssistantMessagesAsync(Guid conversationId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantMessage?> WaitForAssistantMessageAsync(Guid conversationId, Guid messageId, CancellationToken cancellationToken = default);
     Task<bool> UpdateAssistantConversationAsync(Guid conversationId, string? title = null, bool? archived = null, CancellationToken cancellationToken = default);
     Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default);
-    Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
     Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
@@ -115,9 +115,15 @@ public sealed record AssistantEvidenceItem(
     string? Timecode,
     string? Speaker,
     string? Text);
-public sealed record DesktopAssistantConversation(string Id, string Title, string ScopeType, string? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt)
+public sealed record DesktopAssistantConversation(string Id, string Title, string ScopeType, string? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY")
 {
-    public string ContextLabel => ScopeType.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase) ? "Вся история" : "Совещание";
+    public string ContextLabel => AssistantMode.ToUpperInvariant() switch
+    {
+        "GENERAL_CHAT" => "Обычный чат",
+        "CURRENT_MEETING" => "Текущее совещание",
+        _ when ScopeType.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase) => "Память совещаний",
+        _ => "Совещание"
+    };
 }
 public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt)
 {
