@@ -57,7 +57,10 @@ public sealed record RawRecordingChunk(
     string? Error,
     string? SourceEncoding = null,
     string? SourceSubFormat = null,
-    int? ValidBitsPerSample = null);
+    int? ValidBitsPerSample = null,
+    int EncodeAttempts = 0,
+    DateTimeOffset? NextEncodeAttemptAtUtc = null,
+    string? LastEncodeErrorCode = null);
 
 public sealed record RawChunkBacklog(
     int Pending,
@@ -131,7 +134,7 @@ public sealed class SpoolStore
              CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
-            CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
+            CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, encode_attempts INTEGER NOT NULL DEFAULT 0, next_encode_attempt_at TEXT, last_encode_error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_track_info(track_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_type TEXT NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, endpoint_id TEXT, device_name TEXT, selection_mode TEXT NOT NULL DEFAULT 'DEFAULT', profile TEXT NOT NULL DEFAULT 'ROOM', encoding TEXT NOT NULL DEFAULT 'IeeeFloat', bits_per_sample INTEGER NOT NULL DEFAULT 32, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS server_bindings(local_session_id TEXT NOT NULL, local_track_id TEXT NOT NULL, server_session_id TEXT NOT NULL, server_track_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(local_session_id, local_track_id));
             CREATE TABLE IF NOT EXISTS agent_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -213,6 +216,9 @@ public sealed class SpoolStore
             "ALTER TABLE recording_raw_chunks ADD COLUMN source_encoding TEXT",
             "ALTER TABLE recording_raw_chunks ADD COLUMN source_sub_format TEXT",
             "ALTER TABLE recording_raw_chunks ADD COLUMN valid_bits_per_sample INTEGER"
+            ,"ALTER TABLE recording_raw_chunks ADD COLUMN encode_attempts INTEGER NOT NULL DEFAULT 0"
+            ,"ALTER TABLE recording_raw_chunks ADD COLUMN next_encode_attempt_at TEXT"
+            ,"ALTER TABLE recording_raw_chunks ADD COLUMN last_encode_error_code TEXT"
         })
         {
             await using var trackMigration = connection.CreateCommand();
@@ -537,7 +543,7 @@ public sealed class SpoolStore
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE recording_raw_chunks SET status='RAW_READY',sample_count=$sampleCount,raw_size_bytes=$size,raw_sha256=$sha,error=NULL,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
+        command.CommandText = "UPDATE recording_raw_chunks SET status='RAW_READY',sample_count=$sampleCount,raw_size_bytes=$size,raw_sha256=$sha,error=NULL,next_encode_attempt_at=NULL,last_encode_error_code=NULL,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
         command.Parameters.AddWithValue("$sampleCount", sampleCount);
         command.Parameters.AddWithValue("$size", rawSizeBytes);
         command.Parameters.AddWithValue("$sha", rawSha256);
@@ -553,7 +559,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE recording_raw_chunks SET status=$status,sample_count=COALESCE($sampleCount,sample_count),raw_size_bytes=COALESCE($size,raw_size_bytes),raw_sha256=COALESCE($sha,raw_sha256),error=$error,raw_purge_after=CASE WHEN $status='READY' THEN COALESCE(raw_purge_after,$rawPurgeAfter) ELSE raw_purge_after END,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
+        command.CommandText = "UPDATE recording_raw_chunks SET status=$status,sample_count=COALESCE($sampleCount,sample_count),raw_size_bytes=COALESCE($size,raw_size_bytes),raw_sha256=COALESCE($sha,raw_sha256),error=$error,last_encode_error_code=CASE WHEN $status IN ('RAW_READY','READY') THEN NULL ELSE last_encode_error_code END,next_encode_attempt_at=CASE WHEN $status IN ('RAW_READY','READY') THEN NULL ELSE next_encode_attempt_at END,raw_purge_after=CASE WHEN $status='READY' THEN COALESCE(raw_purge_after,$rawPurgeAfter) ELSE raw_purge_after END,updated_at=$updated WHERE session_id=$session AND track_id=$track AND sequence=$sequence";
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$sampleCount", (object?)sampleCount ?? DBNull.Value);
         command.Parameters.AddWithValue("$size", (object?)rawSizeBytes ?? DBNull.Value);
@@ -584,16 +590,72 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error,source_encoding,source_sub_format,valid_bits_per_sample FROM recording_raw_chunks WHERE status IN ('WRITING','RAW_READY','ENCODING','ENCODE_FAILED') ORDER BY updated_at,session_id,track_id,sequence LIMIT $limit";
+        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error,source_encoding,source_sub_format,valid_bits_per_sample,encode_attempts,next_encode_attempt_at,last_encode_error_code FROM recording_raw_chunks WHERE status IN ('WRITING','RAW_READY','ENCODING') OR (status='ENCODE_FAILED' AND (next_encode_attempt_at IS NULL OR next_encode_attempt_at <= $now)) ORDER BY updated_at,session_id,track_id,sequence LIMIT $limit";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
         var result = new List<RawRecordingChunk>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new RawRecordingChunk(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11), reader.GetInt32(12), reader.GetString(13), reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16), reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetInt32(19)));
+            result.Add(ReadRawRecordingChunk(reader));
         }
         return result;
     }
+
+    /// <summary>Atomically claims one due raw chunk for the process-local encoder.</summary>
+    public async Task<RawRecordingChunk?> ClaimNextRawChunkForEncodingAsync(string? sessionId = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var select = connection.CreateCommand();
+        select.Transaction = transaction;
+        select.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error,source_encoding,source_sub_format,valid_bits_per_sample,encode_attempts,next_encode_attempt_at,last_encode_error_code FROM recording_raw_chunks WHERE (status='RAW_READY' OR (status='ENCODE_FAILED' AND (next_encode_attempt_at IS NULL OR next_encode_attempt_at <= $now))) AND ($session IS NULL OR session_id=$session) ORDER BY updated_at,session_id,track_id,sequence LIMIT 1";
+        select.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        select.Parameters.AddWithValue("$session", (object?)sessionId ?? DBNull.Value);
+        await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            await reader.DisposeAsync();
+            await transaction.CommitAsync(cancellationToken);
+            return null;
+        }
+        var chunk = ReadRawRecordingChunk(reader);
+        await reader.DisposeAsync();
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE recording_raw_chunks SET status='ENCODING',encode_attempts=encode_attempts+1,error=NULL,updated_at=$updated WHERE id=$id AND status IN ('RAW_READY','ENCODE_FAILED')";
+        update.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("$id", chunk.Id);
+        if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return chunk with { Status = "ENCODING", EncodeAttempts = chunk.EncodeAttempts + 1, NextEncodeAttemptAtUtc = null, LastEncodeErrorCode = null };
+    }
+
+    public async Task SetRawEncodingFailureAsync(RawRecordingChunk chunk, string errorCode, CancellationToken cancellationToken = default)
+    {
+        var attempt = Math.Max(1, chunk.EncodeAttempts);
+        var baseSeconds = attempt switch { 1 => 2, 2 => 5, 3 => 15, 4 => 30, _ => 60 };
+        var delay = Math.Min(300, baseSeconds) + Random.Shared.NextDouble() * Math.Max(1, baseSeconds * 0.2);
+        var next = DateTimeOffset.UtcNow.AddSeconds(delay);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_raw_chunks SET status='ENCODE_FAILED',next_encode_attempt_at=$next,last_encode_error_code=$code,error=$error,updated_at=$updated WHERE id=$id AND status='ENCODING'";
+        command.Parameters.AddWithValue("$next", next.ToString("O"));
+        command.Parameters.AddWithValue("$code", errorCode);
+        command.Parameters.AddWithValue("$error", errorCode);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", chunk.Id);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static RawRecordingChunk ReadRawRecordingChunk(SqliteDataReader reader)
+        => new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11), reader.GetInt32(12), reader.GetString(13), reader.GetInt64(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16), reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetInt32(19), reader.IsDBNull(20) ? 0 : reader.GetInt32(20), reader.IsDBNull(21) || !DateTimeOffset.TryParse(reader.GetString(21), out var next) ? null : next, reader.IsDBNull(22) ? null : reader.GetString(22));
 
     public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(string? sessionId = null, CancellationToken cancellationToken = default)
     {

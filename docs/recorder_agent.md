@@ -1,31 +1,35 @@
-# Windows Recorder Agent — локальный запуск
+# Windows Recorder Host — локальный запуск
 
-На текущем этапе Agent уже умеет:
+Поддерживаемый Phase 1 runtime — current-user AudioGraph Recorder Host из
+`C:\Program Files\WhisperX Atom\RecorderHost`. Legacy Windows Service остаётся
+ручным fallback и не должен запускаться параллельно с Host.
 
-- открыть default microphone через WASAPI;
-- открыть WASAPI loopback как отдельную дорожку системного звука;
-- писать каждую дорожку в SQLite-backed spool;
-- закрывать чанки примерно по 10 секунд;
-- конвертировать PCM в FLAC через FFmpeg;
+Host умеет:
+
+- открыть выбранный или Windows-default microphone через AudioGraph;
+- нормализовать AudioGraph Float32 в mono PCM16;
+- сохранять raw PCM-сегменты в SQLite-backed spool (30 секунд по умолчанию);
+- завершать запись на durable raw-границе независимо от FFmpeg;
+- кодировать PCM в FLAC в фоне через SQLite backlog с bounded retry;
 - считать SHA-256 и сохранять метаданные чанка;
-- выполнять команды START/PAUSE/RESUME/STOP/STATUS из SSE, если Agent credentials настроены.
+- выполнять команды START/PAUSE/RESUME/STOP через IPC v6.
 
-Видео, загрузка чанков в server-session и Tray UI подключаются следующими итерациями. Исходные аудиофайлы из `C:\Users\AI_server\Documents\Audacity` автоматически не читаются.
+Исходные аудиофайлы из `C:\Users\AI_server\Documents\Audacity` автоматически
+не читаются. Системный loopback и дополнительные дорожки не входят в Phase 1.
 
 ## Предварительные условия
 
 - Windows 10/11;
-- .NET 10 SDK/runtime;
-- FFmpeg в PATH или путь в `ATOM_AGENT_FFMPEG_PATH`;
-- доступные default microphone и default playback device.
+- установленный Desktop/Host одной build identity;
+- доступный выбранный/default microphone;
+- FFmpeg/ffprobe рекомендуются для FLAC и master, но их временная
+  недоступность не блокирует START и STOP: состояние будет `WAITING_FOR_ENCODER`.
 
 ## Быстрый smoke
 
 ```powershell
 $env:ATOM_AGENT_DATA_ROOT = "C:\WhisperXAtom\Agent"
-$env:ATOM_AGENT_FFMPEG_PATH = "ffmpeg.exe"
-$env:ATOM_AGENT_AUTORECORD_SECONDS = "30"
-dotnet run --project .\apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj
+Start-Process "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe"
 ```
 
 После завершения в каталоге `ATOM_AGENT_DATA_ROOT` должны появиться:
@@ -33,27 +37,20 @@ dotnet run --project .\apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj
 ```text
 agent.db
 agent-YYYYMMDD.log
-recordings/<session>/<track>/<sequence>.flac
+sessions/<session>/<track>/<sequence>.pcm
+sessions/<session>/<track>/<sequence>.flac
 ```
 
-Остановить консольный smoke можно `Ctrl+C`. В production Agent будет запускаться как Windows Service.
+Остановить запись следует штатной командой STOP. Legacy Service запускается
+только для отдельной диагностики и не является основным runtime.
 
-## Управление из Web
+## Raw-first и восстановление
 
-Для command channel задайте URL и credentials уже зарегистрированного Agent:
-
-```powershell
-$env:ATOM_AGENT_SERVER_URL = "http://localhost:8000"
-$env:ATOM_AGENT_ID = "<agent-guid>"
-$env:ATOM_AGENT_TOKEN = "<agent-token>"
-```
-
-Web создаёт команды через `/api/meetings/{id}/recording-commands`; Agent читает их через SSE и возвращает результат. При отключённом command channel Agent продолжает локальный spool и smoke-режим.
-
-## Важные ограничения текущего слоя
-
-1. Используются default audio devices текущей Windows-сессии.
-2. Формат сохраняется в native WASAPI (на тестовой машине это 48 kHz, 32-bit float, 2 канала); нормализация в mono 16 kHz выполняется серверным media pipeline.
-3. `ATOM_AGENT_TOKEN` пока задаётся через окружение; перенос секрета в DPAPI и enrollment из UI — следующий hardening-шаг.
-4. При наличии Agent credentials и meetingId Agent создаёт server session/tracks, загружает FLAC-чанки с SHA-256, удаляет локальный файл только после подтверждения и вызывает finalize.
-5. Для реальной проверки используйте короткую копию записи или Web upload; большие файлы Audacity остаются ручным пилотным набором.
+1. Источником заданий encoder является SQLite: `RAW_READY`/`ENCODE_FAILED`, а не
+   память процесса. Raw удаляется только после проверенного FLAC.
+2. `STOP` возвращает `LOCAL_READY` после flush/rename/hash raw; `ArchivePath` и
+   отправка появляются позже. При отключённом сервере запись продолжается локально.
+3. `ATOM_RAW_FINALIZER_QUEUE_CAPACITY` ограничивает in-memory finalizer (2–32,
+   default 4). Переполнение оставляет `.pcm.part` для recovery.
+4. Токены и аудио не входят в диагностические архивы; enrollment управляется
+   Desktop и DPAPI.

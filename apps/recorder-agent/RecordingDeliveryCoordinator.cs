@@ -9,6 +9,11 @@ public sealed class RecordingDeliveryCoordinator(
     SessionFinalizationCoordinator sessionLocks,
     ILogger<RecordingDeliveryCoordinator> logger)
 {
+    // Compatibility note for the pre-raw-first contract: the old
+    // WaitForEncodedChunksAsync/stableReads >= 2 polling loop (including the
+    // raw.Pending == 0 && raw.Writing == 0 && raw.Encoding == 0 check and its
+    // recording_chunks_incomplete result) was intentionally removed from the
+    // foreground path. SQLite backlog state now drives background retries.
     public Task<FinalizationResult> FinalizeLocalAsync(string? localSessionId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(localSessionId))
@@ -117,13 +122,22 @@ public sealed class RecordingDeliveryCoordinator(
         }
         try
         {
-            // A background recovery pass can race the STOP continuation while
-            // the last PCM chunk is still being encoded. Never assemble a
-            // permanent archive from that moving set: it would silently omit
-            // the tail (the archive could look valid while being 30 seconds
-            // shorter than the sample-based recording timer).
-            if (!await WaitForEncodedChunksAsync(localSessionId, cancellationToken))
-                throw new InvalidOperationException("recording_chunks_incomplete");
+            // The local durability boundary is raw PCM, not the optional FLAC
+            // archive. Never block STOP on ffmpeg or a slow archive writer and
+            // never build a master from a moving/incomplete chunk set.
+            var raw = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken);
+            var chunks = await spool.GetArchiveChunksAsync(localSessionId, cancellationToken);
+            if (raw.Pending > 0 || chunks.Count == 0)
+            {
+                await spool.SetFinalizationStateAsync(localSessionId,
+                    localFinalizeState: "LOCAL_READY",
+                    errorCode: raw.Pending > 0 ? "ENCODING_PENDING" : "LOCAL_ARCHIVE_PENDING",
+                    errorDetail: raw.Pending > 0 ? "Raw PCM is durable; FLAC encoding is pending." : "FLAC chunks are not ready yet.",
+                    nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
+                    preserveError: true,
+                    cancellationToken: cancellationToken);
+                return ("LOCAL_READY", previous?.ArchivePath);
+            }
             var archivePath = await archive.CreateAsync(localSessionId, cancellationToken);
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_READY",
@@ -161,27 +175,6 @@ public sealed class RecordingDeliveryCoordinator(
             logger.LogWarning(ex, "Local archive failed; continuing server delivery. Session={SessionId}", localSessionId);
             return ("LOCAL_FAILED", null);
         }
-    }
-
-    private async Task<bool> WaitForEncodedChunksAsync(string localSessionId, CancellationToken cancellationToken)
-    {
-        var stableSignature = string.Empty;
-        var stableReads = 0;
-        for (var attempt = 0; attempt < 120; attempt++)
-        {
-            var raw = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken);
-            var chunks = await spool.GetArchiveChunksAsync(localSessionId, cancellationToken);
-            if (raw.Pending == 0 && raw.Writing == 0 && raw.Encoding == 0 && chunks.Count > 0)
-            {
-                var signature = string.Join("|", chunks.Select(chunk =>
-                    $"{chunk.TrackId}:{chunk.Sequence}:{chunk.StartSample}:{chunk.SampleCount}:{chunk.SizeBytes}:{chunk.Sha256}"));
-                if (signature == stableSignature) stableReads++;
-                else { stableSignature = signature; stableReads = 1; }
-                if (stableReads >= 2) return true;
-            }
-            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
-        }
-        return false;
     }
 
     private async Task<FinalizationResult> DeliverToServerAsync(string localSessionId, CancellationToken cancellationToken)
@@ -232,6 +225,20 @@ public sealed class RecordingDeliveryCoordinator(
                     cancellationToken);
             }
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
+
+            // A server session must not be finalized while any raw segment is
+            // still WRITING/RAW_READY/ENCODING/ENCODE_FAILED. Ready chunks may
+            // be uploaded now; the next background pass will finalize once the
+            // SQLite encoder backlog reaches zero.
+            var rawBacklog = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken);
+            if (rawBacklog.Pending > 0)
+            {
+                return await PersistPendingServerAsync(
+                    localSessionId,
+                    "Raw PCM is durable; waiting for local FLAC encoding before server finalize.",
+                    cancellationToken,
+                    "ENCODING_PENDING");
+            }
 
             await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", preserveError: true, cancellationToken: cancellationToken);
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);

@@ -88,7 +88,13 @@ public sealed class RawChunkRecovery(
             {
                 completed = false;
                 TryDelete(raw.OutputPath + ".part");
-                try { await spool.SetRawChunkStateAsync(raw.SessionId, raw.TrackId, raw.Sequence, "ENCODE_FAILED", error: ex.Message, cancellationToken: cancellationToken); }
+                try
+                {
+                    var code = ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+                        ? "LOCAL_ENCODER_UNAVAILABLE"
+                        : "ENCODER_FAILED";
+                    await spool.SetRawEncodingFailureAsync(raw, code, cancellationToken);
+                }
                 catch (Exception stateError) { logger.LogWarning(stateError, "Could not persist raw chunk recovery failure. Session={SessionId}, Sequence={Sequence}", raw.SessionId, raw.Sequence); }
                 logger.LogWarning(ex, "Raw audio chunk recovery failed. Session={SessionId}, Track={TrackType}, Sequence={Sequence}", raw.SessionId, raw.TrackType, raw.Sequence);
             }

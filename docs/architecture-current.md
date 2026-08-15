@@ -6,79 +6,70 @@
 flowchart LR
   subgraph Windows[Windows host]
     Desktop[WinUI 3 Desktop\n.NET 10]
-    Agent[Recorder Agent\nWindows Service]
-    Voice[Voice Host\nexperimental]
+    Host[AudioGraph Recorder Host\ncurrent-user]
+    Legacy[Recorder Service\nmanual fallback]
     GPU[Host GPU Worker\nPython + WhisperX + CUDA]
-    Archive[Local archive + SQLite spool]
+    Archive[Durable PCM + FLAC + SQLite spool]
   end
-
-  subgraph Docker[Docker core]
-    API[ASP.NET Core API\n.NET 10]
+  subgraph Docker[Docker LAN core]
+    API[ASP.NET Core API]
     DB[(PostgreSQL)]
     NATS[(NATS JetStream)]
-    TUS[tusd resumable upload]
-    Outbox[Outbox Relay]
-    Import[Import Worker]
+    TUS[tusd]
     Media[Media Worker]
-    ContainerGPU[Optional container GPU Worker]
+    ContainerGPU[Optional GPU Worker]
   end
-
-  Desktop <-->|Named Pipe / REST| Agent
-  Voice -->|protected IPC| Agent
-  Agent --> Archive
-  Agent -->|chunk delivery| API
+  Desktop <-->|Named Pipe v6| Host
+  Legacy -.->|manual only| Host
+  Host --> Archive
+  Host -->|background chunks| API
   Desktop -->|REST / SSE| API
-  TUS --> API
   API --> DB
-  API --> Outbox
-  Outbox --> NATS
-  Import --> API
+  API --> NATS
+  TUS --> API
   Media --> NATS
-  Media -->|media.ingest| NATS
-  GPU -->|ml.transcribe| NATS
+  GPU --> NATS
   ContainerGPU -. fallback .-> NATS
-  NATS --> DB
 ```
 
 ## Что является текущим runtime
 
-Поддерживаемая конфигурация — Docker core + host ML:
-
-- Docker: PostgreSQL, NATS JetStream, ASP.NET API, tusd, outbox relay, import worker и media worker.
-- Windows: Recorder Service, Desktop и host GPU Worker.
-- WhisperX и CUDA загружаются из локального Python окружения, указанного в `WHISPERX_HOST_PYTHON`.
-- `GPU_WORKER_RUNTIME=host` и `GPU_WORKER_MODE=host` устанавливаются запускателем.
-- container GPU Worker остаётся резервным режимом для машины с доступным CUDA-образом.
-- `summary-worker`, `llama-server`, web и gateway не нужны для Transcript MVP и не запускаются обычным `run-whisperx.ps1`.
+Поддерживаемая конфигурация — Docker core + current-user AudioGraph capture +
+host ML. Windows запускает Desktop, AudioGraph Recorder Host из Program Files и
+host GPU Worker. Legacy Recorder Service остаётся остановленным ручным fallback.
+WhisperX и CUDA загружаются из локального Python окружения; container GPU Worker
+остаётся резервным режимом.
 
 ## Границы ответственности
 
-### API
+### API и workers
 
-API владеет аутентификацией, сессиями, встречами, media metadata, заданиями, transcript/summary версиями, speakers, assistant conversations, decisions, tasks, agents и аудитом. API не загружает WhisperX-модели и не обрабатывает полное аудио в своём процессе.
+API владеет аутентификацией, сессиями, встречами, media metadata, заданиями и
+версиями transcript. Media Worker собирает корректный input, GPU Worker выполняет
+ASR и enrichment, сохраняя heartbeat и lease в PostgreSQL/NATS.
 
-### Media Worker
+### Recorder Host
 
-Проверяет media, собирает и нормализует дорожки, использует FFmpeg/FFprobe, сохраняет производные файлы и передаёт корректный input в ML pipeline.
-
-### GPU Worker
-
-Забирает задания из NATS, удерживает DB lease и JetStream delivery для длинных jobs, выполняет WhisperX ASR, alignment, diarization и persistence результата. Worker публикует heartbeat в `worker_instances`.
-
-### Recorder Agent
-
-Снимает WASAPI microphone/loopback, создаёт FLAC-чанки, считает SHA-256, хранит spool и локальный архив, связывает с серверной meeting/session и повторяет delivery после восстановления.
+Host снимает выбранный microphone через AudioGraph, преобразует Float32 в mono
+PCM16, пишет 30-секундные raw-сегменты и регистрирует их в SQLite. После STOP raw
+становится `LOCAL_READY`; отдельный SQLite-driven encoder строит FLAC с retry,
+после чего delivery coordinator загружает готовые чанки и выполняет server finalize.
+Системный loopback и новые дорожки не входят в Phase 1.
 
 ### Desktop
 
-Показывает фактические состояния API, Agent и processing, отправляет пользовательские команды и подписывается на SSE с polling fallback. ML-бизнес-логика остаётся в API/worker, а не в XAML.
+Desktop показывает фактические состояния API, Host, raw/encoder/archive/delivery и
+processing, отправляет пользовательские команды и подписывается на SSE с polling
+fallback. ML-бизнес-логика остаётся в API/worker.
 
 ## Источники истины и надёжность
 
-- PostgreSQL — состояние пользователей, meetings, jobs, media, transcript, worker heartbeat и audit.
-- NATS JetStream — доставка событий и возможность redelivery, но не единственное хранилище.
-- SQLite spool — локальное состояние Agent до подтверждённой доставки.
-- Локальный архив — постоянная копия записи; его нельзя удалять при временной ошибке API.
-- `artifacts/runtime/state.json` — диагностический снимок запуска, не источник бизнес-состояния.
+- PostgreSQL — состояние пользователей, meetings, jobs, media, transcript и audit.
+- NATS JetStream — доставка событий и redelivery, но не единственное хранилище.
+- SQLite spool — локальное состояние Host до подтверждённой доставки.
+- Durable PCM/FLAC archive — локальная копия записи; её нельзя удалять при
+  временной ошибке API или encoder.
+- `artifacts/runtime/state.json` — диагностический снимок, не бизнес-состояние.
 
-Legacy `app.py`, `app/` и отдельные watch/runtime-файлы сохранены для совместимости. В поддерживаемом запуске они не образуют второй параллельный server pipeline.
+Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для совместимости, но не
+образуют второй поддерживаемый server pipeline.

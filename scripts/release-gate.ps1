@@ -117,6 +117,24 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
 }
 $acceptanceReady = $acceptanceBlockers.Count -eq 0
 
+# Core release gate deliberately stops at the first useful text. Summary/Qwen,
+# long endurance and recovery hardening remain part of the full gate below.
+$coreAcceptanceScenarios = @("e2e-5m")
+$coreAcceptanceBlockers = [System.Collections.Generic.List[string]]::new()
+foreach ($scenario in $coreAcceptanceScenarios) {
+    $scenarioRoot = Join-Path $acceptanceRoot $scenario
+    $evidence = @(Get-ChildItem -LiteralPath $scenarioRoot -Recurse -File -Filter "*.json" -ErrorAction SilentlyContinue)
+    $scenarioReady = $false
+    foreach ($file in $evidence) {
+        try {
+            $json = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
+            if ($scenarioReady) { break }
+        } catch { }
+    }
+    if (-not $scenarioReady) { $coreAcceptanceBlockers.Add("CORE_ACCEPTANCE_$($scenario.ToUpperInvariant().Replace('-', '_'))_MISSING") }
+}
+
 $reasons = [System.Collections.Generic.List[string]]::new()
 foreach ($reason in $runtimeReasons) { $reasons.Add($reason) }
 foreach ($reason in $acceptanceBlockers) { $reasons.Add($reason) }
@@ -144,6 +162,16 @@ $uniqueChains = $chains.Count -eq 0 -or (-not $missingCorrelation -and -not $dup
 if ($missingCorrelation) { $reasons.Add("PIPELINE_CORRELATION_EVIDENCE_MISSING") }
 if ($duplicateChains) { $reasons.Add("DUPLICATE_PIPELINE_IDENTIFIERS") }
 
+$coreReasons = [System.Collections.Generic.List[string]]::new()
+foreach ($reason in $runtimeReasons) { $coreReasons.Add($reason) }
+foreach ($reason in $coreAcceptanceBlockers) { $coreReasons.Add($reason) }
+if (-not $recordingReady) { $coreReasons.Add("LOCAL_ARCHIVE_EVIDENCE_MISSING") }
+if (-not $deliveryReady) { $coreReasons.Add("DELIVERY_CONFIRMATION_MISSING") }
+if (-not $mediaReady) { $coreReasons.Add("MEDIA_READY_EVIDENCE_MISSING") }
+if (-not $transcriptReady) { $coreReasons.Add("TRANSCRIPT_NOT_READY") }
+if (-not $uniqueChains) { $coreReasons.Add("PIPELINE_CORRELATION_INVALID") }
+$coreStatus = if ($coreReasons.Count -eq 0) { "END_TO_END_CORE_READY" } else { "BLOCKED_BY_CORE_PIPELINE" }
+
 $audit = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     resultRoot = if ($ResultRoot) { [string]$ResultRoot } else { $null }
@@ -156,11 +184,15 @@ $audit = [ordered]@{
         transcript = $transcriptReady
         summary = $summaryReady
         acceptance = $acceptanceReady
+        coreAcceptanceScenarios = $coreAcceptanceScenarios
+        coreAcceptance = $coreAcceptanceBlockers.Count -eq 0
         requiredAcceptanceScenarios = $requiredAcceptanceScenarios
         uniqueChains = $uniqueChains
         chainCount = $chains.Count
     }
     chains = @($chains)
+    coreStatus = $coreStatus
+    coreBlockers = @($coreReasons)
     blockers = @($reasons)
 }
 $auditPath = Join-Path $OutputRoot "mvp-release-audit.json"
@@ -170,11 +202,15 @@ $gateStatus = if ($reasons.Count -eq 0) { "READY" } else { "BLOCKED_BY_CORE_PIPE
 $gate = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     status = $gateStatus
+    coreStatus = $coreStatus
+    coreReady = $coreStatus -eq "END_TO_END_CORE_READY"
+    coreBlockers = @($coreReasons)
     mvpV1Ready = $gateStatus -eq "READY"
     auditPath = $auditPath
     blockers = @($reasons)
     releaseHardeningAllowed = $gateStatus -eq "READY"
-    note = if ($gateStatus -eq "READY") { "Core pipeline evidence is complete." } else { "Release hardening remains blocked until the complete live core pipeline is proven." }
+    releaseHardeningStatus = if ($gateStatus -eq "READY") { "FULL_RELEASE_READY" } elseif ($coreStatus -eq "END_TO_END_CORE_READY") { "CORE_READY_HARDENING_PENDING" } else { "BLOCKED_BY_CORE_PIPELINE" }
+    note = if ($gateStatus -eq "READY") { "Core pipeline and full release hardening evidence are complete." } elseif ($coreStatus -eq "END_TO_END_CORE_READY") { "Transcript V1 core path is ready; Summary/Qwen and hardening scenarios remain pending." } else { "Core pipeline remains blocked until a live record-to-transcript path is proven." }
 }
 $gatePath = Join-Path $OutputRoot "mvp-release-gate.json"
 $gate | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 -LiteralPath $gatePath

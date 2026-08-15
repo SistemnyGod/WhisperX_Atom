@@ -152,7 +152,8 @@ public sealed class RecordingViewModel : ObservableObject
     public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
     public string EncodingStatusLabel => _encodingState.ToUpperInvariant() switch
     {
-        "ENCODING" => "Подготовка локального файла",
+        "ENCODING" => "Кодирование локального файла",
+        "WAITING_FOR_ENCODER" => "Ожидает кодировщик",
         "FLAC_READY" => "Чанки готовы",
         _ => "Ожидание кодирования"
     };
@@ -513,7 +514,9 @@ public sealed class RecordingViewModel : ObservableObject
             // false timeout errors.
             await RefreshAsync();
             var preflight = await _services.Recorder.PreflightAsync();
-            if (!preflight.Ok || preflight.Preflight is null || !preflight.Preflight.Ready)
+            var captureReady = preflight.Preflight is { CaptureReady: true }
+                || (preflight.Preflight is not null && preflight.Preflight.CaptureReady == false && preflight.Preflight.Ready);
+            if (!preflight.Ok || preflight.Preflight is null || !captureReady)
             {
                 State = RecordingState.Error;
                 ErrorMessage = preflight.Preflight is { Errors.Count: > 0 }
@@ -523,6 +526,10 @@ public sealed class RecordingViewModel : ObservableObject
                     ? string.Join("; ", preflight.Preflight.Warnings.Select(MapRecordingError))
                     : string.Empty;
                 return false;
+            }
+            if (preflight.Preflight is { EncodingReady: false })
+            {
+                WarningMessage = "Запись сохраняется локально; кодирование и отправка продолжатся после восстановления FFmpeg.";
             }
             if (!_hasAudioSource)
             {
@@ -580,7 +587,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             ErrorMessage = string.Empty;
             State = RecordingState.Finalizing;
-            StatusMessage = "Сохраняю локальный архив и запускаю доставку…";
+            StatusMessage = "Сохраняю локальную запись и запускаю фоновую доставку…";
             var response = await _services.Recorder.StopAsync();
             SessionId = response.SessionId ?? SessionId;
             MeetingId = response.MeetingId ?? MeetingId;
@@ -910,13 +917,17 @@ public sealed class RecordingViewModel : ObservableObject
         {
             if (State is RecordingState.Finalizing or RecordingState.Error) State = RecordingState.Idle;
             ErrorMessage = string.Empty;
-            WarningMessage = session.DeliveryState is "CONFIRMED" or "COMPLETED"
-                ? string.Empty
-                : "Локальный master сохранён. Agent продолжает доставку на сервер.";
+            WarningMessage = session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+                ? "Запись сохранена локально; кодирование и отправка продолжатся после восстановления FFmpeg."
+                : session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                    ? string.Empty
+                    : "Локальный файл сохранён. Agent продолжает доставку на сервер.";
             ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
-            StatusMessage = session.DeliveryState is "CONFIRMED" or "COMPLETED"
-                ? "Аудио сохранено и подтверждено сервером."
-                : "Локальная запись сохранена; серверная доставка продолжится автоматически.";
+            StatusMessage = session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+                ? "Запись сохранена локально. Ожидается кодирование аудио."
+                : session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                    ? "Аудио сохранено и подтверждено сервером."
+                    : "Локальная запись сохранена; серверная доставка продолжится автоматически.";
         }
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(CanOpenLocalArchive));
@@ -1416,6 +1427,7 @@ public sealed class RecordingViewModel : ObservableObject
             "AGENT_AUTH_REJECTED" => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
             "RECORDING_ARCHIVE_ACCESS_DENIED" => "Нет доступа к папке локального архива.",
             "FFMPEG_UNAVAILABLE" => "Не найден FFmpeg для локальной сборки аудио.",
+            "LOCAL_ENCODER_UNAVAILABLE" => "FFmpeg временно недоступен. Запись сохранится локально, кодирование продолжится автоматически после восстановления.",
             "SESSION_REQUIRED" => "Не найдена локальная сессия записи для повторной отправки.",
             "AGENT_USER_LINK_REQUIRED" => "Recorder Agent ещё не привязан к текущему пользователю. Повторите вход или обратитесь к администратору.",
             "DEVICE_SELECTION_NOT_CONFIRMED" => "Recorder Agent не подтвердил выбранное устройство. Предыдущее устройство восстановлено.",

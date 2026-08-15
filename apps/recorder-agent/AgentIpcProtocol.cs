@@ -231,7 +231,14 @@ public sealed record AgentPreflightResult(
     IReadOnlyList<string> Errors,
     string StorageWatermarkState = "NORMAL",
     double StorageFreePercent = 100,
-    string? StorageWatermarkReason = null);
+    string? StorageWatermarkReason = null,
+    // Optional v6 tail fields. Older Desktop/Hosts deserialize the original
+    // prefix and continue to use Ready; newer clients can distinguish local
+    // capture from encoder and delivery availability.
+    bool CaptureReady = false,
+    bool EncodingReady = true,
+    bool DeliveryReady = true,
+    bool Ffprobe = true);
 
 public sealed record RecordingSessionStatus(
     string SessionId,

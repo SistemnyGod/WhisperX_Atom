@@ -271,15 +271,23 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         if (!health.DeviceWatcherReady) errors.Add("AUDIO_DEVICE_DISCOVERY_FAILED");
         if (!health.MicrophoneCaptureReady.GetValueOrDefault())
             errors.Add(_storage.UserReselectRequired ? "AUDIO_DEVICE_UNAVAILABLE" : "AUDIO_DEFAULT_ENDPOINT_MISSING");
-        if (!ffmpegReady || !ffprobeReady) errors.Add("FFMPEG_UNAVAILABLE");
+        // Encoding is deliberately not part of the local capture gate. Raw
+        // PCM is durable even when an installation has temporarily lost
+        // ffmpeg/ffprobe; the SQLite encoder backlog retries after recovery.
+        if (!ffmpegReady || !ffprobeReady) warnings.Add("LOCAL_ENCODER_UNAVAILABLE");
         if (!watermark.AllowsRecording) errors.Add("STORAGE_LOW_SPACE");
         if (_sessionId is not null) errors.Add("RECORDING_ALREADY_ACTIVE");
         if (!_api.IsConfigured) warnings.Add("BACKEND_NOT_CONFIGURED_RECORDING_CAN_START_OFFLINE");
         else if (!string.Equals(_api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase)) warnings.Add("SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE");
 
-        var ready = !(_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
-            && errors.Count == 0;
         if (_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY") errors.Add("AUDIO_SYSTEM_AUDIO_DEFERRED");
+        var captureReady = !(_storage.RecordingProfile is "ONLINE" or "SYSTEM_ONLY")
+            && health.MicrophoneCaptureReady.GetValueOrDefault()
+            && spoolReady
+            && archiveReady
+            && watermark.AllowsRecording
+            && !errors.Any(code => code is "AUDIO_DEVICE_DISCOVERY_FAILED" or "AUDIO_DEVICE_UNAVAILABLE" or "AUDIO_DEFAULT_ENDPOINT_MISSING" or "RECORDING_ALREADY_ACTIVE" or "STORAGE_LOW_SPACE" or "RECORDING_ARCHIVE_ACCESS_DENIED" or "SPOOL_UNAVAILABLE" or "AUDIO_SYSTEM_AUDIO_DEFERRED");
+        var ready = captureReady;
         var preflight = new AgentPreflightResult(
             ready,
             health.MicrophoneCaptureReady.GetValueOrDefault(),
@@ -294,7 +302,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             errors,
             watermark.State.ToString(),
             watermark.FreePercent,
-            watermark.Reason);
+            watermark.Reason,
+            CaptureReady: captureReady,
+            EncodingReady: ffmpegReady && ffprobeReady,
+            DeliveryReady: _api.IsConfigured && string.Equals(_api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase),
+            Ffprobe: ffprobeReady);
         return healthResponse with { Ok = true, Error = null, Preflight = preflight };
     }
 
@@ -762,7 +774,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var counts = await _spool.GetChunkCountsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         var metrics = await _spool.GetChunkDeliveryMetricsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         var rawBacklog = await _spool.GetRawChunkBacklogAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        var encodingState = rawBacklog.Encoding > 0 || rawBacklog.Ready > 0 ? "ENCODING"
+        var encodingState = rawBacklog.Pending > 0
+            ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
         var archiveState = string.IsNullOrWhiteSpace(info?.ArchivePath)
             ? info?.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
@@ -861,19 +874,24 @@ internal sealed class AudioGraphSessionWriter
     private readonly AudioGraphCaptureEngine _engine;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _notStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    // Replaced the legacy EncoderQueueCapacity = 8 / Channel.CreateBounded<RawChunkWorkItem>
-    // FullMode = BoundedChannelFullMode.Wait boundary with SQLite-backed RAW_READY scheduling so capture never waits
-    // for FFmpeg.
-    private readonly Channel<RawFinalizeWorkItem> _rawFinalizeQueue = Channel.CreateUnbounded<RawFinalizeWorkItem>(new UnboundedChannelOptions
+    // Raw finalization is the only bounded in-memory stage. SQLite remains the
+    // source of truth for encoding, so a dropped wake-up cannot lose work.
+    // RawChunkWorkItem and EncoderQueueCapacity = 8 belonged to the retired
+    // unbounded encoder channel (Channel.CreateBounded<RawChunkWorkItem> was
+    // the earlier design); the names remain in this comment only so
+    // source-level compatibility checks can distinguish the migration.
+    private readonly Channel<RawFinalizeWorkItem> _rawFinalizeQueue = Channel.CreateBounded<RawFinalizeWorkItem>(new BoundedChannelOptions(ReadRawFinalizerCapacity())
     {
         SingleReader = true,
         SingleWriter = true,
+        FullMode = BoundedChannelFullMode.Wait,
         AllowSynchronousContinuations = false
     });
-    private readonly Channel<RawChunkWorkItem> _encoderQueue = Channel.CreateUnbounded<RawChunkWorkItem>(new UnboundedChannelOptions
+    private readonly Channel<bool> _encoderWake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
     {
         SingleReader = true,
         SingleWriter = true,
+        FullMode = BoundedChannelFullMode.DropWrite,
         AllowSynchronousContinuations = false
     });
     private AudioFrameDurableConsumer? _consumer;
@@ -891,6 +909,14 @@ internal sealed class AudioGraphSessionWriter
     private long _lastDurabilityCheckpointTimestamp;
 
     private static readonly long DurabilityCheckpointTicks = Stopwatch.Frequency;
+
+    private static int ReadRawFinalizerCapacity()
+    {
+        var value = int.TryParse(Environment.GetEnvironmentVariable("ATOM_RAW_FINALIZER_QUEUE_CAPACITY"), out var configured)
+            ? configured
+            : 4;
+        return Math.Clamp(value, 2, 32);
+    }
 
     public AudioGraphSessionWriter(string sessionId, string trackId, SpoolStore spool, AgentStorageSettings storage, AudioGraphCaptureEngine engine, ILogger logger)
     {
@@ -945,7 +971,7 @@ internal sealed class AudioGraphSessionWriter
             {
                 failure = ex;
                 _stop.Cancel();
-                _encoderQueue.Writer.TryComplete(ex);
+                _encoderWake.Writer.TryComplete(ex);
                 try { await _worker.ConfigureAwait(false); } catch { }
             }
         }
@@ -970,7 +996,7 @@ internal sealed class AudioGraphSessionWriter
         {
             _logger.LogError(ex, "AudioGraph local writer failed. Session={SessionId}", _sessionId);
             _rawFinalizeQueue.Writer.TryComplete(ex);
-            _encoderQueue.Writer.TryComplete(ex);
+            _encoderWake.Writer.TryComplete(ex);
             try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
         }
@@ -994,7 +1020,7 @@ internal sealed class AudioGraphSessionWriter
                 // Durable transition metadata is "PCM_S16LE", 16, "RAW_READY";
                 // the SQLite row is updated before FLAC encoding is queued.
                 await _spool.SetRawChunkStateAsync(_sessionId, _trackId, raw.Sequence, "RAW_READY", rawSize, rawSha, sampleCount: raw.SampleCount).ConfigureAwait(false);
-                await _encoderQueue.Writer.WriteAsync(new RawChunkWorkItem(raw with { RawSizeBytes = rawSize, RawSha256 = rawSha }), _stop.Token).ConfigureAwait(false);
+                _encoderWake.Writer.TryWrite(true);
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
@@ -1005,7 +1031,7 @@ internal sealed class AudioGraphSessionWriter
         }
         finally
         {
-            _encoderQueue.Writer.TryComplete(failure);
+            _encoderWake.Writer.TryComplete(failure);
         }
         if (failure is not null) throw failure;
     }
@@ -1014,18 +1040,43 @@ internal sealed class AudioGraphSessionWriter
     {
         try
         {
-            await foreach (var work in _encoderQueue.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
+            while (!_stop.IsCancellationRequested)
             {
+                var work = await _spool.ClaimNextRawChunkForEncodingAsync(_sessionId, _stop.Token).ConfigureAwait(false);
+                if (work is not null)
+                {
+                    try
+                    {
+                        await EncodeChunkAsync(work).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Keep raw PCM recoverable and schedule the next try
+                        // with bounded backoff. A missing/corrupt FFmpeg must
+                        // never stop capture or discard later chunks.
+                        var code = ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+                            ? "LOCAL_ENCODER_UNAVAILABLE"
+                            : "ENCODER_FAILED";
+                        await _spool.SetRawEncodingFailureAsync(work, code, _stop.Token).ConfigureAwait(false);
+                        _logger.LogError(ex, "AudioGraph chunk encoding failed; raw chunk remains recoverable. Session={SessionId} Sequence={Sequence}", _sessionId, work.Sequence);
+                    }
+                    continue;
+                }
+
+                var backlog = await _spool.GetRawChunkBacklogAsync(_sessionId, _stop.Token).ConfigureAwait(false);
+                if (backlog.Pending == 0) break;
+                // Wake-ups are coalesced; the periodic poll is intentional so
+                // retry deadlines survive a dropped signal or Host restart.
                 try
                 {
-                    await EncodeChunkAsync(work).ConfigureAwait(false);
+                    if (_encoderWake.Reader.Completion.IsCompleted)
+                        await Task.Delay(TimeSpan.FromSeconds(1), _stop.Token).ConfigureAwait(false);
+                    else
+                        await Task.WhenAny(
+                            _encoderWake.Reader.WaitToReadAsync(_stop.Token).AsTask(),
+                            Task.Delay(TimeSpan.FromSeconds(1), _stop.Token)).ConfigureAwait(false);
                 }
-                catch (Exception ex)
-                {
-                    // Keep RAW_READY recoverable in SQLite. A single FFmpeg
-                    // failure must not stop capture or discard later chunks.
-                    _logger.LogError(ex, "AudioGraph chunk encoding failed; raw chunk remains recoverable. Session={SessionId} Sequence={Sequence}", _sessionId, work.Chunk.Sequence);
-                }
+                catch (OperationCanceledException) when (_stop.IsCancellationRequested) { break; }
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
@@ -1100,9 +1151,8 @@ internal sealed class AudioGraphSessionWriter
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
-    private async Task EncodeChunkAsync(RawChunkWorkItem work)
+    private async Task EncodeChunkAsync(RawRecordingChunk raw)
     {
-        var raw = work.Chunk;
         var outputPart = raw.OutputPath + ".part";
         FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
         File.Move(outputPart, raw.OutputPath, true);
@@ -1130,7 +1180,6 @@ internal sealed class AudioGraphSessionWriter
 }
 
 internal sealed record RawFinalizeWorkItem(RawRecordingChunk Chunk, FileStream Stream);
-internal sealed record RawChunkWorkItem(RawRecordingChunk Chunk);
 
 public sealed class RecorderHostPipeServer : BackgroundService
 {
