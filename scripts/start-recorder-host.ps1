@@ -197,11 +197,21 @@ if ((Test-Path -LiteralPath $sourceFfmpeg -PathType Leaf) -and (Test-Path -Liter
     Sync-PinnedTool $sourceFfmpeg $bundledFfmpeg
     Sync-PinnedTool $sourceFfprobe $bundledFfprobe
 }
-if (-not (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf) -or -not (Test-Path -LiteralPath $bundledFfprobe -PathType Leaf)) {
+$hasBundledEncoder = (Test-Path -LiteralPath $bundledFfmpeg -PathType Leaf) -and (Test-Path -LiteralPath $bundledFfprobe -PathType Leaf)
+if (-not $hasBundledEncoder -and -not $audioGraph) {
+    # Legacy Service still owns its historical WAV/FLAC foreground contract.
     throw "FFMPEG_UNAVAILABLE: bundled ffmpeg.exe and ffprobe.exe are required beside the Recorder executable."
 }
-$env:ATOM_AGENT_FFMPEG_PATH = $bundledFfmpeg
-$env:ATOM_AGENT_FFPROBE_PATH = $bundledFfprobe
+if ($hasBundledEncoder) {
+    $env:ATOM_AGENT_FFMPEG_PATH = $bundledFfmpeg
+    $env:ATOM_AGENT_FFPROBE_PATH = $bundledFfprobe
+} else {
+    # AudioGraph capture is raw-first. Let Host preflight expose
+    # LOCAL_ENCODER_UNAVAILABLE and keep START/STOP usable without tools.
+    Remove-Item Env:ATOM_AGENT_FFMPEG_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:ATOM_AGENT_FFPROBE_PATH -ErrorAction SilentlyContinue
+    Write-Warning "LOCAL_ENCODER_UNAVAILABLE: AudioGraph will record durable PCM and encode when FFmpeg returns."
+}
 
 $process = Start-Process -FilePath $ExecutablePath -WorkingDirectory (Split-Path -Parent $ExecutablePath) -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ascii
