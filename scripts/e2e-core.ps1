@@ -66,7 +66,9 @@ function Wait-Job([string]$MeetingId) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
     $jobs = @(Invoke-Api GET "/api/meetings/$MeetingId/jobs")
-    $job = $jobs | Where-Object { $_.type -eq "TRANSCRIBE" } | Select-Object -First 1
+    # The raw-first pipeline names the first text-producing job
+    # TRANSCRIBE_ASR; keep TRANSCRIBE for older API deployments.
+    $job = $jobs | Where-Object { $_.type -in @("TRANSCRIBE", "TRANSCRIBE_ASR") } | Select-Object -First 1
     if ($null -ne $job) {
       Write-Host ("job {0}: {1}/{2} {3}%" -f $job.id, $job.status, $job.stage, $job.progress)
       $terminal = if ($WaitForGpu) { @("READY", "FAILED") } else { @("QUEUED", "READY", "FAILED") }
