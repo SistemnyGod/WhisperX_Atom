@@ -404,13 +404,12 @@ def test_summary_rebuild_returns_a_full_job_for_terminal_tracking():
     assert "bool Retryable" in client
 
 
-def test_host_process_guard_uses_the_user_installation_identity_and_script_reuses_any_live_host():
+def test_host_process_guard_uses_canonical_spool_identity_and_script_rejects_stale_hosts():
     guard = read("apps/recorder-host/RecorderHostProcessGuard.cs")
     launcher = read("scripts/start-recorder-host.ps1")
 
-    assert "TryReadUserInstallationId" in guard
-    assert "ATOM_AGENT_CONFIG_PATH" in guard
-    assert '"WhisperXAtom", "Agent", "agent-config.json"' in guard
-    assert "$anyHost" in launcher
-    assert "which artifact" in launcher
-    assert "hostInstallation" in launcher
+    assert "ATOM_AGENT_DATA_ROOT" in guard
+    assert "SHA256.HashData" in guard
+    assert "$anyHosts" in launcher
+    assert "RECORDER_HOST_BUILD_MISMATCH" in launcher
+    assert "RECORDER_HOST_DUPLICATE" in launcher

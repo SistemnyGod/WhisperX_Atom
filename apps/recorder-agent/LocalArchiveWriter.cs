@@ -21,9 +21,7 @@ public sealed class LocalArchiveWriter(
 {
     private readonly ConcurrentDictionary<string, Lazy<Task<string>>> _writes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, object> _manifestGates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _ffmpegPath = RecorderToolPaths.Ffmpeg();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
-    private readonly string _ffprobePath = RecorderToolPaths.Ffprobe();
 
     public Task<string> CreateAsync(string sessionId, CancellationToken cancellationToken = default)
     {
@@ -108,12 +106,13 @@ public sealed class LocalArchiveWriter(
 
         var trackFiles = new List<ArchiveFileEntry>();
         var masterInputs = new List<MasterTrackInput>();
+        var trackAssemblyModes = new List<string>();
         foreach (var group in chunks.GroupBy(item => new { item.TrackId, item.TrackType, item.SampleRate, item.Channels }).OrderBy(item => item.Key.TrackType))
         {
             var ordered = group.OrderBy(item => item.Sequence).ToArray();
             ValidateTrack(ordered);
             var trackPath = Path.Combine(sourceDirectory, $"track-{Sanitize(group.Key.TrackType)}-{Sanitize(group.Key.TrackId[..Math.Min(8, group.Key.TrackId.Length)])}.flac");
-            await ConcatTrackAsync(ordered, trackPath, cancellationToken);
+            trackAssemblyModes.Add(await ConcatTrackAsync(ordered, trackPath, cancellationToken));
             var entry = await DescribeFileAsync(trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken);
             trackFiles.Add(entry);
             masterInputs.Add(new MasterTrackInput(trackPath, group.Key.TrackType, group.Key.SampleRate, ordered[0].StartSample, ordered.Sum(item => item.SampleCount)));
@@ -121,7 +120,7 @@ public sealed class LocalArchiveWriter(
 
         var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken)).Select(track => track.Profile).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "ROOM";
         var masterPath = Path.Combine(exportDirectory, "master.flac");
-        var assemblyResult = await CreateMasterAsync(masterInputs, masterPath, profile, cancellationToken);
+        var assemblyResult = await CreateMasterAsync(masterInputs, masterPath, profile, trackAssemblyModes, cancellationToken);
         var exportFiles = new List<ArchiveFileEntry>
         {
             await DescribeFileAsync(masterPath, "export", "master", 48000, 1, null, cancellationToken)
@@ -257,7 +256,7 @@ public sealed class LocalArchiveWriter(
         return info.Exists && info.Length > 0 && (file.SizeBytes <= 0 || info.Length == file.SizeBytes);
     }
 
-    private async Task ConcatTrackAsync(IReadOnlyList<RecordingArchiveChunk> chunks, string output, CancellationToken cancellationToken)
+    private async Task<string> ConcatTrackAsync(IReadOnlyList<RecordingArchiveChunk> chunks, string output, CancellationToken cancellationToken)
     {
         var attempt = Guid.NewGuid().ToString("N");
         var tempRoot = Path.Combine(Path.GetTempPath(), "WhisperXAtom");
@@ -280,11 +279,26 @@ public sealed class LocalArchiveWriter(
         await File.WriteAllTextAsync(listPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false), cancellationToken);
         try
         {
-            // The atomic target intentionally ends in `.part`; ffmpeg cannot
-            // infer the muxer from that suffix on Windows.
-            await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
-            await ValidateAudioFileAsync(outputPart, cancellationToken);
-            File.Move(outputPart, output, true);
+            // Compatible FLAC chunks can be joined without a lossy or
+            // CPU-heavy decode/re-encode. If a container is incompatible or
+            // validation rejects the stream, retry once through the existing
+            // safe re-encode path.
+            try
+            {
+                await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "copy", "-f", "flac", outputPart], cancellationToken);
+                await ValidateAudioFileAsync(outputPart, chunks[0].SampleRate, chunks[0].Channels, chunks.Sum(item => item.SampleCount), cancellationToken);
+                File.Move(outputPart, output, true);
+                return "STREAM_COPY";
+            }
+            catch (Exception copyException) when (copyException is InvalidOperationException or Win32Exception)
+            {
+                DeleteIfExists(outputPart);
+                logger.LogDebug(copyException, "FLAC stream copy was not compatible; using re-encode fallback. Track={TrackId}", chunks[0].TrackId);
+                await RunFfmpegAsync(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
+                await ValidateAudioFileAsync(outputPart, chunks[0].SampleRate, chunks[0].Channels, chunks.Sum(item => item.SampleCount), cancellationToken);
+                File.Move(outputPart, output, true);
+                return "REENCODE_FALLBACK";
+            }
         }
         finally
         {
@@ -293,7 +307,7 @@ public sealed class LocalArchiveWriter(
         }
     }
 
-    private async Task<MasterAssemblyResult> CreateMasterAsync(IReadOnlyList<MasterTrackInput> tracks, string output, string recordingProfile, CancellationToken cancellationToken)
+    private async Task<MasterAssemblyResult> CreateMasterAsync(IReadOnlyList<MasterTrackInput> tracks, string output, string recordingProfile, IReadOnlyList<string> trackAssemblyModes, CancellationToken cancellationToken)
     {
         var outputDirectory = Path.GetDirectoryName(output);
         if (string.IsNullOrWhiteSpace(outputDirectory)) throw new InvalidOperationException("LOCAL_ARCHIVE_PATH_INVALID");
@@ -333,13 +347,13 @@ public sealed class LocalArchiveWriter(
             warningsList.Add("ONLINE_MIX_DEGRADED");
         }
         var warnings = warningsList.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var result = new MasterAssemblyResult(recordingProfile, selectedAsrSource, tracks.Count, mixStrategy, tolerance, timeline, warnings);
+        var result = new MasterAssemblyResult(recordingProfile, selectedAsrSource, tracks.Count, mixStrategy, tolerance, timeline, warnings, trackAssemblyModes);
         if (selectedTracks.Count == 1)
         {
             try
             {
                 await RunFfmpegAsync(["-y", "-i", selectedTracks[0].Path, "-ac", "1", "-ar", "48000", "-c:a", "flac", "-f", "flac", outputPart], cancellationToken);
-                await ValidateAudioFileAsync(outputPart, cancellationToken);
+                await ValidateAudioFileAsync(outputPart, 48000, 1, null, cancellationToken);
                 File.Move(outputPart, output, true);
             }
             finally { DeleteIfExists(outputPart); }
@@ -359,7 +373,7 @@ public sealed class LocalArchiveWriter(
         try
         {
             await RunFfmpegAsync(arguments, cancellationToken);
-            await ValidateAudioFileAsync(outputPart, cancellationToken);
+            await ValidateAudioFileAsync(outputPart, 48000, 1, null, cancellationToken);
             File.Move(outputPart, output, true);
         }
         finally { DeleteIfExists(outputPart); }
@@ -369,7 +383,8 @@ public sealed class LocalArchiveWriter(
 
     private async Task<long> GetDurationMsAsync(string path, CancellationToken cancellationToken)
     {
-        using var process = new Process { StartInfo = new ProcessStartInfo { FileName = _ffprobePath, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
+        var ffprobePath = RecorderToolPaths.Ffprobe();
+        using var process = new Process { StartInfo = new ProcessStartInfo { FileName = ffprobePath, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
         foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path }) process.StartInfo.ArgumentList.Add(argument);
         if (!process.Start()) throw new InvalidOperationException("ffprobe_start_failed");
         var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
@@ -381,11 +396,12 @@ public sealed class LocalArchiveWriter(
 
     private async Task RunFfmpegAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        var ffmpegPath = RecorderToolPaths.Ffmpeg();
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = _ffmpegPath,
+                FileName = ffmpegPath,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -402,27 +418,28 @@ public sealed class LocalArchiveWriter(
         }
         catch (Win32Exception ex)
         {
-            throw new InvalidOperationException($"ffmpeg_not_found:{_ffmpegPath}", ex);
+            throw new InvalidOperationException($"ffmpeg_not_found:{ffmpegPath}", ex);
         }
     }
 
-    private async Task ValidateAudioFileAsync(string path, CancellationToken cancellationToken)
+    private async Task ValidateAudioFileAsync(string path, int expectedSampleRate, int expectedChannels, long? expectedSamples, CancellationToken cancellationToken)
     {
         if (!File.Exists(path) || new FileInfo(path).Length == 0)
             throw new InvalidOperationException("local_audio_output_empty");
 
+        var ffprobePath = RecorderToolPaths.Ffprobe();
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = _ffprobePath,
+                FileName = ffprobePath,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             }
         };
-        foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path })
+        foreach (var argument in new[] { "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels,nb_samples:format=duration", "-of", "json", path })
             process.StartInfo.ArgumentList.Add(argument);
         try
         {
@@ -430,24 +447,50 @@ public sealed class LocalArchiveWriter(
             var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
             var error = await process.StandardError.ReadToEndAsync(cancellationToken);
             await process.WaitForExitAsync(cancellationToken);
-            if (process.ExitCode != 0 || !double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration) || duration <= 0)
-                throw new InvalidOperationException($"ffprobe_invalid_audio:{error.Trim()}");
-            if (duration <= 0 || double.IsNaN(duration) || double.IsInfinity(duration))
+            if (process.ExitCode != 0) throw new InvalidOperationException($"ffprobe_invalid_audio:{error.Trim()}");
+            using var document = JsonDocument.Parse(output);
+            if (!document.RootElement.TryGetProperty("streams", out var streams)
+                || streams.ValueKind != JsonValueKind.Array
+                || streams.GetArrayLength() == 0)
+                throw new InvalidOperationException("ffprobe_invalid_audio:stream");
+            var stream = streams[0];
+            if (!stream.TryGetProperty("codec_name", out var codec)
+                || !string.Equals(codec.GetString(), "flac", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("ffprobe_invalid_audio:codec");
+            if (!TryReadJsonInt(stream, "sample_rate", out var sampleRate) || sampleRate != expectedSampleRate)
+                throw new InvalidOperationException("ffprobe_invalid_audio:sample_rate");
+            if (!TryReadJsonInt(stream, "channels", out var channels) || channels != expectedChannels)
+                throw new InvalidOperationException("ffprobe_invalid_audio:channels");
+            if (expectedSamples is > 0 && stream.TryGetProperty("nb_samples", out var samples)
+                && long.TryParse(samples.ToString(), out var actualSamples)
+                && Math.Abs(actualSamples - expectedSamples.Value) > Math.Max(1, expectedSampleRate / 100))
+                throw new InvalidOperationException("ffprobe_invalid_audio:sample_count");
+            if (!document.RootElement.TryGetProperty("format", out var format)
+                || !format.TryGetProperty("duration", out var durationValue)
+                || !double.TryParse(durationValue.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration)
+                || duration <= 0 || double.IsNaN(duration) || double.IsInfinity(duration))
                 throw new InvalidOperationException("ffprobe_invalid_audio:duration");
+            if (expectedSamples is > 0 && Math.Abs(duration - expectedSamples.Value / (double)expectedSampleRate) > 0.1d)
+                throw new InvalidOperationException("ffprobe_invalid_audio:duration_mismatch");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("ffprobe_invalid_audio:json", ex);
         }
         catch (Win32Exception ex)
         {
-            throw new InvalidOperationException($"ffprobe_not_found:{_ffprobePath}", ex);
+            throw new InvalidOperationException($"ffprobe_not_found:{ffprobePath}", ex);
         }
 
         // ffprobe validates the container metadata; decode the complete file
         // as an additional integrity gate so a truncated FLAC cannot be sent
         // to the server and fail later during ASR.
+        var ffmpegPath = RecorderToolPaths.Ffmpeg();
         using var decoder = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = _ffmpegPath,
+                FileName = ffmpegPath,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -465,8 +508,15 @@ public sealed class LocalArchiveWriter(
         }
         catch (Win32Exception ex)
         {
-            throw new InvalidOperationException($"ffmpeg_not_found:{_ffmpegPath}", ex);
+            throw new InvalidOperationException($"ffmpeg_not_found:{ffmpegPath}", ex);
         }
+    }
+
+    private static bool TryReadJsonInt(JsonElement element, string property, out int value)
+    {
+        value = 0;
+        return element.TryGetProperty(property, out var candidate)
+            && (candidate.TryGetInt32(out value) || int.TryParse(candidate.ToString(), out value));
     }
 
     private static void ValidateTrack(IReadOnlyList<RecordingArchiveChunk> chunks)
@@ -532,5 +582,5 @@ public sealed class LocalArchiveWriter(
     private sealed record ArchiveFileEntry(string Kind, string Name, string RelativePath, long SizeBytes, string Sha256, int SampleRate, int Channels, long? SampleCount);
     private sealed record MasterTrackInput(string Path, string TrackType, int SampleRate, long FirstStartSample, long ExpectedSamples);
     private sealed record MasterTrackTimeline(string TrackType, double StartOffsetMs, double ExpectedDurationMs, long ActualDurationMs, double DriftMs);
-    private sealed record MasterAssemblyResult(string RecordingProfile, string SelectedAsrSource, int TrackCount, string MixStrategy, int DriftToleranceMs, IReadOnlyList<MasterTrackTimeline> Tracks, IReadOnlyList<string> Warnings);
+    private sealed record MasterAssemblyResult(string RecordingProfile, string SelectedAsrSource, int TrackCount, string MixStrategy, int DriftToleranceMs, IReadOnlyList<MasterTrackTimeline> Tracks, IReadOnlyList<string> Warnings, IReadOnlyList<string> TrackAssemblyModes);
 }

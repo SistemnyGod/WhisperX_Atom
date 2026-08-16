@@ -41,8 +41,6 @@ class ProcessingService:
             config.asr_backend,
             config.device,
             config.compute_type,
-            bool(config.enable_alignment),
-            bool(config.enable_diarization),
         )
         with self._lock:
             if self._pipeline is None or self._pipeline_fingerprint != fingerprint:
@@ -123,11 +121,20 @@ class ProcessingService:
                 asr_ready(result.to_dict())
 
         try:
+            if str(request.profile or "").strip().lower() == "enrich":
+                return self._process_enrichment(request, pipeline, ctx, config, duration_seconds, report)
             report("NORMALIZING", 10)
             ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(request.media_path)
             if ctx.asr_audio_path != request.media_path:
                 ctx.register_temp(ctx.asr_audio_path)
-            ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
+            # Transcript V1 is an ASR-only fast path. Do not run the second
+            # diarization-oriented preprocessing pass when enrichment is
+            # disabled; it adds latency and can fail a valid ASR job before the
+            # first transcript is emitted.
+            if config.enable_diarization:
+                ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
+            else:
+                ctx.diar_audio_path = None
 
             # A valid PCM file with no measurable signal is a normal terminal
             # outcome, not an ASR failure. Detect it before loading/running the
@@ -344,7 +351,91 @@ class ProcessingService:
                     self._clear_pipeline_locked(clear_cuda=True)
             raise
         finally:
+            with self._lock:
+                # Idle eviction starts after the job actually finishes, not
+                # when model acquisition began. Long ASR jobs must not be
+                # immediately treated as idle on the next worker tick.
+                self._last_used_monotonic = time.monotonic()
             pipeline._cleanup_ctx(ctx)
+
+    def _process_enrichment(
+        self,
+        request: ProcessingRequest,
+        pipeline: Any,
+        ctx: Any,
+        config: Any,
+        duration_seconds: float | None,
+        report: Callable[[str, int], None],
+    ) -> ProcessingResult:
+        """Run alignment/diarization over persisted ASR V1 without ASR."""
+        source = copy.deepcopy(request.input_transcript or {})
+        result: dict[str, Any] = {
+            "language": source.get("language") or config.language,
+            "segments": source.get("segments", []),
+            "word_segments": source.get("word_segments", []),
+        }
+        ctx.asr_audio_path = request.media_path
+        ctx.asr_result = result
+        if config.enable_diarization:
+            diar_path = pipeline._preprocess_audio(request.media_path, asr=False)
+            ctx.diar_audio_path = ctx.register_temp(diar_path)
+        stage_outcomes: dict[str, str] = {"ASR": "REUSED_V1"}
+        warnings: list[str] = []
+
+        report("ALIGNING", 35)
+        if config.enable_alignment:
+            try:
+                aligned = pipeline._align_result(ctx, result)
+                result = aligned or result
+                stage_outcomes["ALIGNMENT"] = "SUCCEEDED"
+            except Exception:
+                LOGGER.warning("enrichment_alignment_failed job_id=%s", request.job_id, exc_info=True)
+                warnings.append("ALIGNMENT_FAILED")
+                stage_outcomes["ALIGNMENT"] = "FAILED"
+        else:
+            stage_outcomes["ALIGNMENT"] = "SKIPPED"
+
+        report("DIARIZING", 65)
+        if config.enable_diarization:
+            try:
+                result = pipeline._apply_diarization(ctx, copy.deepcopy(result), "diar")
+                stage_outcomes["DIARIZATION"] = "SUCCEEDED"
+            except Exception:
+                LOGGER.warning("enrichment_diarization_failed job_id=%s", request.job_id, exc_info=True)
+                warnings.append("DIARIZATION_FAILED")
+                stage_outcomes["DIARIZATION"] = "FAILED"
+        else:
+            warnings.append("DIARIZATION_DISABLED")
+            stage_outcomes["DIARIZATION"] = "SKIPPED"
+
+        for segment in result.get("segments", []):
+            if not segment.get("speaker"):
+                segment["speaker"] = "UNKNOWN"
+        result = pipeline._apply_glossary(result)
+        final_report = build_transcript_quality_report(result, duration_seconds, TranscriptQualityThresholds.from_env())
+        if not final_report.to_dict().get("segment_count") and not source.get("segments"):
+            raise ValueError("TRANSCRIPT_INPUT_EMPTY")
+        warnings.extend(reason for reason in final_report.reasons if reason not in warnings)
+        text = " ".join(str(item.get("text", "")).strip() for item in result.get("segments", []) if item.get("text")).strip()
+        return ProcessingResult(
+            job_id=request.job_id,
+            language=result.get("language") or config.language,
+            text=text,
+            segments=result.get("segments", []),
+            word_segments=result.get("word_segments", []),
+            metadata={
+                "model": config.asr_model,
+                "backend": config.asr_backend,
+                "device": config.device,
+                "compute_type": config.compute_type,
+                "processing_profile": request.profile,
+                "source_transcript_id": source.get("transcript_id"),
+            },
+            status="PARTIAL_READY" if warnings else "READY",
+            warnings=list(dict.fromkeys(warnings)),
+            stage_outcomes=stage_outcomes,
+            quality=final_report.to_dict(),
+        )
 
 
 def _is_cuda_oom(exc: BaseException) -> bool:

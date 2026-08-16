@@ -13,6 +13,9 @@ class ProcessingRequest:
     profile: str = "meeting"
     min_speakers: int = 1
     max_speakers: int = 12
+    # Enrichment consumes the already persisted ASR V1 instead of running ASR
+    # against the media a second time.
+    input_transcript: dict[str, Any] | None = None
 
 
 @dataclass

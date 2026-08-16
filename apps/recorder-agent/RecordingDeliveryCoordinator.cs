@@ -28,6 +28,18 @@ public sealed class RecordingDeliveryCoordinator(
         return sessionLocks.RunAsync(localSessionId, ct => RunCoreAsync(localSessionId, ct), cancellationToken);
     }
 
+    public Task UploadActiveSessionAsync(
+        string localSessionId,
+        Func<CancellationToken, Task> ensureBinding,
+        CancellationToken cancellationToken = default) =>
+        sessionLocks.RunAsync(localSessionId, async ct =>
+        {
+            await ensureBinding(ct).ConfigureAwait(false);
+            await api.UploadPendingChunksAsync(spool, localSessionId, ct).ConfigureAwait(false);
+            await api.UploadPendingEventsAsync(spool, localSessionId, ct).ConfigureAwait(false);
+            return true;
+        }, cancellationToken);
+
     private async Task<FinalizationResult> FinalizeLocalCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
         var info = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
@@ -60,16 +72,12 @@ public sealed class RecordingDeliveryCoordinator(
 
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
-        // The caller reaches this method after the raw durability boundary.
-        // Keep LOCAL_READY stable while optional archive assembly and server
-        // delivery run in parallel.
-
-        var archiveTask = CreateLocalArchiveAsync(localSessionId, cancellationToken);
-        var deliveryTask = DeliverToServerAsync(localSessionId, cancellationToken);
-        await Task.WhenAll(archiveTask, deliveryTask);
-
-        var archiveResult = await archiveTask;
-        var deliveryResult = await deliveryTask;
+        // Archive first so transport purge can never delete chunks while the
+        // local archive still reads them. Delivery remains independently
+        // retryable when archive creation fails; retention keeps transport
+        // files until a later archive attempt succeeds.
+        var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        var deliveryResult = await DeliverToServerAsync(localSessionId, cancellationToken).ConfigureAwait(false);
         var persisted = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
         var deliveryState = persisted?.DeliveryState switch
         {
@@ -92,13 +100,6 @@ public sealed class RecordingDeliveryCoordinator(
     private async Task<(string State, string? ArchivePath)> CreateLocalArchiveAsync(string localSessionId, CancellationToken cancellationToken)
     {
         var previous = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
-        if (previous?.LocalFinalizeState == "LOCAL_FAILED" && await spool.GetServerSessionIdAsync(localSessionId, cancellationToken) is Guid)
-        {
-            // Do not repeatedly rebuild a known-failing best-effort archive
-            // during recovery; server delivery remains independent.
-            logger.LogInformation("Skipping previously failed local archive while reconciling server delivery. Session={SessionId}", localSessionId);
-            return ("LOCAL_FAILED", previous.ArchivePath);
-        }
         try
         {
             // The local durability boundary is raw PCM, not the optional FLAC
@@ -118,6 +119,7 @@ public sealed class RecordingDeliveryCoordinator(
                 return ("LOCAL_READY", previous?.ArchivePath);
             }
             var archivePath = await archive.CreateAsync(localSessionId, cancellationToken);
+            await spool.ClearArchiveErrorAsync(localSessionId, cancellationToken).ConfigureAwait(false);
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_READY",
                 archivePath: archivePath,
@@ -145,14 +147,24 @@ public sealed class RecordingDeliveryCoordinator(
                 return ("LOCAL_READY", previous?.ArchivePath);
             }
             var code = ClassifyLocalArchiveError(ex);
+            var retryCount = (previous?.ArchiveRetryCount ?? 0) + 1;
+            await spool.SetArchiveErrorAsync(
+                localSessionId,
+                code,
+                ex.Message,
+                retryCount,
+                DateTimeOffset.UtcNow.Add(GetRetryDelay(retryCount)),
+                cancellationToken).ConfigureAwait(false);
             await spool.SetFinalizationStateAsync(localSessionId,
-                localFinalizeState: "LOCAL_FAILED",
-                errorCode: code,
-                errorDetail: ex.Message,
+                // The PCM durability contract already succeeded. A derived
+                // master/archive failure must remain independent so delivery
+                // and Transcript V1 can continue using the FLAC chunks.
+                localFinalizeState: "LOCAL_READY",
+                archivePath: previous?.ArchivePath,
                 preserveError: true,
                 cancellationToken: cancellationToken);
             logger.LogWarning(ex, "Local archive failed; continuing server delivery. Session={SessionId}", localSessionId);
-            return ("LOCAL_FAILED", null);
+            return ("FAILED", previous?.ArchivePath);
         }
     }
 
@@ -205,6 +217,18 @@ public sealed class RecordingDeliveryCoordinator(
             }
             await api.UploadPendingEventsAsync(spool, localSessionId, cancellationToken);
 
+            var chunkMetrics = await spool.GetChunkDeliveryMetricsAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+            if (chunkMetrics.Ready > 0 || chunkMetrics.Uploading > 0 || chunkMetrics.Failed > 0)
+            {
+                return await PersistPendingServerAsync(
+                    localSessionId,
+                    chunkMetrics.Failed > 0
+                        ? "FLAC chunk delivery is retryable and is still waiting for confirmation."
+                        : "FLAC chunks are still waiting for upload confirmation.",
+                    cancellationToken,
+                    chunkMetrics.Failed > 0 ? "UPLOAD_RETRY_PENDING" : "UPLOAD_PENDING");
+            }
+
             // A server session must not be finalized while any raw segment is
             // still WRITING/RAW_READY/ENCODING/ENCODE_FAILED. Ready chunks may
             // be uploaded now; the next background pass will finalize once the
@@ -255,7 +279,14 @@ public sealed class RecordingDeliveryCoordinator(
                 clearNextRetry: true,
                 clearError: true,
                 cancellationToken: cancellationToken);
-            await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken);
+            // Server confirmation is not an archive barrier. Keep transport
+            // chunks until the local archive has a durable path; a later
+            // reconciliation pass will purge them after archive recovery.
+            var archiveBarrier = await spool.GetSessionInfoAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(archiveBarrier?.ArchivePath))
+                await spool.PurgeFinalizedSessionAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+            else
+                logger.LogWarning("Server confirmed session before local archive was ready; retaining transport chunks. Session={SessionId}", localSessionId);
             return new FinalizationResult(true, "SERVER_ASSEMBLY", null, false, null, server, null, null, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId);
         }
         catch (Exception ex)

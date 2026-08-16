@@ -61,7 +61,8 @@ def test_ipc_v6_reports_compatibility_and_host_is_single_instance():
     assert "IPC_VERSION_INCOMPATIBLE" in legacy_host
     assert "MinimumSupportedProtocolVersion" in host_runtime
     assert "RECORDER_HOST_ALREADY_RUNNING" in read("apps/recorder-host/Program.cs")
-    assert "WindowsIdentity.GetCurrent" in guard
+    assert "ATOM_AGENT_DATA_ROOT" in guard
+    assert "SHA256.HashData" in guard
     assert "Global\\\\WhisperXAtomRecorderRuntime" in lease
 
 

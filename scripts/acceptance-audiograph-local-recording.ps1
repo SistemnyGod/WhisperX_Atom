@@ -29,6 +29,7 @@ $stopRequested = $false
 $hostProcessId = $null
 $hostPath = $null
 $hostBuild = $null
+$prePurgeStatus = $null
 
 function Get-ProductVersion([string]$path) {
     try {
@@ -69,6 +70,9 @@ function Ensure-ReleaseHost {
     $expectedBuild = Get-ProductVersion $expectedPath
     $running = @(Get-HostProcesses)
     if ($running.Count -gt 0) {
+        if ($running.Count -ne 1) {
+            throw "RECORDER_HOST_DUPLICATE: expected one installed Host, found $($running.Count)"
+        }
         $wrong = $running | Where-Object { -not $_.Path -or $_.Path -ne $expectedPath }
         if ($wrong.Count -gt 0) {
             throw "RECORDER_HOST_BUILD_MISMATCH: running Host path '$($wrong[0].Path)' does not match '$expectedPath'"
@@ -147,6 +151,7 @@ try {
     $stop = Invoke-HostCommand "STOP"
     $stopRequested = $true
     if ($stop.ok -ne $true) { throw "AUDIOGRAPH_STOP_FAILED: $($stop.error)" }
+    if ($null -ne $stop.sessionStatus) { $prePurgeStatus = $stop.sessionStatus }
     $postStopHealth = Invoke-HostCommand "HEALTH"
 
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
@@ -155,6 +160,7 @@ try {
         Start-Sleep -Seconds 2
         $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
         $status = $statusResponse.sessionStatus
+        if ($null -ne $status -and [int]$status.rawChunkCount -gt 0 -and ($null -eq $prePurgeStatus -or [int]$status.rawChunkCount -gt [int]$prePurgeStatus.rawChunkCount -or ([int]$status.rawChunkCount -eq [int]$prePurgeStatus.rawChunkCount -and [int]$status.rawWritingCount -lt [int]$prePurgeStatus.rawWritingCount))) { $prePurgeStatus = $status }
         if ($null -ne $status -and $status.localFinalizeState -in @("LOCAL_READY", "COMPLETED", "FAILED", "LOCAL_FAILED")) { break }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
@@ -170,8 +176,21 @@ try {
             Start-Sleep -Seconds 2
             $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
             $status = $statusResponse.sessionStatus
+            if ($null -ne $status -and [int]$status.rawChunkCount -gt 0 -and ($null -eq $prePurgeStatus -or [int]$status.rawChunkCount -gt [int]$prePurgeStatus.rawChunkCount -or ([int]$status.rawChunkCount -eq [int]$prePurgeStatus.rawChunkCount -and [int]$status.rawWritingCount -lt [int]$prePurgeStatus.rawWritingCount))) { $prePurgeStatus = $status }
         } while ($null -ne $status -and [DateTimeOffset]::UtcNow -lt $deliveryDeadline)
     }
+
+    # Raw-only acceptance requires that the finalizer has closed every WRITING
+    # row before the report is accepted. The status may later be purged after a
+    # successful server delivery, therefore preserve the pre-purge evidence.
+    $rawDeadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
+    do {
+        if ($null -ne $status -and [int]$status.rawWritingCount -eq 0) { break }
+        Start-Sleep -Seconds 2
+        $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
+        $status = $statusResponse.sessionStatus
+        if ($null -ne $status -and [int]$status.rawChunkCount -gt 0 -and ($null -eq $prePurgeStatus -or [int]$status.rawChunkCount -gt [int]$prePurgeStatus.rawChunkCount -or ([int]$status.rawChunkCount -eq [int]$prePurgeStatus.rawChunkCount -and [int]$status.rawWritingCount -lt [int]$prePurgeStatus.rawWritingCount))) { $prePurgeStatus = $status }
+    } while ($null -ne $status -and [DateTimeOffset]::UtcNow -lt $rawDeadline)
 
     # LOCAL_READY is the durable raw boundary.  With the regular installed
     # release we also wait for the asynchronous encoder/archive so that the
@@ -207,6 +226,7 @@ try {
         }
     }
     $durationDeltaSeconds = if ($null -eq $durationSeconds) { $null } else { [math]::Round([math]::Abs($durationSeconds - $Seconds), 3) }
+    $attempt = if ($null -ne $postStopHealth.health.lastAudioGraphAttempt) { $postStopHealth.health.lastAudioGraphAttempt } else { $null }
     $report = [ordered]@{
         schemaVersion = 1
         gate = "AUDIOGRAPH_LOCAL_RECORDING"
@@ -231,7 +251,14 @@ try {
             rawEncodingCount = [int]$status.rawEncodingCount
             rawFailedCount = [int]$status.rawFailedCount
             rawBacklogHealth = [string]$status.rawBacklogHealth
-            pipelineOverruns = if ($null -ne $postStopHealth.health.lastAudioGraphAttempt) { [int]$postStopHealth.health.lastAudioGraphAttempt.pipelineOverruns } else { 0 }
+            pipelineOverruns = if ($null -ne $attempt) { [int]$attempt.pipelineOverruns } else { 0 }
+            framesProduced = if ($null -ne $attempt) { [int64]$attempt.framesProduced } else { 0 }
+            framesConsumed = if ($null -ne $attempt) { [int64]$attempt.framesConsumed } else { 0 }
+            currentQueueDepth = if ($null -ne $attempt) { [int]$attempt.currentQueueDepth } else { 0 }
+            maximumQueueDepth = if ($null -ne $attempt) { [int]$attempt.maximumQueueDepth } else { 0 }
+            frameQueueCapacity = 256
+            framesBalanced = $null -ne $attempt -and [int64]$attempt.framesProduced -eq [int64]$attempt.framesConsumed
+            frameQueueWithinLimit = $null -ne $attempt -and [int]$attempt.maximumQueueDepth -lt 192
             archiveExists = $archiveExists
             archiveReady = $archiveReady
             archiveState = [string]$status.archiveState
@@ -246,6 +273,13 @@ try {
             mediaAssetId = [string]$status.mediaAssetId
             processingJobId = [string]$status.processingJobId
             traceId = [string]$status.traceId
+            prePurgeEvidence = if ($null -ne $prePurgeStatus) { [ordered]@{
+                localChunkCount = [int]$prePurgeStatus.localChunkCount
+                rawChunkCount = [int]$prePurgeStatus.rawChunkCount
+                rawWritingCount = [int]$prePurgeStatus.rawWritingCount
+                rawReadyCount = [int]$prePurgeStatus.rawReadyCount
+                deliveryState = [string]$prePurgeStatus.deliveryState
+            } } else { $null }
         }
         safety = [ordered]@{ credentialsIncluded = $false; tokensIncluded = $false; audioIncluded = $false; transcriptIncluded = $false }
     }
@@ -254,22 +288,34 @@ try {
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
     $deliveryIncomplete = $ServerDelivery -and $report.result.deliveryState -ne "CONFIRMED"
     $archiveRequired = -not $AllowPendingArchive
-    $rawGatePassed = $report.result.rawChunkCount -gt 0 -and $report.result.rawWritingCount -eq 0 -and $report.result.pipelineOverruns -eq 0
+    $rawEvidence = if ($null -ne $report.result.prePurgeEvidence) { $report.result.prePurgeEvidence } else { $report.result }
+    $pipelineGatePassed = $report.result.framesBalanced -and $report.result.frameQueueWithinLimit -and $report.result.pipelineOverruns -eq 0
+    $rawGatePassed = $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and $pipelineGatePassed
     $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
-    $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $report.result.localChunkCount -gt 0
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete) {
+    $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $rawEvidence.localChunkCount -gt 0
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }
 finally {
     if ($hostWasStarted -and $StopHost) {
-        if ($DevelopmentHost) {
+        if ($null -eq $hostProcessId) {
             $pidPath = Join-Path $repo "artifacts\runtime\recorder-host.pid"
-            if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
-                $hostPid = [int](Get-Content -LiteralPath $pidPath -Raw)
-                Stop-Process -Id $hostPid -Force -ErrorAction SilentlyContinue
+            if ($DevelopmentHost -and (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+                $hostProcessId = [int](Get-Content -LiteralPath $pidPath -Raw)
             }
+        }
+        if ($null -ne $hostProcessId) {
+            try {
+                $process = Get-Process -Id ([int]$hostProcessId) -ErrorAction Stop
+                $actualPath = $null
+                try { $actualPath = [IO.Path]::GetFullPath($process.Path) } catch { }
+                if ([string]::IsNullOrWhiteSpace($hostPath) -or [string]::IsNullOrWhiteSpace($actualPath) -or [IO.Path]::GetFullPath($hostPath) -eq $actualPath) {
+                    Stop-Process -Id ([int]$hostProcessId) -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch { }
         }
     }
 }

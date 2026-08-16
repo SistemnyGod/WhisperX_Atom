@@ -25,23 +25,24 @@ public sealed class RecorderRuntimeLease : IDisposable
     }
 
     [SupportedOSPlatform("windows")]
-    public static RecorderRuntimeLease Acquire(Guid installationId)
+    public static RecorderRuntimeLease Acquire(Guid installationId, string? dataRoot = null)
     {
         if (installationId == Guid.Empty)
             throw new InvalidOperationException("RECORDER_INSTALLATION_ID_REQUIRED");
 
-        // The runtime lease is deliberately installation-scoped, not user-scoped:
-        // LocalSystem Service and the current-user Host must not mutate the same
-        // canonical spool concurrently. Global makes the ownership visible across
-        // Windows sessions; the Host process guard remains SID-scoped separately.
-        var safe = installationId.ToString("N");
-        var name = $"Global\\WhisperXAtomRecorderRuntime-{safe}";
+        // The lease is scoped to the canonical spool, not only to installationId.
+        // A stale user/machine configuration must never allow two runtimes to
+        // mutate the same SQLite database and raw files concurrently.
+        var root = ResolveCanonicalDataRoot(dataRoot);
+        var rootHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(root))).ToLowerInvariant();
+        var name = $"Global\\WhisperXAtomRecorderRuntime-{rootHash}";
         // The interactive Host and the legacy Windows Service run under
         // different identities.  An implicit creator-only DACL would make
         // whichever process starts second fail with ACCESS_DENIED instead of
-        // observing the intended runtime lease.  The name is installation
-        // scoped and contains an unguessable identity, so grant only the
-        // synchronization rights required by authenticated users and SYSTEM.
+        // observing the intended runtime lease. The name is derived from the
+        // canonical spool path, so grant only the synchronization rights
+        // required by authenticated users and SYSTEM.
         var security = new SemaphoreSecurity();
         security.AddAccessRule(new SemaphoreAccessRule(
             new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
@@ -58,6 +59,18 @@ public sealed class RecorderRuntimeLease : IDisposable
             throw new InvalidOperationException("RECORDER_RUNTIME_LEASE_HELD");
         }
         return new RecorderRuntimeLease(semaphore);
+    }
+
+    private static string ResolveCanonicalDataRoot(string? dataRoot)
+    {
+        var configured = dataRoot;
+        if (string.IsNullOrWhiteSpace(configured))
+            configured = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT");
+        if (string.IsNullOrWhiteSpace(configured))
+            configured = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
+        return Path.GetFullPath(configured.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
     }
 
     public void Dispose()

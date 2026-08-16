@@ -163,6 +163,36 @@ class JobRepository:
             row = connection.execute("SELECT input_transcript_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row and row[0] else None
 
+    def load_transcript_source(self, transcript_id: str | None) -> dict[str, Any] | None:
+        if not transcript_id:
+            return None
+        with psycopg.connect(self.conninfo) as connection:
+            transcript = connection.execute(
+                "SELECT language,quality_metadata FROM transcripts WHERE id=%s",
+                (transcript_id,),
+            ).fetchone()
+            if transcript is None:
+                return None
+            rows = connection.execute(
+                "SELECT start_ms,end_ms,text,confidence,words FROM transcript_segments WHERE transcript_id=%s AND COALESCE(is_hidden,false)=false ORDER BY ordinal",
+                (transcript_id,),
+            ).fetchall()
+            segments: list[dict[str, Any]] = []
+            words: list[dict[str, Any]] = []
+            for start_ms, end_ms, text, confidence, segment_words in rows:
+                decoded_words = segment_words or []
+                segments.append({
+                    "start": float(start_ms or 0) / 1000.0,
+                    "end": float(end_ms or 0) / 1000.0,
+                    "text": str(text or ""),
+                    "confidence": confidence,
+                    "words": decoded_words,
+                    "speaker": "UNKNOWN",
+                })
+                if isinstance(decoded_words, list):
+                    words.extend(decoded_words)
+            return {"language": transcript[0], "segments": segments, "word_segments": words, "transcript_id": transcript_id}
+
     def complete_asr_job(self, job_id: str, meeting_id: str) -> None:
         """Close an ASR-only job without creating a second transcript version."""
         with psycopg.connect(self.conninfo) as connection:

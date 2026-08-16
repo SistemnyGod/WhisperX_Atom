@@ -5,8 +5,8 @@ namespace WhisperX.Atom.Recorder;
 /// <summary>
 /// Reconciles durable PCM metadata after a process restart. Encoding is owned
 /// exclusively by GlobalRawEncoderWorker; this component never invokes FFmpeg.
-// RecorderToolPaths.Ffmpeg/Ffprobe are intentionally not used here; recovery
-// only promotes durable PCM and wakes the global encoder.
+/// RecorderToolPaths.Ffmpeg/Ffprobe are intentionally not used here; recovery
+/// only promotes durable PCM and wakes the global encoder.
 /// </summary>
 public sealed class RawChunkRecovery(
     SpoolStore spool,
@@ -23,16 +23,35 @@ public sealed class RawChunkRecovery(
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (string.Equals(raw.SessionId, activeSessionId, StringComparison.Ordinal)) continue;
+            // The runtime lease can be acquired by START after this recovery
+            // pass has begun. A live session state is therefore a stronger
+            // exclusion than the caller's snapshot and protects its .part
+            // file from orphan promotion.
+            var sessionInfo = await spool.GetSessionInfoAsync(raw.SessionId, cancellationToken).ConfigureAwait(false);
+            if (sessionInfo?.State is "RECORDING" or "PAUSED") continue;
 
             try
             {
+                // RAW_READY with an intact canonical path is already a valid
+                // encoder input. Leave it untouched so the singleton encoder
+                // cannot be reset to RAW_READY after it has claimed the row.
+                if (string.Equals(raw.Status, "RAW_READY", StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(raw.RawPath))
+                {
+                    continue;
+                }
                 if (string.Equals(raw.Status, "WRITING", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(raw.Status, "RAW_READY", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!File.Exists(raw.RawPath) && File.Exists(raw.RawPath + ".part"))
+                    var effectiveRawPath = raw.RawPath;
+                    if (!File.Exists(effectiveRawPath) && !File.Exists(effectiveRawPath + ".part"))
+                        effectiveRawPath = FindExactRawPath(raw) ?? effectiveRawPath;
+                    if (!File.Exists(effectiveRawPath) && File.Exists(raw.RawPath + ".part"))
+                        effectiveRawPath = raw.RawPath;
+                    if (!File.Exists(effectiveRawPath) && File.Exists(raw.RawPath + ".part"))
                         File.Move(raw.RawPath + ".part", raw.RawPath, true);
 
-                    if (!File.Exists(raw.RawPath) || new FileInfo(raw.RawPath).Length == 0)
+                    if (!File.Exists(effectiveRawPath) || new FileInfo(effectiveRawPath).Length == 0)
                     {
                         TryDelete(raw.RawPath + ".part");
                         // Legacy diagnostic spelling retained in this comment;
@@ -43,7 +62,15 @@ public sealed class RawChunkRecovery(
                         continue;
                     }
 
-                    await PromoteRawReadyAsync(raw, cancellationToken).ConfigureAwait(false);
+                    // A crash can happen after the exact timeline filename is
+                    // moved but before SQLite promotion. Keep the row and bind
+                    // it to the discovered exact file instead of discarding
+                    // valid audio because the old .pcm path is missing.
+                    await PromoteRawReadyAsync(
+                        string.Equals(effectiveRawPath, raw.RawPath, StringComparison.OrdinalIgnoreCase)
+                            ? raw
+                            : raw with { RawPath = effectiveRawPath },
+                        cancellationToken).ConfigureAwait(false);
                     wake.Signal();
                 }
             }
@@ -80,6 +107,28 @@ public sealed class RawChunkRecovery(
         var sha = FlacEncoder.ComputeSha256(exactPath);
         await spool.PromoteRawChunkReadyAsync(raw, exactPath, effectiveSampleCount, size, sha, cancellationToken).ConfigureAwait(false);
         logger.LogInformation("Raw PCM is durable. Session={SessionId}, Track={TrackId}, Sequence={Sequence}, Samples={Samples}", raw.SessionId, raw.TrackId, raw.Sequence, effectiveSampleCount);
+    }
+
+    private static string? FindExactRawPath(RawRecordingChunk raw)
+    {
+        var directory = Path.GetDirectoryName(raw.RawPath);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return null;
+
+        if (raw.SampleCount > 0)
+        {
+            var expected = Path.Combine(directory, RawChunkFileName.Create(raw.Sequence, raw.StartSample, raw.SampleCount));
+            if (File.Exists(expected)) return expected;
+        }
+
+        try
+        {
+            return Directory.EnumerateFiles(directory, "*.pcm", SearchOption.TopDirectoryOnly)
+                .FirstOrDefault(path => RawChunkFileName.TryParse(path, out var sequence, out var startSample, out _)
+                    && sequence == raw.Sequence
+                    && (raw.StartSample <= 0 || startSample == raw.StartSample));
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
 
     private async Task<bool> RegisterOrphanRawFilesAsync(string? activeSessionId, CancellationToken cancellationToken)
@@ -125,6 +174,8 @@ public sealed class RawChunkRecovery(
             var sessionId = sessionDirectory.Name;
             var trackId = trackDirectory.Name;
             if (string.Equals(sessionId, activeSessionId, StringComparison.Ordinal)) continue;
+            var sessionInfo = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (sessionInfo?.State is "RECORDING" or "PAUSED") continue;
 
             var isPart = candidatePath.EndsWith(".pcm.part", StringComparison.OrdinalIgnoreCase);
             var rawPath = isPart ? candidatePath[..^".part".Length] : candidatePath;

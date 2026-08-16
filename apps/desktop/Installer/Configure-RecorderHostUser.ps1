@@ -9,18 +9,28 @@ if (-not (Test-Path -LiteralPath $RecorderHostPath -PathType Leaf)) {
     throw "RECORDER_HOST_BINARY_NOT_FOUND: $RecorderHostPath"
 }
 
-$machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
-$machineConfig = if (Test-Path -LiteralPath $machineConfigPath -PathType Leaf) {
-    try { Get-Content -LiteralPath $machineConfigPath -Raw | ConvertFrom-Json } catch { $null }
-} else { $null }
-$installationId = if ($null -ne $machineConfig -and $machineConfig.installationId) { [string]$machineConfig.installationId } else { [Guid]::NewGuid().ToString() }
-
 $directory = Join-Path (Join-Path $env:LOCALAPPDATA "WhisperXAtom") "Agent"
 New-Item -ItemType Directory -Force -Path $directory | Out-Null
 $path = Join-Path $directory "agent-config.json"
 $existing = if (Test-Path -LiteralPath $path -PathType Leaf) {
     try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
 } else { $null }
+
+# The current-user Host owns the DPAPI token and the canonical Agent identity.
+# Only fall back to the machine installation id when no valid user identity
+# exists; otherwise an elevated installer can silently split one installation
+# into two runtime leases.
+$machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
+$machineConfig = if (Test-Path -LiteralPath $machineConfigPath -PathType Leaf) {
+    try { Get-Content -LiteralPath $machineConfigPath -Raw | ConvertFrom-Json } catch { $null }
+} else { $null }
+$userInstallationId = if ($existing -and $existing.InstallationId) { [string]$existing.InstallationId } elseif ($existing -and $existing.installationId) { [string]$existing.installationId } else { $null }
+$machineInstallationId = if ($machineConfig -and $machineConfig.InstallationId) { [string]$machineConfig.InstallationId } elseif ($machineConfig -and $machineConfig.installationId) { [string]$machineConfig.installationId } else { $null }
+$validUserInstallationId = [Guid]::Empty
+$validMachineInstallationId = [Guid]::Empty
+$userIsValid = [Guid]::TryParse($userInstallationId, [ref]$validUserInstallationId) -and $validUserInstallationId -ne [Guid]::Empty
+$machineIsValid = [Guid]::TryParse($machineInstallationId, [ref]$validMachineInstallationId) -and $validMachineInstallationId -ne [Guid]::Empty
+$installationId = if ($userIsValid) { $validUserInstallationId.ToString() } elseif ($machineIsValid) { $validMachineInstallationId.ToString() } else { [Guid]::NewGuid().ToString() }
 
 $existingAudio = if ($existing) { $existing.AudioConfiguration } else { $null }
 $existingDevice = if ($existingAudio -and $existingAudio.microphone) { [string]$existingAudio.microphone.deviceId } elseif ($existing) { [string]$existing.MicrophoneDeviceId } else { $null }

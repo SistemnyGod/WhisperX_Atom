@@ -27,5 +27,12 @@ def test_responsive_layout_guards_transient_xaml_tree():
 def test_host_launcher_does_not_spawn_duplicate_process_when_ipc_is_temporarily_unready():
     launcher = (ROOT / "scripts" / "start-recorder-host.ps1").read_text(encoding="utf-8")
     assert "No duplicate Host was started" in launcher
-    assert 'if ($anyHost.Count -gt 0) {' in launcher
+    assert 'if ($anyHosts.Count -gt 0) {' in launcher
     assert 'throw "RECORDER_HOST_PIPE_UNRESPONSIVE' in launcher
+
+
+def test_desktop_never_kills_host_without_verified_executable_path():
+    controller = (ROOT / "apps" / "desktop" / "WhisperX.Atom.Desktop" / "Services" / "RecorderServiceController.cs").read_text(encoding="utf-8")
+    assert "string.IsNullOrWhiteSpace(expectedPath)" in controller
+    assert "string.IsNullOrWhiteSpace(actualPath)" in controller
+    assert "|| string.IsNullOrWhiteSpace(actualPath)" in controller

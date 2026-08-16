@@ -13,71 +13,36 @@ public sealed class RecorderHostProcessGuard : IDisposable
 
     public static RecorderHostProcessGuard? TryAcquire()
     {
-        var sid = ResolveCurrentSid();
-        // Every Host launch path must derive the same identity. Before the
-        // installer migrates machine config v1, the current-user config is
-        // authoritative for the AudioGraph Host. Falling back straight to
-        // "unknown" allowed a packaged Host and a dev-script Host to acquire
-        // different mutexes and write/recover the same canonical spool.
-        var installationId = Environment.GetEnvironmentVariable("ATOM_AGENT_INSTALLATION_ID");
-        if (string.IsNullOrWhiteSpace(installationId))
-            installationId = TryReadUserInstallationId();
-        if (string.IsNullOrWhiteSpace(installationId))
-            installationId = TryReadMachineInstallationId();
-        var identity = sid + "-" + (installationId ?? "unknown");
+        // Keep the process guard on the same canonical spool identity as the
+        // cross-session runtime lease. A mismatched installationId must not
+        // create a second Host against the same SQLite/raw storage.
+        var root = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT");
+        if (string.IsNullOrWhiteSpace(root))
+            root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
+        var identity = Path.GetFullPath(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).ToUpperInvariant();
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
-        var mutex = new Mutex(false, $"Local\\WhisperXAtomRecorderHost-{hash}");
-        if (!mutex.WaitOne(TimeSpan.Zero))
+        // Global scope covers RDP/fast-user-switch sessions as well. The
+        // spool-scoped runtime semaphore remains the authority shared with the
+        // legacy Service; this mutex prevents a second interactive Host from
+        // even opening an IPC endpoint in another session.
+        var mutex = new Mutex(false, $"Global\\WhisperXAtomRecorderHost-{hash}");
+        var acquired = false;
+        try
+        {
+            acquired = mutex.WaitOne(TimeSpan.Zero);
+        }
+        catch (AbandonedMutexException)
+        {
+            // The previous Host crashed. Windows transfers ownership to this
+            // waiter and reports the abandoned state; it is safe to continue.
+            acquired = true;
+        }
+        if (!acquired)
         {
             mutex.Dispose();
             return null;
         }
         return new RecorderHostProcessGuard(mutex);
-    }
-
-    private static string ResolveCurrentSid()
-    {
-        try { return System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName; }
-        catch { return Environment.UserName; }
-    }
-
-    private static string? TryReadMachineInstallationId()
-    {
-        try
-        {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "WhisperXAtom", "client-config.json");
-            if (!File.Exists(path)) return null;
-            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-            return document.RootElement.TryGetProperty("installationId", out var value)
-                ? value.GetString()
-                : null;
-        }
-        catch { return null; }
-    }
-
-    private static string? TryReadUserInstallationId()
-    {
-        try
-        {
-            var path = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH");
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                path = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "WhisperXAtom", "Agent", "agent-config.json");
-            }
-            if (!File.Exists(path)) return null;
-            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-            foreach (var property in document.RootElement.EnumerateObject())
-            {
-                if (string.Equals(property.Name, "installationId", StringComparison.OrdinalIgnoreCase))
-                    return property.Value.GetString();
-            }
-        }
-        catch { }
-        return null;
     }
 
     public void Dispose()

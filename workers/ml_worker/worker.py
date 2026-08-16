@@ -117,7 +117,13 @@ class GpuWorker:
             enrichment_job = job_type == "TRANSCRIPT_ENRICH"
             self._repository.update_job(job_id, "RUNNING", "TRANSCRIBING", 20)
             request_profile = "asr" if asr_only_job else ("enrich" if enrichment_job else message.get("profile", "meeting"))
-            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=request_profile, min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)))
+            input_transcript = None
+            if enrichment_job:
+                transcript_id = message.get("transcript_id") or await asyncio.to_thread(self._repository.input_transcript_id, job_id)
+                input_transcript = await asyncio.to_thread(self._repository.load_transcript_source, transcript_id)
+                if not input_transcript or not input_transcript.get("segments"):
+                    raise RuntimeError("TRANSCRIPT_INPUT_NOT_FOUND")
+            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=request_profile, min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)), input_transcript=input_transcript)
 
             def progress(stage: str, value: int) -> None:
                 LOGGER.info("job=%s stage=%s progress=%s", job_id, stage, value)

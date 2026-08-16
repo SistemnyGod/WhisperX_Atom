@@ -107,32 +107,52 @@ if ($publishRequired) {
 $ExecutablePath = (Resolve-Path -LiteralPath $ExecutablePath).Path
 $expectedBuild = Get-ProductVersion $ExecutablePath
 
-$anyHost = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | Select-Object -First 1)
-if ($anyHost.Count -gt 0 -and (Test-RecorderPipe)) {
-    # A live Host owns the canonical user spool regardless of which artifact
-    # directory launched it. Starting a second binary would compete for raw
-    # recovery and make the shared named pipe route commands nondeterministically.
-    $anyHost[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
-    Write-Host "Recorder host is already running. PID=$($anyHost[0].Id)"
-    return
-}
-if ($anyHost.Count -gt 0) {
+$anyHosts = @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+if ($anyHosts.Count -gt 0) {
+    # A responsive process is not automatically acceptable: release startup
+    # must reject an old artifact Host instead of treating it as success.
+    foreach ($candidate in $anyHosts) {
+        $runningPath = $null
+        try { $runningPath = $candidate.Path } catch { }
+        $runningBuild = Get-ProductVersion $runningPath
+        if ([string]::IsNullOrWhiteSpace($runningPath)) {
+            throw "RECORDER_HOST_BUILD_MISMATCH: cannot inspect the running Host path for PID $($candidate.Id)."
+        }
+        if (-not [string]::Equals([IO.Path]::GetFullPath($runningPath), [IO.Path]::GetFullPath($ExecutablePath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "RECORDER_HOST_BUILD_MISMATCH: running Host path '$runningPath' does not match expected '$ExecutablePath'."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($expectedBuild) -and
+            -not [string]::IsNullOrWhiteSpace($runningBuild) -and
+            -not [string]::Equals($expectedBuild, $runningBuild, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "RECORDER_HOST_BUILD_MISMATCH: running Host build '$runningBuild' does not match expected '$expectedBuild'."
+        }
+    }
+
+    if ($anyHosts.Count -gt 1) {
+        throw "RECORDER_HOST_DUPLICATE: more than one Recorder Host process is running."
+    }
+    if (Test-RecorderPipe) {
+        $anyHosts[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
+        Write-Host "Recorder host is already running. PID=$($anyHosts[0].Id)"
+        return
+    }
+
     # A process-level mutex belongs to the user session even when the pipe is
     # temporarily unavailable. Never start a second Host: it will only fail
     # with RECORDER_HOST_ALREADY_RUNNING and can compete with recovery later.
     # A non-responsive process is an actionable failure, not a successful
     # no-op. In particular, an old binary may still own the pipe while the
     # current package is already published beside it.
-    $anyHost[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
+    $anyHosts[0].Id | Set-Content -LiteralPath $pidPath -Encoding ascii
     $runningPath = $null
-    try { $runningPath = $anyHost[0].Path } catch { }
+    try { $runningPath = $anyHosts[0].Path } catch { }
     $runningBuild = Get-ProductVersion $runningPath
     if (-not [string]::IsNullOrWhiteSpace($expectedBuild) -and
         -not [string]::IsNullOrWhiteSpace($runningBuild) -and
         -not [string]::Equals($expectedBuild, $runningBuild, [StringComparison]::OrdinalIgnoreCase)) {
         throw "RECORDER_HOST_UPDATE_RESTART_REQUIRED: running Host build '$runningBuild' does not match expected '$expectedBuild'. No duplicate Host was started."
     }
-    throw "RECORDER_HOST_PIPE_UNRESPONSIVE: Host process $($anyHost[0].Id) is running but its IPC pipe is not ready. No duplicate Host was started."
+    throw "RECORDER_HOST_PIPE_UNRESPONSIVE: Host process $($anyHosts[0].Id) is running but its IPC pipe is not ready. No duplicate Host was started."
 }
 
 $existing = Get-RecorderProcess $ExecutablePath
@@ -157,6 +177,17 @@ $configDirectory = Split-Path -Parent $configPath
 New-Item -ItemType Directory -Force -Path $configDirectory | Out-Null
 $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 $machineInstallationId = $null
+$userInstallationId = $null
+$userConfig = $null
+if ($audioGraph -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    try {
+        $userConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        $hostInstallation = $userConfig.PSObject.Properties["InstallationId"]
+        if ($null -eq $hostInstallation) { $hostInstallation = $userConfig.PSObject.Properties["installationId"] }
+        if ($null -ne $hostInstallation) { $userInstallationId = [string]$hostInstallation.Value }
+    }
+    catch { }
+}
 if ($null -ne $machineConfig) {
     $installationProperty = $machineConfig.PSObject.Properties["installationId"]
     if ($null -ne $installationProperty) { $machineInstallationId = [string]$installationProperty.Value }
@@ -165,19 +196,11 @@ if ($null -ne $machineConfig) {
         if ($null -ne $installationProperty) { $machineInstallationId = [string]$installationProperty.Value }
     }
 }
-if ([string]::IsNullOrWhiteSpace($machineInstallationId) -and $audioGraph -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-    try {
-        $hostConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-        $hostInstallation = $hostConfig.PSObject.Properties["InstallationId"]
-        if ($null -eq $hostInstallation) { $hostInstallation = $hostConfig.PSObject.Properties["installationId"] }
-        if ($null -ne $hostInstallation) { $machineInstallationId = [string]$hostInstallation.Value }
-    }
-    catch { }
-}
+$canonicalInstallationId = if (-not [string]::IsNullOrWhiteSpace($userInstallationId)) { $userInstallationId } else { $machineInstallationId }
 $env:AUDIO_CAPTURE_ENGINE = if ($audioGraph) { "AUDIOGRAPH" } else { "LEGACY_WASAPI" }
 $env:ATOM_AGENT_CONFIG_PATH = $configPath
 $env:ATOM_AGENT_DATA_ROOT = $dataRoot
-$env:ATOM_AGENT_INSTALLATION_ID = $machineInstallationId
+$env:ATOM_AGENT_INSTALLATION_ID = $canonicalInstallationId
 $env:ATOM_AGENT_ALLOWED_SID = $sid
 $env:ATOM_AGENT_DPAPI_SCOPE = if ($audioGraph) { "CURRENT_USER" } else { "LOCAL_MACHINE" }
 $toolDirectory = if (-not [string]::IsNullOrWhiteSpace($env:WHISPERX_FFMPEG_DIR)) { $env:WHISPERX_FFMPEG_DIR } else { Join-Path $repo "vendor\ffmpeg\win-x64" }

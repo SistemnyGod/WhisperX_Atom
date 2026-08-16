@@ -8,13 +8,14 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_host_releases_installation_lease_when_start_fails_before_capture():
+def test_host_persists_recoverable_session_when_start_fails_before_capture():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     start = runtime.split("public async Task<AgentIpcResponse> StartAsync", 1)[1].split(
         "public async Task<AgentIpcResponse> StopAsync", 1
     )[0]
     assert "await StopCoreAsync(CancellationToken.None)" in start
-    assert "_runtimeLease?.Dispose()" in start
+    assert "startedSessionId" in start
+    assert 'SetSessionStateAsync(startedSessionId, "FINALIZING"' in start
     assert "RECORDER_RUNTIME_LEASE_HELD" in read("apps/recorder-agent/RecorderRuntimeLease.cs")
 
 
@@ -184,6 +185,7 @@ def test_host_launcher_fails_when_existing_process_owns_unresponsive_pipe():
     assert "expectedBuild" in launcher
     assert "RECORDER_HOST_UPDATE_RESTART_REQUIRED" in launcher
     assert "RECORDER_HOST_PIPE_UNRESPONSIVE" in launcher
+    assert "RECORDER_HOST_DUPLICATE" in launcher
     assert "No duplicate Host was started" in launcher
 
 

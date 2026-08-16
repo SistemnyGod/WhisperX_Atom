@@ -45,6 +45,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     private AudioCaptureState _state = AudioCaptureState.Unknown;
     private AudioTelemetrySnapshot _telemetry = new(0, 0, null, null, null, false, null, null);
     private long _sampleCursor;
+    private long _consumedSampleCursor;
     private long _frameCount;
     private long _bytesReceived;
     private long? _firstFrameLatencyMs;
@@ -107,7 +108,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     /// wall-clock polling in the UI.
     /// </summary>
     public long CurrentMediaTimeMs
-        => Math.Max(0, Interlocked.Read(ref _sampleCursor) * 1000L / SampleRate);
+        => Math.Max(0, Interlocked.Read(ref _consumedSampleCursor) * 1000L / SampleRate);
 
     public LiveAudioTelemetrySnapshot LiveTelemetry
     {
@@ -155,9 +156,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
     }
 
     /// <summary>Called by the durable consumer after it accepts a frame.</summary>
-    public void MarkFrameConsumed()
+    public void MarkFrameConsumed(int sampleCount)
     {
         Interlocked.Increment(ref _framesConsumed);
+        if (sampleCount > 0)
+            Interlocked.Add(ref _consumedSampleCursor, sampleCount);
         var depth = Interlocked.Decrement(ref _queueDepth);
         if (depth < 0) Interlocked.Exchange(ref _queueDepth, 0);
     }
@@ -177,9 +180,23 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
+        if (State is AudioCaptureState.Recording or AudioCaptureState.Paused or AudioCaptureState.Starting)
+        {
+            lock (_gate)
+            {
+                _attempt = new AudioGraphAttemptDiagnostics
+                {
+                    FinalCaptureState = State.ToString(),
+                    FinalErrorCode = "AUDIO_CAPTURE_BUSY",
+                    FinalErrorDetail = "Audio capture is active; stop the current session before probing a device."
+                };
+            }
+            return BuildProbeResult(0, "AUDIO_CAPTURE_BUSY", "Audio capture is active; stop the current session before probing a device.");
+        }
         lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
         var started = Stopwatch.GetTimestamp();
         AudioDeviceProbeResult? result = null;
+        var startedHere = false;
         try
         {
             // Keep endpoint resolution inside the probe boundary. A missing
@@ -188,6 +205,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
             await SelectDeviceAsync(selectionMode, deviceId, cancellationToken).ConfigureAwait(false);
             _probeMode = true;
             await StartAsync(cancellationToken).ConfigureAwait(false);
+            startedHere = true;
             await Task.Delay(duration <= TimeSpan.Zero ? TimeSpan.FromSeconds(2) : duration, cancellationToken).ConfigureAwait(false);
             result = BuildProbeResult(ElapsedMilliseconds(started), null, null);
         }
@@ -198,7 +216,13 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         }
         finally
         {
-            try { await StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            // A probe may fail before it starts its own graph (for example when
+            // a user asks to probe while recording). Never stop a graph owned by
+            // the active recording session from this cleanup path.
+            if (startedHere)
+            {
+                try { await StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            }
             _probeMode = false;
             if (result is not null)
                 result = result with { AttemptDiagnostics = LastAttemptDiagnostics };
@@ -804,6 +828,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
         lock (_gate)
         {
             _sampleCursor = 0;
+            _consumedSampleCursor = 0;
             _frameCount = 0;
             _bytesReceived = 0;
             _firstFrameLatencyMs = null;
@@ -924,6 +949,9 @@ internal static class AudioGraphErrorMapper
     public static string Map(Exception exception)
     {
         var message = exception.ToString();
+        if (message.Contains("AUDIO_CAPTURE_BUSY", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("AUDIO_DEVICE_SELECTION_LOCKED", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_CAPTURE_BUSY";
         if (message.Contains("RECORDER_RUNTIME_LEASE_HELD", StringComparison.OrdinalIgnoreCase))
             return "RECORDER_RUNTIME_LEASE_HELD";
         if (exception is InvalidCastException

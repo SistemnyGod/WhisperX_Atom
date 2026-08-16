@@ -119,6 +119,8 @@ public sealed class GlobalRawEncoderWorker(
             FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
             if (!await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), outputPart, raw, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("ffprobe_invalid_audio");
+            if (!await spool.OwnsRawEncodingLeaseAsync(raw, _workerId, cancellationToken).ConfigureAwait(false))
+                throw new InvalidOperationException("RAW_ENCODER_LEASE_LOST");
             File.Move(outputPart, raw.OutputPath, true);
             await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
             logger.LogInformation("Raw chunk encoded. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", raw.SessionId, raw.TrackId, raw.Sequence);

@@ -327,10 +327,11 @@ def test_active_recording_uploads_completed_chunks_without_finalizing():
     reconcile = runtime.split("public async Task ReconcileBackgroundAsync", 1)[1].split(
         "public async Task<RecordingSessionStatus>", 1
     )[0]
-    assert "UploadPendingChunksAsync(_spool, activeSession" in reconcile
+    assert "UploadActiveSessionAsync(" in reconcile
+    assert "UploadPendingChunksAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
     assert "using (var deliveryGate = new SemaphoreSlim(2, 2))" in reconcile
     assert "EnsureActiveSessionBoundAsync(activeSession" in reconcile
-    assert "UploadPendingEventsAsync(_spool, activeSession" in reconcile
+    assert "UploadPendingEventsAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
 
 
 def test_transcript_fallback_does_not_retry_only_missing_word_timestamps_and_cleans_alternate_temp():

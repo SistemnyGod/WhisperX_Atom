@@ -117,9 +117,9 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             var executable = ResolveHostExecutable();
             var expectedBuild = GetFileVersion(executable);
             var pathMatches = !process.Exists
-                || string.IsNullOrWhiteSpace(process.Path)
-                || string.IsNullOrWhiteSpace(executable)
-                || string.Equals(Path.GetFullPath(process.Path), Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase);
+                || (!string.IsNullOrWhiteSpace(process.Path)
+                    && !string.IsNullOrWhiteSpace(executable)
+                    && string.Equals(Path.GetFullPath(process.Path), Path.GetFullPath(executable), StringComparison.OrdinalIgnoreCase));
             var buildMatches = string.IsNullOrWhiteSpace(health?.RuntimeBuildIdentity)
                 || string.IsNullOrWhiteSpace(expectedBuild)
                 || string.Equals(health.RuntimeBuildIdentity, expectedBuild, StringComparison.OrdinalIgnoreCase);
@@ -128,7 +128,9 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             var capabilityError = hasConcurrentHostCapabilities && hasEventStreamCapability ? null : "RECORDER_HOST_UPDATE_REQUIRED";
             var pipeResponsive = health is not null;
             var error = response.Error;
-            if (!pathMatches)
+            if (process.Count > 1)
+                error = "RECORDER_HOST_DUPLICATE";
+            else if (!pathMatches)
                 error = "RECORDER_HOST_BUILD_MISMATCH";
             else if (!buildMatches)
                 error = "RECORDER_HOST_BUILD_MISMATCH";
@@ -234,8 +236,13 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 return before with { Error = "RECORDER_HOST_UPDATE_RESTART_REQUIRED" };
             await Task.Delay(250, cancellationToken).ConfigureAwait(false);
         }
-        else if (before.Exists && before.Error is "RECORDER_IPC_ACCESS_DENIED" or "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_BUILD_MISMATCH")
+        else if (before.Exists && !before.PipeReachable)
+        {
+            // A live but initializing/degraded Host still owns the global
+            // runtime lease. Never launch a competing process while its pipe
+            // reports a precise startup or spool error.
             return before;
+        }
 
         var executable = ResolveHostExecutable();
         if (!string.IsNullOrWhiteSpace(executable) && File.Exists(executable))
@@ -257,7 +264,7 @@ public sealed class RecorderServiceController(IRecorderService recorder)
             var currentUserSid = WindowsIdentity.GetCurrent().User?.Value;
             if (!string.IsNullOrWhiteSpace(currentUserSid))
                 directStart.Environment["ATOM_AGENT_ALLOWED_SID"] = currentUserSid;
-            var installationId = ResolveMachineInstallationId();
+            var installationId = ResolveHostInstallationId();
             if (!string.IsNullOrWhiteSpace(installationId))
                 directStart.Environment["ATOM_AGENT_INSTALLATION_ID"] = installationId;
             directStart.Environment["ATOM_AGENT_FFMPEG_PATH"] = Path.Combine(Path.GetDirectoryName(executable)!, "ffmpeg.exe");
@@ -335,9 +342,13 @@ public sealed class RecorderServiceController(IRecorderService recorder)
 
             var expectedPath = ResolveHostExecutable();
             var actualPath = TryGetProcessPath(process);
-            if (!string.IsNullOrWhiteSpace(expectedPath)
-                && !string.IsNullOrWhiteSpace(actualPath)
-                && !string.Equals(Path.GetFullPath(expectedPath), Path.GetFullPath(actualPath), StringComparison.OrdinalIgnoreCase))
+            // Never terminate a process whose executable path cannot be
+            // verified. A stale/foreign Host must surface as a mismatch and
+            // require an explicit administrative cleanup, not be guessed at
+            // from the process name alone.
+            if (string.IsNullOrWhiteSpace(expectedPath)
+                || string.IsNullOrWhiteSpace(actualPath)
+                || !string.Equals(Path.GetFullPath(expectedPath), Path.GetFullPath(actualPath), StringComparison.OrdinalIgnoreCase))
                 return false;
 
             process.Kill(entireProcessTree: true);
@@ -347,18 +358,36 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         catch { return false; }
     }
 
-    private static string? ResolveMachineInstallationId()
+    private static string? ResolveHostInstallationId()
     {
-        try
+        var userPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "WhisperXAtom", "Agent", "agent-config.json");
+        var machinePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "WhisperXAtom", "client-config.json");
+        foreach (var path in new[] { userPath, machinePath })
         {
-            return WhisperX.Atom.Desktop.MachineServerConfig.Load()?.InstallationId?.ToString();
+            try
+            {
+                if (!File.Exists(path)) continue;
+                using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (!string.Equals(property.Name, "installationId", StringComparison.OrdinalIgnoreCase)) continue;
+                    var value = property.Value.GetString();
+                    if (Guid.TryParse(value, out var parsed) && parsed != Guid.Empty)
+                        return parsed.ToString();
+                }
+            }
+            catch { }
         }
-        catch { }
         return null;
     }
 
     private static HostProcessInspection InspectHostProcess()
     {
+        var found = new List<HostProcessInspection>();
         try
         {
             var currentSession = Process.GetCurrentProcess().SessionId;
@@ -368,14 +397,17 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 {
                     if (process.SessionId != currentSession) continue;
                     var path = TryGetProcessPath(process);
-                    return new HostProcessInspection(true, process.Id, path, GetFileVersion(path));
+                    found.Add(new HostProcessInspection(true, process.Id, path, GetFileVersion(path), 0));
                 }
                 finally { process.Dispose(); }
             }
         }
         catch { }
 
-        return new HostProcessInspection(false, null, null, null);
+        var first = found.FirstOrDefault();
+        return first is null
+            ? new HostProcessInspection(false, null, null, null, 0)
+            : first with { Count = found.Count };
     }
 
     private static string? TryGetProcessPath(Process process)
@@ -384,7 +416,7 @@ public sealed class RecorderServiceController(IRecorderService recorder)
         catch { return null; }
     }
 
-    private sealed record HostProcessInspection(bool Exists, int? ProcessId, string? Path, string? BuildIdentity);
+    private sealed record HostProcessInspection(bool Exists, int? ProcessId, string? Path, string? BuildIdentity, int Count);
 
     internal static string? ResolveHostExecutable()
     {
