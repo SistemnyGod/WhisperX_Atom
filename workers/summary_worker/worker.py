@@ -23,7 +23,7 @@ from .contracts import (
     SUMMARY_SCHEMA_VERSION,
 )
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
-from .llama_subprocess import LocalLlamaServer
+from .llama_subprocess import LocalLlamaRuntime
 from .assistant import AssistantWorker
 
 LOGGER = logging.getLogger("whisperx.summary-worker")
@@ -37,11 +37,26 @@ class RetryScheduled(RuntimeError):
 
 def is_retryable_summary_error(exc: BaseException) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
-    return not any(token in text for token in ("transcript_has_no_segments", "transcript_not_found", "cancelled"))
+    if any(token in text for token in (
+        "transcript_has_no_segments",
+        "transcript_not_found",
+        "cancelled",
+        "schema_validation",
+        "invalid_json",
+        "evidence_invalid",
+    )):
+        return False
+    # Only infrastructure failures are retried. Deterministic prompt/schema
+    # failures must become FAILED instead of consuming the whole retry budget.
+    return any(token in text for token in (
+        "timeout", "timed out", "connection", "unavailable", "refused",
+        "llama", "gpu", "cuda", "busy", "temporarily", "503", "502",
+        "sqlite", "postgres", "psycopg", "broken pipe",
+    ))
 
 
 def retry_delay_seconds(attempt: int) -> float:
-    return {1: 5, 2: 15, 3: 30}.get(attempt, 60) + attempt * 0.37
+    return {1: 5, 2: 15, 3: 30, 4: 60, 5: 120}.get(attempt, 300) + attempt * 0.37
 
 
 class SummaryRepository:
@@ -66,6 +81,12 @@ class SummaryRepository:
         with psycopg.connect(self.conninfo) as connection:
             row = connection.execute("SELECT status FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row else None
+
+    def release_message(self, message_id: str | None) -> None:
+        if not message_id:
+            return
+        with psycopg.connect(self.conninfo) as connection:
+            connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
     def pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
         with psycopg.connect(self.conninfo) as connection:
@@ -106,21 +127,31 @@ class SummaryRepository:
             # The transcript remains usable even when the optional summary failed.
             connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
 
-    def schedule_retry(self, job_id: str, error: str, error_code: str, max_attempts: int = 3) -> int | None:
+    def schedule_retry(self, job_id: str, error: str, error_code: str, message_id: str | None = None, max_attempts: int = 3) -> int | None:
+        """Atomically make a transient job retryable and release its inbox claim.
+
+        Releasing the inbox row in the same transaction as the job transition is
+        essential: a delayed NAK can arrive immediately after the transaction,
+        and a still-live inbox lease would make the retry look like a duplicate
+        and be acknowledged without executing the job.
+        """
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute(
-                """
-                UPDATE jobs
-                SET status='QUEUED', stage='RETRY_PENDING', progress=0,
-                    attempt=attempt+1, error_message=%s, error_code=%s,
-                    worker_id=NULL, lease_expires_at=NULL,
-                    last_heartbeat=now(), updated_at=now()
-                WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
-                  AND attempt < %s
-                RETURNING attempt
-                """,
-                (error, error_code, job_id, max_attempts),
-            ).fetchone()
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status='QUEUED', stage='RETRY_PENDING', progress=0,
+                        attempt=attempt+1, error_message=%s, error_code=%s,
+                        worker_id=NULL, lease_expires_at=NULL,
+                        last_heartbeat=now(), updated_at=now()
+                    WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
+                      AND attempt < %s
+                    RETURNING attempt
+                    """,
+                    (error, error_code, job_id, max_attempts),
+                ).fetchone()
+                if row is not None and message_id:
+                    connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
             return int(row[0]) if row else None
     def load_segments(self, meeting_id: str, transcript_id: str | None = None) -> list[TranscriptSegment]:
         with psycopg.connect(self.conninfo) as connection:
@@ -185,6 +216,10 @@ class SummaryRepository:
         is_protocol = str(result.get("profile", "")).upper() == MEETING_PROTOCOL_RU
         schema_version = str(result.get("schema_version") or (PROTOCOL_RU_SCHEMA_VERSION if is_protocol else SUMMARY_SCHEMA_VERSION))
         prompt_version = str(result.get("prompt_version") or (PROTOCOL_RU_PROMPT_VERSION if is_protocol else SUMMARY_PROMPT_VERSION))
+        # Keep a stable provenance marker in JSONB without requiring a schema
+        # migration. A changed transcript, model, prompt or schema therefore
+        # produces a new logical generation even when the NATS job is retried.
+        result["generation_fingerprint"] = ":".join((source_hash, model_name, prompt_version, schema_version))
         with psycopg.connect(self.conninfo) as connection:
             # Serialize summary versions and decision/task inserts for this meeting.
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
@@ -334,6 +369,7 @@ class SummaryWorker:
         self.repository = SummaryRepository()
         self._gpu_lease = PostgresGpuLease(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
+        self._llm_runtime = LocalLlamaRuntime()
 
 
     async def handle(self, payload: dict[str, Any]) -> None:
@@ -358,8 +394,7 @@ class SummaryWorker:
             LOGGER.info("job=%s waiting for GPU lease", job_id)
             async with self._gpu_lease:
                 LOGGER.info("job=%s acquired GPU lease", job_id)
-                server = LocalLlamaServer()
-                await asyncio.to_thread(server.start)
+                server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 try:
                     client = LlamaCppClient(server.base_url, self.model_alias)
 
@@ -383,7 +418,7 @@ class SummaryWorker:
                     if correlation_id:
                         result["correlation_id"] = correlation_id
                 finally:
-                    await asyncio.to_thread(server.stop)
+                    await asyncio.to_thread(self._llm_runtime.release_after_job)
             LOGGER.info("job=%s released GPU lease", job_id)
             self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
             self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
@@ -393,7 +428,9 @@ class SummaryWorker:
         except Exception as exc:
             detail = type(exc).__name__ + ": " + str(exc)
             if is_retryable_summary_error(exc):
-                scheduled_attempt = self.repository.schedule_retry(job_id, detail, "SUMMARY_RETRY_PENDING")
+                scheduled_attempt = self.repository.schedule_retry(
+                    job_id, detail, "SUMMARY_RETRY_PENDING", message_id=message_id
+                )
                 if scheduled_attempt is not None:
                     raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
             self.repository.mark_failed(job_id, meeting_id, detail)
@@ -406,6 +443,7 @@ async def run() -> None:
     except ImportError as exc:
         raise RuntimeError("Install workers/summary_worker/requirements.txt") from exc
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
+    runtime_probe = LocalLlamaRuntime()
     def summary_capabilities() -> dict[str, Any]:
         model_path = os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf")
         manifest_path = os.getenv("LLM_MODEL_MANIFEST", model_path + ".manifest.json")
@@ -445,6 +483,8 @@ async def run() -> None:
             "modelManifestSize": manifest_size,
             "modelValidationReason": validation_reason,
             "llamaRuntimeAvailable": os.path.isfile(llama_binary),
+            "llamaRuntimeState": runtime_probe.state,
+            "llamaResidentEnabled": runtime_probe.enabled,
             "gpuRequired": os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"},
         }
     heartbeat = AsyncHeartbeat("summary-worker", capabilities=summary_capabilities)
@@ -467,6 +507,7 @@ async def run() -> None:
 
     async def consume_summary() -> None:
         while True:
+            await asyncio.to_thread(summary_worker._llm_runtime.release_idle)
             for message in await fetch_available(summary_subscription, nats.errors.TimeoutError, timeout=1):
                 job_id: str | None = None
                 try:
@@ -499,6 +540,7 @@ async def run() -> None:
 
     async def consume_assistant() -> None:
         while True:
+            await asyncio.to_thread(assistant_worker._llm_runtime.release_idle)
             for message in await fetch_available(assistant_subscription, nats.errors.TimeoutError, timeout=1):
                 query_id: str | None = None
                 try:

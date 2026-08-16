@@ -4,7 +4,7 @@ using NAudio.Wave;
 
 namespace WhisperX.Atom.Voice.Host;
 
-internal sealed record SpeechRequest(string Text, byte[]? Wav);
+internal sealed record SpeechRequest(string Text, byte[]? Wav, TaskCompletionSource Completion);
 
 public sealed class SpeechResponder : IDisposable
 {
@@ -38,15 +38,25 @@ public sealed class SpeechResponder : IDisposable
     public event Action<Exception>? Error;
 
     public bool TryEnqueue(string text)
+        => TryEnqueue(text, out _);
+
+    public bool TryEnqueue(string text, out Task completion)
     {
-        if (_disposed || QuietMode || string.IsNullOrWhiteSpace(text)) return false;
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        completion = completed.Task;
+        if (_disposed || QuietMode || string.IsNullOrWhiteSpace(text))
+        {
+            completed.TrySetResult();
+            return false;
+        }
         var key = ResponseKey(text);
         _responses.TryGetValue(key ?? string.Empty, out var wav);
         lock (_gate)
         {
             Volatile.Write(ref _busy, 1);
-            if (_queue.Writer.TryWrite(new SpeechRequest(text, wav))) return true;
+            if (_queue.Writer.TryWrite(new SpeechRequest(text, wav, completed))) return true;
             if (!_queue.Reader.TryPeek(out _)) Volatile.Write(ref _busy, 0);
+            completed.TrySetResult();
             return false;
         }
     }
@@ -69,6 +79,7 @@ public sealed class SpeechResponder : IDisposable
                 finally
                 {
                     Volatile.Write(ref _speaking, 0);
+                    request.Completion.TrySetResult();
                     lock (_gate)
                     {
                         if (!_queue.Reader.TryPeek(out _)) Volatile.Write(ref _busy, 0);

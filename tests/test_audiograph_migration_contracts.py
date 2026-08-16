@@ -110,7 +110,9 @@ def test_desktop_local_first_start_and_profile_migration_are_explicit():
 
     assert "bool localOnly = false" in contracts
     assert "new { title, meetingId, ownerUserId, localOnly }" in pipe
-    assert "localOnly: false" in view_model
+    assert "_services.RecordingCommands.StartAsync(title, ownerUserId)" in view_model
+    command_service = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecordingCommandService.cs")
+    assert "localOnly: false" in command_service
     assert "CreateMeetingAsync" not in view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
     assert 'normalized is "ONLINE" or "SYSTEM_ONLY"' in view_model
     assert 'ErrorMessage = "AUDIO_SYSTEM_AUDIO_DEFERRED"' in view_model
@@ -133,7 +135,7 @@ def test_desktop_start_uses_host_preflight_default_and_background_delivery():
     assert "health.DeviceWatcherReady && health.AudioGraphReady" in view_model
     assert 'health.CaptureEngine, "LEGACY_WASAPI"' in view_model
     start = view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
-    assert "StartAsync(title, null, ownerUserId, localOnly: false)" in start
+    assert "_services.RecordingCommands.StartAsync(title, ownerUserId)" in start
     assert "CreateMeetingAsync" not in start and "CancelMeetingAsync" not in start
 
 

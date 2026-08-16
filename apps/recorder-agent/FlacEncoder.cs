@@ -120,7 +120,7 @@ internal static class FlacEncoder
 
             return await DecodeFullyAsync(path, cancellationToken).ConfigureAwait(false);
         }
-        catch (System.ComponentModel.Win32Exception) { return false; }
+        catch (System.ComponentModel.Win32Exception ex) { throw new InvalidOperationException("ffprobe_not_found", ex); }
         catch (JsonException) { return false; }
     }
 
@@ -153,7 +153,7 @@ internal static class FlacEncoder
             await decoder.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
             return decoder.ExitCode == 0;
         }
-        catch (System.ComponentModel.Win32Exception) { return false; }
+        catch (System.ComponentModel.Win32Exception ex) { throw new InvalidOperationException("ffmpeg_not_found", ex); }
     }
 
     private static AudioSampleType ParseSampleType(string encoding, int bitsPerSample, string? sourceSubFormat)

@@ -704,7 +704,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             }
             if (!_state.TryExecute(command)) return await RespondAsync("Команда недоступна в текущем состоянии", cancellationToken, false);
 
-            _ = TryRecordVoiceEventAsync("VOICE_COMMAND", new { intent = command.Intent.ToString(), text = command.Text, parameter = command.Parameter, traceId });
+            // Persist the command before touching Recorder so the command and
+            // any system response have a deterministic timeline order. Event
+            // persistence is best-effort, but it is no longer fire-and-forget.
+            var commandEventSaved = await TryRecordVoiceEventAsync(
+                "VOICE_COMMAND",
+                new { intent = command.Intent.ToString(), parameter = command.Parameter, traceId });
+            if (!commandEventSaved)
+                _logger?.LogWarning("VOICE_COMMAND event could not be persisted. TraceId={TraceId}", traceId);
             var response = command.Intent switch
             {
                 VoiceIntent.StartRecording => await SendRecorderAsync("START", new { }, cancellationToken, traceId),
@@ -860,27 +867,37 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     {
         var target = returnState ?? (_state.Snapshot.State == VoiceHostState.Confirming ? VoiceHostState.Confirming : VoiceHostState.Listening);
         _state.TryRespond(text, target);
-        var enqueued = _speech.TryEnqueue(text);
+        var responseId = Guid.NewGuid().ToString("N");
+        // Write the opening marker before starting playback. This prevents a
+        // fast TTS response from being heard by the recorder before its
+        // technical interval exists in the event stream.
+        var responseEventSaved = await TryRecordVoiceEventAsync(
+            "SYSTEM_RESPONSE_STARTED",
+            new { responseId, traceId = _lastTraceId });
+        if (!responseEventSaved)
+            _logger?.LogWarning("SYSTEM_RESPONSE_STARTED event could not be persisted. ResponseId={ResponseId}", responseId);
+        var enqueued = _speech.TryEnqueue(text, out var playbackCompleted);
         if (enqueued)
         {
-            _ = TryRecordVoiceEventAsync("SYSTEM_RESPONSE_STARTED", new { text });
-            _ = CompleteResponseAfterPlaybackAsync();
+            _ = CompleteResponseAfterPlaybackAsync(responseId, playbackCompleted);
         }
         else
         {
+            await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { responseId, playbackStarted = false });
             _state.FinishResponse();
             if (_state.Snapshot.State == VoiceHostState.Cooldown) _ = CompleteCooldownAsync();
         }
-        await Task.CompletedTask;
         return new VoiceResponse(text, enqueued, success);
     }
 
-    private async Task CompleteResponseAfterPlaybackAsync()
+    private async Task CompleteResponseAfterPlaybackAsync(string responseId, Task playbackCompleted)
     {
         try
         {
-            while (_speech.IsBusy && !_shutdown.IsCancellationRequested) await Task.Delay(20, _shutdown.Token);
-            _ = TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { });
+            await playbackCompleted.WaitAsync(_shutdown.Token).ConfigureAwait(false);
+            var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { responseId, playbackStarted = true });
+            if (!finishedSaved)
+                _logger?.LogWarning("SYSTEM_RESPONSE_FINISHED event could not be persisted. ResponseId={ResponseId}", responseId);
             _state.FinishResponse();
             DrainAudioQueue();
             if (_state.Snapshot.State == VoiceHostState.Cooldown) await CompleteCooldownAsync();
@@ -968,16 +985,24 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return $"{first.Trim()} {second.Trim()}";
     }
 
-    private async Task TryRecordVoiceEventAsync(string eventType, object payload)
+    private async Task<bool> TryRecordVoiceEventAsync(string eventType, object payload)
     {
         try
         {
+            bool ok;
             if (_desktopBroker is not null)
-                await _desktopBroker.RecordEventAsync(eventType, payload, CancellationToken.None);
+                ok = (await _desktopBroker.RecordEventAsync(eventType, payload, CancellationToken.None)).Ok;
             else
-                await _recorder.SendAsync("VOICE_EVENT", new { eventType, payload }, CancellationToken.None);
+                ok = (await _recorder.SendAsync("VOICE_EVENT", new { eventType, payload }, CancellationToken.None)).Ok;
+            if (!ok) _lastErrorCode = "VOICE_EVENT_PERSIST_FAILED";
+            return ok;
         }
-        catch (Exception ex) { _logger?.LogDebug(ex, "Recorder event could not be persisted: {EventType}", eventType); }
+        catch (Exception ex)
+        {
+            _lastErrorCode = "VOICE_EVENT_PERSIST_FAILED";
+            _logger?.LogDebug(ex, "Recorder event could not be persisted: {EventType}", eventType);
+            return false;
+        }
     }
 
     private static string? ReadString(JsonElement payload, string name) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;

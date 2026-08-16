@@ -16,7 +16,7 @@ ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
 
 def _technical_intervals(connection: psycopg.Connection[Any], meeting_id: str) -> list[tuple[int, int, str]]:
     rows = connection.execute(
-        "SELECT e.event_type,e.media_time_ms FROM recording_events e "
+        "SELECT e.event_type,e.media_time_ms,e.payload FROM recording_events e "
         "JOIN recording_sessions rs ON rs.id=e.session_id "
         "WHERE rs.meeting_id=%s AND e.media_time_ms IS NOT NULL "
         "ORDER BY e.media_time_ms,e.created_at",
@@ -118,7 +118,7 @@ class JobRepository:
         with psycopg.connect(self.conninfo) as connection:
             connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
-    def schedule_retry(self, job_id: str, error: str, error_code: str, max_attempts: int = 3) -> int | None:
+    def schedule_retry(self, job_id: str, error: str, error_code: str, message_id: str | None = None, max_attempts: int = 3) -> int | None:
         """Return the new attempt number when a transient retry was claimed.
 
         The job is made visible to the outbox/NATS retry path only while its
@@ -127,19 +127,22 @@ class JobRepository:
         acknowledged by the terminal-state guard without doing any work.
         """
         with psycopg.connect(self.conninfo) as connection:
-            row = connection.execute(
-                """
-                UPDATE jobs
-                SET status='QUEUED', stage='RETRY_PENDING', progress=0,
-                    attempt=attempt+1, error_message=%s, error_code=%s,
-                    worker_id=NULL, lease_expires_at=NULL,
-                    last_heartbeat=now(), updated_at=now()
-                WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
-                  AND attempt < %s
-                RETURNING attempt
-                """,
-                (error, error_code, job_id, max_attempts),
-            ).fetchone()
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status='QUEUED', stage='RETRY_PENDING', progress=0,
+                        attempt=attempt+1, error_message=%s, error_code=%s,
+                        worker_id=NULL, lease_expires_at=NULL,
+                        last_heartbeat=now(), updated_at=now()
+                    WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
+                      AND attempt < %s
+                    RETURNING attempt
+                    """,
+                    (error, error_code, job_id, max_attempts),
+                ).fetchone()
+                if row is not None and message_id:
+                    connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
             return int(row[0]) if row else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:

@@ -44,7 +44,7 @@ def test_desktop_start_defers_meeting_creation_to_idempotent_background_bind():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     start = view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
     assert "CreateMeetingAsync" not in start
-    assert "StartAsync(title, null, ownerUserId, localOnly: false)" in start
+    assert "_services.RecordingCommands.StartAsync(title, ownerUserId)" in start
 
     host = read("apps/recorder-host/RecorderHostRuntime.cs")
     assert "localOnly).ConfigureAwait(false)" in host

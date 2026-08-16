@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -13,7 +14,7 @@ LOGGER = logging.getLogger("whisperx.summary.llama")
 
 
 class LocalLlamaServer:
-    """Start llama.cpp only while the PostgreSQL GPU lease is held."""
+    """Managed llama.cpp subprocess used under the worker GPU lease."""
 
     def __init__(self) -> None:
         self.model_path = Path(os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf"))
@@ -95,3 +96,99 @@ class LocalLlamaServer:
 
     def __exit__(self, *_: object) -> None:
         self.stop()
+
+
+class LocalLlamaRuntime:
+    """Process-wide resident llama-server with bounded idle unloading.
+
+    Summary and Assistant workers live in the same GPU worker process. They
+    share this runtime, while their PostgreSQL GPU leases still serialize
+    requests. Keeping the process resident avoids reloading Qwen for every
+    block/job and unloading after inactivity leaves the GPU available to ASR.
+    """
+
+    _gate = threading.RLock()
+    _server: LocalLlamaServer | None = None
+    _fingerprint: tuple[str, int, int, str, str, str] | None = None
+    _last_used = 0.0
+
+    def __init__(self, idle_seconds: int | None = None) -> None:
+        self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "900")))
+        # Keep the safe stop-after-job behavior until the deployment enables
+        # cross-worker GPU coordination. The resident path is opt-in so a
+        # standalone summary container cannot starve the ASR worker.
+        self.enabled = os.getenv("LLM_RESIDENT_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+    @staticmethod
+    def _model_fingerprint() -> tuple[str, int, int, str, str, str]:
+        path = Path(os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf"))
+        try:
+            stat = path.stat()
+            return (
+                str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns),
+                os.getenv("LLM_MODEL_ALIAS", "qwen3-8b"),
+                os.getenv("LLM_GPU_LAYERS", "99"),
+                os.getenv("LLM_CONTEXT_SIZE", "16384"),
+            )
+        except OSError:
+            return (
+                str(path), 0, 0,
+                os.getenv("LLM_MODEL_ALIAS", "qwen3-8b"),
+                os.getenv("LLM_GPU_LAYERS", "99"),
+                os.getenv("LLM_CONTEXT_SIZE", "16384"),
+            )
+
+    def ensure_started(self) -> LocalLlamaServer:
+        fingerprint = self._model_fingerprint()
+        runtime = type(self)
+        with runtime._gate:
+            process = runtime._server.process if runtime._server is not None else None
+            if runtime._server is None or process is None or process.poll() is not None or runtime._fingerprint != fingerprint:
+                if runtime._server is not None:
+                    runtime._server.stop()
+                server = LocalLlamaServer()
+                server.start()
+                runtime._server = server
+                runtime._fingerprint = fingerprint
+            runtime._last_used = time.monotonic()
+            return runtime._server
+
+    def touch(self) -> None:
+        runtime = type(self)
+        with runtime._gate:
+            runtime._last_used = time.monotonic()
+
+    def release_after_job(self) -> None:
+        if self.enabled:
+            self.touch()
+        else:
+            self.stop()
+
+    @property
+    def state(self) -> str:
+        runtime = type(self)
+        with runtime._gate:
+            if runtime._server is None:
+                return "STOPPED"
+            process = runtime._server.process
+            if process is None or process.poll() is not None:
+                return "FAILED"
+            return "READY"
+
+    def release_idle(self) -> None:
+        runtime = type(self)
+        with runtime._gate:
+            if runtime._server is not None and runtime._last_used and time.monotonic() - runtime._last_used >= self.idle_seconds:
+                runtime._server.stop()
+                runtime._server = None
+                runtime._fingerprint = None
+                runtime._last_used = 0.0
+
+    def stop(self) -> None:
+        runtime = type(self)
+        with runtime._gate:
+            if runtime._server is not None:
+                runtime._server.stop()
+            runtime._server = None
+            runtime._fingerprint = None
+            runtime._last_used = 0.0

@@ -89,7 +89,7 @@ def is_retryable_error_code(code: str) -> bool:
 
 
 def retry_delay_seconds(attempt: int) -> float:
-    base = {1: 5, 2: 15, 3: 30}.get(attempt, 60)
+    base = {1: 5, 2: 15, 3: 30, 4: 60, 5: 120}.get(attempt, 300)
     return base + (attempt * 0.37)
 
 
@@ -209,18 +209,19 @@ class GpuWorker:
             except Exception as exc:
                 LOGGER.exception("job=%s failed", job_id)
                 failure_code = error_code_for(exc)
-                self._repository.release_message(str(message.get("message_id", "")))
                 if is_retryable_error_code(failure_code):
                     scheduled_attempt = self._repository.schedule_retry(
                         job_id,
                         type(exc).__name__ + ": " + str(exc),
                         failure_code + "_RETRY_PENDING",
+                        message_id=str(message.get("message_id", "")),
                     )
                     if scheduled_attempt is not None:
                         failure_code = failure_code + "_RETRY_PENDING"
                         if self._heartbeat:
                             self._heartbeat.set_state("READY", failure_code)
                         raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
+                self._repository.release_message(str(message.get("message_id", "")))
                 self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), failure_code)
                 if self._heartbeat:
                     self._heartbeat.set_state("READY", failure_code)

@@ -141,7 +141,7 @@ public sealed class GlobalRawEncoderWorker(
             if (File.Exists(outputPart)) File.Delete(outputPart);
             FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
             if (!await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), outputPart, raw, cancellationToken).ConfigureAwait(false))
-                throw new InvalidOperationException("ffprobe_invalid_audio");
+                throw new RawEncoderValidationException("FLAC_VALIDATION_FAILED");
             if (!await spool.OwnsRawEncodingLeaseAsync(raw, _workerId, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("RAW_ENCODER_LEASE_LOST");
             File.Move(outputPart, raw.OutputPath, true);
@@ -153,11 +153,12 @@ public sealed class GlobalRawEncoderWorker(
         {
             try { if (File.Exists(outputPart)) File.Delete(outputPart); } catch (IOException) { }
             var terminalCode = ex is RawEncoderTerminalException terminal ? terminal.Code : null;
-            var code = terminalCode
-                ?? (ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
-                || ex.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
-                ? "LOCAL_ENCODER_UNAVAILABLE"
-                : "ENCODER_FAILED");
+            // A malformed derived FLAC is retryable while the encoder/ffprobe
+            // may still be racing a file flush. Only repeated validation
+            // failures become terminal; the source PCM is always retained.
+            if (ex is RawEncoderValidationException && raw.EncodeAttempts < 3)
+                terminalCode = null;
+            var code = terminalCode ?? ClassifyEncodeFailure(ex);
             if (terminalCode is not null)
             {
                 var terminalClaimed = await spool.SetRawEncodingTerminalFailureAsync(raw, code, _workerId, cancellationToken).ConfigureAwait(false);
@@ -209,6 +210,23 @@ public sealed class GlobalRawEncoderWorker(
             throw new RawEncoderTerminalException("UNSUPPORTED_AUDIO_FORMAT");
     }
 
+    private static string ClassifyEncodeFailure(Exception exception)
+    {
+        if (exception is System.ComponentModel.Win32Exception
+            || exception.Message.Contains("was not found", StringComparison.OrdinalIgnoreCase)
+            || exception.Message.Contains("start_failed", StringComparison.OrdinalIgnoreCase)
+            || exception.Message.Contains("ffmpeg_not_found", StringComparison.OrdinalIgnoreCase)
+            || exception.Message.Contains("ffprobe_not_found", StringComparison.OrdinalIgnoreCase))
+            return "LOCAL_ENCODER_UNAVAILABLE";
+        if (exception is RawEncoderValidationException)
+            return "FLAC_VALIDATION_FAILED";
+        if (exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase))
+            return "FFMPEG_ENCODE_FAILED";
+        if (exception.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase))
+            return "FLAC_VALIDATION_FAILED";
+        return "ENCODER_FAILED";
+    }
+
     private static string ClassifyRuntimeError(Exception ex)
         => ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
             || ex.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
@@ -237,7 +255,9 @@ public sealed class GlobalRawEncoderWorker(
     }
 }
 
-internal sealed class RawEncoderTerminalException(string code) : InvalidOperationException(code)
+internal class RawEncoderTerminalException(string code) : InvalidOperationException(code)
 {
     public string Code { get; } = code;
 }
+
+internal sealed class RawEncoderValidationException(string code) : RawEncoderTerminalException(code);

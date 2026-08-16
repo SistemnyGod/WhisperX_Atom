@@ -11,7 +11,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
-from .llama_subprocess import LocalLlamaServer
+from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
@@ -174,6 +174,7 @@ class AssistantWorker:
         self.repository = AssistantRepository()
         self.lease = PostgresGpuLease(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
+        self._llm_runtime = LocalLlamaRuntime()
 
     async def handle(self, payload: dict[str, Any]) -> None:
         query_id = str(payload["query_id"])
@@ -212,12 +213,11 @@ class AssistantWorker:
                 {"role": "user", "content": user_content},
             ]
             async with self.lease:
-                server = LocalLlamaServer()
-                await asyncio.to_thread(server.start)
+                server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 try:
                     result = await LlamaCppClient(server.base_url, self.model_alias).invoke_json(messages, ASSISTANT_SCHEMA)
                 finally:
-                    await asyncio.to_thread(server.stop)
+                    await asyncio.to_thread(self._llm_runtime.release_after_job)
             await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode)
         except Exception as exc:
             self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())

@@ -93,8 +93,9 @@ def test_start_does_not_replay_configuration_commands_in_capture_critical_path()
     start = view_model.split("public async Task<bool> StartRecordingAsync()", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
     assert "SyncConfigurationAsync" not in start
     assert "await RefreshAsync();" in start
-    assert "var preflight = await _services.Recorder.PreflightAsync();" in start
-    assert "_services.Recorder.StartAsync(title, null, ownerUserId, localOnly: false)" in start
+    assert "var preflight = await recorder.PreflightAsync" in read("apps/desktop/WhisperX.Atom.Desktop/Services/RecordingCommandService.cs")
+    assert "_services.RecordingCommands.StartAsync(title, ownerUserId)" in start
+    assert "_services.Recorder.PreflightAsync();" not in start
 
 
 def test_recovery_has_bounded_backoff_and_skips_cancelled_sessions():

@@ -178,7 +178,7 @@ class ServerFirstContractTests(unittest.TestCase):
         self.assertIn("VisibleStatus", pipe_host)
         self.assertIn("meetingId", recorder)
         self.assertNotIn("CreateMeetingAsync(title", view_model)
-        self.assertIn("StartAsync(title, null, ownerUserId, localOnly: false)", view_model)
+        self.assertIn("_services.RecordingCommands.StartAsync(title, ownerUserId)", view_model)
         self.assertIn("StartProcessingPollingAsync", view_model)
         self.assertIn("GetTranscriptAsync", view_model)
         self.assertIn("response.MeetingId ?? MeetingId", view_model)
