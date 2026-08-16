@@ -156,6 +156,20 @@ public partial class App : Application
         _window.NavigateTo("home");
         _window.StartBackgroundPolling();
         WriteStartupLog("BACKGROUND_POLLING_STARTED", null);
+        if (_services.Settings.Load().VoiceAlwaysListening)
+        {
+            _ = StartVoiceHostAsync(_services);
+        }
+    }
+
+    private static async Task StartVoiceHostAsync(FrontendServices services)
+    {
+        try
+        {
+            if (!await services.VoiceHost.StartAsync().ConfigureAwait(false))
+                WriteStartupLog(services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE", null);
+        }
+        catch (Exception exception) { WriteStartupLog("VOICE_HOST_START_FAILED", exception); }
     }
 
     private void HandleLoggedOut()

@@ -329,7 +329,7 @@ def test_active_recording_uploads_completed_chunks_without_finalizing():
     )[0]
     assert "UploadActiveSessionAsync(" in reconcile
     assert "UploadPendingChunksAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
-    assert "using (var deliveryGate = new SemaphoreSlim(2, 2))" in reconcile
+    assert "new SemaphoreSlim(activeSession is null ? 2 : 1" in reconcile
     assert "EnsureActiveSessionBoundAsync(activeSession" in reconcile
     assert "UploadPendingEventsAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
 

@@ -219,6 +219,8 @@ public sealed class FrontendServices
         AgentBootstrap = new AgentBootstrapCoordinator(this);
         JobTracker = new ProcessingJobTracker(backend);
         RecorderService = new RecorderServiceController(recorder);
+        RecordingCommands = new RecordingCommandService(recorder);
+        VoiceHost = new VoiceHostController(this);
         Diagnostics = new ClientRuntimeDiagnostics(this);
     }
 
@@ -229,6 +231,8 @@ public sealed class FrontendServices
     public AgentBootstrapCoordinator AgentBootstrap { get; }
     public ProcessingJobTracker JobTracker { get; }
     public RecorderServiceController RecorderService { get; }
+    public RecordingCommandService RecordingCommands { get; }
+    public VoiceHostController VoiceHost { get; }
     public ClientRuntimeDiagnostics Diagnostics { get; }
 
     public async Task<ProductRuntimeSnapshot> GetRuntimeSnapshotAsync(CancellationToken cancellationToken = default)

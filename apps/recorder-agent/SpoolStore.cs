@@ -78,6 +78,7 @@ public sealed record RawChunkBacklog(
     int ReadyForUpload = 0,
     int Total = 0,
     int Completed = 0,
+    int TerminalFailed = 0,
     int FinalizerQueueDepth = 0,
     int FinalizerMaximumDepth = 0,
     int FinalizerCapacity = 0);
@@ -117,6 +118,12 @@ public sealed record RecordingSessionInfo(
     string? ArchiveErrorDetail = null,
     int ArchiveRetryCount = 0,
     DateTimeOffset? ArchiveNextRetryAtUtc = null);
+public sealed record LocalDurabilityOutcome(
+    string State,
+    bool HasDurableAudio,
+    bool HasRecoverablePart,
+    int DurableChunkCount,
+    string? ErrorCode = null);
 public sealed record RecordingArchiveChunk(string TrackId, string TrackType, int Sequence, string LocalPath, long StartSample, long SampleCount, int SampleRate, int Channels, long SizeBytes, string Sha256);
 public sealed record ChunkDeliveryMetrics(int Total, int Ready, int Uploading, int Confirmed, int Failed, long BytesPending, double? OldestPendingAgeSeconds);
 public sealed record RetentionCandidate(string SessionId, string Category, IReadOnlyList<string> Paths, long Bytes, DateTimeOffset PurgeAfterUtc);
@@ -498,6 +505,172 @@ public sealed class SpoolStore
             archiveRetryAt);
     }
 
+    /// <summary>
+    /// Determines whether a session crossed the local durability boundary.
+    /// This deliberately checks the bytes on disk instead of trusting the
+    /// session state: a failed START/STOP must never be reported as
+    /// LOCAL_READY merely because a SQLite row was created.
+    /// </summary>
+    public async Task<LocalDurabilityOutcome> GetLocalDurabilityAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT r.raw_path,r.output_path,r.status,r.start_sample,r.sample_count,r.sample_rate,r.channels,r.bits_per_sample,c.local_path,c.status,c.size_bytes,c.sha256 FROM recording_raw_chunks r LEFT JOIN recording_chunks c ON c.id=r.id WHERE r.session_id=$session AND r.status<>'DISCARDED' ORDER BY r.sequence";
+        command.Parameters.AddWithValue("$session", sessionId);
+        var durable = 0;
+        var recoverable = false;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var rawPath = reader.GetString(0);
+            var outputPath = reader.GetString(1);
+            var status = reader.GetString(2);
+            var startSample = reader.GetInt64(3);
+            var sampleCount = reader.GetInt64(4);
+            var sampleRate = reader.GetInt32(5);
+            var channels = Math.Max(1, reader.GetInt32(6));
+            var bits = Math.Max(8, reader.GetInt32(7));
+            var encodedPath = reader.IsDBNull(8) ? null : reader.GetString(8);
+            var encodedStatus = reader.IsDBNull(9) ? null : reader.GetString(9);
+            var encodedSize = reader.IsDBNull(10) ? (long?)null : reader.GetInt64(10);
+            var encodedSha = reader.IsDBNull(11) ? null : reader.GetString(11);
+            var blockAlign = Math.Max(1, channels * (bits / 8));
+            var expectedBytes = sampleCount > 0 ? sampleCount * blockAlign : 0;
+
+            if (File.Exists(rawPath))
+            {
+                var size = new FileInfo(rawPath).Length;
+                // A non-empty, block-aligned PCM file is the durable capture
+                // boundary.  The sample-rate value is read intentionally here
+                // so malformed legacy rows do not qualify as audio.
+                if (startSample >= 0 && sampleCount > 0 && sampleRate > 0 && size > 0 && size % blockAlign == 0 && size == expectedBytes)
+                {
+                    durable++;
+                    continue;
+                }
+                // A crash can happen after the stream was closed/renamed but
+                // before SQLite was promoted from WRITING.  The raw bytes are
+                // still recoverable by RawChunkRecovery even though the old
+                // row has sampleCount=0 or an incomplete timeline.
+                if (string.Equals(status, "WRITING", StringComparison.OrdinalIgnoreCase) && size > 0)
+                    recoverable = true;
+            }
+
+            var partPath = rawPath.EndsWith(".part", StringComparison.OrdinalIgnoreCase) ? rawPath : rawPath + ".part";
+            if (File.Exists(partPath) && new FileInfo(partPath).Length > 0)
+                recoverable = true;
+
+            if (string.Equals(status, "READY", StringComparison.OrdinalIgnoreCase)
+                && IsUsableFlac(
+                    string.IsNullOrWhiteSpace(encodedPath) ? outputPath : encodedPath,
+                    sampleRate,
+                    channels,
+                    bits,
+                    sampleCount,
+                    encodedStatus,
+                    encodedSize,
+                    encodedSha))
+                durable++;
+        }
+
+        if (recoverable)
+            return new LocalDurabilityOutcome("RECOVERY_PENDING", false, true, durable, "RAW_RECOVERY_PENDING");
+        if (durable > 0)
+            return new LocalDurabilityOutcome("LOCAL_READY", true, false, durable);
+        return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, "NO_AUDIO_CAPTURED");
+    }
+
+    private static bool IsUsableFlac(
+        string path,
+        int expectedSampleRate,
+        int expectedChannels,
+        int expectedBits,
+        long expectedSamples,
+        string? encodedStatus,
+        long? encodedSize,
+        string? encodedSha)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length < 64) return false;
+            if (encodedStatus is not null
+                && !string.Equals(encodedStatus, "READY", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(encodedStatus, "CONFIRMED", StringComparison.OrdinalIgnoreCase)) return false;
+            if (encodedSize is long expectedSize && expectedSize != info.Length) return false;
+            if (!string.IsNullOrWhiteSpace(encodedSha)
+                && !string.Equals(ComputeSha256(path), encodedSha, StringComparison.OrdinalIgnoreCase)) return false;
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan);
+            Span<byte> signature = stackalloc byte[4];
+            if (!ReadExactly(stream, signature)
+                || signature[0] != (byte)'f'
+                || signature[1] != (byte)'L'
+                || signature[2] != (byte)'a'
+                || signature[3] != (byte)'C') return false;
+
+            var foundStreamInfo = false;
+            var actualRate = 0;
+            var actualChannels = 0;
+            var actualBits = 0;
+            long actualSamples = 0;
+            var lastBlock = false;
+            Span<byte> lengthBytes = stackalloc byte[3];
+            Span<byte> streamInfo = stackalloc byte[34];
+            while (!lastBlock)
+            {
+                var blockHeader = stream.ReadByte();
+                if (blockHeader < 0) return false;
+                if (!ReadExactly(stream, lengthBytes)) return false;
+                var length = (lengthBytes[0] << 16) | (lengthBytes[1] << 8) | lengthBytes[2];
+                if (length > stream.Length - stream.Position) return false;
+                lastBlock = (blockHeader & 0x80) != 0;
+                var blockType = blockHeader & 0x7f;
+                if (blockType == 0)
+                {
+                    if (foundStreamInfo || length != 34) return false;
+                    if (!ReadExactly(stream, streamInfo)) return false;
+                    ulong packed = 0;
+                    for (var index = 10; index < 18; index++) packed = (packed << 8) | streamInfo[index];
+                    actualRate = (int)(packed >> 44);
+                    actualChannels = (int)((packed >> 41) & 0x7) + 1;
+                    actualBits = (int)((packed >> 36) & 0x1f) + 1;
+                    actualSamples = (long)(packed & 0x0f_ff_ff_ff_ffUL);
+                    foundStreamInfo = true;
+                }
+                else
+                {
+                    stream.Seek(length, SeekOrigin.Current);
+                }
+            }
+
+            if (!foundStreamInfo || stream.Position >= stream.Length
+                || actualRate != expectedSampleRate
+                || actualChannels != expectedChannels
+                || actualBits != expectedBits
+                || actualSamples <= 0
+                || expectedSamples <= 0) return false;
+            var tolerance = Math.Max(1, expectedSampleRate / 100);
+            return Math.Abs(actualSamples - expectedSamples) <= tolerance;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (CryptographicException) { return false; }
+    }
+
+    private static bool ReadExactly(Stream stream, Span<byte> buffer)
+    {
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            var read = stream.Read(buffer[offset..]);
+            if (read <= 0) return false;
+            offset += read;
+        }
+        return true;
+    }
+
     public async Task SetServerReceiptAsync(string sessionId, Guid? meetingId, Guid? mediaAssetId, Guid? processingJobId, string? traceId, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
@@ -866,6 +1039,20 @@ public sealed class SpoolStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<bool> SetRawEncodingTerminalFailureAsync(RawRecordingChunk chunk, string errorCode, string? workerId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_raw_chunks SET status='ENCODE_TERMINAL_FAILED',next_encode_attempt_at=NULL,last_encode_error_code=$code,error=$error,encoding_worker_id=NULL,encoding_started_at=NULL,encoding_lease_expires_at=NULL,updated_at=$updated WHERE id=$id AND status='ENCODING' AND ($worker IS NULL OR encoding_worker_id=$worker)";
+        command.Parameters.AddWithValue("$code", errorCode);
+        command.Parameters.AddWithValue("$error", errorCode);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", chunk.Id);
+        command.Parameters.AddWithValue("$worker", (object?)workerId ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
     public async Task CompleteRawEncodingAsync(RawRecordingChunk raw, string flacPath, string workerId, CancellationToken cancellationToken = default)
     {
         var size = new FileInfo(flacPath).Length;
@@ -917,7 +1104,7 @@ public sealed class SpoolStore
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(string? sessionId = null, CancellationToken cancellationToken = default)
+    public async Task<RawChunkBacklog> GetRawChunkBacklogAsync(string? sessionId = null, CancellationToken cancellationToken = default, bool includeFilesystemScan = false)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -938,12 +1125,15 @@ public sealed class SpoolStore
         var rawReady = counts.GetValueOrDefault("RAW_READY").Count;
         var encoding = counts.GetValueOrDefault("ENCODING").Count;
         var failed = counts.GetValueOrDefault("ENCODE_FAILED").Count;
-        var diskFallback = string.IsNullOrWhiteSpace(sessionId)
+        var terminalFailed = counts.GetValueOrDefault("ENCODE_TERMINAL_FAILED").Count;
+        // Full orphan discovery belongs to startup/Doctor recovery, not to
+        // the frequent health/reconciliation path.
+        var diskFallback = includeFilesystemScan && string.IsNullOrWhiteSpace(sessionId)
             ? await GetUnregisteredClosedRawBacklogAsync(cancellationToken)
             : (Count: 0, Bytes: 0L, Oldest: (DateTimeOffset?)null);
         writing += diskFallback.Count;
         if (diskFallback.Oldest is not null && (oldest is null || diskFallback.Oldest < oldest)) oldest = diskFallback.Oldest;
-        var pending = writing + rawReady + encoding + failed;
+        var pending = writing + rawReady + encoding + failed + terminalFailed;
         double? ageMs = oldest is null ? null : Math.Max(0, (DateTimeOffset.UtcNow - oldest.Value).TotalMilliseconds);
         var health = pending > 10 || ageMs is > 120_000d ? "CRITICAL" : pending > 3 ? "LAGGING" : "HEALTHY";
         await using var readyCommand = connection.CreateCommand();
@@ -976,6 +1166,7 @@ public sealed class SpoolStore
             readyForUpload,
             total,
             completed,
+            terminalFailed,
             0,
             0,
             configuredCapacity);
@@ -1322,7 +1513,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-         command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (state IN ('FINALIZING') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER','DELIVERY_ERROR','DELIVERY_FAILED'))";
+        command.CommandText = "SELECT COUNT(*) FROM recording_sessions WHERE state NOT IN ('CANCELLED','FINALIZED') AND (state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL)) AND (state IN ('FINALIZING') OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','RECOVERY_PENDING','LOCAL_FAILED') OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER','DELIVERY_ERROR','DELIVERY_FAILED'))";
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -1340,7 +1531,7 @@ public sealed class SpoolStore
               AND (delivery_state NOT IN ('DELIVERY_ERROR','DELIVERY_FAILED') OR (last_error_retryable=1 AND next_retry_at IS NOT NULL))
               AND (
                     state IN ('FINALIZING')
-                    OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','LOCAL_FAILED')
+                    OR local_finalize_state IN ('PENDING','FINALIZING_LOCAL','RECOVERY_PENDING','LOCAL_FAILED')
                     OR delivery_state IN ('BINDING','UPLOADING','RECONCILING','FINALIZING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','PENDING_SERVER','DELIVERY_ERROR','DELIVERY_FAILED')
                   )
             """;

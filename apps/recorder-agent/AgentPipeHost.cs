@@ -15,6 +15,7 @@ public sealed class AgentPipeHost(
     RecordingDeliveryCoordinator delivery,
     DeviceHealthMonitor deviceHealth,
     RawFinalizerQueueMetrics rawFinalizerMetrics,
+    RawEncoderRuntimeState encoderRuntimeState,
     ILogger<AgentPipeHost> logger) : BackgroundService
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -196,8 +197,19 @@ public sealed class AgentPipeHost(
                     // a server meeting and without a cached owner. The server
                     // resolves the linked user when the spool is later bound.
                     var title = ReadString(request.Payload, "title");
-                    var sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly);
-                    var boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);
+                    string sessionId;
+                    try { sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly); }
+                    catch (Exception exception) { return Error(MapStartError(exception)); }
+                    Guid? boundMeetingId = null;
+                    try { boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken); }
+                    catch (Exception exception)
+                    {
+                        // Capture has already crossed its local start
+                        // boundary.  A transient SQLite read failure must not
+                        // turn a live recording into a misleading
+                        // "Recorder Agent did not answer" error.
+                        logger.LogWarning(exception, "Recording started but meeting binding could not be read immediately. Session={SessionId}", sessionId);
+                    }
                     return new AgentIpcResponse(true, state.State.ToString(), sessionId, null, null, boundMeetingId);
                 case "PAUSE":
                     await recorder.PauseAsync(cancellationToken);
@@ -215,13 +227,17 @@ public sealed class AgentPipeHost(
                     var eventType = ReadString(request.Payload, "eventType") ?? "VOICE_COMMAND";
                     return await RecordEventAsync(eventType, request.Payload, cancellationToken);
                 case "STOP":
-                    var localSessionId = recorder.SessionId;
-                    var stoppedMeetingId = string.IsNullOrWhiteSpace(localSessionId)
-                        ? null
-                        : await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
-                    var stop = await recorder.RequestStopAsync(cancellationToken);
-                    if (!string.IsNullOrWhiteSpace(stop.SessionId)) TrackFinalization(stop, stoppedMeetingId);
-                    return new AgentIpcResponse(true, RecorderState.Finalizing.ToString(), localSessionId, "server_finalize_pending", null, stoppedMeetingId);
+                    try
+                    {
+                        var localSessionId = recorder.SessionId;
+                        var stoppedMeetingId = string.IsNullOrWhiteSpace(localSessionId)
+                            ? null
+                            : await spool.GetMeetingIdAsync(localSessionId, cancellationToken);
+                        var stop = await recorder.RequestStopAsync(cancellationToken);
+                        if (!string.IsNullOrWhiteSpace(stop.SessionId)) TrackFinalization(stop, stoppedMeetingId);
+                        return new AgentIpcResponse(true, RecorderState.Finalizing.ToString(), localSessionId, "server_finalize_pending", null, stoppedMeetingId);
+                    }
+                    catch (Exception exception) { return Error(MapStopError(exception)); }
                 default:
                     return Error("unsupported_command");
             }
@@ -303,8 +319,28 @@ public sealed class AgentPipeHost(
         catch (Exception ex)
         {
             logger.LogError(ex, "Recording finalization failed after local stop. Session={SessionId}, Meeting={MeetingId}", stop.SessionId, meetingId);
-            var code = stage == "LOCAL_FINALIZATION" ? "LOCAL_ENCODING_FAILED" : "LOCAL_ARCHIVE_FAILED";
-            await spool.SetFinalizationStateAsync(stop.SessionId!, localFinalizeState: "LOCAL_FAILED", deliveryState: "NOT_REQUESTED", errorCode: code, errorDetail: ex.Message, retryCount: 0, clearNextRetry: true, cancellationToken: CancellationToken.None);
+            var durability = await spool.GetLocalDurabilityAsync(stop.SessionId!, CancellationToken.None).ConfigureAwait(false);
+            var code = durability.State switch
+            {
+                "LOCAL_READY" => stage == "LOCAL_FINALIZATION" ? "RAW_DURABILITY_FAILED" : "LOCAL_ARCHIVE_FAILED",
+                "RECOVERY_PENDING" => "RAW_RECOVERY_PENDING",
+                _ => stage == "LOCAL_FINALIZATION" ? "RAW_DURABILITY_FAILED" : "NO_AUDIO_CAPTURED"
+            };
+            var detail = durability.State == "RECOVERY_PENDING"
+                ? "A non-empty PCM part remains and will be recovered on the next startup/reconciliation pass."
+                : ex.Message;
+            await spool.SetSessionStateAsync(stop.SessionId!, durability.State == "LOCAL_FAILED" ? "FAILED" : "FINALIZING", CancellationToken.None).ConfigureAwait(false);
+            await spool.SetFinalizationStateAsync(
+                stop.SessionId!,
+                localFinalizeState: durability.State,
+                deliveryState: durability.State == "LOCAL_FAILED" ? "NOT_REQUESTED" : "PENDING_SERVER",
+                errorCode: code,
+                errorDetail: detail,
+                retryCount: 0,
+                nextRetryAtUtc: durability.State == "RECOVERY_PENDING" ? DateTimeOffset.UtcNow.AddSeconds(5) : null,
+                clearNextRetry: durability.State != "RECOVERY_PENDING",
+                preserveError: false,
+                cancellationToken: CancellationToken.None);
             _finalizationErrors[stop.SessionId!] = code;
         }
     }
@@ -338,6 +374,7 @@ public sealed class AgentPipeHost(
         var rawBacklog = new RawChunkBacklog(0, 0, 0, 0, 0);
         try { rawBacklog = await spool.GetRawChunkBacklogAsync(cancellationToken: cancellationToken); }
         catch (Exception ex) { logger.LogDebug(ex, "Raw chunk backlog is not available while reporting health."); }
+        var encoder = encoderRuntimeState.Snapshot();
         var visible = VisibleStatus();
         RecordingSessionStatus? sessionStatus = null;
         if (!string.IsNullOrWhiteSpace(visible.SessionId))
@@ -364,7 +401,14 @@ public sealed class AgentPipeHost(
             recorder.GetCaptureReadiness(storage.RecordingProfile).Microphone,
             recorder.GetCaptureReadiness(storage.RecordingProfile).SystemAudio,
             AudioDeviceProbe.State(recorder.LastMicrophoneProbe),
-            AudioDeviceProbe.State(recorder.LastSystemAudioProbe)), null, recorder.CurrentMediaTimeMs,
+            AudioDeviceProbe.State(recorder.LastSystemAudioProbe),
+            EncoderState: encoder.State,
+            RawTerminalFailedCount: rawBacklog.TerminalFailed,
+            EncoderLastHeartbeatAtUtc: encoder.LastHeartbeatAtUtc,
+            EncoderCurrentChunkId: encoder.CurrentChunkId,
+            EncoderLastSuccessAtUtc: encoder.LastSuccessAtUtc,
+            EncoderLastErrorCode: encoder.LastErrorCode,
+            EncoderQueueDepth: encoder.QueueDepth), null, recorder.CurrentMediaTimeMs,
             AgentIpcProtocol.Version, null, sessionStatus);
     }
 
@@ -374,16 +418,21 @@ public sealed class AgentPipeHost(
         var watermark = StorageRetentionPolicy.FromEnvironment().Evaluate(health.FreeBytes, health.TotalBytes);
         var warnings = new List<string>();
         var errors = new List<string>();
-        var ffmpeg = true;
+        var ffmpeg = File.Exists(RecorderToolPaths.Ffmpeg());
+        var ffprobe = File.Exists(RecorderToolPaths.Ffprobe());
         var archive = true;
         var spoolReady = true;
         try { recorder.ValidatePreflight(); }
         catch (Exception ex)
         {
-            ffmpeg = !ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase);
+            // ValidatePreflight covers storage and device-independent local
+            // prerequisites. FFmpeg availability is reported separately and
+            // is intentionally only a warning: raw PCM capture can start
+            // while the singleton encoder waits for the tools to return.
             archive = !ex.Message.Contains("archive", StringComparison.OrdinalIgnoreCase);
             errors.Add(ex.Message);
         }
+        if (!ffmpeg || !ffprobe) warnings.Add("LOCAL_ENCODER_UNAVAILABLE");
         try { _ = await spool.PendingUploadSessionCountAsync(cancellationToken); }
         catch (Exception ex) { spoolReady = false; errors.Add("spool_unavailable"); logger.LogDebug(ex, "Recorder spool preflight failed."); }
         if (!health.Microphone && !health.SystemAudio) errors.Add("no_audio_source_available");
@@ -401,10 +450,14 @@ public sealed class AgentPipeHost(
             "ONLINE" => captureReadiness.Microphone && captureReadiness.SystemAudio,
             _ => captureReadiness.Microphone
         };
-        var ready = requiredSourceReady && ffmpeg && archive && spoolReady && watermark.AllowsRecording;
+        var ready = requiredSourceReady && archive && spoolReady && watermark.AllowsRecording;
         return new AgentIpcResponse(true, state.State.ToString(), recorder.SessionId, null, null, null, recorder.CurrentMediaTimeMs,
-            AgentIpcProtocol.Version, new AgentPreflightResult(ready, captureReadiness.Microphone, captureReadiness.SystemAudio, ffmpeg, spoolReady, archive,
-                health.FreeBytes, minimumBytes, api.ServerConnectionState, warnings, errors, watermark.State.ToString(), watermark.FreePercent, watermark.Reason));
+            AgentIpcProtocol.Version, new AgentPreflightResult(ready, captureReadiness.Microphone, captureReadiness.SystemAudio, ffmpeg && ffprobe, spoolReady, archive,
+                health.FreeBytes, minimumBytes, api.ServerConnectionState, warnings, errors, watermark.State.ToString(), watermark.FreePercent, watermark.Reason,
+                CaptureReady: ready,
+                EncodingReady: ffmpeg && ffprobe,
+                DeliveryReady: api.IsConfigured && string.Equals(api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase),
+                Ffprobe: ffprobe));
     }
 
     private async Task<AgentIpcResponse> SessionStatusAsync(string sessionId, CancellationToken cancellationToken)
@@ -435,22 +488,18 @@ public sealed class AgentPipeHost(
             {
                 "FINALIZING_LOCAL" => "FINALIZING_LOCAL",
                 "LOCAL_READY" => "LOCAL_READY",
+                "RECOVERY_PENDING" => "RECOVERY_PENDING",
                 "LOCAL_FAILED" => "LOCAL_FAILED",
                 _ => info.State
             };
-        var delivery = info.DeliveryState switch
-        {
-            "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" && info.MeetingId is null => "NOT_REQUESTED",
-            "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" && !api.IsConfigured => "WAITING_FOR_API",
-            "NOT_STARTED" when info.LocalFinalizeState == "LOCAL_READY" => "BINDING",
-            "PENDING_SERVER" => "PENDING_SERVER",
-            "CONFIRMED" => "COMPLETED",
-            _ => info.DeliveryState
-        };
-        if (string.IsNullOrWhiteSpace(delivery)) delivery = serverSessionId is null ? (info.MeetingId is null ? "NOT_REQUESTED" : api.IsConfigured ? "BINDING" : "WAITING_FOR_API") : counts.Pending > 0 ? "SYNCING" : "WAITING_SERVER";
+        // DeliveryState is persisted truth. Do not infer CONFIRMED from a
+        // successful request: server media assembly may still be pending.
+        var delivery = string.IsNullOrWhiteSpace(info.DeliveryState) ? "NOT_STARTED" : info.DeliveryState;
         var errorCode = _finalizationErrors.TryGetValue(sessionId, out var finalizationError) ? finalizationError : info.ErrorCode;
         var error = errorCode is null ? null : SafeErrorText(errorCode);
-        var encodingState = rawBacklog.Pending > 0
+        var encodingState = rawBacklog.TerminalFailed > 0
+            ? "TERMINAL_FAILED"
+            : rawBacklog.Pending > 0
             ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
         var archiveState = info.LocalFinalizeState == "LOCAL_FAILED"
@@ -469,21 +518,27 @@ public sealed class AgentPipeHost(
             rawBacklog.OldestPendingAgeMs is null ? null : rawBacklog.OldestPendingAgeMs.Value / 1000d,
             rawBacklog.Health, rawBacklog.FinalizerQueueDepth, rawBacklog.FinalizerMaximumDepth, rawBacklog.FinalizerCapacity,
             archiveState == "FAILED" ? errorCode : null,
-            archiveState == "FAILED" ? error : null);
+            archiveState == "FAILED" ? error : null,
+            RawTerminalFailedCount: rawBacklog.TerminalFailed);
     }
 
-    private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED";
+    private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED" or "RAW_RECOVERY_PENDING" or "LOCAL_ENCODER_UNAVAILABLE";
 
     private static string SafeErrorText(string code) => code switch
     {
         "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте устройство; сохранённые данные останутся доступны для восстановления.",
         "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Запись остановлена, исходные данные сохранены насколько это возможно.",
+        "RAW_DURABILITY_FAILED" => "Не удалось подтвердить сохранение исходного PCM. Запись не считается сохранённой; проверьте локальное хранилище.",
         "ENCODER_FAILED" => "Не удалось закодировать аудиочанк. Запись остановлена, локальные данные сохранены для восстановления.",
         "LOCAL_ENCODING_FAILED" or "LOCAL_ARCHIVE_FAILED" => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
         "LOCAL_CHUNK_MISSING" or "LOCAL_CHUNK_INVALID" => "Локальные аудиочанки неполные или повреждены. Исходные файлы сохранены для диагностики.",
         "SERVER_UNAVAILABLE" or "CHUNK_UPLOAD_FAILED" => "Запись сохранена локально. Сервер пока не подтвердил получение. Повторная отправка выполняется автоматически.",
         "SERVER_FINALIZE_REJECTED" => "Запись сохранена локально. Сервер не подтвердил завершение, повторная отправка выполняется автоматически.",
         "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" => "Серверу не хватает частей записи. Выполняется повторная отправка.",
+        "RAW_RECOVERY_PENDING" => "Локальный PCM-файл не закрыт. Agent восстановит его автоматически.",
+        "RAW_DURABILITY_FAILED" or "RAW_FINALIZER_BACKLOG_EXCEEDED" => "Не удалось подтвердить закрытие локального PCM. Исходные данные оставлены для recovery.",
+        "NO_AUDIO_CAPTURED" or "AUDIO_CAPTURE_START_FAILED" => "Не удалось подтвердить сохранённый аудиопоток. Запись не считается сохранённой.",
+        "REQUIRES_MANUAL_REPAIR" or "RAW_SOURCE_MISSING" or "RAW_SOURCE_EMPTY" or "RAW_TIMELINE_INVALID" or "RAW_CHECKSUM_MISMATCH" or "UNSUPPORTED_AUDIO_FORMAT" => "Исходный PCM повреждён или отсутствует. Требуется ручное восстановление.",
         "recording_timeline_inconsistent" => "Сервер отклонил временную шкалу записи. Исходные части сохранены для диагностики.",
         "chunk_checksum_mismatch" => "Сервер отклонил повреждённую часть записи. Исходные файлы сохранены для диагностики.",
         "AGENT_AUTH_REJECTED" => "Сервер отклонил авторизацию Agent. Переподключите Agent в настройках.",
@@ -522,19 +577,42 @@ public sealed class AgentPipeHost(
 
     private static AgentIpcResponse Error(string error) => new(false, RecorderState.Idle.ToString(), null, error, null);
 
-    private static string MapError(Exception exception) => exception switch
+    private static string MapError(Exception exception)
     {
-        InvalidOperationException when exception.Message.Contains("Cannot pause", StringComparison.OrdinalIgnoreCase) => "recording_cannot_pause",
-        InvalidOperationException when exception.Message.Contains("Cannot resume", StringComparison.OrdinalIgnoreCase) => "recording_cannot_resume",
-        InvalidOperationException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
-        InvalidOperationException when exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase) => "recording_already_active",
-        FileNotFoundException when exception.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) => "ffmpeg_unavailable",
-        IOException when exception.Message.Contains("AUDIO_CALLBACK_TIMEOUT", StringComparison.OrdinalIgnoreCase) => "AUDIO_CALLBACK_TIMEOUT",
-        IOException when exception.Message.Contains("storage", StringComparison.OrdinalIgnoreCase) => "recording_storage_unavailable",
-        UnauthorizedAccessException => "recording_archive_access_denied",
-        FileNotFoundException or DirectoryNotFoundException or PathTooLongException => "recording_archive_path_unavailable",
-        _ => "recorder_command_failed"
-    };
+        var message = exception.ToString();
+        foreach (var code in new[]
+        {
+            "AUDIO_CAPTURE_BUSY", "AUDIO_CAPTURE_START_FAILED", "AUDIO_CALLBACK_TIMEOUT",
+            "AUDIO_SOURCE_FAILED", "AUDIO_DEVICE_UNAVAILABLE", "AUDIO_DEVICE_NOT_FOUND",
+            "AUDIO_DEVICE_ACCESS_DENIED", "AUDIO_INPUT_NODE_CREATE_FAILED",
+            "AUDIO_GRAPH_CREATE_FAILED", "AUDIO_PIPELINE_OVERRUN", "AUDIO_BUFFER_FORMAT_MISMATCH",
+            "RAW_FINALIZER_BACKLOG_EXCEEDED", "RAW_DURABILITY_FAILED", "RAW_RECOVERY_PENDING"
+        })
+        {
+            if (message.Contains(code, StringComparison.OrdinalIgnoreCase)) return code;
+        }
+        if (message.Contains("no_audio_source_available", StringComparison.OrdinalIgnoreCase)) return "AUDIO_CAPTURE_START_FAILED";
+        if (exception is InvalidOperationException && exception.Message.Contains("Cannot pause", StringComparison.OrdinalIgnoreCase)) return "recording_cannot_pause";
+        if (exception is InvalidOperationException && exception.Message.Contains("Cannot resume", StringComparison.OrdinalIgnoreCase)) return "recording_cannot_resume";
+        if (exception is InvalidOperationException && exception.Message.Contains("already", StringComparison.OrdinalIgnoreCase)) return "recording_already_active";
+        if (message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)) return "LOCAL_ENCODER_UNAVAILABLE";
+        if (message.Contains("storage", StringComparison.OrdinalIgnoreCase)) return "recording_storage_unavailable";
+        if (exception is UnauthorizedAccessException) return "recording_archive_access_denied";
+        if (exception is FileNotFoundException or DirectoryNotFoundException or PathTooLongException) return "recording_archive_path_unavailable";
+        return "recorder_command_failed";
+    }
+
+    private static string MapStartError(Exception exception)
+    {
+        var mapped = MapError(exception);
+        return mapped == "recorder_command_failed" ? "AUDIO_CAPTURE_START_FAILED" : mapped;
+    }
+
+    private static string MapStopError(Exception exception)
+    {
+        var mapped = MapError(exception);
+        return mapped == "recorder_command_failed" ? "RAW_DURABILITY_FAILED" : mapped;
+    }
 
     private static Guid? ReadGuid(JsonElement payload, string name) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) &&

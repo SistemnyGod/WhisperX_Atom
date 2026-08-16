@@ -37,6 +37,7 @@ public sealed class RawEncoderWakeSignal
 public sealed class GlobalRawEncoderWorker(
     SpoolStore spool,
     RawEncoderWakeSignal wake,
+    RawEncoderRuntimeState runtimeState,
     ILogger<GlobalRawEncoderWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
@@ -47,18 +48,30 @@ public sealed class GlobalRawEncoderWorker(
     {
         try
         {
+            runtimeState.Mark("STARTING");
             await spool.WaitUntilInitializedAsync(stoppingToken).ConfigureAwait(false);
+            runtimeState.Mark("READY");
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
                     if (!RecorderRuntimeActivity.IsActive)
                     {
+                        runtimeState.Mark("STOPPED");
                         await Task.Delay(PollInterval, stoppingToken).ConfigureAwait(false);
                         continue;
                     }
 
                     await spool.RecoverExpiredRawEncodingLeasesAsync(stoppingToken).ConfigureAwait(false);
+                    var backlog = await spool.GetRawChunkBacklogAsync(cancellationToken: stoppingToken).ConfigureAwait(false);
+                    if (backlog.TerminalFailed > 0 && backlog.Pending == backlog.TerminalFailed)
+                    {
+                        runtimeState.Mark("DEGRADED", errorCode: "REQUIRES_MANUAL_REPAIR", queueDepth: backlog.Pending);
+                    }
+                    else
+                    {
+                        runtimeState.Mark("READY", queueDepth: backlog.Pending);
+                    }
                     var raw = await spool.ClaimNextRawChunkForEncodingAsync(
                         sessionId: null,
                         workerId: _workerId,
@@ -66,6 +79,7 @@ public sealed class GlobalRawEncoderWorker(
                         cancellationToken: stoppingToken).ConfigureAwait(false);
                     if (raw is not null)
                     {
+                        runtimeState.Mark("BUSY", raw.Id, queueDepth: Math.Max(0, backlog.Pending - 1));
                         await EncodeOneAsync(raw, stoppingToken).ConfigureAwait(false);
                         continue;
                     }
@@ -89,6 +103,7 @@ public sealed class GlobalRawEncoderWorker(
                     // encoder must not permanently kill the singleton worker.
                     // The raw row remains durable and will be claimed again.
                     logger.LogWarning(ex, "Global raw encoder iteration failed; retrying.");
+                    runtimeState.Mark("DEGRADED", errorCode: ClassifyRuntimeError(ex));
                     try { await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 }
@@ -98,6 +113,11 @@ public sealed class GlobalRawEncoderWorker(
         catch (Exception ex)
         {
             logger.LogError(ex, "Global raw encoder stopped unexpectedly. WorkerId={WorkerId}", _workerId);
+            runtimeState.Mark("FAILED", errorCode: ClassifyRuntimeError(ex));
+        }
+        finally
+        {
+            runtimeState.Mark("STOPPED");
         }
     }
 
@@ -112,8 +132,11 @@ public sealed class GlobalRawEncoderWorker(
             if (File.Exists(raw.OutputPath) && await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), raw.OutputPath, raw, cancellationToken).ConfigureAwait(false))
             {
                 await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+                runtimeState.MarkSuccess(raw.Id);
                 return;
             }
+
+            ValidateRawSource(raw);
 
             if (File.Exists(outputPart)) File.Delete(outputPart);
             FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
@@ -123,25 +146,74 @@ public sealed class GlobalRawEncoderWorker(
                 throw new InvalidOperationException("RAW_ENCODER_LEASE_LOST");
             File.Move(outputPart, raw.OutputPath, true);
             await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+            runtimeState.MarkSuccess(raw.Id);
             logger.LogInformation("Raw chunk encoded. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", raw.SessionId, raw.TrackId, raw.Sequence);
         }
         catch (Exception ex)
         {
             try { if (File.Exists(outputPart)) File.Delete(outputPart); } catch (IOException) { }
-            var code = ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+            var terminalCode = ex is RawEncoderTerminalException terminal ? terminal.Code : null;
+            var code = terminalCode
+                ?? (ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
                 || ex.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
                 ? "LOCAL_ENCODER_UNAVAILABLE"
-                : "ENCODER_FAILED";
-            await spool.SetRawEncodingFailureAsync(raw, code, _workerId, cancellationToken).ConfigureAwait(false);
+                : "ENCODER_FAILED");
+            if (terminalCode is not null)
+            {
+                var terminalClaimed = await spool.SetRawEncodingTerminalFailureAsync(raw, code, _workerId, cancellationToken).ConfigureAwait(false);
+                if (terminalClaimed)
+                {
+                    await spool.SetSessionStateAsync(raw.SessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+                    await spool.SetFinalizationStateAsync(raw.SessionId,
+                        localFinalizeState: "LOCAL_FAILED",
+                        deliveryState: "NOT_REQUESTED",
+                        errorCode: code,
+                        errorDetail: "Raw encoder encountered a terminal source error; manual repair is required.",
+                        clearNextRetry: true,
+                        preserveError: false,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await spool.SetRawEncodingFailureAsync(raw, code, _workerId, cancellationToken).ConfigureAwait(false);
+            }
+            runtimeState.Mark(terminalCode is null && code == "LOCAL_ENCODER_UNAVAILABLE" ? "WAITING_FOR_FFMPEG" : "DEGRADED", raw.Id, code);
             logger.LogWarning(ex, "Raw chunk encoding failed; PCM remains recoverable. Session={SessionId}, Sequence={Sequence}, ErrorCode={ErrorCode}", raw.SessionId, raw.Sequence, code);
         }
         finally
         {
             leaseStop.Cancel();
             try { await leaseRenewal.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { logger.LogWarning(ex, "Raw encoder lease renewal stopped after encode result was determined."); }
         }
     }
+
+    private static void ValidateRawSource(RawRecordingChunk raw)
+    {
+        if (!File.Exists(raw.RawPath)) throw new RawEncoderTerminalException("RAW_SOURCE_MISSING");
+        var size = new FileInfo(raw.RawPath).Length;
+        if (size <= 0) throw new RawEncoderTerminalException("RAW_SOURCE_EMPTY");
+        var blockAlign = Math.Max(1, raw.Channels * Math.Max(1, raw.BitsPerSample / 8));
+        if (raw.SampleRate <= 0 || raw.SampleCount <= 0 || size % blockAlign != 0 || size != raw.SampleCount * blockAlign)
+            throw new RawEncoderTerminalException("RAW_TIMELINE_INVALID");
+        if (!string.IsNullOrWhiteSpace(raw.RawSha256))
+        {
+            using var stream = File.OpenRead(raw.RawPath);
+            var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(actual, raw.RawSha256, StringComparison.OrdinalIgnoreCase))
+                throw new RawEncoderTerminalException("RAW_CHECKSUM_MISMATCH");
+        }
+        if (raw.BitsPerSample is not (16 or 24 or 32))
+            throw new RawEncoderTerminalException("UNSUPPORTED_AUDIO_FORMAT");
+    }
+
+    private static string ClassifyRuntimeError(Exception ex)
+        => ex.Message.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
+            ? "LOCAL_ENCODER_UNAVAILABLE"
+            : "ENCODER_FAILED";
 
     private async Task RenewLeaseAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
     {
@@ -163,4 +235,9 @@ public sealed class GlobalRawEncoderWorker(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
+}
+
+internal sealed class RawEncoderTerminalException(string code) : InvalidOperationException(code)
+{
+    public string Code { get; } = code;
 }

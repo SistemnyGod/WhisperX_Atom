@@ -15,7 +15,8 @@ def test_host_persists_recoverable_session_when_start_fails_before_capture():
     )[0]
     assert "await StopCoreAsync(CancellationToken.None)" in start
     assert "startedSessionId" in start
-    assert 'SetSessionStateAsync(startedSessionId, "FINALIZING"' in start
+    assert "PersistFailedLocalLifecycleAsync(startedSessionId" in start
+    assert "GetLocalDurabilityAsync" in runtime
     assert "RECORDER_RUNTIME_LEASE_HELD" in read("apps/recorder-agent/RecorderRuntimeLease.cs")
 
 
@@ -143,6 +144,45 @@ def test_local_archive_updates_do_not_erase_delivery_retry_schedule():
     assert "clearNextRetry: true" in confirmed
     persist_failure = delivery.split("private async Task<FinalizationResult> PersistFailureAsync", 1)[1]
     assert "clearNextRetry: !result.Retryable" in persist_failure
+
+
+def test_transcript_enrichment_requires_the_canonical_v1_storage_key():
+    processing = read("whisperx_atom/processing.py")
+    enrichment = processing.split("def _process_enrichment", 1)[1].split("def ", 1)[0]
+    assert 'actual_key = str(request.source_storage_key or "").strip()' in enrichment
+    assert 'if not expected_key or not actual_key or expected_key != actual_key:' in enrichment
+    assert 'raise ValueError("ASR_INPUT_MISMATCH")' in enrichment
+
+
+def test_local_flac_durability_checks_streaminfo_and_recorded_integrity():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert "LEFT JOIN recording_chunks c ON c.id=r.id" in spool
+    assert "encodedSize" in spool and "encodedSha" in spool
+    assert "ReadExactly(stream, streamInfo)" in spool
+    assert "actualSamples <= 0" in spool
+    assert "Math.Abs(actualSamples - expectedSamples)" in spool
+
+
+def test_server_rejects_missing_or_zero_sample_count_at_upload_and_finalize():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    finalize = read("apps/server/WhisperX.Atom.Api/RecordingFinalizeSupport.cs")
+    assert "!long.TryParse(countHeader, out parsedCount) || parsedCount <= 0" in api
+    assert "chunk.SampleCount <= 0" in finalize
+
+
+def test_finalize_does_not_rehash_every_confirmed_chunk_on_normal_path():
+    api = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    support = read("apps/server/WhisperX.Atom.Api/RecordingFinalizeSupport.cs")
+    assert "verifyHashes: false" in api
+    assert "bool verifyHashes = false" in support
+    assert "if (verifyHashes" in support
+
+
+def test_transcript_card_refresh_notifies_status_after_background_v1_v2_update():
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/TranscriptsViewModel.cs")
+    selected_refresh = view_model.split("item.SetTranscript", 1)[1].split("finally", 1)[0]
+    assert "OnPropertyChanged(nameof(SelectedTitle))" in selected_refresh
+    assert "OnPropertyChanged(nameof(SelectedStatus))" in selected_refresh
 
 
 def test_desktop_maps_legacy_device_id_to_default_for_audiograph():
@@ -374,7 +414,7 @@ def test_missing_server_recording_is_terminal_and_routine_probes_do_not_flood_in
 
 def test_recorder_health_never_waits_for_full_windows_device_reconciliation():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
-    health = runtime.split("public Task<AgentIpcResponse> HealthAsync", 1)[1].split(
+    health = runtime.split("public async Task<AgentIpcResponse> HealthAsync", 1)[1].split(
         "public async Task<AgentIpcResponse> PreflightAsync", 1
     )[0]
     assert "DeviceWatcher is the authoritative live source" in health

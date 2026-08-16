@@ -27,12 +27,39 @@ public sealed partial class SettingsPage : Page
         DataContext = ViewModel;
         UpdateStatus();
         _ = RefreshRuntimeDiagnosticsAsync();
+        _ = RefreshVoiceDiagnosticsAsync();
     }
 
     private async Task RefreshRuntimeDiagnosticsAsync()
     {
         if (ViewModel is null) return;
         await ViewModel.RefreshRecorderDiagnosticsAsync();
+    }
+
+    private async Task RefreshVoiceDiagnosticsAsync()
+    {
+        if (ViewModel is null) return;
+        await ViewModel.RefreshVoiceDiagnosticsAsync();
+    }
+
+    private async void TestVoiceSpeechButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.TestVoiceSpeechAsync("Мифодий, начни запись");
+        UpdateStatus();
+    }
+
+    private async void TestVoiceTtsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.TestVoiceTtsAsync();
+        UpdateStatus();
+    }
+
+    private async void RefreshVoiceButton_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshVoiceDiagnosticsAsync();
+        UpdateStatus();
     }
 
     private async void ChangePasswordButton_Click(object sender, RoutedEventArgs e)

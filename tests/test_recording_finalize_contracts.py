@@ -39,14 +39,14 @@ def test_recording_session_has_separate_local_and_delivery_state():
     assert "SERVER_UNAVAILABLE" in host
 
 
-def test_archive_completes_before_server_delivery_to_protect_transport_chunks():
+def test_archive_and_server_delivery_run_independently_with_purge_barrier():
     coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
     host = read("apps/recorder-agent/AgentPipeHost.cs")
     run = coordinator.split("private async Task<FinalizationResult> RunCoreAsync", 1)[1]
     assert "await stop.LocalFinalization;" in host
-    assert "var archiveResult = await CreateLocalArchiveAsync" in run
-    assert "var deliveryResult = await DeliverToServerAsync" in run
-    assert run.index("CreateLocalArchiveAsync") < run.index("DeliverToServerAsync")
+    assert "RunArchiveIsolatedAsync" in run
+    assert "RunDeliveryIsolatedAsync" in run
+    assert "Task.WhenAll(archiveTask, deliveryTask)" in run
     assert "Local archive failed; continuing server delivery" in coordinator
     assert "localFinalizeState: \"LOCAL_READY\"" in coordinator
     assert 'return ("FAILED", previous?.ArchivePath)' in coordinator

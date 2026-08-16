@@ -13,11 +13,12 @@ public sealed class RawChunkRecovery(
     RawEncoderWakeSignal wake,
     ILogger<RawChunkRecovery> logger)
 {
-    public async Task<bool> RecoverAsync(string? activeSessionId, CancellationToken cancellationToken = default)
+    public async Task<bool> RecoverAsync(string? activeSessionId, CancellationToken cancellationToken = default, bool scanOrphans = true)
     {
         var completed = true;
         await spool.RecoverExpiredRawEncodingLeasesAsync(cancellationToken).ConfigureAwait(false);
-        completed &= await RegisterOrphanRawFilesAsync(activeSessionId, cancellationToken).ConfigureAwait(false);
+        if (scanOrphans)
+            completed &= await RegisterOrphanRawFilesAsync(activeSessionId, cancellationToken).ConfigureAwait(false);
 
         foreach (var raw in await spool.RawChunksNeedingRecoveryAsync(1000, cancellationToken).ConfigureAwait(false))
         {
@@ -37,6 +38,17 @@ public sealed class RawChunkRecovery(
                 // cannot be reset to RAW_READY after it has claimed the row.
                 if (string.Equals(raw.Status, "RAW_READY", StringComparison.OrdinalIgnoreCase)
                     && File.Exists(raw.RawPath))
+                {
+                    continue;
+                }
+                // A crash can happen after FLAC was atomically moved but
+                // before the PCM retention pass removed the source. Keep the
+                // SQLite row for the singleton encoder to validate/accept the
+                // existing FLAC; recovery must not discard it merely because
+                // the raw input has already been reclaimed.
+                if (string.Equals(raw.Status, "RAW_READY", StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(raw.OutputPath)
+                    && new FileInfo(raw.OutputPath).Length > 0)
                 {
                     continue;
                 }

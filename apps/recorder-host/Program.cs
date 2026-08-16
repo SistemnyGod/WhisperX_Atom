@@ -52,6 +52,7 @@ builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
 builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
 builder.Services.AddSingleton<RecorderHostRuntime>();
 builder.Services.AddSingleton<RawEncoderWakeSignal>();
+builder.Services.AddSingleton<RawEncoderRuntimeState>();
 builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
 builder.Services.AddHostedService<RecorderHostPipeServer>();
 builder.Services.AddHostedService<GlobalRawEncoderWorker>();

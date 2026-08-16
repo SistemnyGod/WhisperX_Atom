@@ -91,7 +91,7 @@ public static class RecordingFinalizeSupport
             long? previousEnd = null;
             foreach (var chunk in ordered)
             {
-                if (chunk.SampleCount < 0 || chunk.StartSample < 0 || (chunk.SampleCount > 0 && chunk.StartSample > long.MaxValue - chunk.SampleCount))
+                if (chunk.SampleCount <= 0 || chunk.StartSample < 0 || chunk.StartSample > long.MaxValue - chunk.SampleCount)
                 {
                     mismatches.Add(new RecordingTimelineMismatch(track.Id, "invalid_sample_range", chunk.Sequence, null, chunk.StartSample));
                     continue;
@@ -110,7 +110,10 @@ public static class RecordingFinalizeSupport
         return mismatches;
     }
 
-    public static async Task<IReadOnlyList<MissingRecordingChunks>> FindMissingAsync(Dictionary<Guid, RecordingTrackAssembly> tracks, Dictionary<Guid, int> expected)
+    public static async Task<IReadOnlyList<MissingRecordingChunks>> FindMissingAsync(
+        Dictionary<Guid, RecordingTrackAssembly> tracks,
+        Dictionary<Guid, int> expected,
+        bool verifyHashes = false)
     {
         var missing = new List<MissingRecordingChunks>();
         foreach (var track in tracks.Values)
@@ -131,7 +134,12 @@ public static class RecordingFinalizeSupport
                         missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
                         continue;
                     }
-                    if (!string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
+                    // Upload already computed and verified this SHA before the
+                    // immutable storage move.  The normal finalize path only
+                    // needs existence/size checks; callers doing an explicit
+                    // integrity-recovery pass can request the full re-hash.
+                    if (verifyHashes
+                        && !string.Equals(await StorageHelpers.ComputeSha256Async(path), chunk.Sha256, StringComparison.OrdinalIgnoreCase))
                         missing.Add(new MissingRecordingChunks(track.Id, [chunk.Sequence]));
                 }
                 catch (IOException)

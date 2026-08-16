@@ -14,7 +14,10 @@ public sealed record DesktopSettings(
     DateTimeOffset? SessionExpiresAtUtc = null,
     string? RecordingProfile = "ROOM",
     Guid? OwnerUserId = null,
-    bool AgentBootstrapConfirmed = false)
+    bool AgentBootstrapConfirmed = false,
+    bool VoiceAlwaysListening = true,
+    bool VoiceQuietMode = false,
+    string VoiceSensitivity = "balanced")
 {
     private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -40,7 +43,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? UnconfiguredApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced")
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -52,7 +55,10 @@ public sealed record DesktopSettings(
             sessionExpiresAtUtc,
             NormalizeRecordingProfile(recordingProfile),
             ownerUserId,
-            agentBootstrapConfirmed);
+            agentBootstrapConfirmed,
+            voiceAlwaysListening,
+            voiceQuietMode,
+            NormalizeVoiceSensitivity(voiceSensitivity));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -86,6 +92,9 @@ public sealed record DesktopSettings(
         return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
     }
 
+    private static string NormalizeVoiceSensitivity(string? sensitivity) =>
+        sensitivity?.Trim().ToLowerInvariant() is "low" or "high" or "balanced" value ? value : "balanced";
+
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 
     private static DesktopSettings MigrateApiUrl(DesktopSettings settings)
@@ -115,7 +124,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity);
             }
         }
         catch

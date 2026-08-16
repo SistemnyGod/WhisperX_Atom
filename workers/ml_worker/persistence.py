@@ -191,7 +191,7 @@ class JobRepository:
                 })
                 if isinstance(decoded_words, list):
                     words.extend(decoded_words)
-            return {"language": transcript[0], "segments": segments, "word_segments": words, "transcript_id": transcript_id}
+            return {"language": transcript[0], "quality_metadata": transcript[1] or {}, "segments": segments, "word_segments": words, "transcript_id": transcript_id}
 
     def complete_asr_job(self, job_id: str, meeting_id: str) -> None:
         """Close an ASR-only job without creating a second transcript version."""
@@ -233,11 +233,15 @@ class JobRepository:
                 version = int(version_row[0])
                 quality = dict(draft.get("quality") or {})
                 quality["processing_job_id"] = job_id
+                metadata = dict(draft.get("metadata") or {})
+                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds"):
+                    if key in metadata:
+                        quality[key] = metadata[key]
                 warnings = list(draft.get("warnings") or [])
                 result_error_code = str(draft.get("error_code") or "").strip().upper() or None
                 transcript_id = connection.execute(
                     "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,'PARTIAL_READY',%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,NULL,'ASR_DRAFT') RETURNING id",
-                    (meeting_id, version, draft.get("language"), (draft.get("metadata") or {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), (draft.get("metadata") or {}).get("processing_profile"), (draft.get("metadata") or {}).get("selected_asr_pass")),
+                    (meeting_id, version, draft.get("language"), metadata.get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), metadata.get("processing_profile"), metadata.get("selected_asr_pass")),
                 ).fetchone()[0]
                 for ordinal, segment in enumerate(draft.get("segments", [])):
                     connection.execute(

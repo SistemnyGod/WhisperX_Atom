@@ -48,6 +48,8 @@ def resolve_storage_path(storage_key: str) -> Path:
 
 def error_code_for(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
+    if "asr_input_mismatch" in text:
+        return "ASR_INPUT_MISMATCH"
     if "no speech" in text or "no_speech_detected" in text:
         return "NO_SPEECH_DETECTED"
     # A decodable recording that produces no segments is a valid no-speech
@@ -123,7 +125,7 @@ class GpuWorker:
                 input_transcript = await asyncio.to_thread(self._repository.load_transcript_source, transcript_id)
                 if not input_transcript or not input_transcript.get("segments"):
                     raise RuntimeError("TRANSCRIPT_INPUT_NOT_FOUND")
-            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=request_profile, min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)), input_transcript=input_transcript)
+            request = ProcessingRequest(job_id=job_id, media_path=resolve_storage_path(str(message["storage_key"])), language=message.get("language", "ru"), profile=request_profile, min_speakers=int(message.get("min_speakers", 1)), max_speakers=int(message.get("max_speakers", 12)), input_transcript=input_transcript, source_storage_key=str(message.get("storage_key") or "") or None)
 
             def progress(stage: str, value: int) -> None:
                 LOGGER.info("job=%s stage=%s progress=%s", job_id, stage, value)

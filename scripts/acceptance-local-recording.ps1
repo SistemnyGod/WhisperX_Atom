@@ -83,7 +83,7 @@ try {
         Start-Sleep -Seconds 2
         $response = Invoke-AgentCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
         $status = $response.sessionStatus
-        if ($null -ne $status -and $status.localFinalizeState -in @("LOCAL_READY", "COMPLETED", "FAILED", "LOCAL_FAILED")) { break }
+        if ($null -ne $status -and $status.localFinalizeState -in @("LOCAL_READY", "RECOVERY_PENDING", "COMPLETED", "FAILED", "LOCAL_FAILED")) { break }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
     if ($null -eq $status) { throw "LOCAL_CAPTURE_STATUS_MISSING" }

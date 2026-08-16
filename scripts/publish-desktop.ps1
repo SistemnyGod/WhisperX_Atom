@@ -26,9 +26,11 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 $desktopProject = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\WhisperX.Atom.Desktop.csproj"
 $serviceProject = Join-Path $repoRoot "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj"
 $recorderHostProject = Join-Path $repoRoot "apps\recorder-host\WhisperX.Atom.Recorder.Host.csproj"
+$voiceHostProject = Join-Path $repoRoot "apps\voice-host\WhisperX.Atom.Voice.Host\WhisperX.Atom.Voice.Host.csproj"
 $desktopOut = Join-Path $output "Desktop"
 $serviceOut = Join-Path $output "Service"
 $recorderHostOut = Join-Path $output "RecorderHost"
+$voiceHostOut = Join-Path $output "VoiceHost"
 $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 
 # WinUI 3 is published as an unpackaged self-contained directory. Keeping the
@@ -38,6 +40,7 @@ $identityArg = "-p:WhisperXBuildIdentity=$buildIdentity"
 $desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", $identityArg, "-o", $desktopOut) + $publishRestoreArgs
 $servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $serviceOut) + $publishRestoreArgs
 $recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
+$voiceHostPublishArgs = @($voiceHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $voiceHostOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     & dotnet publish @Arguments
     $exitCode = [int]$LASTEXITCODE
@@ -46,6 +49,7 @@ function Invoke-Publish([string[]]$Arguments) {
 Invoke-Publish $desktopPublishArgs
 Invoke-Publish $servicePublishArgs
 Invoke-Publish $recorderHostPublishArgs
+Invoke-Publish $voiceHostPublishArgs
 
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output

@@ -604,7 +604,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var expected = expectations
             .Where(item => item.Value.ExpectedChunkCount is not null)
             .ToDictionary(item => item.Key, item => item.Value.ExpectedChunkCount!.Value);
-        var missing = await RecordingFinalizeSupport.FindMissingAsync(tracks, expected);
+        // Confirmed upload rows already carry the SHA verified before the
+        // atomic storage move. Avoid re-reading every FLAC during the normal
+        // finalize path; an explicit integrity-recovery pass can opt into
+        // full re-hashing through FindMissingAsync(..., verifyHashes: true).
+        var missing = await RecordingFinalizeSupport.FindMissingAsync(tracks, expected, verifyHashes: false);
         if (missing.Count > 0)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, missing, "recording_chunks_incomplete");
 

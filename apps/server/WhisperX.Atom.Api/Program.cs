@@ -1120,11 +1120,16 @@ app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/ch
         }
         var startSample = long.TryParse(startHeader, out var parsedStart) ? parsedStart : 0;
         var sampleCount = long.TryParse(countHeader, out var parsedCount) ? parsedCount : 0;
-        if (startSample < 0 || sampleCount < 0)
+        // A non-empty FLAC without a positive sample timeline is not a valid
+        // raw-first chunk.  Accepting an omitted/zero count lets a legacy or
+        // malformed client reach finalize, where the failure becomes an
+        // opaque media/timeline error instead of an actionable upload error.
+        if (!long.TryParse(countHeader, out parsedCount) || parsedCount <= 0 || startSample < 0)
         {
             File.Delete(partPath);
             return Results.BadRequest(new { error = "chunk_sample_metadata_invalid" });
         }
+        sampleCount = parsedCount;
         if (File.Exists(path))
         {
             var existingSha = await StorageHelpers.ComputeSha256Async(path);

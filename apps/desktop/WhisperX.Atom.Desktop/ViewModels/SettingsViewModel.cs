@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using System.Text.Json;
 using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
 
@@ -21,6 +22,12 @@ public sealed class SettingsViewModel : ObservableObject
     private string _recorderRuntimeOrigin = "—";
     private string _recorderRuntimeError = "—";
     private string _recorderRuntimeProcess = "—";
+    private bool _voiceAlwaysListening;
+    private bool _voiceQuietMode;
+    private string _voiceSensitivity = "balanced";
+    private string _voiceStatus = "Проверка Мифодия…";
+    private string _voiceLastRecognition = "—";
+    private string _voiceErrorCode = "—";
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -33,6 +40,9 @@ public sealed class SettingsViewModel : ObservableObject
         _apiUrl = ServerOriginManaged ? machineConfig!.ServerOrigin : settings.ApiUrl;
         _username = settings.Username;
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
+        _voiceAlwaysListening = settings.VoiceAlwaysListening;
+        _voiceQuietMode = settings.VoiceQuietMode;
+        _voiceSensitivity = settings.VoiceSensitivity;
     }
 
     public string ApiUrl { get => _apiUrl; set { if (!ServerOriginManaged) SetProperty(ref _apiUrl, value); } }
@@ -62,6 +72,12 @@ public sealed class SettingsViewModel : ObservableObject
     public string RecorderRuntimeOrigin { get => _recorderRuntimeOrigin; private set => SetProperty(ref _recorderRuntimeOrigin, value); }
     public string RecorderRuntimeError { get => _recorderRuntimeError; private set => SetProperty(ref _recorderRuntimeError, value); }
     public string RecorderRuntimeProcess { get => _recorderRuntimeProcess; private set => SetProperty(ref _recorderRuntimeProcess, value); }
+    public bool VoiceAlwaysListening { get => _voiceAlwaysListening; set { if (SetProperty(ref _voiceAlwaysListening, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public bool VoiceQuietMode { get => _voiceQuietMode; set { if (SetProperty(ref _voiceQuietMode, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public string VoiceSensitivity { get => _voiceSensitivity; set { if (SetProperty(ref _voiceSensitivity, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
+    public string VoiceErrorCode { get => _voiceErrorCode; private set => SetProperty(ref _voiceErrorCode, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool CanLogin => !IsBusy && !IsLoggedIn;
     public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
@@ -101,6 +117,58 @@ public sealed class SettingsViewModel : ObservableObject
             RecorderRuntimeState = "Ошибка проверки";
             RecorderRuntimeError = UiErrorFormatter.Format(exception, "RECORDER_HOST_UNAVAILABLE");
         }
+    }
+
+    public async Task RefreshVoiceDiagnosticsAsync()
+    {
+        try
+        {
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync().ConfigureAwait(true);
+            if (response is null)
+            {
+                VoiceStatus = "Voice Host не запущен";
+                VoiceErrorCode = "VOICE_HOST_NOT_INSTALLED";
+                return;
+            }
+            VoiceStatus = $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}";
+            VoiceLastRecognition = response.LastRecognizedText ?? "—";
+            VoiceErrorCode = response.LastErrorCode ?? "—";
+        }
+        catch (Exception ex)
+        {
+            VoiceStatus = "Voice Host недоступен";
+            VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+        }
+    }
+
+    public async Task TestVoiceSpeechAsync(string phrase)
+    {
+        try
+        {
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("TEST_SPEECH", new { text = phrase, confidence = 1.0 });
+            VoiceLastRecognition = response.Data is JsonElement data && data.TryGetProperty("recognizedText", out var text) ? text.GetString() ?? "—" : "—";
+            VoiceStatus = response.Data is JsonElement result && result.TryGetProperty("intent", out var intent) ? $"Тест: {intent.GetString()}" : "Тест выполнен";
+        }
+        catch (Exception ex) { VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE"); }
+    }
+
+    public async Task TestVoiceTtsAsync()
+    {
+        try { _ = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("TEST_TTS"); }
+        catch (Exception ex) { VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE"); }
+    }
+
+    private async Task ApplyVoiceSettingsAsync()
+    {
+        var current = _services.Settings.Load();
+        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity });
+        try
+        {
+            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("ENABLE", new { enabled = VoiceAlwaysListening });
+            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("QUIET_MODE", new { enabled = VoiceQuietMode });
+            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SET_SENSITIVITY", new { sensitivity = VoiceSensitivity });
+        }
+        catch { if (VoiceAlwaysListening) _ = _services.VoiceHost.StartAsync(); }
     }
 
     public async Task<bool> LoginAsync(string password)
@@ -460,7 +528,8 @@ public sealed class SettingsViewModel : ObservableObject
         var effectiveCookie = string.IsNullOrWhiteSpace(cookie) ? current.UnprotectSessionCookie() : cookie;
         DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc,
-            current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed);
+            current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed,
+            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity);
     }
 
     private static string SafeError(Exception ex, string? fallback = null) => UiErrorFormatter.Format(ex, fallback ?? "Не удалось выполнить операцию с настройками.");

@@ -46,6 +46,55 @@ public sealed class RecordingDeliveryCoordinator(
         if (info is null)
             return new FinalizationResult(false, "LOCAL_FINALIZE", "LOCAL_SESSION_NOT_FOUND", false);
 
+        var durability = await spool.GetLocalDurabilityAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (!durability.HasDurableAudio)
+        {
+            if (durability.HasRecoverablePart)
+            {
+                await spool.SetSessionStateAsync(localSessionId, "FINALIZING", cancellationToken).ConfigureAwait(false);
+                await spool.SetFinalizationStateAsync(
+                    localSessionId,
+                    localFinalizeState: "RECOVERY_PENDING",
+                    deliveryState: "PENDING_SERVER",
+                    errorCode: "RAW_RECOVERY_PENDING",
+                    errorDetail: "A non-empty PCM part is waiting for recovery.",
+                    nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
+                    clearError: false,
+                    preserveError: false,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                return new FinalizationResult(false, "RECOVERY_PENDING", "RAW_RECOVERY_PENDING", true, DeliveryState: "PENDING_SERVER");
+            }
+
+            await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+            await spool.SetFinalizationStateAsync(
+                localSessionId,
+                localFinalizeState: "LOCAL_FAILED",
+                deliveryState: "NOT_REQUESTED",
+                errorCode: "NO_AUDIO_CAPTURED",
+                errorDetail: "No durable PCM or validated FLAC was found for the session.",
+                clearNextRetry: true,
+                clearError: false,
+                preserveError: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new FinalizationResult(false, "LOCAL_FAILED", "NO_AUDIO_CAPTURED", false, DeliveryState: "NOT_REQUESTED");
+        }
+
+        var rawBacklog = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (rawBacklog.TerminalFailed > 0)
+        {
+            await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+            await spool.SetFinalizationStateAsync(
+                localSessionId,
+                localFinalizeState: "LOCAL_FAILED",
+                deliveryState: "NOT_REQUESTED",
+                errorCode: "REQUIRES_MANUAL_REPAIR",
+                errorDetail: "One or more raw PCM chunks have a terminal encoding error.",
+                clearNextRetry: true,
+                preserveError: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new FinalizationResult(false, "LOCAL_FAILED", "REQUIRES_MANUAL_REPAIR", false, DeliveryState: "NOT_REQUESTED");
+        }
+
         var deliveryState = string.Equals(info.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase)
             ? "NOT_REQUESTED"
             : "PENDING_SERVER";
@@ -72,21 +121,16 @@ public sealed class RecordingDeliveryCoordinator(
 
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
-        // Archive first so transport purge can never delete chunks while the
-        // local archive still reads them. Delivery remains independently
-        // retryable when archive creation fails; retention keeps transport
-        // files until a later archive attempt succeeds.
-        var archiveResult = await CreateLocalArchiveAsync(localSessionId, cancellationToken).ConfigureAwait(false);
-        var deliveryResult = await DeliverToServerAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        // Archive and delivery share the session single-flight lock but run
+        // independently. Retention still enforces the archive+server purge
+        // barrier, so parallel execution cannot remove chunks prematurely.
+        var archiveTask = RunArchiveIsolatedAsync(localSessionId, cancellationToken);
+        var deliveryTask = RunDeliveryIsolatedAsync(localSessionId, cancellationToken);
+        await Task.WhenAll(archiveTask, deliveryTask).ConfigureAwait(false);
+        var archiveResult = await archiveTask.ConfigureAwait(false);
+        var deliveryResult = await deliveryTask.ConfigureAwait(false);
         var persisted = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
-        var deliveryState = persisted?.DeliveryState switch
-        {
-            "PENDING_SERVER" => "PENDING_SERVER",
-            "WAITING_FOR_API" => "WAITING_FOR_API",
-            "NOT_REQUESTED" => "NOT_REQUESTED",
-            "CONFIRMED" => "CONFIRMED",
-            _ => deliveryResult.Success ? "CONFIRMED" : "DELIVERY_FAILED"
-        };
+        var deliveryState = persisted?.DeliveryState ?? deliveryResult.DeliveryState ?? "DELIVERY_FAILED";
         return deliveryResult with
         {
             ArchivePath = archiveResult.ArchivePath,
@@ -95,6 +139,28 @@ public sealed class RecordingDeliveryCoordinator(
             ServerFinalizeState = deliveryResult.Stage,
             MediaState = deliveryState == "CONFIRMED" ? "ACCEPTED" : "PENDING"
         };
+    }
+
+    private async Task<(string State, string? ArchivePath)> RunArchiveIsolatedAsync(string localSessionId, CancellationToken cancellationToken)
+    {
+        try { return await CreateLocalArchiveAsync(localSessionId, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Local archive task failed independently of delivery. Session={SessionId}", localSessionId);
+            return ("FAILED", null);
+        }
+    }
+
+    private async Task<FinalizationResult> RunDeliveryIsolatedAsync(string localSessionId, CancellationToken cancellationToken)
+    {
+        try { return await DeliverToServerAsync(localSessionId, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Delivery task failed independently of local archive. Session={SessionId}", localSessionId);
+            return new FinalizationResult(false, "DELIVERY", "DELIVERY_FAILED", true, DeliveryState: "DELIVERY_FAILED");
+        }
     }
 
     private async Task<(string State, string? ArchivePath)> CreateLocalArchiveAsync(string localSessionId, CancellationToken cancellationToken)
@@ -106,6 +172,19 @@ public sealed class RecordingDeliveryCoordinator(
             // archive. Never block STOP on ffmpeg or a slow archive writer and
             // never build a master from a moving/incomplete chunk set.
             var raw = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken);
+            if (raw.TerminalFailed > 0)
+            {
+                await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+                await spool.SetFinalizationStateAsync(localSessionId,
+                    localFinalizeState: "LOCAL_FAILED",
+                    deliveryState: "NOT_REQUESTED",
+                    errorCode: "REQUIRES_MANUAL_REPAIR",
+                    errorDetail: "One or more raw PCM chunks have a terminal encoding error.",
+                    clearNextRetry: true,
+                    preserveError: false,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                return ("FAILED", previous?.ArchivePath);
+            }
             var chunks = await spool.GetArchiveChunksAsync(localSessionId, cancellationToken);
             if (raw.Pending > 0 || chunks.Count == 0)
             {
@@ -172,6 +251,26 @@ public sealed class RecordingDeliveryCoordinator(
     {
         var sessionInfo = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
         var serverSessionId = await spool.GetServerSessionIdAsync(localSessionId, cancellationToken);
+        if (sessionInfo?.LocalFinalizeState is "LOCAL_FAILED" or "RECOVERY_PENDING")
+            return new FinalizationResult(false, "DELIVERY_BLOCKED", sessionInfo.ErrorCode ?? "LOCAL_NOT_READY", sessionInfo.LocalFinalizeState == "RECOVERY_PENDING", DeliveryState: sessionInfo.DeliveryState);
+        // Terminal raw failures are not retryable transport failures. Check
+        // this before binding/uploading so a parallel archive task cannot race
+        // delivery into creating a server session for unrecoverable audio.
+        var terminalBacklog = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (terminalBacklog.TerminalFailed > 0)
+        {
+            await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+            await spool.SetFinalizationStateAsync(
+                localSessionId,
+                localFinalizeState: "LOCAL_FAILED",
+                deliveryState: "NOT_REQUESTED",
+                errorCode: "REQUIRES_MANUAL_REPAIR",
+                errorDetail: "One or more raw PCM chunks have a terminal encoding error.",
+                clearNextRetry: true,
+                preserveError: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new FinalizationResult(false, "DELIVERY_BLOCKED", "REQUIRES_MANUAL_REPAIR", false, DeliveryState: "NOT_REQUESTED");
+        }
         if (string.Equals(sessionInfo?.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase))
             return new FinalizationResult(true, "LOCAL_ONLY", null, false, DeliveryState: "NOT_REQUESTED");
         if (!api.IsConfigured)

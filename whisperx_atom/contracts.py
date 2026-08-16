@@ -16,6 +16,9 @@ class ProcessingRequest:
     # Enrichment consumes the already persisted ASR V1 instead of running ASR
     # against the media a second time.
     input_transcript: dict[str, Any] | None = None
+    # Storage identity of the canonical ASR asset. It is metadata only and is
+    # never an absolute filesystem path or a secret.
+    source_storage_key: str | None = None
 
 
 @dataclass

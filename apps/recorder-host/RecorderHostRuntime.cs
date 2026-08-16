@@ -24,6 +24,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly RecordingDeliveryCoordinator _delivery;
     private readonly AudioGraphCaptureEngine _engine;
     private readonly RawEncoderWakeSignal _encoderWake;
+    private readonly RawEncoderRuntimeState _encoderRuntimeState;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
     private readonly ILogger<RecorderHostRuntime> _logger;
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
@@ -37,6 +38,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private volatile string? _initializationError;
     private volatile bool _recoveryInProgress;
     private volatile string _recoveryState = "NOT_STARTED";
+    private DateTimeOffset _lastOrphanScanAtUtc = DateTimeOffset.MinValue;
 
     public RecorderHostRuntime(
         SpoolStore spool,
@@ -47,6 +49,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         RecordingDeliveryCoordinator delivery,
         AudioGraphCaptureEngine engine,
         RawEncoderWakeSignal encoderWake,
+        RawEncoderRuntimeState encoderRuntimeState,
         RawFinalizerQueueMetrics rawFinalizerMetrics,
         ILogger<RecorderHostRuntime> logger)
     {
@@ -58,6 +61,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _delivery = delivery;
         _engine = engine;
         _encoderWake = encoderWake;
+        _encoderRuntimeState = encoderRuntimeState;
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _logger = logger;
         _engine.CaptureFailed += (_, failure) => _logger.LogWarning("AudioGraph failure {ErrorCode}: {Detail}", failure.ErrorCode, failure.Detail);
@@ -165,7 +169,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _logger.LogInformation("Recorder Host capture startup completed; background recovery deferred.");
     }
 
-    public Task<AgentIpcResponse> HealthAsync(CancellationToken cancellationToken = default)
+    public async Task<AgentIpcResponse> HealthAsync(CancellationToken cancellationToken = default)
     {
         // DeviceWatcher is the authoritative live source and already keeps this
         // cache current. A synchronous FindAllAsync reconciliation can stall in
@@ -179,6 +183,10 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var telemetry = _engine.Telemetry;
         var liveTelemetry = _engine.LiveTelemetry;
         var effectiveDevice = _engine.SelectedDevice;
+        var encoder = _encoderRuntimeState.Snapshot();
+        var rawHealth = new RawChunkBacklog(0, 0, 0, 0, 0);
+        try { rawHealth = await _spool.GetRawChunkBacklogAsync(cancellationToken: cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Raw backlog is not available while Host is starting."); }
         var ready = effectiveDevice is not null && _engine.State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed;
         var attempt = _engine.LastAttemptDiagnostics;
         var signalState = !ready
@@ -254,18 +262,24 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 : _initialized ? "READY" : "STARTING",
             RecoveryState: _recoveryState,
             RecoveryPendingCount: _recoveryInProgress ? 1 : 0,
-            EncoderState: RecorderRuntimeActivity.IsActive ? "RUNNING" : "STOPPED",
+            EncoderState: encoder.State,
             RawFinalizerQueueDepth: _rawFinalizerMetrics.Depth,
             RawFinalizerMaximumDepth: _rawFinalizerMetrics.MaximumDepth,
-            RawFinalizerCapacity: _rawFinalizerMetrics.Capacity);
-        return Task.FromResult(new AgentIpcResponse(
+            RawFinalizerCapacity: _rawFinalizerMetrics.Capacity,
+            RawTerminalFailedCount: rawHealth.TerminalFailed,
+            EncoderLastHeartbeatAtUtc: encoder.LastHeartbeatAtUtc,
+            EncoderCurrentChunkId: encoder.CurrentChunkId,
+            EncoderLastSuccessAtUtc: encoder.LastSuccessAtUtc,
+            EncoderLastErrorCode: encoder.LastErrorCode,
+            EncoderQueueDepth: encoder.QueueDepth);
+        return new AgentIpcResponse(
             _initializationError is null && !systemAudioDeferred,
             _engine.State.ToString(),
             _sessionId,
             _initializationError
                 ?? (systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null),
             health,
-            MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs));
+            MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs);
     }
 
     public Task<AgentIpcResponse> LiveTelemetryAsync(CancellationToken cancellationToken = default)
@@ -470,22 +484,16 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 if (_sessionId is not null || _writer is not null)
                     await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(startedSessionId))
-                {
-                    await _spool.SetSessionStateAsync(startedSessionId, "FINALIZING", CancellationToken.None).ConfigureAwait(false);
-                    await _spool.SetFinalizationStateAsync(
-                        startedSessionId,
-                        localFinalizeState: "LOCAL_READY",
-                        errorCode: AudioGraphErrorMapper.Map(ex),
-                        errorDetail: ex.Message,
-                        preserveError: false,
-                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                }
+                    await PersistFailedLocalLifecycleAsync(startedSessionId, ex, "AUDIO_CAPTURE_START_FAILED").ConfigureAwait(false);
             }
             catch (Exception cleanupException)
             {
                 _logger.LogWarning(cleanupException, "Recorder Host failed to clean up an aborted START.");
             }
-            return Error(AudioGraphErrorMapper.Map(ex), ex.Message);
+            var startCode = AudioGraphErrorMapper.Map(ex);
+            if (startCode == "AUDIO_GRAPH_UNRECOVERABLE" || startCode == "AUDIO_STORAGE_WRITE_FAILED")
+                startCode = "AUDIO_CAPTURE_START_FAILED";
+            return Error(startCode, ex.Message);
         }
         finally { _audioOperationGate.Release(); }
     }
@@ -530,23 +538,51 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             {
                 try
                 {
-                    await _spool.SetSessionStateAsync(sessionId, "FINALIZING", CancellationToken.None).ConfigureAwait(false);
-                    await _spool.SetFinalizationStateAsync(
-                        sessionId,
-                        localFinalizeState: "LOCAL_READY",
-                        errorCode: AudioGraphErrorMapper.Map(ex),
-                        errorDetail: ex.Message,
-                        preserveError: false,
-                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    await PersistFailedLocalLifecycleAsync(sessionId, ex, "RAW_DURABILITY_FAILED").ConfigureAwait(false);
                 }
                 catch (Exception recoveryException)
                 {
                     _logger.LogWarning(recoveryException, "Recorder Host could not persist failed STOP state. Session={SessionId}", sessionId);
                 }
             }
-            return Error(AudioGraphErrorMapper.Map(ex), ex.Message);
+            var stopCode = AudioGraphErrorMapper.Map(ex);
+            if (stopCode is "AUDIO_GRAPH_UNRECOVERABLE" or "AUDIO_STORAGE_WRITE_FAILED")
+                stopCode = "RAW_DURABILITY_FAILED";
+            return Error(stopCode, ex.Message);
         }
         finally { _audioOperationGate.Release(); }
+    }
+
+    private async Task PersistFailedLocalLifecycleAsync(string sessionId, Exception exception, string fallbackCode)
+    {
+        var durability = await _spool.GetLocalDurabilityAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        var errorCode = durability.State switch
+        {
+            // The caller already knows which lifecycle boundary failed.  Do
+            // not leak a low-level mapper value (for example
+            // AUDIO_GRAPH_UNRECOVERABLE) after durable audio was confirmed;
+            // the IPC contract must expose the stable START/STOP code.
+            "LOCAL_READY" => fallbackCode,
+            "RECOVERY_PENDING" => "RAW_RECOVERY_PENDING",
+            _ => fallbackCode
+        };
+        var errorDetail = durability.State == "RECOVERY_PENDING"
+            ? "A non-empty PCM part remains and will be recovered on the next startup/reconciliation pass."
+            : exception.Message;
+        await _spool.SetSessionStateAsync(
+            sessionId,
+            durability.State == "LOCAL_FAILED" ? "FAILED" : "FINALIZING",
+            CancellationToken.None).ConfigureAwait(false);
+        await _spool.SetFinalizationStateAsync(
+            sessionId,
+            localFinalizeState: durability.State,
+            deliveryState: durability.State == "LOCAL_FAILED" ? "NOT_REQUESTED" : null,
+            errorCode: errorCode,
+            errorDetail: errorDetail,
+            nextRetryAtUtc: durability.State == "RECOVERY_PENDING" ? DateTimeOffset.UtcNow.AddSeconds(5) : null,
+            clearNextRetry: durability.State != "RECOVERY_PENDING",
+            preserveError: false,
+            cancellationToken: CancellationToken.None).ConfigureAwait(false);
     }
 
     public async Task<AgentIpcResponse> ProbeAsync(string? deviceId, CancellationToken cancellationToken, int durationMs = 3000)
@@ -770,31 +806,21 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             // RawChunkRecovery also re-checks SQLite state per file to close
             // the remaining snapshot race.
             activeSession = _sessionId;
-            if (activeSession is not null)
+            var scanOrphans = DateTimeOffset.UtcNow - _lastOrphanScanAtUtc >= TimeSpan.FromMinutes(10);
+            await _recovery.RecoverAsync(activeSession, cancellationToken, scanOrphans).ConfigureAwait(false);
+            if (scanOrphans) _lastOrphanScanAtUtc = DateTimeOffset.UtcNow;
+            sessions = await _spool.SessionsNeedingRecoveryAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var sessionId in sessions)
             {
-                sessions = Array.Empty<string>();
-            }
-            else
-            {
-                await _recovery.RecoverAsync(null, cancellationToken).ConfigureAwait(false);
-                sessions = await _spool.SessionsNeedingRecoveryAsync(cancellationToken).ConfigureAwait(false);
-                foreach (var sessionId in sessions)
+                if (string.Equals(sessionId, _sessionId, StringComparison.Ordinal)) continue;
+                var session = await _spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
+                if (session?.State is "RECORDING" or "PAUSED")
                 {
-                    if (string.Equals(sessionId, _sessionId, StringComparison.Ordinal)) continue;
-                    var session = await _spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
-                    if (session?.State is "RECORDING" or "PAUSED")
-                    {
-                        // A current-user Host can be terminated by logoff,
-                        // update or a crash. Such a session is no longer live:
-                        // close its durable lifecycle before archive/delivery
-                        // recovery so it does not remain displayed as recording
-                        // forever and get retried as an active session.
-                        await _spool.SetSessionStateAsync(sessionId, "FINALIZING", cancellationToken).ConfigureAwait(false);
-                        await _spool.AddEventAsync(
-                            sessionId,
-                            "RECORDER_RECOVERED_AFTER_RESTART",
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
+                    // A current-user Host can be terminated by logoff, update
+                    // or a crash. Such a non-active session is recoverable;
+                    // never let it block the current microphone session.
+                    await _spool.SetSessionStateAsync(sessionId, "FINALIZING", cancellationToken).ConfigureAwait(false);
+                    await _spool.AddEventAsync(sessionId, "RECORDER_RECOVERED_AFTER_RESTART", cancellationToken: cancellationToken).ConfigureAwait(false);
                 }
             }
             _recoveryState = "READY";
@@ -834,9 +860,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         // session-scoped and must not hold the capture gate: otherwise START
         // waits behind every historical retry and the Desktop times out while
         // a recording may already be opening.
-        using (var deliveryGate = new SemaphoreSlim(2, 2))
+        using (var deliveryGate = new SemaphoreSlim(activeSession is null ? 2 : 1, activeSession is null ? 2 : 1))
         {
-            var deliveryTasks = sessions.Select(async sessionId =>
+            var deliveryTasks = sessions
+                .Where(sessionId => !string.Equals(sessionId, activeSession, StringComparison.Ordinal))
+                .Select(async sessionId =>
             {
                 await deliveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try { await _delivery.RunAsync(sessionId, cancellationToken).ConfigureAwait(false); }
@@ -931,7 +959,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             FinalizerMaximumDepth = _rawFinalizerMetrics.MaximumDepth,
             FinalizerCapacity = _rawFinalizerMetrics.Capacity
         };
-        var encodingState = rawBacklog.Pending > 0
+        var encodingState = rawBacklog.TerminalFailed > 0
+            ? "TERMINAL_FAILED"
+            : rawBacklog.Pending > 0
             ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
         var archiveState = info?.LocalFinalizeState == "LOCAL_FAILED"
@@ -978,7 +1008,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             RawFinalizerMaximumDepth: rawBacklog.FinalizerMaximumDepth,
             RawFinalizerCapacity: rawBacklog.FinalizerCapacity,
             ArchiveErrorCode: archiveState == "FAILED" ? info?.ArchiveErrorCode : null,
-            ArchiveErrorDetail: archiveState == "FAILED" ? info?.ArchiveErrorDetail : null);
+            ArchiveErrorDetail: archiveState == "FAILED" ? info?.ArchiveErrorDetail : null,
+            RawTerminalFailedCount: rawBacklog.TerminalFailed);
     }
 
     public async ValueTask DisposeAsync()
@@ -1651,11 +1682,8 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 if (command != "SHUTDOWN")
                 {
                     var initializationTask = _initializationTask;
-                    if (initializationTask is not null)
-                    {
-                        try { await initializationTask.WaitAsync(cancellationToken).ConfigureAwait(false); }
-                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-                    }
+                    if (initializationTask is not null && !initializationTask.IsCompleted)
+                        return new AgentIpcResponse(false, "STARTING", null, "RECORDER_HOST_NOT_INITIALIZED", null, ProtocolVersion: AgentIpcProtocol.Version);
                     if (_runtime.InitializationError is not null || _initializationError is not null)
                     {
                         var error = _runtime.InitializationError ?? _initializationError ?? "RECORDER_HOST_INIT_FAILED";

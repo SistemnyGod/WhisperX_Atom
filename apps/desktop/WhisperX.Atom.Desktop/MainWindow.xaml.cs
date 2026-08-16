@@ -168,6 +168,11 @@ public sealed partial class MainWindow : Window
         var versionTask = _services.Backend.GetSystemVersionAsync(cancellationToken);
         var processingTask = _services.Backend.GetProcessingReadinessAsync(cancellationToken);
         var recorderTask = _services.Recorder.GetHealthAsync(cancellationToken);
+        var voiceTask = Task.Run(async () =>
+        {
+            try { return await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken); }
+            catch { return null; }
+        }, cancellationToken);
 
         var backendAvailable = false;
         DesktopSystemVersion? serverVersion = null;
@@ -177,6 +182,8 @@ public sealed partial class MainWindow : Window
         try { serverVersion = await versionTask; } catch (OperationCanceledException) { throw; } catch { }
         try { processingReadiness = await processingTask; } catch (OperationCanceledException) { throw; } catch { }
         try { recorderAvailable = (await recorderTask).IsReachable; } catch (OperationCanceledException) { throw; } catch { }
+        var voice = await voiceTask;
+        SetVoiceStatus(voice);
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
             QueueAgentRecovery(cancellationToken);
@@ -197,6 +204,30 @@ public sealed partial class MainWindow : Window
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
         SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady);
         SetSystemStatus(status.Item1, status.Item2);
+    }
+
+    private void SetVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot)
+    {
+        if (!_uiDispatcherQueue.HasThreadAccess)
+        {
+            _uiDispatcherQueue.TryEnqueue(() => SetVoiceStatus(snapshot));
+            return;
+        }
+        if (snapshot is null)
+        {
+            VoiceStatusText.Text = _services.VoiceHost.State == "NEEDS_SETUP" ? "Мифодий · требуется настройка" : "Мифодий · выключен";
+            return;
+        }
+        var stale = DateTimeOffset.UtcNow - snapshot.UpdatedAt > TimeSpan.FromSeconds(10);
+        VoiceStatusText.Text = stale ? "Мифодий · нет heartbeat" : snapshot.State.ToUpperInvariant() switch
+        {
+            "LISTENING" => "Мифодий · слушает",
+            "RECOGNIZING" or "CAPTURING" or "WAKEDETECTED" => "Мифодий · распознаёт",
+            "EXECUTING" => "Мифодий · выполняет",
+            "RESPONDING" => "Мифодий · говорит",
+            "DEGRADED" or "ERROR" => "Мифодий · требуется настройка",
+            _ => "Мифодий · выключен"
+        };
     }
 
     private void QueueAgentRecovery(CancellationToken cancellationToken)
@@ -275,9 +306,10 @@ public sealed partial class MainWindow : Window
                 : "WhisperX или GPU/worker ещё не готовы. Откройте «Состояние системы» для деталей.");
     }
 
-    private void MainWindow_Closed(object sender, WindowEventArgs args)
+    private async void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         _statusCts.Cancel();
         _statusCts.Dispose();
+        try { await _services.VoiceHost.StopAsync(); } catch { }
     }
 }

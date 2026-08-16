@@ -180,6 +180,12 @@ public sealed class TranscriptsViewModel : ObservableObject
             item.SetTranscript(await _services.Backend.GetTranscriptAsync(meetingId, cancellationToken));
             SelectedItem = item;
             ApplySegmentFilter();
+            // The item is commonly already selected when a background poll
+            // refreshes its V1/V2 transcript.  In that case SetProperty in the
+            // SelectedItem setter is a no-op, so explicitly refresh every
+            // property bound by the selected-transcript card.
+            OnPropertyChanged(nameof(SelectedTitle));
+            OnPropertyChanged(nameof(SelectedStatus));
             OnPropertyChanged(nameof(SelectedQualityText));
             OnPropertyChanged(nameof(SelectedQualityWarningText));
         }

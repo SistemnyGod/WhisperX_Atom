@@ -31,6 +31,7 @@
                         <TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" />
                         <TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" />
                         <TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" />
+                        <TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" />
                         <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" ToolTipService.ToolTip="Текущий пользователь и состояние локальной сессии" AutomationProperties.Name="Текущий пользователь" />
                     </StackPanel>
                     <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />

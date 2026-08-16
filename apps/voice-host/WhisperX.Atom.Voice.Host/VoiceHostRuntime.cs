@@ -11,11 +11,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 {
     private static readonly string[] WakeGrammar =
     [
-        "атом", "атом начни запись", "атом запись", "атом пауза", "атом продолжи", "атом продолжи запись",
-        "атом поставь на паузу", "атом приостанови запись",
-        "атом поставь метку", "атом добавь метку", "атом отметь решение", "атом зафиксируй решение",
-        "атом отметь поручение", "атом зафиксируй поручение", "атом статус",
-        "атом заверши запись", "атом останови запись", "атом подтверждаю", "атом отмена", "[unk]"
+        "мифодий", "мифодий начни запись", "мифодий запись", "мифодий пауза", "мифодий продолжи", "мифодий продолжи запись",
+        "мифодий поставь на паузу", "мифодий приостанови запись", "мифодий статус", "мифодий заверши запись", "мифодий останови запись", "мифодий подтверждаю", "мифодий отмена",
+        "мефодий начни запись", "мефодий останови запись", "атом начни запись", "атом останови запись", "атом подтверждаю", "[unk]"
     ];
 
     private static readonly string[] CommandGrammar =
@@ -43,6 +41,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         FullMode = BoundedChannelFullMode.Wait
     });
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource _shutdownRequested = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly object _recognitionGate = new();
     private readonly object _pttGate = new();
@@ -75,6 +74,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private string? _microphoneError;
     private string? _recorderPipeError;
     private string? _lastErrorCode;
+    private VoiceIntentBrokerClient? _desktopBroker;
+    private string? _microphoneDeviceId;
     private double? _lastCommandLatencyMs;
     private double? _wakeLatencyMs;
     private double? _intentLatencyMs;
@@ -149,6 +150,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     };
 
     public bool QuietMode { get => _speech.QuietMode; set => _speech.QuietMode = value; }
+    public Task WaitForShutdownAsync() => _shutdownRequested.Task;
+
+    public void ConfigureManagedBroker(string? pipeName = null) =>
+        _desktopBroker = new VoiceIntentBrokerClient(string.IsNullOrWhiteSpace(pipeName) ? VoiceHostIpc.DesktopBrokerPipeName : pipeName);
+
+    public void ConfigureMicrophone(string? deviceId) => _microphoneDeviceId = string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
 
     public async Task<VoiceHostDoctorResult> RunDoctorAsync(CancellationToken cancellationToken = default, bool stopAfter = true)
     {
@@ -180,7 +187,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audioWorker ??= Task.Run(AudioWorkerAsync);
         try
         {
-            _audio.Start();
+            _audio.Start(_microphoneDeviceId);
             _microphoneReady = true;
             _microphoneError = null;
             ApplyReadinessState();
@@ -200,7 +207,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _audioWorker ??= Task.Run(AudioWorkerAsync);
             if (!_audio.IsRunning)
             {
-                try { _audio.Start(); _microphoneReady = true; _microphoneError = null; }
+                try { _audio.Start(_microphoneDeviceId); _microphoneReady = true; _microphoneError = null; }
                 catch (Exception ex) { OnCaptureError(ex); }
             }
             ApplyReadinessState();
@@ -222,8 +229,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         if (!_state.Snapshot.Enabled) return new VoiceResponse("Голосовой помощник выключен", false, false);
         if (_state.Snapshot.State == VoiceHostState.Degraded)
             return new VoiceResponse("\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u043c\u043e\u0449\u043d\u0438\u043a \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0432 \u0440\u0435\u0436\u0438\u043c\u0435 DEGRADED: \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043c\u043e\u0434\u0435\u043b\u044c \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043c\u0438\u043a\u0440\u043e\u0444\u043e\u043d.", true, false);
-        var normalized = pushToTalk && !_parser.HasWakeWord(text) ? "Атом " + text : text;
-        if (!_parser.HasWakeWord(normalized)) return new VoiceResponse("Нужна кодовая фраза «Атом»", true, false);
+        var normalized = pushToTalk && !_parser.HasWakeWord(text) ? "Мифодий " + text : text;
+        if (!_parser.HasWakeWord(normalized)) return new VoiceResponse("Нужна кодовая фраза «Мифодий»", true, false);
         var command = _parser.Parse(normalized, confidence);
         if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown || pushToTalk && command.Intent == VoiceIntent.HistoryQuestion)
             return await RespondAsync("Команда не распознана", cancellationToken, false);
@@ -253,6 +260,21 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             case "SET_SENSITIVITY": SetSensitivity(ReadString(payload, "sensitivity")); return new VoiceHostResponse(true, Snapshot);
             case "QUIET_MODE": QuietMode = ReadBool(payload, "enabled", false); return new VoiceHostResponse(true, Snapshot);
             case "TEST_TTS": return new VoiceHostResponse(_speech.Test(), new { ok = true });
+            case "SHUTDOWN": _shutdownRequested.TrySetResult(); SetEnabled(false); return new VoiceHostResponse(true, Snapshot);
+            case "TEST_SPEECH":
+            {
+                var text = ReadString(payload, "text") ?? string.Empty;
+                var confidence = payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("confidence", out var confidenceValue) && confidenceValue.TryGetDouble(out var parsed) ? parsed : 1.0;
+                var command = _parser.Parse(text, confidence);
+                return new VoiceHostResponse(true, new
+                {
+                    recognizedText = text,
+                    intent = command.Intent.ToString(),
+                    command.Confidence,
+                    wakeWord = _parser.HasWakeWord(text),
+                    testMode = true
+                });
+            }
             default: return new VoiceHostResponse(false, Error: "unsupported_command");
         }
     }
@@ -355,7 +377,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 try
                 {
                     _audio.Stop();
-                    _audio.Start();
+                    _audio.Start(_microphoneDeviceId);
                     _microphoneReady = true;
                     _microphoneError = null;
                     ApplyReadinessState();
@@ -528,7 +550,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             await RespondAsync("Команда не распознана", cancellationToken, false);
             return;
         }
-        var normalized = _parser.HasWakeWord(text) ? text : "Атом " + text;
+        var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
         var command = _parser.Parse(normalized, confidence);
         if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown)
         {
@@ -582,7 +604,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _state.ReturnToListening("push-to-talk-unrecognized");
             return await RespondAsync("Не удалось распознать команду", cancellationToken, false);
         }
-        var normalized = _parser.HasWakeWord(text) ? text : "Атом " + text;
+        var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
         if (_state.Snapshot.State != VoiceHostState.Confirming) EnsureRecognitionState(normalized);
         return await SubmitTextAsync(normalized, true, cancellationToken, recognition.Confidence);
     }
@@ -593,12 +615,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         try
         {
             _lastIntent = command.Intent.ToString();
-            if (command.Intent == VoiceIntent.StopRecording && _pendingStop is null)
+            // A complete, high-confidence stop phrase is safe to execute
+            // immediately. Short/uncertain phrases still require confirmation.
+            if (command.Intent == VoiceIntent.StopRecording && _pendingStop is null && command.Confidence < 0.70)
             {
                 _pendingStop = command;
                 _state.RequestConfirmation(command);
                 _ = ExpireConfirmationAsync(command.CreatedAt ?? DateTimeOffset.UtcNow);
-                return await RespondAsync("Подтвердите остановку записи: скажите «Атом, подтверждаю»", cancellationToken, false, VoiceHostState.Confirming);
+                return await RespondAsync("Подтвердите остановку записи: скажите «Мифодий, подтверждаю»", cancellationToken, false, VoiceHostState.Confirming);
             }
             if (_state.Snapshot.State == VoiceHostState.Confirming)
             {
@@ -659,6 +683,41 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private async Task<VoiceResponse> SendRecorderAsync(string command, object payload, CancellationToken cancellationToken)
     {
         var started = Stopwatch.GetTimestamp();
+        if (_desktopBroker is not null && command is "START" or "STOP" or "PAUSE" or "RESUME" or "MARKER" or "DECISION" or "ACTION_ITEM" or "STATUS")
+        {
+            var intent = command switch
+            {
+                "START" => VoiceIntent.StartRecording,
+                "STOP" => VoiceIntent.StopRecording,
+                "PAUSE" => VoiceIntent.PauseRecording,
+                "RESUME" => VoiceIntent.ResumeRecording,
+                "STATUS" => VoiceIntent.GetStatus,
+                "MARKER" => VoiceIntent.AddMarker,
+                "DECISION" => VoiceIntent.MarkDecision,
+                _ => VoiceIntent.MarkActionItem
+            };
+            var broker = await _desktopBroker.ExecuteAsync(intent.ToString(), _pendingRecognizedText ?? command, 1.0, false, cancellationToken);
+            _recorderAckLatencyMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (!broker.Ok)
+            {
+                _lastErrorCode = broker.ErrorCode ?? "VOICE_COMMAND_REJECTED";
+                return new VoiceResponse(VoiceErrorText(_lastErrorCode), true, false);
+            }
+            _recorderPipeReady = true;
+            _recorderPipeError = null;
+            return new VoiceResponse(broker.SpokenText ?? command switch
+            {
+                "START" => "Запись начата",
+                "PAUSE" => "Запись приостановлена",
+                "RESUME" => "Запись продолжена",
+                "STOP" => "Запись остановлена и сохранена",
+                "STATUS" => $"Состояние записи: {broker.RecorderState}",
+                "MARKER" => "Метка установлена",
+                "DECISION" => "Решение отмечено",
+                "ACTION_ITEM" => "Поручение отмечено",
+                _ => "Команда выполнена"
+            }, true, true);
+        }
         var result = await _recorder.SendAsync(command, payload, cancellationToken);
         _recorderAckLatencyMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         _recorderPipeReady = true;
@@ -669,13 +728,13 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _recorderPipeError = "RECORDER_PROTOCOL_MISMATCH";
             return new VoiceResponse("Версия Recorder Service несовместима с приложением", true, false);
         }
-        if (!result.Ok) return new VoiceResponse("Recorder Service отклонил команду", true, false);
+        if (!result.Ok) return new VoiceResponse(VoiceErrorText(result.Error ?? "VOICE_RECORDER_UNAVAILABLE"), true, false);
         var text = command switch
         {
             "START" => "Запись начата",
             "PAUSE" => "Запись приостановлена",
             "RESUME" => "Запись продолжена",
-            "STOP" => "Совещание завершено",
+            "STOP" => "Запись остановлена и сохранена",
             "MARKER" => "Метка установлена",
             "DECISION" => "Решение отмечено",
             "ACTION_ITEM" => "Поручение отмечено",
@@ -684,6 +743,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         };
         return new VoiceResponse(text, true, true);
     }
+
+    private static string VoiceErrorText(string code) => code switch
+    {
+        "VOICE_DESKTOP_BROKER_UNAVAILABLE" => "Приложение Desktop не отвечает.",
+        "VOICE_RECORDER_UNAVAILABLE" => "Recorder недоступен.",
+        "VOICE_COMMAND_REJECTED" => "Команда отклонена текущим состоянием записи.",
+        "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
+        "NO_AUDIO_CAPTURED" => "Аудио не было захвачено, запись не сохранена.",
+        _ => "Не удалось выполнить голосовую команду."
+    };
 
     private async Task<VoiceResponse> AskHistoryAsync(string question, CancellationToken cancellationToken)
     {
@@ -816,7 +885,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static bool IsWakeOnly(string text)
     {
         var normalized = text.Trim().TrimEnd('.', ',', '!', '?').ToLowerInvariant();
-        return normalized is "атом" or "atom";
+        return normalized is "мифодий" or "мефодий" or "атом" or "atom";
     }
 
     private static string? AppendText(string? first, string? second)

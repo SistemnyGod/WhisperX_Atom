@@ -18,6 +18,9 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.SessionExpiresAtUtc,
             settings.RecordingProfile,
             settings.OwnerUserId,
-            settings.AgentBootstrapConfirmed);
+            settings.AgentBootstrapConfirmed,
+            settings.VoiceAlwaysListening,
+            settings.VoiceQuietMode,
+            settings.VoiceSensitivity);
     }
 }

@@ -273,6 +273,23 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
             _state.Restore(RecorderState.Idle, "recording-start-failed");
             try { await _spool.SetSessionStateAsync(sessionId, "FAILED", CancellationToken.None); }
             catch (Exception stateError) { _logger.LogWarning(stateError, "Could not persist failed start state. Session={SessionId}", sessionId); }
+            try
+            {
+                var durability = await _spool.GetLocalDurabilityAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+                await _spool.SetFinalizationStateAsync(
+                    sessionId,
+                    localFinalizeState: durability.State,
+                    deliveryState: durability.State == "LOCAL_FAILED" ? "NOT_REQUESTED" : "PENDING_SERVER",
+                    errorCode: durability.State == "RECOVERY_PENDING" ? "RAW_RECOVERY_PENDING" : "AUDIO_CAPTURE_START_FAILED",
+                    errorDetail: durability.State == "RECOVERY_PENDING"
+                        ? "A non-empty PCM part remains and will be recovered on the next startup/reconciliation pass."
+                        : "Recorder failed before a durable audio stream was confirmed.",
+                    nextRetryAtUtc: durability.State == "RECOVERY_PENDING" ? DateTimeOffset.UtcNow.AddSeconds(5) : null,
+                    clearNextRetry: durability.State != "RECOVERY_PENDING",
+                    preserveError: false,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception stateError) { _logger.LogWarning(stateError, "Could not persist failed local durability state. Session={SessionId}", sessionId); }
             throw;
         }
     }

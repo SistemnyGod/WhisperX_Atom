@@ -68,14 +68,54 @@ try
     host.Services.AddSerilog();
     using var built = host.Build();
     var runtime = built.Services.GetRequiredService<VoiceHostRuntime>();
+    var managed = args.Any(argument => string.Equals(argument, "--managed", StringComparison.OrdinalIgnoreCase));
+    var brokerIndex = Array.FindIndex(args, argument => string.Equals(argument, "--broker-pipe", StringComparison.OrdinalIgnoreCase));
+    var brokerPipe = brokerIndex >= 0 && brokerIndex + 1 < args.Length ? args[brokerIndex + 1] : null;
+    var microphoneIndex = Array.FindIndex(args, argument => string.Equals(argument, "--microphone-id", StringComparison.OrdinalIgnoreCase));
+    var microphoneId = microphoneIndex >= 0 && microphoneIndex + 1 < args.Length ? args[microphoneIndex + 1] : null;
+    if (managed) runtime.ConfigureManagedBroker(brokerPipe);
+    runtime.ConfigureMicrophone(microphoneId);
     runtime.Start();
     await built.StartAsync();
+    if (managed)
+    {
+        using var parentCancellation = new CancellationTokenSource();
+        var parentPid = ReadIntArgument(args, "--parent-pid");
+        var monitor = ParentMonitorAsync(parentPid, parentCancellation.Token);
+        await Task.WhenAny(monitor, runtime.WaitForShutdownAsync());
+        parentCancellation.Cancel();
+        await built.StopAsync(TimeSpan.FromSeconds(2));
+        return;
+    }
     using var context = new VoiceTrayContext(runtime, built);
     Application.Run(context);
 }
 finally
 {
     await Log.CloseAndFlushAsync();
+}
+
+static int? ReadIntArgument(string[] arguments, string name)
+{
+    var index = Array.FindIndex(arguments, argument => string.Equals(argument, name, StringComparison.OrdinalIgnoreCase));
+    return index >= 0 && index + 1 < arguments.Length && int.TryParse(arguments[index + 1], out var value) ? value : null;
+}
+
+static async Task ParentMonitorAsync(int? parentPid, CancellationToken cancellationToken)
+{
+    if (parentPid is not int pid || pid <= 0) return;
+    try
+    {
+        using var parent = Process.GetProcessById(pid);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (parent.HasExited) return;
+            await Task.Delay(1000, cancellationToken);
+        }
+    }
+    catch (ArgumentException) { }
+    catch (InvalidOperationException) { }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
 }
 
 internal sealed class VoiceTrayContext(VoiceHostRuntime runtime, IHost host) : ApplicationContext

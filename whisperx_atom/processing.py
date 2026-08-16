@@ -189,7 +189,7 @@ class ProcessingService:
                 if not segment.get("speaker"):
                     segment["speaker"] = "UNKNOWN"
             asr_text = " ".join(str(item.get("text", "")).strip() for item in asr_segments if item.get("text")).strip()
-            emit_asr_ready(ProcessingResult(
+            asr_draft = ProcessingResult(
                 job_id=request.job_id,
                 language=result.get("language") or config.language,
                 text=asr_text,
@@ -203,12 +203,22 @@ class ProcessingService:
                     "processing_profile": request.profile,
                     "selected_asr_pass": selected_pass,
                     "asr_preprocessing": ctx.asr_preprocessing,
+                    "asr_storage_key": request.source_storage_key,
+                    "asr_sample_rate": 16000,
+                    "asr_channels": 1,
+                    "asr_duration_seconds": duration_seconds,
                 },
                 status="PARTIAL_READY",
                 warnings=[],
                 stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"},
                 quality=selected_report.to_dict(),
-            ))
+            )
+            emit_asr_ready(asr_draft)
+            if asr_only:
+                # V1 is the terminal result of TRANSCRIBE_ASR. Enrichment is
+                # a separate job and must not be able to turn a persisted V1
+                # into a failed ASR result after the user already has text.
+                return asr_draft
             ctx.asr_result = result
             asr_recovery_result = copy.deepcopy(result)
             # ASR reasons drive fallback selection, but alignment can legitimately
@@ -374,7 +384,16 @@ class ProcessingService:
             "segments": source.get("segments", []),
             "word_segments": source.get("word_segments", []),
         }
+        expected_key = str((source.get("quality_metadata") or {}).get("asr_storage_key") or "").strip()
+        actual_key = str(request.source_storage_key or "").strip()
+        # The enrichment job must use the exact canonical asset that produced
+        # V1. Treat a missing key as a mismatch too; silently accepting it
+        # would allow alignment/diarization to run against a different media
+        # object while leaving V1 apparently valid.
+        if not expected_key or not actual_key or expected_key != actual_key:
+            raise ValueError("ASR_INPUT_MISMATCH")
         ctx.asr_audio_path = request.media_path
+        ctx.asr_preprocessing = (source.get("quality_metadata") or {}).get("asr_preprocessing") or {}
         ctx.asr_result = result
         if config.enable_diarization:
             diar_path = pipeline._preprocess_audio(request.media_path, asr=False)
@@ -413,6 +432,15 @@ class ProcessingService:
                 segment["speaker"] = "UNKNOWN"
         result = pipeline._apply_glossary(result)
         final_report = build_transcript_quality_report(result, duration_seconds, TranscriptQualityThresholds.from_env())
+        enrichment_metadata = source.get("quality_metadata") or {}
+        # Preserve the canonical ASR provenance on V2 so diagnostics can prove
+        # that enrichment reused the same preprocessing and storage asset.
+        final_report_dict = final_report.to_dict()
+        final_report_dict.update({
+            key: enrichment_metadata[key]
+            for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds")
+            if key in enrichment_metadata
+        })
         if not final_report.to_dict().get("segment_count") and not source.get("segments"):
             raise ValueError("TRANSCRIPT_INPUT_EMPTY")
         warnings.extend(reason for reason in final_report.reasons if reason not in warnings)
@@ -430,11 +458,16 @@ class ProcessingService:
                 "compute_type": config.compute_type,
                 "processing_profile": request.profile,
                 "source_transcript_id": source.get("transcript_id"),
+                "asr_preprocessing": enrichment_metadata.get("asr_preprocessing", {}),
+                "asr_storage_key": enrichment_metadata.get("asr_storage_key"),
+                "asr_sample_rate": enrichment_metadata.get("asr_sample_rate"),
+                "asr_channels": enrichment_metadata.get("asr_channels"),
+                "asr_duration_seconds": enrichment_metadata.get("asr_duration_seconds"),
             },
             status="PARTIAL_READY" if warnings else "READY",
             warnings=list(dict.fromkeys(warnings)),
             stage_outcomes=stage_outcomes,
-            quality=final_report.to_dict(),
+            quality=final_report_dict,
         )
 
 

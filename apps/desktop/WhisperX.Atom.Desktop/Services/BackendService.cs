@@ -48,7 +48,7 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed, current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
@@ -108,7 +108,8 @@ public sealed class BackendService : IBackendService
             DesktopSettings.Save(ApiUrl, currentSettings.Username, SessionCookie, currentSettings.ArchiveRoot,
                 currentSettings.MicrophoneDeviceId, currentSettings.SystemAudioDeviceId, SessionExpiresAtUtc,
                 currentSettings.RecordingProfile, currentUser?.Id,
-                currentUser?.Id == currentSettings.OwnerUserId && currentSettings.AgentBootstrapConfirmed);
+                currentUser?.Id == currentSettings.OwnerUserId && currentSettings.AgentBootstrapConfirmed,
+                currentSettings.VoiceAlwaysListening, currentSettings.VoiceQuietMode, currentSettings.VoiceSensitivity);
             return true;
         }
         catch

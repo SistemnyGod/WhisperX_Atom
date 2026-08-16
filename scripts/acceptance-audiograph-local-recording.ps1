@@ -161,7 +161,7 @@ try {
         $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
         $status = $statusResponse.sessionStatus
         if ($null -ne $status -and [int]$status.rawChunkCount -gt 0 -and ($null -eq $prePurgeStatus -or [int]$status.rawChunkCount -gt [int]$prePurgeStatus.rawChunkCount -or ([int]$status.rawChunkCount -eq [int]$prePurgeStatus.rawChunkCount -and [int]$status.rawWritingCount -lt [int]$prePurgeStatus.rawWritingCount))) { $prePurgeStatus = $status }
-        if ($null -ne $status -and $status.localFinalizeState -in @("LOCAL_READY", "COMPLETED", "FAILED", "LOCAL_FAILED")) { break }
+        if ($null -ne $status -and $status.localFinalizeState -in @("LOCAL_READY", "RECOVERY_PENDING", "COMPLETED", "FAILED", "LOCAL_FAILED")) { break }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
     if ($null -eq $status) { throw "AUDIOGRAPH_STATUS_MISSING" }
@@ -250,6 +250,7 @@ try {
             rawReadyCount = [int]$status.rawReadyCount
             rawEncodingCount = [int]$status.rawEncodingCount
             rawFailedCount = [int]$status.rawFailedCount
+            rawTerminalFailedCount = [int]$status.rawTerminalFailedCount
             rawBacklogHealth = [string]$status.rawBacklogHealth
             pipelineOverruns = if ($null -ne $attempt) { [int]$attempt.pipelineOverruns } else { 0 }
             framesProduced = if ($null -ne $attempt) { [int64]$attempt.framesProduced } else { 0 }
@@ -278,6 +279,7 @@ try {
                 rawChunkCount = [int]$prePurgeStatus.rawChunkCount
                 rawWritingCount = [int]$prePurgeStatus.rawWritingCount
                 rawReadyCount = [int]$prePurgeStatus.rawReadyCount
+                rawTerminalFailedCount = [int]$prePurgeStatus.rawTerminalFailedCount
                 deliveryState = [string]$prePurgeStatus.deliveryState
             } } else { $null }
         }
@@ -290,7 +292,7 @@ try {
     $archiveRequired = -not $AllowPendingArchive
     $rawEvidence = if ($null -ne $report.result.prePurgeEvidence) { $report.result.prePurgeEvidence } else { $report.result }
     $pipelineGatePassed = $report.result.framesBalanced -and $report.result.frameQueueWithinLimit -and $report.result.pipelineOverruns -eq 0
-    $rawGatePassed = $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and $pipelineGatePassed
+    $rawGatePassed = $report.result.localFinalizeState -eq "LOCAL_READY" -and $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and ([int]$rawEvidence.rawTerminalFailedCount -eq 0) -and $pipelineGatePassed
     $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
     $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $rawEvidence.localChunkCount -gt 0
     if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {

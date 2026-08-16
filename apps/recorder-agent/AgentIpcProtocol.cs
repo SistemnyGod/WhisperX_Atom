@@ -192,7 +192,13 @@ public sealed record AgentIpcHealth(
     string EncoderState = "UNKNOWN",
     int RawFinalizerQueueDepth = 0,
     int RawFinalizerMaximumDepth = 0,
-    int RawFinalizerCapacity = 0);
+    int RawFinalizerCapacity = 0,
+    int RawTerminalFailedCount = 0,
+    DateTimeOffset? EncoderLastHeartbeatAtUtc = null,
+    string? EncoderCurrentChunkId = null,
+    DateTimeOffset? EncoderLastSuccessAtUtc = null,
+    string? EncoderLastErrorCode = null,
+    int EncoderQueueDepth = 0);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
@@ -287,7 +293,8 @@ public sealed record RecordingSessionStatus(
     int RawFinalizerMaximumDepth = 0,
     int RawFinalizerCapacity = 0,
     string? ArchiveErrorCode = null,
-    string? ArchiveErrorDetail = null);
+    string? ArchiveErrorDetail = null,
+    int RawTerminalFailedCount = 0);
 
 public sealed record FinalizationResult(
     bool Success,

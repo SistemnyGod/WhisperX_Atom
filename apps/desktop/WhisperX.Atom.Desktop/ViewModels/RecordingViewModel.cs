@@ -154,6 +154,7 @@ public sealed class RecordingViewModel : ObservableObject
     {
         "FINALIZING_LOCAL" => "Локальный master собирается",
         "LOCAL_READY" => "Запись сохранена",
+        "RECOVERY_PENDING" => "Ожидает восстановления локального файла",
         "LOCAL_FAILED" => "Локальная сборка не завершена",
         _ => "Локальное сохранение ожидает"
     };
@@ -163,11 +164,14 @@ public sealed class RecordingViewModel : ObservableObject
         "ENCODING" => "Кодирование локального файла",
         "WAITING_FOR_ENCODER" => "Ожидает кодировщик",
         "FLAC_READY" => "Чанки готовы",
+        "TERMINAL_FAILED" => "Требуется восстановление исходного PCM",
         _ => "Ожидание кодирования"
     };
     public string ArchiveStatusLabel => _archiveState.ToUpperInvariant() switch
     {
         "READY" => "Архив готов",
+        "FAILED" => "Архив не собран; исходные чанки сохранены",
+        "BUILDING" => "Архив собирается",
         "PENDING" => "Собирается после записи",
         _ => "Архив ожидает"
     };
@@ -574,7 +578,7 @@ public sealed class RecordingViewModel : ObservableObject
             // Meeting creation and binding belong to the background delivery
             // worker. START must not wait for HTTP, and localOnly=false keeps
             // the durable session eligible for later automatic delivery.
-            var response = await _services.Recorder.StartAsync(title, null, ownerUserId, localOnly: false);
+            var response = await _services.RecordingCommands.StartAsync(title, ownerUserId);
             ApplyResponse(response);
             if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
             if (response.Ok && response.MeetingId is Guid agentMeetingId)
@@ -593,10 +597,10 @@ public sealed class RecordingViewModel : ObservableObject
         }
     }
 
-    public Task<bool> PauseAsync() => ExecuteCommandAsync(_services.Recorder.PauseAsync);
-    public Task<bool> ResumeAsync() => ExecuteCommandAsync(_services.Recorder.ResumeAsync);
+    public Task<bool> PauseAsync() => ExecuteCommandAsync(_services.RecordingCommands.PauseAsync);
+    public Task<bool> ResumeAsync() => ExecuteCommandAsync(_services.RecordingCommands.ResumeAsync);
     public Task<bool> AddMarkerAsync(string eventType = "MARKER") =>
-        ExecuteCommandAsync(cancellationToken => _services.Recorder.AddMarkerAsync(eventType, cancellationToken));
+        ExecuteCommandAsync(cancellationToken => _services.RecordingCommands.MarkerAsync(eventType, cancellationToken));
 
     public async Task<bool> StopRecordingAsync()
     {
@@ -606,11 +610,22 @@ public sealed class RecordingViewModel : ObservableObject
             ErrorMessage = string.Empty;
             State = RecordingState.Finalizing;
             StatusMessage = "Сохраняю локальную запись и запускаю фоновую доставку…";
-            var response = await _services.Recorder.StopAsync();
+            var response = await _services.RecordingCommands.StopAsync();
             SessionId = response.SessionId ?? SessionId;
             MeetingId = response.MeetingId ?? MeetingId;
             if (!response.Ok)
             {
+                if (response.SessionStatus?.LocalFinalizeState == "RECOVERY_PENDING")
+                {
+                    // STOP completed, but the last .pcm.part still needs
+                    // recovery. Keep the session visible as a warning rather
+                    // than claiming it was saved or turning it into a fatal
+                    // Recorder error.
+                    State = RecordingState.Finalizing;
+                    WarningMessage = MapRecordingError(response.Error ?? "RAW_RECOVERY_PENDING");
+                    if (!string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
+                    return true;
+                }
                 State = RecordingState.Error;
                 ErrorMessage = MapRecordingError(response.Error ?? "Не удалось завершить запись.");
                 return false;
@@ -890,7 +905,7 @@ public sealed class RecordingViewModel : ObservableObject
         "WAITING_SERVER" => "ожидание обработки на сервере",
         "FINALIZING_SERVER" => "завершение на сервере",
         "RECONCILING" => "проверка чанков",
-        "COMPLETED" => "доставлено",
+        "CONFIRMED" or "COMPLETED" => "доставлено",
         "DELIVERY_ERROR" or "DELIVERY_FAILED" => "ошибка доставки",
         "NOT_STARTED" => "ожидание отправки",
         _ => "ожидание восстановления"
@@ -909,13 +924,22 @@ public sealed class RecordingViewModel : ObservableObject
         _sessionTraceId = session.TraceId;
         _nextRetryAtUtc = session.NextRetryAtUtc;
         _sessionRetryable = session.Retryable;
-        if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)
+        if (string.Equals(session.LocalFinalizeState, "RECOVERY_PENDING", StringComparison.OrdinalIgnoreCase))
+        {
+            State = RecordingState.Idle;
+            ErrorMessage = string.Empty;
+            WarningMessage = "Локальный PCM-файл требует восстановления. Agent повторит попытку автоматически.";
+            StatusMessage = "Ожидается восстановление локальной записи.";
+        }
+        else if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)
             && !HasServerAcceptedRecording(session))
         {
             State = RecordingState.Error;
             ErrorMessage = MapRecordingError(session.ErrorCode ?? session.Error);
             WarningMessage = "Исходные аудиочанки сохранены. Исправьте Agent и повторите отправку.";
-            StatusMessage = "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.";
+            StatusMessage = session.ErrorCode == "REQUIRES_MANUAL_REPAIR"
+                ? "Локальная запись требует ручного восстановления исходного PCM."
+                : "Не удалось подтвердить локальную запись. Исходные аудиочанки сохранены.";
         }
         else if (session.DeliveryState is "DELIVERY_ERROR" or "DELIVERY_FAILED")
         {
@@ -935,13 +959,17 @@ public sealed class RecordingViewModel : ObservableObject
         {
             if (State is RecordingState.Finalizing or RecordingState.Error) State = RecordingState.Idle;
             ErrorMessage = string.Empty;
-            WarningMessage = session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+            WarningMessage = session.ArchiveState == "FAILED"
+                ? "Локальный архив не собран. Исходные чанки сохранены, доставка и Transcript V1 продолжаются."
+                : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
                 ? "Запись сохранена локально; кодирование и отправка продолжатся после восстановления FFmpeg."
                 : session.DeliveryState is "CONFIRMED" or "COMPLETED"
                     ? string.Empty
                     : "Локальный файл сохранён. Agent продолжает доставку на сервер.";
             ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
-            StatusMessage = session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+            StatusMessage = session.ArchiveState == "FAILED"
+                ? "Архив недоступен, но серверная доставка не остановлена."
+                : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
                 ? "Запись сохранена локально. Ожидается кодирование аудио."
                 : session.DeliveryState is "CONFIRMED" or "COMPLETED"
                     ? "Аудио сохранено и подтверждено сервером."
@@ -1147,6 +1175,7 @@ public sealed class RecordingViewModel : ObservableObject
             "CUDA_OOM" => "На GPU недостаточно видеопамяти для этой модели WhisperX.",
             "TRANSCRIPT_EMPTY" => "WhisperX не получил текст из аудиозаписи.",
             "TRANSCRIPT_OUTSIDE_MEDIA" => "Таймкоды стенограммы выходят за длительность аудио.",
+            "ASR_INPUT_MISMATCH" => "Enrichment остановлен: исходный ASR-файл не совпадает с canonical media asset. Версия V1 сохранена.",
             "ALIGNMENT_FAILED" => "Выравнивание таймкодов не выполнено; доступен частичный текст.",
             "DIARIZATION_FAILED" => "Диаризация не выполнена; спикеры отмечены как «Не определён».",
             "DIARIZATION_DISABLED" => "Диаризация отключена настройками обработки.",
@@ -1475,6 +1504,11 @@ public sealed class RecordingViewModel : ObservableObject
             "AUDIO_BUFFER_FORMAT_MISMATCH" => "Recorder получил аудиобуфер неожиданного формата. Обновите Recorder Host до актуального установщика.",
             "AUDIO_NO_FRAMES" or "AUDIO_CALLBACK_TIMEOUT" => "Микрофон найден, но аудиокадры не поступают. Проверьте разрешение микрофона и устройство по умолчанию.",
             "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
+            "AUDIO_CAPTURE_START_FAILED" => "Recorder не подтвердил запуск захвата. Запись не считается сохранённой; проверьте устройство и журнал Host.",
+            "RAW_DURABILITY_FAILED" => "Не удалось подтвердить сохранение исходного PCM. Проверьте локальное хранилище Recorder.",
+            "RAW_FINALIZER_BACKLOG_EXCEEDED" => "Локальная очередь финализации переполнена. Исходный PCM оставлен для recovery; повторите после освобождения диска.",
+            "RAW_RECOVERY_PENDING" => "Исходный PCM ещё закрывается. Recorder восстановит его автоматически при следующей проверке.",
+            "NO_AUDIO_CAPTURED" => "В записи не обнаружено сохранённого аудио. Запись не считается сохранённой.",
             "MICROPHONE_PROBE_REQUIRED" or "microphone_probe_required" => "Микрофон найден, но ещё не подтверждён реальным захватом. Нажмите «Проверить микрофон».",
             "SYSTEM_AUDIO_PROBE_REQUIRED" or "system_audio_probe_required" => "Системный аудиопоток ещё не подтверждён реальным захватом. Нажмите «Проверить системный звук».",
             "AUDIO_NO_DATA" => "Поток открылся, но за время проверки не пришёл ни один аудиопакет.",

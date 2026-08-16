@@ -41,6 +41,7 @@ try
     builder.Services.AddSingleton<RecordingDeliveryCoordinator>();
     builder.Services.AddSingleton<RawChunkRecovery>();
     builder.Services.AddSingleton<RawEncoderWakeSignal>();
+    builder.Services.AddSingleton<RawEncoderRuntimeState>();
     builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
     builder.Services.AddHostedService<GlobalRawEncoderWorker>();
     builder.Services.AddHostedService<AgentPipeHost>();
@@ -89,6 +90,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         await spool.InitializeAsync(stoppingToken);
         logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.GetChunkDurationSeconds(), api.IsConfigured);
         await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
+        var lastOrphanScan = DateTimeOffset.UtcNow;
         var recoveryCompleted = false;
         if (api.IsConfigured)
         {
@@ -118,7 +120,9 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var lastRetention = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
-            await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
+            var scanOrphans = DateTimeOffset.UtcNow - lastOrphanScan >= TimeSpan.FromMinutes(10);
+            await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken, scanOrphans);
+            if (scanOrphans) lastOrphanScan = DateTimeOffset.UtcNow;
             if (DateTimeOffset.UtcNow - lastRetention >= TimeSpan.FromMinutes(5))
             {
                 // Eligibility is SQLite state based; this never scans filenames

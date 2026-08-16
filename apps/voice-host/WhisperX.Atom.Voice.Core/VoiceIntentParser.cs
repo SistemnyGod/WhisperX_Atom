@@ -9,7 +9,10 @@ namespace WhisperX.Atom.Voice;
 /// </summary>
 public sealed class VoiceIntentParser
 {
-    private static readonly string[] WakeWords = ["атом", "atom"];
+    // "Мифодий" is the product wake word. "Мефодий" is a common speech
+    // recognition variant and "Атом" remains a temporary compatibility alias
+    // for already trained users.
+    private static readonly string[] WakeWords = ["мифодий", "мефодий", "атом", "atom"];
 
     public bool HasWakeWord(string text)
     {
@@ -74,7 +77,7 @@ public sealed class VoiceIntentParser
 
     private static string RemoveWakeWord(string value)
     {
-        foreach (var word in WakeWords)
+        foreach (var word in WakeWords.OrderByDescending(static word => word.Length))
             if (value.StartsWith(word, StringComparison.Ordinal)) return value[word.Length..].Trim(' ', ',', ':');
         return value;
     }

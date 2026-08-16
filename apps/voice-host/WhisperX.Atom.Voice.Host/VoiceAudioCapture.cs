@@ -36,12 +36,22 @@ public sealed class VoiceAudioCapture : IDisposable
     public event Action<Exception>? CaptureError;
     public bool IsRunning => _capture is not null;
 
-    public void Start()
+    public void Start(string? deviceId = null)
     {
         lock (_gate)
         {
             if (_capture is not null) return;
-            var capture = new WasapiCapture();
+            WasapiCapture capture;
+            if (string.IsNullOrWhiteSpace(deviceId) || string.Equals(deviceId, "DEFAULT", StringComparison.OrdinalIgnoreCase))
+            {
+                capture = new WasapiCapture();
+            }
+            else
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                var device = enumerator.GetDevice(deviceId);
+                capture = new WasapiCapture(device);
+            }
             capture.DataAvailable += OnDataAvailable;
             capture.RecordingStopped += OnStopped;
             _capture = capture;
