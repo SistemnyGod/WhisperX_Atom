@@ -28,6 +28,14 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceStatus = "Проверка Мифодия…";
     private string _voiceLastRecognition = "—";
     private string _voiceErrorCode = "—";
+    private string _voiceMicrophone = "—";
+    private string _voiceLevel = "—";
+    private double _voiceLevelNormalized;
+    private string _voiceSignalState = "Ожидание аудиокадров";
+    private string _voiceWakeWordMode = "—";
+    private string _voiceRuntimeBuild = "—";
+    private string _voiceRuntimeProcess = "—";
+    private string _voiceLastTraceId = "—";
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -78,6 +86,14 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
     public string VoiceErrorCode { get => _voiceErrorCode; private set => SetProperty(ref _voiceErrorCode, value); }
+    public string VoiceMicrophone { get => _voiceMicrophone; private set => SetProperty(ref _voiceMicrophone, value); }
+    public string VoiceLevel { get => _voiceLevel; private set => SetProperty(ref _voiceLevel, value); }
+    public double VoiceLevelNormalized { get => _voiceLevelNormalized; private set => SetProperty(ref _voiceLevelNormalized, value); }
+    public string VoiceSignalState { get => _voiceSignalState; private set => SetProperty(ref _voiceSignalState, value); }
+    public string VoiceWakeWordMode { get => _voiceWakeWordMode; private set => SetProperty(ref _voiceWakeWordMode, value); }
+    public string VoiceRuntimeBuild { get => _voiceRuntimeBuild; private set => SetProperty(ref _voiceRuntimeBuild, value); }
+    public string VoiceRuntimeProcess { get => _voiceRuntimeProcess; private set => SetProperty(ref _voiceRuntimeProcess, value); }
+    public string VoiceLastTraceId { get => _voiceLastTraceId; private set => SetProperty(ref _voiceLastTraceId, value); }
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool CanLogin => !IsBusy && !IsLoggedIn;
     public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
@@ -133,6 +149,24 @@ public sealed class SettingsViewModel : ObservableObject
             VoiceStatus = $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}";
             VoiceLastRecognition = response.LastRecognizedText ?? "—";
             VoiceErrorCode = response.LastErrorCode ?? "—";
+            VoiceMicrophone = response.EffectiveMicrophoneName ?? "—";
+            VoiceWakeWordMode = response.WakeWordMode ?? "—";
+            VoiceRuntimeBuild = response.BuildIdentity ?? "—";
+            VoiceRuntimeProcess = response.ProcessId is int pid ? $"PID {pid}" : "PID —";
+            VoiceLastTraceId = response.LastTraceId ?? "—";
+            var telemetryFresh = response.LastAudioAtUtc is DateTimeOffset at
+                && DateTimeOffset.UtcNow - at <= TimeSpan.FromMilliseconds(750)
+                && response.AudioTelemetrySequence > 0;
+            var peak = response.MicrophonePeak ?? 0d;
+            VoiceLevelNormalized = telemetryFresh ? Math.Clamp(peak, 0d, 1d) : 0d;
+            VoiceLevel = telemetryFresh ? $"{VoiceLevelNormalized * 100:0}% peak · RMS {(response.MicrophoneRms ?? 0d) * 100:0}%" : "Нет данных от микрофона";
+            VoiceSignalState = !telemetryFresh
+                ? "Нет данных от микрофона"
+                : response.MicrophoneClipping || string.Equals(response.AudioSignalState, "CLIPPING", StringComparison.OrdinalIgnoreCase)
+                    ? "Перегрузка"
+                    : string.Equals(response.AudioSignalState, "VOICE", StringComparison.OrdinalIgnoreCase)
+                        ? "Голос записывается"
+                        : "Тишина или слабый сигнал";
         }
         catch (Exception ex)
         {

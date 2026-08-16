@@ -18,6 +18,12 @@ class ResidentLlmConflict(RuntimeError):
     pass
 
 
+class RetryScheduled(RuntimeError):
+    def __init__(self, delay_seconds: float):
+        super().__init__("GPU_JOB_RETRY_SCHEDULED")
+        self.delay_seconds = delay_seconds
+
+
 async def resident_llm_detected() -> bool:
     if os.getenv("GPU_ENFORCE_NO_RESIDENT_LLM", "true").lower() not in {"1", "true", "yes"}:
         return False
@@ -76,6 +82,15 @@ def error_code_for(exc: Exception) -> str:
     if "ffmpeg" in text or "audio" in text:
         return "AUDIO_PROCESSING_ERROR"
     return "GPU_PROCESSING_FAILED"
+
+
+def is_retryable_error_code(code: str) -> bool:
+    return code in {"MEDIA_NOT_FOUND", "CUDA_UNAVAILABLE", "AUDIO_PROCESSING_ERROR"}
+
+
+def retry_delay_seconds(attempt: int) -> float:
+    base = {1: 5, 2: 15, 3: 30}.get(attempt, 60)
+    return base + (attempt * 0.37)
 
 
 
@@ -195,6 +210,17 @@ class GpuWorker:
                 LOGGER.exception("job=%s failed", job_id)
                 failure_code = error_code_for(exc)
                 self._repository.release_message(str(message.get("message_id", "")))
+                if is_retryable_error_code(failure_code):
+                    scheduled_attempt = self._repository.schedule_retry(
+                        job_id,
+                        type(exc).__name__ + ": " + str(exc),
+                        failure_code + "_RETRY_PENDING",
+                    )
+                    if scheduled_attempt is not None:
+                        failure_code = failure_code + "_RETRY_PENDING"
+                        if self._heartbeat:
+                            self._heartbeat.set_state("READY", failure_code)
+                        raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
                 self._repository.update_job(job_id, "FAILED", "FAILED", 0, type(exc).__name__ + ": " + str(exc), failure_code)
                 if self._heartbeat:
                     self._heartbeat.set_state("READY", failure_code)
@@ -273,6 +299,8 @@ async def run() -> None:
                 # delayed NAK prevents a resident llama-server from turning
                 # the pull consumer into a tight redelivery loop.
                 await message.nak(delay=RESIDENT_LLM_RETRY_DELAY_SECONDS)
+            except RetryScheduled as exc:
+                await message.nak(delay=exc.delay_seconds)
             except Exception:
                 LOGGER.exception("gpu_message_failed job_id=%s", job_id)
                 await message.nak()

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Windows;
 
 namespace WhisperX_Atom_Desktop.Services;
 
@@ -7,6 +6,7 @@ namespace WhisperX_Atom_Desktop.Services;
 public sealed class VoiceHostController : IAsyncDisposable
 {
     private readonly FrontendServices _services;
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private Process? _process;
     private DesktopVoiceBrokerServer? _broker;
 
@@ -17,7 +17,23 @@ public sealed class VoiceHostController : IAsyncDisposable
 
     public async Task<bool> StartAsync(CancellationToken cancellationToken = default)
     {
-        if (_process is { HasExited: false }) return true;
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await StartCoreAsync(cancellationToken).ConfigureAwait(false); }
+        finally { _lifecycleGate.Release(); }
+    }
+
+    private async Task<bool> StartCoreAsync(CancellationToken cancellationToken)
+    {
+        if (_process is { HasExited: true })
+        {
+            _process.Dispose();
+            _process = null;
+        }
+        if (_process is { HasExited: false })
+        {
+            if (await IsExpectedRuntimeAsync(cancellationToken).ConfigureAwait(false)) return true;
+            await StopCoreAsync().ConfigureAwait(false);
+        }
         var executable = ResolveExecutable();
         if (executable is null)
         {
@@ -26,15 +42,75 @@ public sealed class VoiceHostController : IAsyncDisposable
             return false;
         }
 
+        var expectedPath = Path.GetFullPath(executable);
+        foreach (var existing in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))
+        {
+            try
+            {
+                var actualPath = existing.MainModule?.FileName;
+                if (string.IsNullOrWhiteSpace(actualPath))
+                {
+                    State = "ERROR";
+                    LastErrorCode = "VOICE_HOST_PROCESS_UNINSPECTABLE";
+                    existing.Dispose();
+                    return false;
+                }
+                if (!string.Equals(Path.GetFullPath(actualPath), expectedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    State = "ERROR";
+                    LastErrorCode = "VOICE_HOST_BUILD_MISMATCH";
+                    existing.Dispose();
+                    return false;
+                }
+                // Reclaim an instance that was started outside the Desktop
+                // broker (legacy tray/development mode) so commands cannot
+                // bypass RecordingCommandService.
+                try
+                {
+                    await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SHUTDOWN", cancellationToken: cancellationToken).ConfigureAwait(false);
+                    existing.WaitForExit(1500);
+                }
+                catch { }
+                existing.Dispose();
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                State = "ERROR";
+                LastErrorCode = "VOICE_HOST_PROCESS_UNINSPECTABLE";
+                existing.Dispose();
+                return false;
+            }
+            catch (InvalidOperationException) when (!existing.HasExited)
+            {
+                State = "ERROR";
+                LastErrorCode = "VOICE_HOST_PROCESS_UNINSPECTABLE";
+                existing.Dispose();
+                return false;
+            }
+            catch { existing.Dispose(); }
+        }
+
         _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands);
         _broker.Start();
         var settings = _services.Settings.Load();
-        var arguments = $"--managed --parent-pid {Environment.ProcessId} --broker-pipe WhisperXAtomDesktopVoiceBroker";
-        if (!string.IsNullOrWhiteSpace(settings.MicrophoneDeviceId))
-            arguments += $" --microphone-id \"{settings.MicrophoneDeviceId.Replace("\"", string.Empty)}\"";
+        // Keep the always-listening host on the same endpoint that Recorder
+        // actually resolved. DEFAULT is retained only when Recorder has not
+        // reported an effective device yet.
+        var microphoneId = settings.MicrophoneDeviceId;
         try
         {
-            _process = Process.Start(new ProcessStartInfo
+            var health = await _services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            microphoneId = health.Health?.EffectiveMicrophoneDeviceId
+                ?? health.Health?.SelectedMicrophoneDeviceId
+                ?? microphoneId;
+        }
+        catch { }
+        var arguments = $"--managed --parent-pid {Environment.ProcessId} --broker-pipe WhisperXAtomDesktopVoiceBroker";
+        if (!string.IsNullOrWhiteSpace(microphoneId))
+            arguments += $" --microphone-id \"{microphoneId.Replace("\"", string.Empty)}\"";
+        try
+        {
+            _process ??= Process.Start(new ProcessStartInfo
             {
                 FileName = executable,
                 Arguments = arguments,
@@ -47,12 +123,18 @@ public sealed class VoiceHostController : IAsyncDisposable
             State = "STARTING";
             LastErrorCode = null;
             await WaitForPipeAsync(cancellationToken).ConfigureAwait(false);
+            var client = new WhisperX.Atom.Desktop.VoiceHostClient();
+            await client.SendAsync("QUIET_MODE", new { enabled = settings.VoiceQuietMode }, cancellationToken).ConfigureAwait(false);
+            await client.SendAsync("SET_SENSITIVITY", new { sensitivity = settings.VoiceSensitivity }, cancellationToken).ConfigureAwait(false);
             State = "LISTENING";
             return true;
         }
         catch (Exception ex)
         {
-            LastErrorCode = ex is System.ComponentModel.Win32Exception ? "VOICE_HOST_START_FAILED" : "VOICE_HOST_UNAVAILABLE";
+            await StopCoreAsync().ConfigureAwait(false);
+            LastErrorCode = ex is VoiceHostBuildMismatchException
+                ? "VOICE_HOST_BUILD_MISMATCH"
+                : ex is System.ComponentModel.Win32Exception ? "VOICE_HOST_START_FAILED" : "VOICE_HOST_UNAVAILABLE";
             State = "ERROR";
             return false;
         }
@@ -67,8 +149,18 @@ public sealed class VoiceHostController : IAsyncDisposable
             try
             {
                 var status = await client.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-                if (status is not null) return;
+                if (status is not null)
+                {
+                    if (!string.Equals(status.BuildIdentity, CurrentBuildIdentity(), StringComparison.OrdinalIgnoreCase))
+                        throw new VoiceHostBuildMismatchException(status.BuildIdentity);
+                    // The host deliberately rejects mutating IPC while its
+                    // microphone/model readiness is being initialized. Wait
+                    // for the first non-STARTING snapshot before applying
+                    // Desktop settings.
+                    if (!string.Equals(status.State, "STARTING", StringComparison.OrdinalIgnoreCase)) return;
+                }
             }
+            catch (VoiceHostBuildMismatchException) { throw; }
             catch { }
             await Task.Delay(150, cancellationToken).ConfigureAwait(false);
         }
@@ -76,6 +168,13 @@ public sealed class VoiceHostController : IAsyncDisposable
     }
 
     public async Task StopAsync()
+    {
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try { await StopCoreAsync().ConfigureAwait(false); }
+        finally { _lifecycleGate.Release(); }
+    }
+
+    private async Task StopCoreAsync()
     {
         try
         {
@@ -107,5 +206,31 @@ public sealed class VoiceHostController : IAsyncDisposable
         return File.Exists(installed) ? installed : null;
     }
 
-    public async ValueTask DisposeAsync() => await StopAsync().ConfigureAwait(false);
+    private async Task<bool> IsExpectedRuntimeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var snapshot = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken).ConfigureAwait(false);
+            return snapshot is not null && string.Equals(snapshot.BuildIdentity, CurrentBuildIdentity(), StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static string CurrentBuildIdentity() =>
+        typeof(VoiceHostController).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .Select(attribute => attribute.InformationalVersion)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+        ?? typeof(VoiceHostController).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync().ConfigureAwait(false);
+        _lifecycleGate.Dispose();
+    }
+
+    private sealed class VoiceHostBuildMismatchException(string? actual)
+        : InvalidOperationException($"Voice Host build mismatch: {actual ?? "missing"}");
 }

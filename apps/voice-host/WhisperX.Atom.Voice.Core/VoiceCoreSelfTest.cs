@@ -7,6 +7,9 @@ public static class VoiceCoreSelfTest
     {
         var parser = new VoiceIntentParser();
         Assert(parser.HasWakeWord("Атом, начни запись"), "wake word");
+        Assert(parser.HasWakeWord("Мифодий, начни запись"), "primary wake word");
+        Assert(parser.HasWakeWord("Мефодий, начни запись"), "wake alias");
+        Assert(parser.Parse("Мифодий, начни запись").Intent == VoiceIntent.StartRecording, "primary start intent");
         Assert(parser.Parse("Атом, начни запись").Intent == VoiceIntent.StartRecording, "start intent");
         Assert(parser.Parse("Атом, зафиксируй решение по поставкам").Intent == VoiceIntent.MarkDecision, "decision intent");
         Assert(parser.Parse("Атом, зафиксируй решение по поставкам").Parameter == "по поставкам", "decision parameter");
@@ -30,6 +33,9 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("\u0410\u0442\u043e\u043c, \u0432\u043a\u043b\u044e\u0447\u0438 \u0441\u0432\u0435\u0442").Intent == VoiceIntent.Unknown, "unknown command");
 
         var machine = new VoiceStateMachine();
+        machine.BeginStartup();
+        Assert(machine.Snapshot.State == VoiceHostState.Starting, "startup transition");
+        machine.MarkReady();
         machine.Enable(true);
         Assert(machine.TryWake(), "wake transition");
         Assert(machine.BeginCapture(), "capture transition");

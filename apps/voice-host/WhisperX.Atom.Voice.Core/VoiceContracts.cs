@@ -3,6 +3,7 @@ namespace WhisperX.Atom.Voice;
 public enum VoiceHostState
 {
     Disabled,
+    Starting,
     Degraded,
     Listening,
     WakeDetected,
@@ -62,7 +63,18 @@ public sealed record VoiceHostSnapshot(
     double? TotalLatencyMs = null,
     double? LastCommandLatencyMs = null,
     int AudioQueueDepth = 0,
-    long AudioQueueDrops = 0);
+    long AudioQueueDrops = 0,
+    string? EffectiveMicrophoneName = null,
+    double? MicrophonePeak = null,
+    DateTimeOffset? LastAudioAtUtc = null,
+    double? MicrophoneRms = null,
+    bool MicrophoneClipping = false,
+    string? AudioSignalState = null,
+    long AudioTelemetrySequence = 0,
+    string? BuildIdentity = null,
+    string? WakeWordMode = null,
+    int? ProcessId = null,
+    string? LastTraceId = null);
 
 public sealed record VoiceResponse(string Text, bool Speak = true, bool Success = true);
 

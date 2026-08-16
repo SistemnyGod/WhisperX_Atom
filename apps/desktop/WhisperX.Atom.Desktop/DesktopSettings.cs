@@ -92,8 +92,11 @@ public sealed record DesktopSettings(
         return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
     }
 
-    private static string NormalizeVoiceSensitivity(string? sensitivity) =>
-        sensitivity?.Trim().ToLowerInvariant() is "low" or "high" or "balanced" value ? value : "balanced";
+    private static string NormalizeVoiceSensitivity(string? sensitivity)
+    {
+        var normalized = sensitivity?.Trim().ToLowerInvariant();
+        return normalized is "low" or "high" or "balanced" ? normalized : "balanced";
+    }
 
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 

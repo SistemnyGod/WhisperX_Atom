@@ -18,4 +18,5 @@ internal sealed record VoiceBrokerResponse(
     string? LocalSessionId = null,
     string? LocalFinalizeState = null,
     string? SpokenText = null,
-    string? Detail = null);
+    string? Detail = null,
+    string? TraceId = null);

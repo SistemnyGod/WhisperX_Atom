@@ -216,18 +216,22 @@ public sealed partial class MainWindow : Window
         if (snapshot is null)
         {
             VoiceStatusText.Text = _services.VoiceHost.State == "NEEDS_SETUP" ? "Мифодий · требуется настройка" : "Мифодий · выключен";
+            SetStatusPill(VoiceStatusPill, VoiceStatusText, _services.VoiceHost.State == "NEEDS_SETUP" ? "warning" : "neutral");
             return;
         }
         var stale = DateTimeOffset.UtcNow - snapshot.UpdatedAt > TimeSpan.FromSeconds(10);
-        VoiceStatusText.Text = stale ? "Мифодий · нет heartbeat" : snapshot.State.ToUpperInvariant() switch
+        var voiceState = stale ? "Мифодий · нет heartbeat" : snapshot.State.ToUpperInvariant() switch
         {
             "LISTENING" => "Мифодий · слушает",
+            "STARTING" => "Мифодий · запускается",
             "RECOGNIZING" or "CAPTURING" or "WAKEDETECTED" => "Мифодий · распознаёт",
             "EXECUTING" => "Мифодий · выполняет",
             "RESPONDING" => "Мифодий · говорит",
             "DEGRADED" or "ERROR" => "Мифодий · требуется настройка",
             _ => "Мифодий · выключен"
         };
+        VoiceStatusText.Text = voiceState;
+        SetStatusPill(VoiceStatusPill, VoiceStatusText, stale || snapshot.State.Equals("DEGRADED", StringComparison.OrdinalIgnoreCase) ? "warning" : snapshot.State.Equals("LISTENING", StringComparison.OrdinalIgnoreCase) ? "success" : "neutral");
     }
 
     private void QueueAgentRecovery(CancellationToken cancellationToken)
@@ -281,6 +285,7 @@ public sealed partial class MainWindow : Window
         }
 
         RecorderStatusText.Text = recorderAvailable ? "Recorder · готов" : "Recorder · недоступен";
+        SetStatusPill(RecorderStatusPill, RecorderStatusText, recorderAvailable ? "success" : "danger");
         ToolTipService.SetToolTip(
             RecorderStatusText,
             recorderAvailable
@@ -291,6 +296,7 @@ public sealed partial class MainWindow : Window
             : authenticated
                 ? "Сервер · доступен"
                 : "Сервер · требуется вход";
+        SetStatusPill(ServerStatusPill, ServerStatusText, !backendAvailable ? "warning" : authenticated ? "success" : "warning");
         ToolTipService.SetToolTip(
             ServerStatusText,
             !backendAvailable
@@ -299,11 +305,27 @@ public sealed partial class MainWindow : Window
                     ? "LAN-сервер доступен, API-сессия подтверждена."
                     : "LAN-сервер доступен, но требуется вход в API.");
         WhisperXStatusText.Text = processingReady ? "WhisperX · готов" : "WhisperX · не готов";
+        SetStatusPill(WhisperXStatusPill, WhisperXStatusText, processingReady ? "success" : "warning");
         ToolTipService.SetToolTip(
             WhisperXStatusText,
             processingReady
                 ? "WhisperX и обязательные worker-компоненты готовы к транскрибации."
                 : "WhisperX или GPU/worker ещё не готовы. Откройте «Состояние системы» для деталей.");
+    }
+
+    private static void SetStatusPill(Border pill, TextBlock text, string state)
+    {
+        var resources = Application.Current.Resources;
+        var (background, border, foreground) = state switch
+        {
+            "success" => ("SurfaceGreenBrush", "SuccessBrush", "TextBrush"),
+            "warning" => ("SurfaceOrangeBrush", "WarningBrush", "TextBrush"),
+            "danger" => ("DangerSurfaceBrush", "DangerBorderBrush", "DangerBrush"),
+            _ => ("SurfaceBrush", "BorderBrush", "TextSecondaryBrush")
+        };
+        if (resources[background] is Brush backgroundBrush) pill.Background = backgroundBrush;
+        if (resources[border] is Brush borderBrush) pill.BorderBrush = borderBrush;
+        if (resources[foreground] is Brush foregroundBrush) text.Foreground = foregroundBrush;
     }
 
     private async void MainWindow_Closed(object sender, WindowEventArgs args)

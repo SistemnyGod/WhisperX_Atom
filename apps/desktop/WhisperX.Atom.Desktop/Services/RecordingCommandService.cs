@@ -25,22 +25,11 @@ public sealed class RecordingCommandService(IRecorderService recorder)
             var response = await recorder.StartAsync(title, ownerUserId: ownerUserId, localOnly: false, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!response.Ok) return response;
 
-            // Recorder acknowledges START before AudioGraph has necessarily
-            // produced a frame. Confirm the first frame so voice feedback is
-            // truthful and never says “started” for an empty capture.
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
-            var current = response;
-            while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
-            {
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-                current = await recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false);
-                if (current.Health?.FirstFrameConfirmed == true) return response;
-                if (!string.Equals(current.State, "RECORDING", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(current.State, "STARTING", StringComparison.OrdinalIgnoreCase))
-                    break;
-            }
-
-            return response with { Ok = false, Error = "AUDIO_CAPTURE_START_FAILED", ErrorDetail = "FIRST_FRAME_NOT_CONFIRMED" };
+            // Recorder Host acknowledges START only after its writer observes
+            // the first durable bytes. Do not perform a second health-based
+            // handshake here: a transient health read must not turn a live
+            // recording into a false failure or leave hidden capture active.
+            return response with { Preflight = preflight.Preflight };
         }
         finally { _gate.Release(); }
     }

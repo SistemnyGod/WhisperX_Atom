@@ -5,23 +5,53 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="WhisperX Atom — Вход">
     <Grid Background="{StaticResource AppBackgroundBrush}" Padding="32">
-        <Border MaxWidth="520" Padding="28" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource CardStyle}">
-            <StackPanel Spacing="14">
-                <TextBlock Text="WhisperX Atom" Style="{StaticResource PageTitleStyle}" />
-                <TextBlock Text="Вход в рабочее пространство" Style="{StaticResource SectionTitleStyle}" />
-                <TextBlock Text="Войдите в LAN-сервер, чтобы просматривать совещания и синхронизировать локальные записи." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+        <Border MaxWidth="560" Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource CardStyle}">
+            <StackPanel Spacing="16">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <Border Width="44" Height="44" CornerRadius="12" Background="{StaticResource AccentBrush}" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE720;" Foreground="White" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                        <TextBlock Text="WhisperX Atom" Style="{StaticResource PageTitleStyle}" FontSize="26" />
+                        <TextBlock Text="Рабочее пространство совещаний" Style="{StaticResource AuthHintStyle}" />
+                    </StackPanel>
+                </StackPanel>
+                <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,12">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Вход в рабочее пространство" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="Подключитесь к LAN-серверу, чтобы просматривать встречи и синхронизировать локальные записи." Style="{StaticResource AuthHintStyle}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
 
-                <TextBlock Text="Сервер" Style="{StaticResource WorkspaceLabelStyle}" Margin="0,8,0,0" />
-                <TextBox x:Name="ApiUrlBox" IsReadOnly="True" Style="{StaticResource InputStyle}" AutomationProperties.Name="Адрес сервера" />
-                <TextBlock Text="Логин" Style="{StaticResource WorkspaceLabelStyle}" />
-                <TextBox x:Name="UsernameBox" Text="admin" Style="{StaticResource InputStyle}" AutomationProperties.Name="Логин" />
-                <TextBlock Text="Пароль" Style="{StaticResource WorkspaceLabelStyle}" />
-                <PasswordBox x:Name="PasswordBox" PlaceholderText="Введите пароль" Style="{StaticResource PasswordInputStyle}" AutomationProperties.Name="Пароль" />
-                <Button x:Name="LoginButton" Content="Войти" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" HorizontalAlignment="Stretch" AutomationProperties.Name="Войти в LAN-сервер" />
-                <ProgressRing x:Name="BusyRing" IsActive="False" IsIndeterminate="True" HorizontalAlignment="Center" />
-                <TextBlock x:Name="StatusText" TextWrapping="Wrap" Foreground="{StaticResource DangerBrush}" />
-                <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
-                    <TextBlock Text="После первого входа запись может продолжаться локально при временной недоступности сервера." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                <StackPanel Spacing="7">
+                    <TextBlock Text="Сервер" Style="{StaticResource AuthLabelStyle}" />
+                    <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <Ellipse Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
+                            <TextBlock x:Name="ApiOriginText" Text="Настроенный адрес" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Border>
+                    <TextBox x:Name="ApiUrlBox" IsReadOnly="True" Style="{StaticResource InputStyle}" AutomationProperties.Name="Адрес сервера" />
+                </StackPanel>
+                <StackPanel Spacing="7">
+                    <TextBlock Text="Логин" Style="{StaticResource AuthLabelStyle}" />
+                    <TextBox x:Name="UsernameBox" Text="admin" Style="{StaticResource InputStyle}" AutomationProperties.Name="Логин" KeyDown="CredentialBox_KeyDown" />
+                    <TextBlock Text="Пароль" Style="{StaticResource AuthLabelStyle}" Margin="0,5,0,0" />
+                    <PasswordBox x:Name="PasswordBox" PlaceholderText="Введите пароль" Style="{StaticResource PasswordInputStyle}" AutomationProperties.Name="Пароль" KeyDown="CredentialBox_KeyDown" />
+                </StackPanel>
+                <Button x:Name="LoginButton" Content="Войти в рабочее пространство" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" HorizontalAlignment="Stretch" AutomationProperties.Name="Войти в LAN-сервер" />
+                <ProgressRing x:Name="BusyRing" IsActive="False" IsIndeterminate="True" HorizontalAlignment="Center" Width="24" Height="24" />
+                <Border x:Name="StatusSurface" Style="{StaticResource AuthStatusBorderStyle}" Visibility="Collapsed">
+                    <StackPanel Orientation="Horizontal" Spacing="9">
+                        <FontIcon x:Name="StatusIcon" Glyph="&#xE783;" FontSize="16" VerticalAlignment="Top" />
+                        <TextBlock x:Name="StatusText" TextWrapping="Wrap" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
+                <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Локальная запись" Style="{StaticResource AuthLabelStyle}" />
+                        <TextBlock Text="После входа запись сначала сохраняется на этом компьютере. Временная недоступность сервера не удаляет аудио — доставка продолжится автоматически." Style="{StaticResource AuthHintStyle}" TextWrapping="Wrap" />
+                    </StackPanel>
                 </Border>
             </StackPanel>
         </Border>

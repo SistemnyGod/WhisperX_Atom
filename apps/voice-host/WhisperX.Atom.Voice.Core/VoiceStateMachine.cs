@@ -5,6 +5,7 @@ public sealed class VoiceStateMachine
     private readonly object _gate = new();
     private readonly List<VoiceTransition> _history = [];
     private VoiceHostState _state = VoiceHostState.Disabled;
+    private DateTimeOffset _updatedAt = DateTimeOffset.UtcNow;
     private bool _enabled;
     private string? _lastText;
     private string? _lastResponse;
@@ -14,6 +15,12 @@ public sealed class VoiceStateMachine
 
     public VoiceHostSnapshot Snapshot { get { lock (_gate) return CreateSnapshot(); } }
     public IReadOnlyList<VoiceTransition> History { get { lock (_gate) return _history.ToArray(); } }
+
+    /// <summary>Marks that the host answered a health/status request.</summary>
+    public void TouchHeartbeat()
+    {
+        lock (_gate) _updatedAt = DateTimeOffset.UtcNow;
+    }
 
     public void Enable(bool enabled)
     {
@@ -25,10 +32,29 @@ public sealed class VoiceStateMachine
             {
                 var previous = _state;
                 _state = VoiceHostState.Disabled;
-                _history.Add(new VoiceTransition(previous, _state, DateTimeOffset.UtcNow, "disabled"));
+                _updatedAt = DateTimeOffset.UtcNow;
+                _history.Add(new VoiceTransition(previous, _state, _updatedAt, "disabled"));
             }
             else
                 TransitionUnsafe(VoiceHostState.Listening, "enabled");
+        }
+    }
+
+    public void BeginStartup()
+    {
+        lock (_gate)
+        {
+            _enabled = true;
+            _pendingConfirmation = null;
+            TransitionUnsafe(VoiceHostState.Starting, "startup");
+        }
+    }
+
+    public void MarkReady()
+    {
+        lock (_gate)
+        {
+            if (_enabled) TransitionUnsafe(VoiceHostState.Listening, "startup-ready");
         }
     }
 
@@ -136,15 +162,17 @@ public sealed class VoiceStateMachine
         if (!Allowed(_state, next)) return false;
         var previous = _state;
         _state = next;
-        _history.Add(new VoiceTransition(previous, next, DateTimeOffset.UtcNow, reason));
+        _updatedAt = DateTimeOffset.UtcNow;
+        _history.Add(new VoiceTransition(previous, next, _updatedAt, reason));
         return true;
     }
 
-    private VoiceHostSnapshot CreateSnapshot() => new(_state, _enabled, _pushToTalk, _lastText, _lastResponse, _pendingConfirmation, DateTimeOffset.UtcNow);
+    private VoiceHostSnapshot CreateSnapshot() => new(_state, _enabled, _pushToTalk, _lastText, _lastResponse, _pendingConfirmation, _updatedAt);
 
     private static bool Allowed(VoiceHostState from, VoiceHostState to) => (from, to) switch
     {
-        (VoiceHostState.Disabled, VoiceHostState.Listening or VoiceHostState.Degraded) => true,
+        (VoiceHostState.Disabled, VoiceHostState.Starting or VoiceHostState.Listening or VoiceHostState.Degraded) => true,
+        (VoiceHostState.Starting, VoiceHostState.Listening or VoiceHostState.Degraded or VoiceHostState.Disabled) => true,
         (VoiceHostState.Listening, VoiceHostState.WakeDetected or VoiceHostState.Disabled or VoiceHostState.Degraded or VoiceHostState.Confirming or VoiceHostState.Responding) => true,
         (VoiceHostState.WakeDetected, VoiceHostState.Capturing or VoiceHostState.Listening or VoiceHostState.Degraded) => true,
         (VoiceHostState.Capturing, VoiceHostState.Recognizing or VoiceHostState.Listening or VoiceHostState.Responding) => true,

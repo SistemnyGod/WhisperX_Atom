@@ -535,24 +535,6 @@ public sealed class RecordingViewModel : ObservableObject
             // here serialized START behind IPC/SQLite round trips and caused
             // false timeout errors.
             await RefreshAsync();
-            var preflight = await _services.Recorder.PreflightAsync();
-            var captureReady = preflight.Preflight is { CaptureReady: true }
-                || (preflight.Preflight is not null && preflight.Preflight.CaptureReady == false && preflight.Preflight.Ready);
-            if (!preflight.Ok || preflight.Preflight is null || !captureReady)
-            {
-                State = RecordingState.Error;
-                ErrorMessage = preflight.Preflight is { Errors.Count: > 0 }
-                    ? string.Join("; ", preflight.Preflight.Errors.Select(MapRecordingError))
-                    : MapRecordingError(preflight.Error ?? "Проверка перед записью не пройдена.");
-                WarningMessage = preflight.Preflight is { Warnings.Count: > 0 }
-                    ? string.Join("; ", preflight.Preflight.Warnings.Select(MapRecordingError))
-                    : string.Empty;
-                return false;
-            }
-            if (preflight.Preflight is { EncodingReady: false })
-            {
-                WarningMessage = "Запись сохраняется локально; кодирование и отправка продолжатся после восстановления FFmpeg.";
-            }
             if (!_hasAudioSource)
             {
                 State = RecordingState.Error;
@@ -579,8 +561,18 @@ public sealed class RecordingViewModel : ObservableObject
             // worker. START must not wait for HTTP, and localOnly=false keeps
             // the durable session eligible for later automatic delivery.
             var response = await _services.RecordingCommands.StartAsync(title, ownerUserId);
+            if (response.Preflight is { EncodingReady: false })
+                WarningMessage = "Запись сохраняется локально; кодирование и отправка продолжатся после восстановления FFmpeg.";
+            if (response.Preflight is { Warnings.Count: > 0 })
+                WarningMessage = string.Join("; ", response.Preflight.Warnings.Select(MapRecordingError));
             ApplyResponse(response);
-            if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
+            if (!response.Ok)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = response.Preflight is { Errors.Count: > 0 }
+                    ? string.Join("; ", response.Preflight.Errors.Select(MapRecordingError))
+                    : MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
+            }
             if (response.Ok && response.MeetingId is Guid agentMeetingId)
             {
                 MeetingId ??= agentMeetingId;

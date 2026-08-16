@@ -3,15 +3,13 @@
     x:Class="WhisperX_Atom_Desktop.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <StackPanel>
-                <TextBlock Text="Настройки" Style="{StaticResource PageTitleStyle}" />
-                <TextBlock Text="Подключение к API, Recorder Agent и локальный архив" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
-            </StackPanel>
+            <controls:PageHeader Title="Настройки" Subtitle="Подключение к API, Recorder Agent и локальный архив" />
             <Grid x:Name="SettingsLayoutGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
                 <Border x:Name="ApiSettingsCard" Style="{StaticResource CardStyle}">
                     <StackPanel Spacing="10">
@@ -86,8 +84,22 @@
                         <StackPanel Grid.Column="1" Spacing="4">
                             <TextBlock Text="Состояние" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
                             <TextBlock Text="{Binding VoiceStatus}" TextWrapping="Wrap" />
+                            <TextBlock Text="Режим wake word" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceWakeWordMode}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                            <TextBlock Text="Сборка Voice Host" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceRuntimeBuild}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                            <TextBlock Text="Процесс" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceRuntimeProcess}" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="Последний trace ID" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceLastTraceId}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                             <TextBlock Text="Последнее распознавание" Style="{StaticResource CaptionStyle}" />
                             <TextBlock Text="{Binding VoiceLastRecognition}" TextWrapping="Wrap" />
+                            <TextBlock Text="Микрофон" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceMicrophone}" TextWrapping="Wrap" />
+                            <TextBlock Text="Живой уровень" Style="{StaticResource CaptionStyle}" />
+                            <Grid x:Name="VoiceBarsPanel" Height="58" ColumnSpacing="3" HorizontalAlignment="Stretch" />
+                            <TextBlock Text="{Binding VoiceSignalState}" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock Text="{Binding VoiceLevel}" />
                             <TextBlock Text="Код ошибки" Style="{StaticResource CaptionStyle}" />
                             <TextBlock Text="{Binding VoiceErrorCode}" TextWrapping="Wrap" />
                         </StackPanel>

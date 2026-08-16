@@ -287,6 +287,29 @@
         <Setter Property="VerticalAlignment" Value="Center" />
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
     </Style>
+    <Style x:Key="TopStatusPillStyle" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="12" />
+        <Setter Property="Padding" Value="9,4" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="AuthLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource WorkspaceLabelStyle}">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+    <Style x:Key="AuthHintStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionStyle}">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+    </Style>
+    <Style x:Key="AuthStatusBorderStyle" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource InfoSurfaceBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12,10" />
+    </Style>
     <Style x:Key="WorkspaceLabelStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="12" />
         <Setter Property="FontWeight" Value="SemiBold" />

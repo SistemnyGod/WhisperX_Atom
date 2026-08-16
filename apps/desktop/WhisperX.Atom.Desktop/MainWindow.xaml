@@ -27,11 +27,11 @@
             <TitleBar.Content>
                 <Grid MinWidth="560" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="20,0,16,0">
                     <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" />
-                        <TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" />
-                        <TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" />
-                        <TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <Border x:Name="RecorderStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
+                        <Border x:Name="ServerStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
+                        <Border x:Name="WhisperXStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" /></Border>
+                        <Border x:Name="VoiceStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
                         <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" ToolTipService.ToolTip="Текущий пользователь и состояние локальной сессии" AutomationProperties.Name="Текущий пользователь" />
                     </StackPanel>
                     <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />

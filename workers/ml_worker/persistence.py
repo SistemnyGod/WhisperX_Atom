@@ -8,9 +8,21 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 from diarization_quality import normalize_speaker_label
+from .technical_events import build_technical_intervals, segment_technical_flags
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
 ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
+
+
+def _technical_intervals(connection: psycopg.Connection[Any], meeting_id: str) -> list[tuple[int, int, str]]:
+    rows = connection.execute(
+        "SELECT e.event_type,e.media_time_ms FROM recording_events e "
+        "JOIN recording_sessions rs ON rs.id=e.session_id "
+        "WHERE rs.meeting_id=%s AND e.media_time_ms IS NOT NULL "
+        "ORDER BY e.media_time_ms,e.created_at",
+        (meeting_id,),
+    ).fetchall()
+    return build_technical_intervals(rows)
 
 
 class JobRepository:
@@ -105,6 +117,30 @@ class JobRepository:
             return
         with psycopg.connect(self.conninfo) as connection:
             connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
+
+    def schedule_retry(self, job_id: str, error: str, error_code: str, max_attempts: int = 3) -> int | None:
+        """Return the new attempt number when a transient retry was claimed.
+
+        The job is made visible to the outbox/NATS retry path only while its
+        attempt budget remains.  A terminal FAILED job must never be NAKed as
+        if it could be retried: JetStream redelivery would otherwise be
+        acknowledged by the terminal-state guard without doing any work.
+        """
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute(
+                """
+                UPDATE jobs
+                SET status='QUEUED', stage='RETRY_PENDING', progress=0,
+                    attempt=attempt+1, error_message=%s, error_code=%s,
+                    worker_id=NULL, lease_expires_at=NULL,
+                    last_heartbeat=now(), updated_at=now()
+                WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
+                  AND attempt < %s
+                RETURNING attempt
+                """,
+                (error, error_code, job_id, max_attempts),
+            ).fetchone()
+            return int(row[0]) if row else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
         with psycopg.connect(self.conninfo) as connection:
@@ -243,10 +279,14 @@ class JobRepository:
                     "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,'PARTIAL_READY',%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,NULL,'ASR_DRAFT') RETURNING id",
                     (meeting_id, version, draft.get("language"), metadata.get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), metadata.get("processing_profile"), metadata.get("selected_asr_pass")),
                 ).fetchone()[0]
+                technical_intervals = _technical_intervals(connection, meeting_id)
                 for ordinal, segment in enumerate(draft.get("segments", [])):
+                    start_ms = int(float(segment.get("start", 0)) * 1000)
+                    end_ms = int(float(segment.get("end", 0)) * 1000)
+                    segment_kind, is_hidden = segment_technical_flags(start_ms, end_ms, technical_intervals)
                     connection.execute(
-                        "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words) VALUES(gen_random_uuid(),%s,%s,%s,%s,NULL,'UNKNOWN',%s,%s,%s)",
-                        (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", []))),
+                        "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,NULL,'UNKNOWN',%s,%s,%s,%s,%s)",
+                        (transcript_id, ordinal, start_ms, end_ms, str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), segment_kind, is_hidden),
                     )
                 connection.execute(
                     "UPDATE jobs SET stage='ASR_READY',progress=45,error_code=%s,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
@@ -325,16 +365,15 @@ class JobRepository:
                     (meeting_id, label, label.replace("SPEAKER_", "Спикер ")),
                 ).fetchone()[0]
                 speakers[label] = str(speaker_id)
-            technical_events = connection.execute(
-                "SELECT e.event_type,e.media_time_ms FROM recording_events e JOIN recording_sessions rs ON rs.id=e.session_id WHERE rs.meeting_id=%s AND e.media_time_ms IS NOT NULL",
-                (meeting_id,),
-            ).fetchall()
-            technical_events = [(str(event_type).upper(), int(media_time_ms)) for event_type, media_time_ms in technical_events]
+            technical_intervals = _technical_intervals(connection, meeting_id)
             for ordinal, segment in enumerate(result.get("segments", [])):
                 label = normalize_speaker_label(segment.get("speaker"))
+                start_ms = int(float(segment.get("start", 0)) * 1000)
+                end_ms = int(float(segment.get("end", 0)) * 1000)
+                technical_kind, technical_hidden = segment_technical_flags(start_ms, end_ms, technical_intervals)
                 connection.execute(
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
-                    (transcript_id, ordinal, int(float(segment.get("start", 0)) * 1000), int(float(segment.get("end", 0)) * 1000), speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), next((event_type for event_type, event_time in technical_events if int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000)), str(segment.get("segment_kind", "SPEECH"))), bool(segment.get("is_hidden", False)) or any(event_type in {"VOICE_COMMAND", "SYSTEM_RESPONSE"} and int(float(segment.get("start", 0)) * 1000) <= event_time <= int(float(segment.get("end", 0)) * 1000) for event_type, event_time in technical_events)),
+                    (transcript_id, ordinal, start_ms, end_ms, speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), technical_kind if technical_hidden else str(segment.get("segment_kind", "SPEECH")), bool(segment.get("is_hidden", False)) or technical_hidden),
                 )
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not no_speech_detected:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()

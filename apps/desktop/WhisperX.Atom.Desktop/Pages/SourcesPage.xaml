@@ -3,21 +3,20 @@
     x:Class="WhisperX_Atom_Desktop.Pages.SourcesPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <Grid ColumnDefinitions="*,Auto">
-                <StackPanel>
-                    <TextBlock Text="Источники" Style="{StaticResource PageTitleStyle}" />
-                    <TextBlock Text="Recorder Agent, устройства записи и серверные агенты" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
-                </StackPanel>
-                <StackPanel x:Name="SourcesActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+            <controls:PageHeader Title="Источники" Subtitle="Recorder Agent, устройства записи и серверные агенты">
+                <controls:PageHeader.Actions>
+                <StackPanel x:Name="SourcesActionsPanel" Orientation="Horizontal" Spacing="8">
                     <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="OpenRecordingButton_Click" AutomationProperties.Name="Открыть запись" ToolTipService.ToolTip="Перейти к выбору микрофона и записи" />
                     <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить источники" ToolTipService.ToolTip="Повторно проверить Recorder Agent, устройства и API" />
                 </StackPanel>
-            </Grid>
+                </controls:PageHeader.Actions>
+            </controls:PageHeader>
 
             <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
                 <InfoBar.ActionButton>

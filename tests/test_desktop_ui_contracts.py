@@ -138,6 +138,29 @@ def test_authenticated_user_can_reach_settings_when_recorder_is_down():
     assert 'ShowMainWindow();' in app
 
 
+def test_login_window_surfaces_connection_context_and_keyboard_submit():
+    page = (DESKTOP / "LoginWindow.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "LoginWindow.xaml.cs").read_text(encoding="utf-8")
+    assert 'Text="Локальная запись"' in page
+    assert 'x:Name="StatusSurface"' in page
+    assert 'KeyDown="CredentialBox_KeyDown"' in page
+    assert 'AppWindow.Resize(new Windows.Graphics.SizeInt32(620, 700))' in codebehind
+    assert 'Проверяем подключение и авторизацию' in codebehind
+    assert 'StatusSurface.Visibility = Visibility.Visible' in codebehind
+    assert 'RECORDER_BOOTSTRAP_FAILED' in codebehind
+    assert 'Не удалось выполнить вход. Проверьте адрес сервера и локальное подключение.' in codebehind
+
+
+def test_title_bar_uses_compact_status_pills_for_runtime_states():
+    shell = (DESKTOP / "MainWindow.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="RecorderStatusPill"' in shell
+    assert 'x:Name="ServerStatusPill"' in shell
+    assert 'x:Name="VoiceStatusPill"' in shell
+    assert 'SetStatusPill(RecorderStatusPill' in codebehind
+    assert 'SetStatusPill(VoiceStatusPill' in codebehind
+
+
 def test_primary_ui_copy_avoids_backend_and_pipeline_jargon():
     settings = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
     agents = (DESKTOP / "Pages" / "AgentsPage.xaml").read_text(encoding="utf-8")

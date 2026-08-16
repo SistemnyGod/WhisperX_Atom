@@ -3,21 +3,20 @@
     x:Class="WhisperX_Atom_Desktop.Pages.AssistantPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <Grid Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,*" RowSpacing="{StaticResource PageGap}">
-        <Grid ColumnDefinitions="*,Auto">
-            <StackPanel Spacing="3">
-                <TextBlock Text="ИИ-помощник" Style="{StaticResource PageTitleStyle}" />
-                <TextBlock Text="Постоянные диалоги по готовым стенограммам с подтверждёнными источниками" Foreground="{StaticResource MutedTextBrush}" />
-                <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,8,0,0">
+        <controls:PageHeader Title="ИИ-помощник" Subtitle="Постоянные диалоги по готовым стенограммам с подтверждёнными источниками">
+            <controls:PageHeader.Actions>
+                <StackPanel Orientation="Horizontal" Spacing="10">
                     <ComboBox x:Name="ModeBox" Header="Режим" ItemsSource="{Binding Modes}" DisplayMemberPath="Label" Width="190" SelectionChanged="ModeBox_SelectionChanged" />
                     <ComboBox x:Name="ContextBox" Header="Контекст" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" Width="270" SelectionChanged="ContextBox_SelectionChanged" />
+                    <Button x:Name="NewChatButton" Content="Новый чат" Style="{StaticResource PrimaryButtonStyle}" Click="NewChatButton_Click" />
                 </StackPanel>
-            </StackPanel>
-            <Button x:Name="NewChatButton" Grid.Column="1" Content="Новый чат" Style="{StaticResource PrimaryButtonStyle}" Click="NewChatButton_Click" />
-        </Grid>
+            </controls:PageHeader.Actions>
+        </controls:PageHeader>
 
         <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" />
 

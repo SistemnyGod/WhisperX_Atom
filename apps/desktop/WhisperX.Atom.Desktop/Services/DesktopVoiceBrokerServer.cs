@@ -1,7 +1,7 @@
 using System.IO.Pipes;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 using WhisperX.Atom.Recorder;
+using WhisperX.Atom.Desktop;
 
 namespace WhisperX_Atom_Desktop.Services;
 
@@ -9,15 +9,15 @@ namespace WhisperX_Atom_Desktop.Services;
 public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 {
     private readonly RecordingCommandService _commands;
-    private readonly ILogger? _logger;
+    private readonly Action<Exception>? _log;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private Task? _loop;
 
-    public DesktopVoiceBrokerServer(RecordingCommandService commands, ILogger? logger = null)
+    public DesktopVoiceBrokerServer(RecordingCommandService commands, Action<Exception>? log = null)
     {
         _commands = commands;
-        _logger = logger;
+        _log = log;
     }
 
     public void Start() => _loop ??= Task.Run(RunAsync);
@@ -41,22 +41,45 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 await writer.WriteLineAsync(JsonSerializer.Serialize(response, _json)).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
-            catch (Exception ex) { _logger?.LogDebug(ex, "Desktop voice broker request failed."); }
+            catch (Exception ex) { _log?.Invoke(ex); }
         }
     }
 
     private async Task<BrokerResponse> HandleAsync(JsonElement root, CancellationToken cancellationToken)
     {
         if (!root.TryGetProperty("command", out var commandElement)
-            || !string.Equals(commandElement.GetString(), "EXECUTE_INTENT", StringComparison.OrdinalIgnoreCase))
+            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT"))
             return new(false, "VOICE_COMMAND_REJECTED", Detail: "unsupported_command");
+
+        if (string.Equals(commandElement.GetString(), "RECORD_EVENT", StringComparison.OrdinalIgnoreCase))
+        {
+            var eventType = root.TryGetProperty("eventType", out var typeElement) ? typeElement.GetString() : null;
+            var payload = root.TryGetProperty("payload", out var payloadElement) ? payloadElement : default;
+            var eventTraceId = root.TryGetProperty("traceId", out var eventTrace) ? eventTrace.GetString() : null;
+            try
+            {
+                // Recorder IPC v6 accepts the event payload. Keep this call
+                // best-effort so telemetry never blocks capture or TTS.
+                var client = new WhisperX.Atom.Desktop.AgentPipeClient();
+                // Preserve the broker trace in the durable event payload so
+                // the server can correlate VOICE_COMMAND/TTS intervals with
+                // the originating EXECUTE_INTENT request.
+                var durablePayload = eventTraceId is null
+                    ? payload
+                    : JsonSerializer.SerializeToElement(new { traceId = eventTraceId, payload }, _json);
+                var eventAck = await client.SendAsync("VOICE_EVENT", new { eventType, payload = durablePayload }, cancellationToken).ConfigureAwait(false);
+                return new(eventAck.Ok, eventAck.Error, eventAck.State, eventAck.SessionId, eventAck.SessionStatus?.LocalFinalizeState, TraceId: eventTraceId);
+            }
+            catch (Exception ex) { return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: eventTraceId); }
+        }
 
         var intent = root.TryGetProperty("intent", out var intentElement) ? intentElement.GetString() : null;
         var text = root.TryGetProperty("text", out var textElement) ? textElement.GetString() : null;
+        var traceId = root.TryGetProperty("traceId", out var traceElement) ? traceElement.GetString() : null;
         var testMode = root.TryGetProperty("testMode", out var testElement) && testElement.ValueKind == JsonValueKind.True;
-        if (string.IsNullOrWhiteSpace(intent)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "intent_missing");
+        if (string.IsNullOrWhiteSpace(intent)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "intent_missing", TraceId: traceId);
         if (testMode)
-            return new(true, RecorderState: "TEST_ONLY", SpokenText: "Тест распознавания завершён", Detail: $"intent={intent};text={text}");
+            return new(true, RecorderState: "TEST_ONLY", SpokenText: "Тест распознавания завершён", Detail: $"intent={intent};text={text}", TraceId: traceId);
 
         AgentIpcResponse response;
         try
@@ -76,11 +99,15 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
         catch (RecorderIpcException ex)
         {
-            return new(false, ex.ErrorCode, Detail: ex.Message);
+            return new(false, ex.ErrorCode, Detail: ex.Message, TraceId: traceId);
         }
         catch (IOException ex)
         {
-            return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.Message);
+            return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.Message, TraceId: traceId);
+        }
+        catch (Exception ex)
+        {
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId);
         }
 
         var localReady = response.SessionStatus?.LocalFinalizeState;
@@ -100,7 +127,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             }
             : null;
         return new(response.Ok, response.Error ?? (response.Ok ? null : "VOICE_COMMAND_REJECTED"), response.State,
-            response.SessionId, localReady, spoken, response.ErrorDetail);
+            response.SessionId, localReady, spoken, response.ErrorDetail, traceId);
     }
 
     public async ValueTask DisposeAsync()
@@ -111,5 +138,5 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     }
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
-        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null);
+        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null);
 }

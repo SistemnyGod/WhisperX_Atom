@@ -29,6 +29,21 @@ from .assistant import AssistantWorker
 LOGGER = logging.getLogger("whisperx.summary-worker")
 
 
+class RetryScheduled(RuntimeError):
+    def __init__(self, delay_seconds: float):
+        super().__init__("SUMMARY_RETRY_SCHEDULED")
+        self.delay_seconds = delay_seconds
+
+
+def is_retryable_summary_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return not any(token in text for token in ("transcript_has_no_segments", "transcript_not_found", "cancelled"))
+
+
+def retry_delay_seconds(attempt: int) -> float:
+    return {1: 5, 2: 15, 3: 30}.get(attempt, 60) + attempt * 0.37
+
+
 class SummaryRepository:
     def __init__(self) -> None:
         self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
@@ -90,6 +105,23 @@ class SummaryRepository:
             )
             # The transcript remains usable even when the optional summary failed.
             connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+
+    def schedule_retry(self, job_id: str, error: str, error_code: str, max_attempts: int = 3) -> int | None:
+        with psycopg.connect(self.conninfo) as connection:
+            row = connection.execute(
+                """
+                UPDATE jobs
+                SET status='QUEUED', stage='RETRY_PENDING', progress=0,
+                    attempt=attempt+1, error_message=%s, error_code=%s,
+                    worker_id=NULL, lease_expires_at=NULL,
+                    last_heartbeat=now(), updated_at=now()
+                WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
+                  AND attempt < %s
+                RETURNING attempt
+                """,
+                (error, error_code, job_id, max_attempts),
+            ).fetchone()
+            return int(row[0]) if row else None
     def load_segments(self, meeting_id: str, transcript_id: str | None = None) -> list[TranscriptSegment]:
         with psycopg.connect(self.conninfo) as connection:
             if transcript_id:
@@ -171,36 +203,52 @@ class SummaryRepository:
             if correlation_id:
                 result["correlation_id"] = correlation_id
                 connection.execute("UPDATE jobs SET pipeline_correlation_id=%s WHERE id=%s", (correlation_id, job_id))
-            existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
-            if existing_summary is not None:
-                existing_status = str(existing_summary[1])
-                if existing_status in {"READY", "NEEDS_REVIEW", "FAILED"}:
-                    connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
-                    connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if existing_status == "READY" else "PARTIAL_READY", meeting_id))
-                    return True
-                raise RuntimeError("summary_persist_incomplete")
             if transcript_id:
                 transcript = connection.execute("SELECT id FROM transcripts WHERE id=%s AND meeting_id=%s", (transcript_id, meeting_id)).fetchone()
             else:
                 transcript = connection.execute("SELECT id FROM transcripts WHERE meeting_id=%s ORDER BY version DESC LIMIT 1", (meeting_id,)).fetchone()
             if transcript is None:
                 raise RuntimeError("transcript_not_found")
-            current = connection.execute("SELECT COALESCE(MAX(version),0) FROM summaries WHERE meeting_id=%s", (meeting_id,)).fetchone()[0]
-            summary_id = connection.execute(
-                "INSERT INTO summaries(id,job_id,meeting_id,transcript_id,version,status,model_name,prompt_version,schema_version,source_hash,quality_score,content) VALUES(gen_random_uuid(),%s,%s,%s,%s,'DRAFT',%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
-                (
-                    job_id,
-                    meeting_id,
-                    transcript[0],
-                    int(current) + 1,
-                    model_name,
-                    prompt_version,
-                    schema_version,
-                    source_hash,
-                    result.get("quality_score"),
-                    Jsonb(result),
-                ),
-            ).fetchone()[0]
+            existing_summary = connection.execute("SELECT id,status FROM summaries WHERE job_id=%s FOR UPDATE", (job_id,)).fetchone()
+            summary_id = None
+            if existing_summary is not None:
+                existing_status = str(existing_summary[1])
+                if existing_status in {"READY", "NEEDS_REVIEW"}:
+                    connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if existing_status == "READY" else "PARTIAL_READY", meeting_id))
+                    return True
+                if existing_status != "FAILED":
+                    raise RuntimeError("summary_persist_incomplete")
+                # A manual retry reuses the idempotency row but resets its
+                # derived children. This preserves the unique job_id index
+                # while ensuring a FAILED result can never be promoted to
+                # READY without new generated content.
+                summary_id = existing_summary[0]
+                connection.execute("DELETE FROM summary_evidence WHERE summary_id=%s", (summary_id,))
+                connection.execute("DELETE FROM decisions WHERE summary_id=%s", (summary_id,))
+                connection.execute("DELETE FROM action_items WHERE summary_id=%s", (summary_id,))
+                current = connection.execute("SELECT COALESCE(MAX(version),0) FROM summaries WHERE meeting_id=%s AND id<>%s", (meeting_id, summary_id)).fetchone()[0]
+                connection.execute(
+                    "UPDATE summaries SET transcript_id=%s,version=%s,status='DRAFT',model_name=%s,prompt_version=%s,schema_version=%s,source_hash=%s,quality_score=%s,content=%s::jsonb WHERE id=%s",
+                    (transcript[0], int(current) + 1, model_name, prompt_version, schema_version, source_hash, result.get("quality_score"), Jsonb(result), summary_id),
+                )
+            else:
+                current = connection.execute("SELECT COALESCE(MAX(version),0) FROM summaries WHERE meeting_id=%s", (meeting_id,)).fetchone()[0]
+                summary_id = connection.execute(
+                    "INSERT INTO summaries(id,job_id,meeting_id,transcript_id,version,status,model_name,prompt_version,schema_version,source_hash,quality_score,content) VALUES(gen_random_uuid(),%s,%s,%s,%s,'DRAFT',%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
+                    (
+                        job_id,
+                        meeting_id,
+                        transcript[0],
+                        int(current) + 1,
+                        model_name,
+                        prompt_version,
+                        schema_version,
+                        source_hash,
+                        result.get("quality_score"),
+                        Jsonb(result),
+                    ),
+                ).fetchone()[0]
             connection.execute(
                 "INSERT INTO summary_runs(id,summary_id,model_name,prompt_version,schema_version,source_hash,finished_at,block_count,input_tokens,output_tokens,generation_ms,quality_score) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,now(),%s,%s,%s,%s,%s)",
                 (
@@ -343,7 +391,12 @@ class SummaryWorker:
             if not persisted:
                 LOGGER.info("summary job=%s result discarded because the meeting was cancelled or deleted", job_id)
         except Exception as exc:
-            self.repository.mark_failed(job_id, meeting_id, type(exc).__name__ + ": " + str(exc))
+            detail = type(exc).__name__ + ": " + str(exc)
+            if is_retryable_summary_error(exc):
+                scheduled_attempt = self.repository.schedule_retry(job_id, detail, "SUMMARY_RETRY_PENDING")
+                if scheduled_attempt is not None:
+                    raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
+            self.repository.mark_failed(job_id, meeting_id, detail)
             raise
 
 
@@ -434,6 +487,9 @@ async def run() -> None:
                     async with maintain_message(message, on_tick=lambda: asyncio.to_thread(summary_worker.repository.renew_lease, job_id, message_id)):
                         await summary_worker.handle(payload)
                     await message.ack()
+                except RetryScheduled as exc:
+                    LOGGER.warning("summary retry scheduled job=%s delay=%ss", job_id, exc.delay_seconds)
+                    await message.nak(delay=exc.delay_seconds)
                 except Exception:
                     LOGGER.exception("summary_message_failed job_id=%s", job_id)
                     await message.nak()

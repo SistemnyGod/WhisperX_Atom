@@ -29,9 +29,9 @@ internal static class VoiceAssetVerifier
                 var full = Path.GetFullPath(Path.Combine(assetsRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
                 if (!full.StartsWith(Path.GetFullPath(assetsRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return new(false, "VOICE_MODEL_LOCK_INVALID");
                 if (!File.Exists(full) || new FileInfo(full).Length != size) return new(false, "VOICE_MODEL_INTEGRITY_FAILED");
-                if (file.TryGetProperty("sha256", out var hashElement))
+                if (file.TryGetProperty("sha256", out var fileHashElement))
                 {
-                    var expected = hashElement.GetString();
+                    var expected = fileHashElement.GetString();
                     using var stream = File.OpenRead(full);
                     var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
                     if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) return new(false, "VOICE_MODEL_INTEGRITY_FAILED");

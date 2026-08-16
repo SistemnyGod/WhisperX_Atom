@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Windows.Forms;
 using Microsoft.Extensions.DependencyInjection;
@@ -54,8 +55,8 @@ if (args.Any(argument => string.Equals(argument, "--doctor", StringComparison.Or
     return;
 }
 
-using var singleInstance = new Mutex(initiallyOwned: true, @"Local\WhisperXAtomVoiceHost", out var ownsInstance);
-if (!ownsInstance) return;
+using var singleInstance = VoiceHostRuntimeLease.TryAcquire();
+if (singleInstance is null) return;
 var dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "VoiceHost");
 Directory.CreateDirectory(dataRoot);
 Log.Logger = new LoggerConfiguration().WriteTo.File(Path.Combine(dataRoot, "voice-host-.log"), rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14).CreateLogger();
