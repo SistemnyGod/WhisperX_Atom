@@ -56,6 +56,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             var eventType = root.TryGetProperty("eventType", out var typeElement) ? typeElement.GetString() : null;
             var payload = root.TryGetProperty("payload", out var payloadElement) ? payloadElement : default;
             var eventTraceId = root.TryGetProperty("traceId", out var eventTrace) ? eventTrace.GetString() : null;
+            var localSessionId = root.TryGetProperty("localSessionId", out var sessionElement) ? sessionElement.GetString() : null;
             try
             {
                 // Recorder IPC v6 accepts the event payload. Keep this call
@@ -67,7 +68,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 var durablePayload = eventTraceId is null
                     ? payload
                     : JsonSerializer.SerializeToElement(new { traceId = eventTraceId, payload }, _json);
-                var eventAck = await client.SendAsync("VOICE_EVENT", new { eventType, payload = durablePayload }, cancellationToken).ConfigureAwait(false);
+                var eventAck = await client.SendAsync("VOICE_EVENT", new { eventType, payload = durablePayload, localSessionId }, cancellationToken).ConfigureAwait(false);
                 return new(eventAck.Ok, eventAck.Error, eventAck.State, eventAck.SessionId, eventAck.SessionStatus?.LocalFinalizeState, TraceId: eventTraceId);
             }
             catch (Exception ex) { return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: eventTraceId); }

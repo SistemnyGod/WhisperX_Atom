@@ -88,6 +88,7 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         try
         {
         await spool.InitializeAsync(stoppingToken);
+        await spool.PrunePendingEventsAsync(TimeSpan.FromMinutes(10), stoppingToken);
         logger.LogInformation("Recorder Agent initialized. State={State}, chunkSeconds={ChunkSeconds}, commandChannel={CommandChannel}", state.State, RecordingContract.GetChunkDurationSeconds(), api.IsConfigured);
         await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken);
         var lastOrphanScan = DateTimeOffset.UtcNow;
@@ -118,11 +119,17 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
         var lastRecovery = DateTimeOffset.MinValue;
         var lastActiveBindingAttempt = DateTimeOffset.MinValue;
         var lastRetention = DateTimeOffset.MinValue;
+        var lastPendingEventPrune = DateTimeOffset.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
             var scanOrphans = DateTimeOffset.UtcNow - lastOrphanScan >= TimeSpan.FromMinutes(10);
             await rawRecovery.RecoverAsync(recorder.SessionId, stoppingToken, scanOrphans);
             if (scanOrphans) lastOrphanScan = DateTimeOffset.UtcNow;
+            if (DateTimeOffset.UtcNow - lastPendingEventPrune >= TimeSpan.FromMinutes(10))
+            {
+                await spool.PrunePendingEventsAsync(TimeSpan.FromMinutes(10), stoppingToken);
+                lastPendingEventPrune = DateTimeOffset.UtcNow;
+            }
             if (DateTimeOffset.UtcNow - lastRetention >= TimeSpan.FromMinutes(5))
             {
                 // Eligibility is SQLite state based; this never scans filenames

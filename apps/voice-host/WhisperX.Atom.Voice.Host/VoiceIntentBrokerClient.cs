@@ -83,7 +83,7 @@ internal sealed class VoiceIntentBrokerClient
         }
     }
 
-    public async Task<VoiceBrokerResponse> RecordEventAsync(string eventType, object payload, CancellationToken cancellationToken)
+    public async Task<VoiceBrokerResponse> RecordEventAsync(string eventType, object payload, CancellationToken cancellationToken, string? localSessionId = null)
     {
         var traceId = Guid.NewGuid().ToString("N");
         try
@@ -91,7 +91,7 @@ internal sealed class VoiceIntentBrokerClient
             await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
             using var reader = new StreamReader(pipe);
             await using var writer = new StreamWriter(pipe) { AutoFlush = true };
-            var request = new { command = "RECORD_EVENT", eventType, payload, timestamp = DateTimeOffset.UtcNow, traceId };
+            var request = new { command = "RECORD_EVENT", eventType, payload, localSessionId, timestamp = DateTimeOffset.UtcNow, traceId };
             await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
             var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             return string.IsNullOrWhiteSpace(line) ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId) : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json) ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId);

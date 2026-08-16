@@ -225,7 +225,11 @@ public sealed class AgentPipeHost(
                     return await RecordEventAsync("ACTION_ITEM", request.Payload, cancellationToken);
                 case "VOICE_EVENT":
                     var eventType = ReadString(request.Payload, "eventType") ?? "VOICE_COMMAND";
-                    return await RecordEventAsync(eventType, request.Payload, cancellationToken);
+                    // A START command is emitted before Recorder has a session.
+                    // Keep it in the local spool and allow Voice Host to replay
+                    // the same event id with the newly returned session id.
+                    var eventSessionId = ReadString(request.Payload, "localSessionId");
+                    return await RecordEventAsync(eventType, request.Payload, cancellationToken, eventSessionId);
                 case "STOP":
                     try
                     {
@@ -565,15 +569,66 @@ public sealed class AgentPipeHost(
         return (state.State, recorder.SessionId, null);
     }
 
-    private async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, CancellationToken cancellationToken)
+    private async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, CancellationToken cancellationToken, string? targetSessionId = null)
     {
-        var sessionId = recorder.SessionId;
-        if (string.IsNullOrWhiteSpace(sessionId)) return Error("recording_not_active");
+        var eventId = ReadEventId(payload) ?? Guid.NewGuid().ToString("N");
+        var payloadJson = JsonSerializer.Serialize(payload);
+        if (HasBoolean(payload, "discardPending") || HasNestedBoolean(payload, "discardPending"))
+        {
+            await spool.RemovePendingEventAsync(eventId, cancellationToken);
+            return new AgentIpcResponse(true, RecorderState.Idle.ToString(), null, null, null,
+                MediaTimeMs: null, ErrorDetail: "VOICE_EVENT_DISCARDED");
+        }
+        var sessionId = string.IsNullOrWhiteSpace(targetSessionId) ? recorder.SessionId : targetSessionId;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            if (string.Equals(eventType, "VOICE_COMMAND", StringComparison.OrdinalIgnoreCase)
+                && IsStartVoiceCommand(payload))
+            {
+                await spool.AddPendingEventAsync(eventId, eventType, payloadJson, cancellationToken: cancellationToken);
+                return new AgentIpcResponse(true, RecorderState.Idle.ToString(), null, null, null,
+                    MediaTimeMs: null, ErrorDetail: "VOICE_EVENT_PENDING_SESSION");
+            }
+            return Error("recording_not_active");
+        }
+        if (await spool.GetSessionInfoAsync(sessionId, cancellationToken) is null)
+            return Error("session_not_found");
         var mediaTimeMs = recorder.CurrentMediaTimeMs ?? 0;
-        await spool.AddEventAsync(sessionId, eventType, mediaTimeMs, JsonSerializer.Serialize(payload), cancellationToken);
+        await spool.AddEventAsync(sessionId, eventType, mediaTimeMs, payloadJson, cancellationToken, eventId);
+        await spool.RemovePendingEventAsync(eventId, cancellationToken);
         var meetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);
         return new AgentIpcResponse(true, state.State.ToString(), sessionId, null, null, meetingId, mediaTimeMs);
     }
+
+    private static string? ReadEventId(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return null;
+        if (payload.TryGetProperty("eventId", out var value) && value.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value.GetString())) return value.GetString();
+        if (payload.TryGetProperty("payload", out var nested)) return ReadEventId(nested);
+        return null;
+    }
+
+    private static bool IsStartVoiceCommand(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return false;
+        if (payload.TryGetProperty("intent", out var value) && value.ValueKind == JsonValueKind.String)
+        {
+            var intent = value.GetString()?.Replace("_", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
+            if (intent == "STARTRECORDING") return true;
+        }
+        return payload.TryGetProperty("payload", out var nested) && IsStartVoiceCommand(nested);
+    }
+
+    private static bool HasNestedBoolean(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object
+        && payload.TryGetProperty("payload", out var nested)
+        && HasBoolean(nested, name);
+
+    private static bool HasBoolean(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object
+        && payload.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.True;
 
     private static AgentIpcResponse Error(string error) => new(false, RecorderState.Idle.ToString(), null, error, null);
 

@@ -705,11 +705,20 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             if (!_state.TryExecute(command)) return await RespondAsync("Команда недоступна в текущем состоянии", cancellationToken, false);
 
             // Persist the command before touching Recorder so the command and
-            // any system response have a deterministic timeline order. Event
-            // persistence is best-effort, but it is no longer fire-and-forget.
+            // any system response have a deterministic timeline order. A START
+            // has no session yet; the same stable event id is replayed after
+            // Recorder returns its localSessionId.
+            var commandEventPayload = new
+            {
+                eventId = Guid.NewGuid().ToString("N"),
+                intent = command.Intent.ToString(),
+                parameter = command.Parameter,
+                traceId,
+                capturedAtUtc = DateTimeOffset.UtcNow
+            };
             var commandEventSaved = await TryRecordVoiceEventAsync(
                 "VOICE_COMMAND",
-                new { intent = command.Intent.ToString(), parameter = command.Parameter, traceId });
+                commandEventPayload);
             if (!commandEventSaved)
                 _logger?.LogWarning("VOICE_COMMAND event could not be persisted. TraceId={TraceId}", traceId);
             var response = command.Intent switch
@@ -725,6 +734,34 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.HistoryQuestion => await AskHistoryAsync(command.Parameter ?? command.Text, cancellationToken),
                 _ => new VoiceResponse("Команда не распознана", true, false)
             };
+            if (command.Intent == VoiceIntent.StartRecording)
+            {
+                if (response.Success && !string.IsNullOrWhiteSpace(response.LocalSessionId))
+                {
+                    // This is idempotent: if the pre-START request reached the
+                    // spool it promotes the pending row; if it did not, this
+                    // call creates the event directly in the new session.
+                    var persisted = false;
+                    for (var attempt = 0; attempt < 3 && !persisted; attempt++)
+                    {
+                        persisted = await TryRecordVoiceEventAsync("VOICE_COMMAND", commandEventPayload, CancellationToken.None, response.LocalSessionId);
+                        if (!persisted && attempt < 2)
+                            await Task.Delay(TimeSpan.FromMilliseconds(100 * (attempt + 1)), _shutdown.Token).ConfigureAwait(false);
+                    }
+                    if (!persisted)
+                        _logger?.LogWarning("VOICE_COMMAND could not be attached to START session. Session={SessionId}, TraceId={TraceId}", response.LocalSessionId, traceId);
+                }
+                else if (!response.Success)
+                {
+                    // Do not attach a failed START to a future meeting. If the
+                    // broker was available, this removes its pending row; a
+                    // later TTL prune covers a broker outage.
+                    await TryRecordVoiceEventAsync(
+                        "VOICE_COMMAND",
+                        new { eventId = commandEventPayload.eventId, discardPending = true },
+                        CancellationToken.None);
+                }
+            }
             _lastCommandLatencyMs = _commandStartedAt == default ? null : (DateTimeOffset.UtcNow - _commandStartedAt).TotalMilliseconds;
             return await RespondAsync(response.Text, cancellationToken, response.Success);
         }
@@ -790,7 +827,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 "DECISION" => "Решение отмечено",
                 "ACTION_ITEM" => "Поручение отмечено",
                 _ => "Команда выполнена"
-            }, true, true);
+            }, true, true, broker.LocalSessionId);
         }
         var result = await _recorder.SendAsync(command, payload, cancellationToken);
         _recorderAckLatencyMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -815,7 +852,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             "STATUS" => $"Состояние записи: {result.State}",
             _ => "Команда выполнена"
         };
-        return new VoiceResponse(text, true, true);
+        return new VoiceResponse(text, true, true, result.SessionId);
     }
 
     private static string VoiceErrorText(string code) => code switch
@@ -868,12 +905,13 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var target = returnState ?? (_state.Snapshot.State == VoiceHostState.Confirming ? VoiceHostState.Confirming : VoiceHostState.Listening);
         _state.TryRespond(text, target);
         var responseId = Guid.NewGuid().ToString("N");
+        var responseEventId = Guid.NewGuid().ToString("N");
         // Write the opening marker before starting playback. This prevents a
         // fast TTS response from being heard by the recorder before its
         // technical interval exists in the event stream.
         var responseEventSaved = await TryRecordVoiceEventAsync(
             "SYSTEM_RESPONSE_STARTED",
-            new { responseId, traceId = _lastTraceId });
+            new { eventId = responseEventId, responseId, traceId = _lastTraceId });
         if (!responseEventSaved)
             _logger?.LogWarning("SYSTEM_RESPONSE_STARTED event could not be persisted. ResponseId={ResponseId}", responseId);
         var enqueued = _speech.TryEnqueue(text, out var playbackCompleted);
@@ -883,7 +921,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
         else
         {
-            await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { responseId, playbackStarted = false });
+            await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { eventId = Guid.NewGuid().ToString("N"), responseId, playbackStarted = false });
             _state.FinishResponse();
             if (_state.Snapshot.State == VoiceHostState.Cooldown) _ = CompleteCooldownAsync();
         }
@@ -895,7 +933,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         try
         {
             await playbackCompleted.WaitAsync(_shutdown.Token).ConfigureAwait(false);
-            var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { responseId, playbackStarted = true });
+            var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { eventId = Guid.NewGuid().ToString("N"), responseId, playbackStarted = true });
             if (!finishedSaved)
                 _logger?.LogWarning("SYSTEM_RESPONSE_FINISHED event could not be persisted. ResponseId={ResponseId}", responseId);
             _state.FinishResponse();
@@ -985,15 +1023,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return $"{first.Trim()} {second.Trim()}";
     }
 
-    private async Task<bool> TryRecordVoiceEventAsync(string eventType, object payload)
+    private async Task<bool> TryRecordVoiceEventAsync(string eventType, object payload, CancellationToken? cancellationToken = null, string? localSessionId = null)
     {
         try
         {
             bool ok;
+            var token = cancellationToken ?? CancellationToken.None;
             if (_desktopBroker is not null)
-                ok = (await _desktopBroker.RecordEventAsync(eventType, payload, CancellationToken.None)).Ok;
+                ok = (await _desktopBroker.RecordEventAsync(eventType, payload, token, localSessionId)).Ok;
             else
-                ok = (await _recorder.SendAsync("VOICE_EVENT", new { eventType, payload }, CancellationToken.None)).Ok;
+                ok = (await _recorder.SendAsync("VOICE_EVENT", new { eventType, payload, localSessionId }, token)).Ok;
             if (!ok) _lastErrorCode = "VOICE_EVENT_PERSIST_FAILED";
             return ok;
         }

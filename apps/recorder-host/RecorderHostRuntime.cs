@@ -122,8 +122,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _logger.LogInformation(
             "Recorder Host initialization started. DataRoot={DataRoot}",
             Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT"));
-        await _spool.InitializeAsync(cancellationToken).ConfigureAwait(false);
-        RecorderRuntimeActivity.SetActive(true);
+            await _spool.InitializeAsync(cancellationToken).ConfigureAwait(false);
+            await _spool.PrunePendingEventsAsync(TimeSpan.FromMinutes(10), cancellationToken).ConfigureAwait(false);
+            RecorderRuntimeActivity.SetActive(true);
         _logger.LogInformation("Recorder Host spool initialized.");
         await _engine.InitializeAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Recorder Host AudioGraph device catalog initialized.");
@@ -785,6 +786,76 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             status.MeetingId, null, AgentIpcProtocol.Version, null, status);
     }
 
+    /// <summary>
+    /// Persists marker and Voice Host technical events in the same local outbox
+    /// as the audio session. A START command arrives before _sessionId exists;
+    /// it is kept in recording_pending_events and replayed with the stable
+    /// event id once Desktop receives the session ACK.
+    /// </summary>
+    public async Task<AgentIpcResponse> RecordEventAsync(string eventType, JsonElement payload, string? targetSessionId, CancellationToken cancellationToken = default)
+    {
+        var normalizedType = string.IsNullOrWhiteSpace(eventType) ? "VOICE_COMMAND" : eventType.Trim().ToUpperInvariant();
+        var eventId = ReadEventId(payload) ?? Guid.NewGuid().ToString("N");
+        var payloadJson = JsonSerializer.Serialize(payload);
+        if (HasBoolean(payload, "discardPending"))
+        {
+            await _spool.RemovePendingEventAsync(eventId, cancellationToken).ConfigureAwait(false);
+            return new AgentIpcResponse(true, "IDLE", null, null, null, ErrorDetail: "VOICE_EVENT_DISCARDED");
+        }
+
+        var sessionId = string.IsNullOrWhiteSpace(targetSessionId) ? _sessionId : targetSessionId;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            if (normalizedType == "VOICE_COMMAND" && IsStartVoiceCommand(payload))
+            {
+                await _spool.AddPendingEventAsync(eventId, normalizedType, payloadJson, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return new AgentIpcResponse(true, "IDLE", null, null, null, ErrorDetail: "VOICE_EVENT_PENDING_SESSION");
+            }
+            return Error("recording_not_active");
+        }
+        if (await _spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false) is null)
+            return Error("session_not_found");
+
+        var mediaTimeMs = string.Equals(sessionId, _sessionId, StringComparison.Ordinal)
+            ? (long?)_engine.CurrentMediaTimeMs
+            : null;
+        if (await _spool.AttachPendingEventAsync(eventId, sessionId, mediaTimeMs, cancellationToken).ConfigureAwait(false))
+        {
+            var meeting = await _spool.GetMeetingIdAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            return new AgentIpcResponse(true, _sessionId is null ? "IDLE" : _engine.State.ToString(), sessionId, null, null, meeting, mediaTimeMs);
+        }
+
+        await _spool.AddEventAsync(sessionId, normalizedType, mediaTimeMs, payloadJson, cancellationToken, eventId).ConfigureAwait(false);
+        var meetingId = await _spool.GetMeetingIdAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        return new AgentIpcResponse(true, _sessionId is null ? "IDLE" : _engine.State.ToString(), sessionId, null, null, meetingId, mediaTimeMs);
+    }
+
+    private static string? ReadEventId(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return null;
+        if (payload.TryGetProperty("eventId", out var value) && value.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value.GetString())) return value.GetString();
+        return payload.TryGetProperty("payload", out var nested) ? ReadEventId(nested) : null;
+    }
+
+    private static bool HasBoolean(JsonElement payload, string name)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return false;
+        if (payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True) return true;
+        return payload.TryGetProperty("payload", out var nested) && HasBoolean(nested, name);
+    }
+
+    private static bool IsStartVoiceCommand(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return false;
+        if (payload.TryGetProperty("intent", out var value) && value.ValueKind == JsonValueKind.String)
+        {
+            var intent = value.GetString()?.Replace("_", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
+            if (intent == "STARTRECORDING") return true;
+        }
+        return payload.TryGetProperty("payload", out var nested) && IsStartVoiceCommand(nested);
+    }
+
     public Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default)
         // AudioGraph accepts microphone selection. The Desktop deliberately
         // sends null for the deferred system-audio field; keep the Host
@@ -809,6 +880,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             var scanOrphans = DateTimeOffset.UtcNow - _lastOrphanScanAtUtc >= TimeSpan.FromMinutes(10);
             await _recovery.RecoverAsync(activeSession, cancellationToken, scanOrphans).ConfigureAwait(false);
             if (scanOrphans) _lastOrphanScanAtUtc = DateTimeOffset.UtcNow;
+            if (scanOrphans) await _spool.PrunePendingEventsAsync(TimeSpan.FromMinutes(10), cancellationToken).ConfigureAwait(false);
             sessions = await _spool.SessionsNeedingRecoveryAsync(cancellationToken).ConfigureAwait(false);
             foreach (var sessionId in sessions)
             {
@@ -1721,6 +1793,8 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 "STOP" => await _runtime.StopAsync(cancellationToken).ConfigureAwait(false),
                 "RETRY_UPLOAD" => await _runtime.RetryUploadAsync(ReadString(request.Payload, "sessionId") ?? throw new InvalidOperationException("session_required"), cancellationToken).ConfigureAwait(false),
                 "GET_SESSION_STATUS" => await SessionStatusAsync(ReadString(request.Payload, "sessionId"), cancellationToken).ConfigureAwait(false),
+                "MARKER" or "DECISION" or "ACTION_ITEM" => await _runtime.RecordEventAsync(command, request.Payload, ReadString(request.Payload, "localSessionId"), cancellationToken).ConfigureAwait(false),
+                "VOICE_EVENT" => await _runtime.RecordEventAsync(ReadString(request.Payload, "eventType") ?? "VOICE_COMMAND", request.Payload, ReadString(request.Payload, "localSessionId"), cancellationToken).ConfigureAwait(false),
                 _ => new AgentIpcResponse(false, "ERROR", null, "unsupported_command", null)
             };
         }

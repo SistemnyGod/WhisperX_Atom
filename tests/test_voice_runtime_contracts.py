@@ -8,6 +8,8 @@ VOICE_RUNTIME = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRunti
 VOICE_CAPTURE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioCapture.cs").read_text(encoding="utf-8")
 VOICE_CONTROLLER = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/VoiceHostController.cs").read_text(encoding="utf-8")
 VOICE_LEASE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntimeLease.cs").read_text(encoding="utf-8")
+RECORDER_HOST_RUNTIME = (ROOT / "apps/recorder-host/RecorderHostRuntime.cs").read_text(encoding="utf-8")
+LEGACY_AGENT_PIPE = (ROOT / "apps/recorder-agent/AgentPipeHost.cs").read_text(encoding="utf-8")
 STATE_MACHINE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceStateMachine.cs").read_text(encoding="utf-8")
 BROKER = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs").read_text(encoding="utf-8")
 BROKER_CLIENT = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceIntentBrokerClient.cs").read_text(encoding="utf-8")
@@ -22,6 +24,19 @@ def test_voice_host_lifecycle_and_startup_guard_are_explicit():
     assert '"RECORDER_HOST_NOT_INITIALIZED"' in VOICE_RUNTIME
     assert "Environment.ProcessId" in VOICE_RUNTIME
     assert "BuildIdentity" in VOICE_RUNTIME
+
+
+def test_voice_command_has_durable_pre_session_outbox_and_idempotent_replay():
+    spool = (ROOT / "apps/recorder-agent/SpoolStore.cs").read_text(encoding="utf-8")
+    assert "recording_pending_events" in RECORDER_HOST_RUNTIME
+    assert "AddPendingEventAsync" in RECORDER_HOST_RUNTIME
+    assert "AttachPendingEventAsync" in RECORDER_HOST_RUNTIME
+    assert '"VOICE_EVENT" => await _runtime.RecordEventAsync' in RECORDER_HOST_RUNTIME
+    assert "eventId" in VOICE_RUNTIME
+    assert "response.LocalSessionId" in VOICE_RUNTIME
+    assert "INSERT OR IGNORE INTO recording_events" in spool
+    assert "AddPendingEventAsync" in LEGACY_AGENT_PIPE
+    assert "targetSessionId" in LEGACY_AGENT_PIPE
 
 
 def test_voice_host_uses_selected_endpoint_and_latest_audio_metrics():

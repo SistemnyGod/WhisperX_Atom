@@ -76,6 +76,6 @@ public sealed record VoiceHostSnapshot(
     int? ProcessId = null,
     string? LastTraceId = null);
 
-public sealed record VoiceResponse(string Text, bool Speak = true, bool Success = true);
+public sealed record VoiceResponse(string Text, bool Speak = true, bool Success = true, string? LocalSessionId = null);
 
 public sealed record VoiceTransition(VoiceHostState From, VoiceHostState To, DateTimeOffset At, string Reason);

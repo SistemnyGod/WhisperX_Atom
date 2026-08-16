@@ -87,6 +87,7 @@ public sealed record ServerBinding(string LocalSessionId, string LocalTrackId, G
 public sealed record RecordingManifestTrack(Guid ServerTrackId, string TrackType, int SampleRate, int Channels, int ExpectedChunkCount, long TotalSamples, long StartSample = 0);
 public sealed record PendingCommandResult(Guid CommandId, long Cursor, string Status, JsonElement Result);
 public sealed record RecordingEventRow(string Id, string SessionId, string EventType, long? MediaTimeMs, string PayloadJson, DateTimeOffset CreatedAt);
+public sealed record PendingRecordingEvent(string Id, string EventType, string PayloadJson, DateTimeOffset CreatedAt);
 public sealed record RecordingSessionInfo(
     string SessionId,
     Guid? MeetingId,
@@ -167,7 +168,8 @@ public sealed class SpoolStore
             PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT, archive_error_code TEXT, archive_error_detail TEXT, archive_retry_count INTEGER NOT NULL DEFAULT 0, archive_next_retry_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
-            CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
+             CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
+             CREATE TABLE IF NOT EXISTS recording_pending_events(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS recording_raw_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, raw_path TEXT NOT NULL, output_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL, encoding TEXT NOT NULL, bits_per_sample INTEGER NOT NULL, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, status TEXT NOT NULL, raw_size_bytes INTEGER NOT NULL DEFAULT 0, raw_sha256 TEXT, error TEXT, raw_purge_after TEXT, encode_attempts INTEGER NOT NULL DEFAULT 0, next_encode_attempt_at TEXT, last_encode_error_code TEXT, encoding_worker_id TEXT, encoding_started_at TEXT, encoding_lease_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(track_id, sequence));
             CREATE TABLE IF NOT EXISTS recording_track_info(track_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_type TEXT NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, endpoint_id TEXT, device_name TEXT, selection_mode TEXT NOT NULL DEFAULT 'DEFAULT', profile TEXT NOT NULL DEFAULT 'ROOM', encoding TEXT NOT NULL DEFAULT 'IeeeFloat', bits_per_sample INTEGER NOT NULL DEFAULT 32, source_encoding TEXT, source_sub_format TEXT, valid_bits_per_sample INTEGER, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS server_bindings(local_session_id TEXT NOT NULL, local_track_id TEXT NOT NULL, server_session_id TEXT NOT NULL, server_track_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(local_session_id, local_track_id));
@@ -1215,19 +1217,89 @@ public sealed class SpoolStore
         return (count, bytes, oldest);
     }
 
-    public async Task AddEventAsync(string sessionId, string eventType, long? mediaTimeMs = null, string payloadJson = "{}", CancellationToken cancellationToken = default)
+    public async Task AddEventAsync(string sessionId, string eventType, long? mediaTimeMs = null, string payloadJson = "{}", CancellationToken cancellationToken = default, string? eventId = null, DateTimeOffset? createdAtUtc = null)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO recording_events(id,session_id,event_type,media_time_ms,payload_json,created_at) VALUES($id,$session,$type,$media,$payload,$created)";
-        command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+        command.CommandText = "INSERT OR IGNORE INTO recording_events(id,session_id,event_type,media_time_ms,payload_json,created_at) VALUES($id,$session,$type,$media,$payload,$created)";
+        command.Parameters.AddWithValue("$id", string.IsNullOrWhiteSpace(eventId) ? Guid.NewGuid().ToString("N") : eventId.Trim());
         command.Parameters.AddWithValue("$session", sessionId);
         command.Parameters.AddWithValue("$type", eventType);
         command.Parameters.AddWithValue("$media", (object?)mediaTimeMs ?? DBNull.Value);
         command.Parameters.AddWithValue("$payload", payloadJson);
-        command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$created", (createdAtUtc ?? DateTimeOffset.UtcNow).ToString("O"));
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Persists a voice START command before a Recorder session exists. The row
+    /// is promoted to recording_events once the session receives its first
+    /// durable frame. The event id is supplied by the caller and is therefore
+    /// safe to replay after a broker/IPC timeout.
+    /// </summary>
+    public async Task AddPendingEventAsync(string eventId, string eventType, string payloadJson = "{}", DateTimeOffset? createdAtUtc = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(eventId)) throw new ArgumentException("Event id is required.", nameof(eventId));
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "INSERT OR IGNORE INTO recording_pending_events(id,event_type,payload_json,created_at) VALUES($id,$type,$payload,$created)";
+        command.Parameters.AddWithValue("$id", eventId.Trim());
+        command.Parameters.AddWithValue("$type", eventType.Trim());
+        command.Parameters.AddWithValue("$payload", string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson);
+        command.Parameters.AddWithValue("$created", (createdAtUtc ?? DateTimeOffset.UtcNow).ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<bool> AttachPendingEventAsync(string eventId, string sessionId, long? mediaTimeMs = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(sessionId)) return false;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var tx = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var select = new SqliteCommand("SELECT event_type,payload_json,created_at FROM recording_pending_events WHERE id=$id", connection, tx);
+        select.Parameters.AddWithValue("$id", eventId.Trim());
+        await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return false;
+        var eventType = reader.GetString(0);
+        var payload = reader.GetString(1);
+        var created = reader.GetString(2);
+        await reader.DisposeAsync();
+        await using var insert = new SqliteCommand("INSERT OR IGNORE INTO recording_events(id,session_id,event_type,media_time_ms,payload_json,created_at) VALUES($id,$session,$type,$media,$payload,$created)", connection, tx);
+        insert.Parameters.AddWithValue("$id", eventId.Trim());
+        insert.Parameters.AddWithValue("$session", sessionId);
+        insert.Parameters.AddWithValue("$type", eventType);
+        insert.Parameters.AddWithValue("$media", (object?)mediaTimeMs ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$payload", payload);
+        insert.Parameters.AddWithValue("$created", created);
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+        await using var delete = new SqliteCommand("DELETE FROM recording_pending_events WHERE id=$id", connection, tx);
+        delete.Parameters.AddWithValue("$id", eventId.Trim());
+        await delete.ExecuteNonQueryAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    public async Task RemovePendingEventAsync(string eventId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(eventId)) return;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM recording_pending_events WHERE id=$id";
+        command.Parameters.AddWithValue("$id", eventId.Trim());
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<int> PrunePendingEventsAsync(TimeSpan maxAge, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM recording_pending_events WHERE created_at < $cutoff";
+        command.Parameters.AddWithValue("$cutoff", DateTimeOffset.UtcNow.Subtract(maxAge).ToString("O"));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task AddEventIfMissingAsync(string sessionId, string eventType, string payloadJson = "{}", CancellationToken cancellationToken = default)
