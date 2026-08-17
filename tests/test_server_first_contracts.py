@@ -183,7 +183,7 @@ class ServerFirstContractTests(unittest.TestCase):
         self.assertIn("GetTranscriptAsync", view_model)
         self.assertIn("response.MeetingId ?? MeetingId", view_model)
         self.assertIn("_serverProcessingExpected = _services.Backend.HasSession", view_model)
-        self.assertIn("WhisperX обработка", page)
+        self.assertIn("Обработка WhisperX", page)
         self.assertIn("OpenTranscriptButton_Click", page_code)
 
     def test_recorder_persists_raw_chunks_before_flac_encoding(self):

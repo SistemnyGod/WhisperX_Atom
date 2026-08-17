@@ -21,8 +21,22 @@ public sealed class RawEncoderWakeSignal
 
     public void Signal() => _channel.Writer.TryWrite(true);
 
-    public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken) =>
-        _channel.Reader.WaitToReadAsync(cancellationToken);
+    public async ValueTask<bool> WaitAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+        try
+        {
+            return await _channel.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The timeout is the normal bounded polling path. The cancelled
+            // waiter is disposed here, so repeated idle polls cannot leave
+            // pending channel readers behind.
+            return false;
+        }
+    }
 
     public void Drain()
     {
@@ -86,10 +100,8 @@ public sealed class GlobalRawEncoderWorker(
 
                     try
                     {
-                        await Task.WhenAny(
-                            wake.WaitToReadAsync(stoppingToken).AsTask(),
-                            Task.Delay(PollInterval, stoppingToken)).ConfigureAwait(false);
-                        wake.Drain();
+                        if (await wake.WaitAsync(PollInterval, stoppingToken).ConfigureAwait(false))
+                            wake.Drain();
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                     {
@@ -126,6 +138,7 @@ public sealed class GlobalRawEncoderWorker(
         var outputPart = $"{raw.OutputPath}.{_workerId.GetHashCode():x8}.part";
         using var leaseStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var leaseRenewal = RenewLeaseAsync(raw, leaseStop.Token);
+        var runtimeHeartbeat = PublishRuntimeHeartbeatAsync(raw, leaseStop.Token);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(raw.OutputPath)!);
@@ -139,7 +152,7 @@ public sealed class GlobalRawEncoderWorker(
             ValidateRawSource(raw);
 
             if (File.Exists(outputPart)) File.Delete(outputPart);
-            FlacEncoder.Encode(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw));
+            await FlacEncoder.EncodeAsync(RecorderToolPaths.Ffmpeg(), raw.RawPath, outputPart, FlacEncoder.RawFormat(raw), cancellationToken).ConfigureAwait(false);
             if (!await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), outputPart, raw, cancellationToken).ConfigureAwait(false))
                 throw new RawEncoderValidationException("FLAC_VALIDATION_FAILED");
             if (!await spool.OwnsRawEncodingLeaseAsync(raw, _workerId, cancellationToken).ConfigureAwait(false))
@@ -188,7 +201,21 @@ public sealed class GlobalRawEncoderWorker(
             try { await leaseRenewal.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { logger.LogWarning(ex, "Raw encoder lease renewal stopped after encode result was determined."); }
+            try { await runtimeHeartbeat.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { logger.LogWarning(ex, "Raw encoder health heartbeat stopped after encode result was determined."); }
         }
+    }
+
+    private async Task PublishRuntimeHeartbeatAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+                runtimeState.Mark("BUSY", raw.Id);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     private static void ValidateRawSource(RawRecordingChunk raw)
@@ -212,6 +239,8 @@ public sealed class GlobalRawEncoderWorker(
 
     private static string ClassifyEncodeFailure(Exception exception)
     {
+        if (exception is ExternalProcessTimeoutException timeout)
+            return timeout.Code;
         if (exception is System.ComponentModel.Win32Exception
             || exception.Message.Contains("was not found", StringComparison.OrdinalIgnoreCase)
             || exception.Message.Contains("start_failed", StringComparison.OrdinalIgnoreCase)

@@ -593,7 +593,9 @@ public sealed class AgentPipeHost(
         }
         if (await spool.GetSessionInfoAsync(sessionId, cancellationToken) is null)
             return Error("session_not_found");
-        var mediaTimeMs = recorder.CurrentMediaTimeMs ?? 0;
+        var mediaTimeMs = string.Equals(sessionId, recorder.SessionId, StringComparison.Ordinal)
+            ? recorder.CurrentMediaTimeMs ?? 0
+            : await spool.GetSessionMediaTimeMsAsync(sessionId, cancellationToken) ?? 0;
         await spool.AddEventAsync(sessionId, eventType, mediaTimeMs, payloadJson, cancellationToken, eventId);
         await spool.RemovePendingEventAsync(eventId, cancellationToken);
         var meetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken);

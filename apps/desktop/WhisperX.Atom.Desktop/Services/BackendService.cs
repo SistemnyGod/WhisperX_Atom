@@ -91,6 +91,7 @@ public sealed class BackendService : IBackendService
     public Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetTasksAsync(meetingId, cancellationToken);
     public Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default) => _client.UpdateTaskAsync(task, cancellationToken);
     public Task<string?> DownloadPreviewAsync(Guid mediaId, CancellationToken cancellationToken = default) => _client.DownloadPreviewAsync(mediaId, cancellationToken);
+    public Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default) => _client.DownloadMediaAsync(mediaId, destinationPath, cancellationToken);
 
     public async Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default)
     {

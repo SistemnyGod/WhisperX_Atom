@@ -12,6 +12,8 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private readonly Action<Exception>? _log;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
+    private readonly object _commandCacheGate = new();
+    private readonly Dictionary<string, (DateTimeOffset ExpiresAt, BrokerResponse Response)> _commandCache = new(StringComparer.Ordinal);
     private Task? _loop;
 
     public DesktopVoiceBrokerServer(RecordingCommandService commands, Action<Exception>? log = null)
@@ -77,10 +79,24 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         var intent = root.TryGetProperty("intent", out var intentElement) ? intentElement.GetString() : null;
         var text = root.TryGetProperty("text", out var textElement) ? textElement.GetString() : null;
         var traceId = root.TryGetProperty("traceId", out var traceElement) ? traceElement.GetString() : null;
+        var commandId = root.TryGetProperty("commandId", out var commandIdElement) ? commandIdElement.GetString() : null;
         var testMode = root.TryGetProperty("testMode", out var testElement) && testElement.ValueKind == JsonValueKind.True;
-        if (string.IsNullOrWhiteSpace(intent)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "intent_missing", TraceId: traceId);
+        if (!string.IsNullOrWhiteSpace(commandId))
+        {
+            lock (_commandCacheGate)
+            {
+                var expired = _commandCache.Where(item => item.Value.ExpiresAt <= DateTimeOffset.UtcNow).Select(item => item.Key).ToArray();
+                foreach (var key in expired) _commandCache.Remove(key);
+                if (_commandCache.TryGetValue(commandId, out var cached)) return cached.Response;
+            }
+        }
+        if (string.IsNullOrWhiteSpace(intent)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "intent_missing", TraceId: traceId, CommandId: commandId);
         if (testMode)
-            return new(true, RecorderState: "TEST_ONLY", SpokenText: "Тест распознавания завершён", Detail: $"intent={intent};text={text}", TraceId: traceId);
+        {
+            var testResponse = new BrokerResponse(true, RecorderState: "TEST_ONLY", SpokenText: "Тест распознавания завершён", Detail: $"intent={intent};text={text}", TraceId: traceId, CommandId: commandId);
+            CacheCommand(commandId, testResponse);
+            return testResponse;
+        }
 
         AgentIpcResponse response;
         try
@@ -100,15 +116,15 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
         catch (RecorderIpcException ex)
         {
-            return new(false, ex.ErrorCode, Detail: ex.Message, TraceId: traceId);
+            return new(false, ex.ErrorCode, Detail: ex.Message, TraceId: traceId, CommandId: commandId);
         }
         catch (IOException ex)
         {
-            return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.Message, TraceId: traceId);
+            return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: ex.Message, TraceId: traceId, CommandId: commandId);
         }
         catch (Exception ex)
         {
-            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId);
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
         }
 
         var localReady = response.SessionStatus?.LocalFinalizeState;
@@ -117,6 +133,8 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             {
                 "STARTRECORDING" => "Запись начата",
                 "STOPRECORDING" when string.Equals(localReady, "LOCAL_READY", StringComparison.OrdinalIgnoreCase) => "Запись остановлена и сохранена",
+                "STOPRECORDING" when string.Equals(localReady, "RECOVERY_PENDING", StringComparison.OrdinalIgnoreCase) => "Запись остановлена; локальный файл восстанавливается",
+                "STOPRECORDING" when string.Equals(localReady, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase) => "Запись остановлена, аудио не удалось подтвердить",
                 "STOPRECORDING" => "Запись остановлена, локальное сохранение продолжается",
                 "PAUSERECORDING" => "Запись приостановлена",
                 "RESUMERECORDING" => "Запись продолжена",
@@ -127,8 +145,24 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 _ => "Команда выполнена"
             }
             : null;
-        return new(response.Ok, response.Error ?? (response.Ok ? null : "VOICE_COMMAND_REJECTED"), response.State,
-            response.SessionId, localReady, spoken, response.ErrorDetail, traceId);
+        var brokerResponse = new BrokerResponse(response.Ok, response.Error ?? (response.Ok ? null : "VOICE_COMMAND_REJECTED"), response.State,
+            response.SessionId, localReady, spoken, response.ErrorDetail, traceId, commandId);
+        CacheCommand(commandId, brokerResponse);
+        return brokerResponse;
+    }
+
+    private void CacheCommand(string? commandId, BrokerResponse response)
+    {
+        if (string.IsNullOrWhiteSpace(commandId)) return;
+        lock (_commandCacheGate)
+        {
+            if (_commandCache.Count >= 256)
+            {
+                var oldest = _commandCache.OrderBy(item => item.Value.ExpiresAt).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(oldest.Key)) _commandCache.Remove(oldest.Key);
+            }
+            _commandCache[commandId] = (DateTimeOffset.UtcNow.AddMinutes(10), response);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -139,5 +173,5 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     }
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
-        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null);
+        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null);
 }

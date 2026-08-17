@@ -32,7 +32,7 @@
                                 <TextBlock Text="{Binding AgentStatus}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                             </StackPanel>
                             <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="10">
-                                <Button Content="Открыть запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" AutomationProperties.Name="Открыть страницу записи" />
+                                <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" AutomationProperties.Name="Открыть страницу записи" />
                                 <Button Content="Совещания" Style="{StaticResource SecondaryButtonStyle}" Click="OpenMeetingsButton_Click" AutomationProperties.Name="Открыть совещания" />
                             </StackPanel>
                         </Grid>
@@ -48,10 +48,10 @@
                         <Border x:Name="KpiQueueCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="В обработке" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ProcessingText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="последние совещания" Style="{StaticResource CaptionStyle}" /></StackPanel>
                         </Border>
-                        <Border x:Name="KpiSummaryCard" Grid.Row="1" Style="{StaticResource CardStyle}" Padding="14">
+                        <Border x:Name="KpiSummaryCard" Grid.Row="1" Visibility="Collapsed" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="Готовые саммари" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ReadySummariesText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="результаты" Style="{StaticResource CaptionStyle}" /></StackPanel>
                         </Border>
-                        <Border x:Name="KpiTasksCard" Grid.Row="1" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="14">
+                        <Border x:Name="KpiTasksCard" Grid.Row="1" Grid.Column="1" Visibility="Collapsed" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="Открытые задачи" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding OpenTasksText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="из совещаний" Style="{StaticResource CaptionStyle}" /></StackPanel>
                         </Border>
                         <Border x:Name="KpiGpuCard" Grid.Row="1" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="14">
@@ -122,11 +122,21 @@
                             <Button Content="Открыть запись" Style="{StaticResource CardButtonStyle}" Click="OpenRecordingButton_Click" />
                         </StackPanel>
                     </Border>
-                    <Border x:Name="NotificationsCard" Style="{StaticResource CardStyle}">
+                    <Border x:Name="NotificationsCard" Visibility="Collapsed" Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="6"><TextBlock Text="Уведомления" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="Новых уведомлений нет" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" /></StackPanel>
                     </Border>
                     <Border x:Name="ProcessingCard" Style="{StaticResource CardStyle}">
-                        <StackPanel Spacing="8"><Grid ColumnDefinitions="*,Auto"><TextBlock Text="Текущая обработка" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="{Binding ActiveProcessingProgressText}" Grid.Column="1" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" /></Grid><TextBlock Text="{Binding ActiveProcessingTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><ProgressBar Value="{Binding ActiveProcessingProgress}" Minimum="0" Maximum="100" /><TextBlock Text="{Binding ActiveProcessingStage}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" /><Button Content="Открыть совещания" Style="{StaticResource CardButtonStyle}" Click="OpenMeetingsButton_Click" /></StackPanel>
+                        <StackPanel Spacing="8">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Text="Активность" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="{Binding ActiveProcessingProgressText}" Grid.Column="1" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                            </Grid>
+                            <TextBlock Text="{Binding ActiveProcessingTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="Локальная запись, кодирование, доставка и WhisperX выполняются независимо." Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                            <ProgressBar Value="{Binding ActiveProcessingProgress}" Minimum="0" Maximum="100" />
+                            <TextBlock Text="{Binding ActiveProcessingStage}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                            <Button Content="Открыть совещания" Style="{StaticResource CardButtonStyle}" Click="OpenMeetingsButton_Click" />
+                        </StackPanel>
                     </Border>
                 </StackPanel>
             </Grid>

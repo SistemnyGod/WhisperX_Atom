@@ -38,6 +38,10 @@ internal static class VoiceHostSelfTest
         BitConverter.GetBytes(float.PositiveInfinity).CopyTo(invalid, 4);
         var invalidMetrics = VoiceAudioCapture.ComputeMetrics(invalid, invalid.Length, format);
         Assert(invalidMetrics.Rms == 0 && invalidMetrics.Peak == 0 && !invalidMetrics.Clipping, "non-finite telemetry");
+        const string audioGraphId = @"\\?\SWD#MMDEVAPI#{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}#{2eef81be-33fa-4800-9670-1cd474972c3f}";
+        Assert(VoiceAudioCapture.NormalizeEndpointId(audioGraphId) == "{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}", "AudioGraph endpoint normalization");
+        Assert(VoiceAudioCapture.NormalizeEndpointId("{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}") == "{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}", "NAudio endpoint id preservation");
+        Assert(VoiceAudioCapture.NormalizeEndpointId("DEFAULT") is null, "default endpoint normalization");
         Assert(VoiceHostRuntime.WakePhrases.Any(value => value == "мефодий" || value.StartsWith("мефодий ", StringComparison.Ordinal)), "wake grammar requires phonetic mifodiy");
         Assert(VoiceHostRuntime.WakePhrases.Any(value => value.StartsWith("атом", StringComparison.Ordinal)), "wake grammar keeps atom alias");
         Assert(VoiceHostRuntime.WakePhrases.Contains("[unk]"), "wake grammar unknown token");

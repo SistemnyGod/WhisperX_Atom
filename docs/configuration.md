@@ -18,8 +18,12 @@ Copy-Item .env.example .env
 | `GPU_WORKER_MODE` | Размещение GPU Worker | `host` по умолчанию |
 | `GPU_WORKER_RUNTIME` | Диагностическая метка runtime | `host` |
 | `WHISPERX_MODEL` | WhisperX model profile | `large-v3` по шаблону |
+| `WHISPERX_MODEL_REPOSITORY` | Pinned faster-whisper repository | `Systran/faster-whisper-large-v3` |
 | `DEVICE` | Torch device | `cuda` |
 | `COMPUTE_TYPE` | faster-whisper compute type | `float16` |
+| `BATCH_SIZE` | ASR batch size | `2` для 8 GB VRAM |
+| `ENABLE_ALIGNMENT` | Word alignment stage | `true` |
+| `ENABLE_DIARIZATION` | pyannote speaker diarization | `false` для 8 GB VRAM preset |
 | `REQUIRE_CUDA` | Запрет CPU fallback | `true` |
 | `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | Совместимость загрузки pyannote | `1` |
 | `HF_TOKEN` | Доступ к Hugging Face/diarization | Локальный секрет, можно оставить пустым для degraded |

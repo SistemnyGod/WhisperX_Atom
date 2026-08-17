@@ -27,11 +27,11 @@ Source: "Configure-RecorderHostUser.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 
 [Icons]
-Name: "{group}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"
-Name: "{commondesktop}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; Tasks: desktopicon
+Name: "{group}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; IconFilename: "{app}\Desktop\Assets\AppIcon.ico"
+Name: "{commondesktop}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.Desktop.exe"; IconFilename: "{app}\Desktop\Assets\AppIcon.ico"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -RecorderHostDirectory ""{app}\RecorderHost"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated

@@ -347,7 +347,7 @@ class SummaryOrchestrator:
         reviewed = int(result["validation"].get("review_items", 0))
         unsupported = int(result["validation"].get("unsupported_claims", 0))
         result["quality_score"] = round(
-            0.0 if reviewed == 0 else max(0.0, min(1.0, 1.0 - unsupported / reviewed)),
+            1.0 if reviewed == 0 else max(0.0, min(1.0, 1.0 - unsupported / reviewed)),
             3,
         )
         result["source_hash"] = transcript_source_hash(segments)
@@ -562,7 +562,7 @@ class SummaryOrchestrator:
         reviewed = int(validation.get("review_items", 0)) + len(rejected)
         unsupported = int(validation.get("unsupported_claims", 0)) + len(rejected)
         result["quality_score"] = round(
-            0.0 if reviewed == 0 else max(0.0, min(1.0, 1.0 - unsupported / reviewed)),
+            1.0 if reviewed == 0 else max(0.0, min(1.0, 1.0 - unsupported / reviewed)),
             3,
         )
         result["source_hash"] = transcript_source_hash(segments)
@@ -601,57 +601,64 @@ class LlamaCppClient:
         self._url = base_url.rstrip("/") + "/chat/completions"
         self._model = model
         self._timeout = timeout_seconds
+        self._client: Any | None = None
 
     @property
     def model(self) -> str:
         return self._model
 
-    async def invoke_json(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
-        import httpx
+    @property
+    def url(self) -> str:
+        return self._url
 
+    async def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def invoke_json(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
         max_tokens = max(512, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "3072")))
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for attempt in range(2):
-                request_messages = messages
-                if attempt:
-                    request_messages = [
-                        *messages,
-                        {
-                            "role": "user",
-                            "content": "Повтори ответ строго как один валидный JSON-объект без Markdown и пояснений. Уменьши каждую коллекцию максимум до 4 элементов; длина текста каждого элемента — до 260 символов. Не обрывай JSON.",
-                        },
-                    ]
-                if attempt:
-                    request_messages = [
-                        *messages,
-                        {
-                            "role": "user",
-                            "content": "Повтори ответ строго одним валидным JSON по Summary v2. Не ограничивай разделы четырьмя элементами; используй только подтверждённые SEG-ID и оставляй неподтверждённые поля пустыми или null.",
-                        },
-                    ]
-                body = {
-                    "model": self._model,
-                    "messages": request_messages,
-                    "temperature": 0.1,
-                    "max_tokens": min(4096, max_tokens * (attempt + 1)),
-                    "response_format": {"type": "json_object", "schema": schema},
-                }
-                response = await client.post(self._url, json=body)
-                response.raise_for_status()
-                payload = response.json()
-                choice = payload["choices"][0]
-                content = choice["message"]["content"]
-                if choice.get("finish_reason") == "length" and attempt == 0:
-                    continue
-                if not isinstance(content, str):
-                    raise ValueError("llm_response_content_is_not_text")
-                content = content.strip()
-                if content.startswith("```"):
-                    content = content.removeprefix("```").removeprefix("json").removesuffix("```").strip()
-                try:
-                    return parse_json_content(content)
-                except (json.JSONDecodeError, ValueError):
-                    if attempt == 1:
-                        raise ValueError("llm_invalid_json")
-                    continue
+        client = await self._get_client()
+        for attempt in range(2):
+            request_messages = messages
+            if attempt:
+                request_messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": "Повтори ответ строго одним валидным JSON по Summary v2. Не ограничивай разделы четырьмя элементами; используй только подтверждённые SEG-ID и оставляй неподтверждённые поля пустыми или null.",
+                    },
+                ]
+            body = {
+                "model": self._model,
+                "messages": request_messages,
+                "temperature": 0.1,
+                "max_tokens": min(4096, max_tokens * (attempt + 1)),
+                "response_format": {"type": "json_object", "schema": schema},
+            }
+            response = await client.post(self._url, json=body)
+            response.raise_for_status()
+            payload = response.json()
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
+            if choice.get("finish_reason") == "length" and attempt == 0:
+                continue
+            if not isinstance(content, str):
+                raise ValueError("llm_response_content_is_not_text")
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.removeprefix("```").removeprefix("json").removesuffix("```").strip()
+            try:
+                return parse_json_content(content)
+            except (json.JSONDecodeError, ValueError):
+                if attempt == 1:
+                    raise ValueError("llm_invalid_json")
+                continue
         raise ValueError("llm_invalid_json")

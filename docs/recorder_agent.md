@@ -24,6 +24,11 @@ Host умеет:
 - доступный выбранный/default microphone;
 - FFmpeg/ffprobe рекомендуются для FLAC и master, но их временная
   недоступность не блокирует START и STOP: состояние будет `WAITING_FOR_ENCODER`.
+- Для защиты фонового кодировщика используется `ATOM_ENCODER_TIMEOUT_SECONDS`
+  (10–900 секунд, default 120). Для сборки master/archive используется
+  `ATOM_ARCHIVE_TIMEOUT_SECONDS` (30–3600 секунд, default 900). По таймауту
+  дерево FFmpeg завершается, `.part` удаляется, а PCM и SQLite-задача остаются
+  для повторной попытки с кодом `ENCODER_TIMEOUT`/`ARCHIVE_TIMEOUT`.
 
 ## Быстрый smoke
 
@@ -54,3 +59,10 @@ sessions/<session>/<track>/<sequence>.flac
    default 4). Переполнение оставляет `.pcm.part` для recovery.
 4. Токены и аудио не входят в диагностические архивы; enrollment управляется
    Desktop и DPAPI.
+
+## Диагностика и фоновые состояния
+
+Health кодировщика отражает реальный lifecycle (`STARTING`, `READY`, `BUSY`,
+`WAITING_FOR_FFMPEG`, `DEGRADED`, `FAILED`, `STOPPED`), heartbeat, текущий chunk,
+последний успех/ошибку и глубину очереди. Ожидание SQLite wake-up отменяется при
+проигрыше другого waiter, поэтому остановка Host не оставляет зависших задач.

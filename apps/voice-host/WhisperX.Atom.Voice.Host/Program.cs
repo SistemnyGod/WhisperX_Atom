@@ -41,9 +41,11 @@ if (args.Any(argument => string.Equals(argument, "--mic-acceptance", StringCompa
     var target = acceptanceIndex >= 0 && acceptanceIndex + 1 < args.Length && int.TryParse(args[acceptanceIndex + 1], out var parsedTarget)
         ? Math.Clamp(parsedTarget, 1, 500)
         : 50;
+    var microphoneIdIndex = Array.FindIndex(args, argument => string.Equals(argument, "--microphone-id", StringComparison.OrdinalIgnoreCase));
+    var acceptanceMicrophoneId = microphoneIdIndex >= 0 && microphoneIdIndex + 1 < args.Length ? args[microphoneIdIndex + 1] : null;
     using var acceptanceCancellation = new CancellationTokenSource();
     Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; acceptanceCancellation.Cancel(); };
-    Environment.ExitCode = await VoiceAcceptanceRunner.MicrophoneAsync(target, TimeSpan.FromMinutes(15), acceptanceCancellation.Token);
+    Environment.ExitCode = await VoiceAcceptanceRunner.MicrophoneAsync(target, TimeSpan.FromMinutes(15), acceptanceCancellation.Token, acceptanceMicrophoneId);
     return;
 }
 if (args.Any(argument => string.Equals(argument, "--doctor", StringComparison.OrdinalIgnoreCase)))
@@ -66,6 +68,7 @@ try
     var host = Host.CreateApplicationBuilder(args);
     host.Services.AddSingleton<VoiceHostRuntime>();
     host.Services.AddHostedService<VoiceHostPipeServer>();
+    host.Services.AddHostedService<VoiceTelemetryPipeServer>();
     host.Services.AddSerilog();
     using var built = host.Build();
     var runtime = built.Services.GetRequiredService<VoiceHostRuntime>();

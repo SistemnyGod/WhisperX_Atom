@@ -501,6 +501,12 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         return PreviewPath;
     }
 
+    public async Task<bool> DownloadMediaAsync(DesktopMedia media, string destinationPath, CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(media.Id, out var mediaId)) return false;
+        return await _services.Backend.DownloadMediaAsync(mediaId, destinationPath, cancellationToken);
+    }
+
     private void ClearCollections()
     {
         Jobs.Clear();

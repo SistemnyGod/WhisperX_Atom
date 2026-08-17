@@ -29,11 +29,19 @@
                         <ComboBox x:Name="StatusFilterCombo" ItemsSource="{Binding StatusFilters}" SelectedItem="{Binding StatusFilter, Mode=TwoWay}" Style="{StaticResource FormComboBoxStyle}" SelectionChanged="StatusFilterCombo_SelectionChanged" />
                         <Button x:Name="ClearFiltersButton" Grid.Column="1" Content="Сбросить фильтры" Style="{StaticResource SecondaryButtonStyle}" Click="ClearFiltersButton_Click" Visibility="Collapsed" AutomationProperties.Name="Сбросить фильтры совещаний" ToolTipService.ToolTip="Очистить поиск и вернуть все статусы" />
                     </Grid>
-                    <Grid Grid.Row="3" Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="100,*,150">
-                        <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
-                        <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
-                        <TextBlock Grid.Column="2" Text="Статус" Style="{StaticResource TableHeaderStyle}" />
-                    </Grid>
+                    <StackPanel Grid.Row="3" Spacing="7">
+                        <Border x:Name="ImportDropZone" AllowDrop="True" DragOver="ImportDropZone_DragOver" Drop="ImportDropZone_Drop" Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1" CornerRadius="7" Padding="12,9">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE898;" Foreground="{StaticResource AccentBrush}" />
+                                <TextBlock Text="Перетащите аудио или видео сюда · MP3, WAV, FLAC, M4A, MP4" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Grid Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="100,*,150">
+                            <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
+                            <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
+                            <TextBlock Grid.Column="2" Text="Статус" Style="{StaticResource TableHeaderStyle}" />
+                        </Grid>
+                    </StackPanel>
                     <Grid Grid.Row="4">
                         <ListView x:Name="MeetingsList" ItemsSource="{Binding FilteredMeetings}" SelectionMode="Single" SelectionChanged="MeetingsList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
@@ -67,7 +75,7 @@
 
             <Border x:Name="WorkspaceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid RowDefinitions="Auto,Auto,*">
-                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
                         <StackPanel Spacing="3">
                             <TextBlock x:Name="WorkspaceEyebrow" Text="ВЫБРАННОЕ СОВЕЩАНИЕ" Style="{StaticResource EyebrowStyle}" />
                             <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
@@ -75,10 +83,24 @@
                             <controls:StatusBadge x:Name="WorkspaceStatusBadge" Text="Ожидает выбора встречи" Status="" HorizontalAlignment="Left" Margin="0,4,0,0" />
                         </StackPanel>
                         <Button x:Name="OpenWorkspaceButton" Grid.Column="1" Content="Открыть совещание" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" />
-                        <Button x:Name="RetryButton" Grid.Column="2" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
-                        <Button x:Name="CancelProcessingButton" Grid.Column="3" Content="Отменить обработку" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="CancelProcessingButton_Click" />
-                        <Button x:Name="DeleteMeetingButton" Grid.Column="4" Content="Удалить" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="DeleteMeetingButton_Click" />
-                        <Button x:Name="RefreshWorkspaceButton" Grid.Column="5" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
+                        <Button x:Name="WorkspaceMoreButton" Grid.Column="2" Content="⋯" Style="{StaticResource IconButtonStyle}" IsEnabled="False" AutomationProperties.Name="Дополнительные действия совещания" ToolTipService.ToolTip="Обновить, повторить обработку, экспортировать или удалить">
+                            <Button.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem x:Name="RefreshWorkspaceMenuItem" Text="Обновить" Click="RefreshWorkspaceButton_Click" />
+                                    <MenuFlyoutItem x:Name="RetryMenuItem" Text="Повторить обработку" Click="RetryButton_Click" />
+                                    <MenuFlyoutItem x:Name="CancelProcessingMenuItem" Text="Отменить обработку" Click="CancelProcessingButton_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Name="ExportTranscriptMenuItem" Text="Экспортировать стенограмму TXT" Click="ExportTranscriptTextButton_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Name="DeleteMeetingMenuItem" Text="Удалить совещание" Click="DeleteMeetingButton_Click" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
+                        <!-- Retained for code-behind and accessibility compatibility; actions are now in the overflow menu. -->
+                        <Button x:Name="RetryButton" Grid.Column="3" Visibility="Collapsed" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
+                        <Button x:Name="CancelProcessingButton" Grid.Column="4" Visibility="Collapsed" Content="Отменить обработку" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="CancelProcessingButton_Click" />
+                        <Button x:Name="DeleteMeetingButton" Grid.Column="5" Visibility="Collapsed" Content="Удалить" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="DeleteMeetingButton_Click" />
+                        <Button x:Name="RefreshWorkspaceButton" Grid.Column="6" Visibility="Collapsed" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
                     </Grid>
 
                     <Grid Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="20,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="22">
@@ -206,7 +228,7 @@
                                     </Grid>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Саммари" Style="{StaticResource WorkspaceTabItemStyle}">
+                                <TabViewItem Header="Протокол" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
                                         <StackPanel Spacing="12">
                                             <Grid ColumnDefinitions="*,Auto">
@@ -217,6 +239,40 @@
                                                 <Button Grid.Column="1" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildSummaryButton_Click" />
                                             </Grid>
                                             <TextBlock x:Name="SummaryText" Text="Саммари пока не готово." TextWrapping="Wrap" LineHeight="22" />
+                                            <Grid ColumnDefinitions="*,*" ColumnSpacing="12" Margin="0,8,0,0">
+                                                <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+                                                    <StackPanel Spacing="6">
+                                                        <TextBlock Text="Решения" Style="{StaticResource SectionTitleStyle}" />
+                                                        <ListView ItemsSource="{Binding Decisions}" SelectionMode="None" MaxHeight="180" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                            <ListView.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <StackPanel Spacing="3" Padding="0,4">
+                                                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource CaptionStyle}" Foreground="{StaticResource AccentBrush}" />
+                                                                    </StackPanel>
+                                                                </DataTemplate>
+                                                            </ListView.ItemTemplate>
+                                                        </ListView>
+                                                        <TextBlock Text="Решения пока не зафиксированы." Style="{StaticResource CaptionStyle}" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Grid.Column="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+                                                    <StackPanel Spacing="6">
+                                                        <TextBlock Text="Поручения" Style="{StaticResource SectionTitleStyle}" />
+                                                        <ListView ItemsSource="{Binding Tasks}" SelectionMode="None" MaxHeight="180" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                            <ListView.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <StackPanel Spacing="3" Padding="0,4">
+                                                                        <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
+                                                                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource CaptionStyle}" Foreground="{StaticResource AccentBrush}" />
+                                                                    </StackPanel>
+                                                                </DataTemplate>
+                                                            </ListView.ItemTemplate>
+                                                        </ListView>
+                                                        <TextBlock Text="Поручений пока нет." Style="{StaticResource CaptionStyle}" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
                                         </StackPanel>
                                     </ScrollViewer>
                                 </TabViewItem>
@@ -229,7 +285,7 @@
                                                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,12">
                                                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                                                             <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                                                            <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
+                                                            <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource AccentBrush}" />
                                                         </Grid>
                                                     </Border>
                                                 </DataTemplate>
@@ -247,7 +303,7 @@
                                                     <Grid Padding="8,12" ColumnDefinitions="*,160,150" ColumnSpacing="12">
                                                         <StackPanel Spacing="3">
                                                             <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
-                                                            <TextBlock Text="{Binding Responsible}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                            <TextBlock Text="{Binding ResponsibleText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                         </StackPanel>
                                                         <ComboBox Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" SelectedValue="{Binding Status, Mode=OneWay}" SelectedValuePath="Content" SelectionChanged="TaskStatusCombo_SelectionChanged" MinWidth="140">
                                                             <ComboBoxItem Content="NEEDS_REVIEW" />
@@ -255,7 +311,7 @@
                                                             <ComboBoxItem Content="DONE" />
                                                             <ComboBoxItem Content="CANCELLED" />
                                                         </ComboBox>
-                                                        <TextBlock Grid.Column="2" Text="{Binding Deadline}" Foreground="{StaticResource MutedTextBrush}" />
+                                                        <TextBlock Grid.Column="2" Text="{Binding DeadlineText}" Foreground="{StaticResource MutedTextBrush}" />
                                                     </Grid>
                                                 </DataTemplate>
                                             </ListView.ItemTemplate>
@@ -275,7 +331,10 @@
                                                             <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                         </StackPanel>
                                                         <TextBlock Grid.Column="1" Text="{Binding SizeBytes}" Foreground="{StaticResource MutedTextBrush}" />
-                                                        <Button Grid.Column="2" Content="Открыть preview" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenPreviewButton_Click" />
+                                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+                                                            <Button Content="Скачать аудио" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="DownloadAudioButton_Click" />
+                                                            <Button Content="Открыть preview" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenPreviewButton_Click" />
+                                                        </StackPanel>
                                                     </Grid>
                                                 </DataTemplate>
                                             </ListView.ItemTemplate>

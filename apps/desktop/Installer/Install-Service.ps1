@@ -177,6 +177,35 @@ function Get-UserAgentConfigPathForSid {
     }
 }
 
+function Sync-LegacyInstallationId {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Guid]$InstallationId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $document = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        # Only the non-secret installation identity is synchronized. DPAPI
+        # ciphertext and the legacy AgentId remain in their original scope;
+        # the elevated installer must never copy a user token to ProgramData.
+        if ($null -ne $document.PSObject.Properties['installationId']) {
+            $document.installationId = [string]$InstallationId
+        } elseif ($null -ne $document.PSObject.Properties['InstallationId']) {
+            $document.InstallationId = [string]$InstallationId
+        } else {
+            $document | Add-Member -NotePropertyName installationId -NotePropertyValue ([string]$InstallationId)
+        }
+        $part = "$Path.part"
+        $document | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $part -Encoding utf8
+        Move-Item -LiteralPath $part -Destination $Path -Force
+        return $true
+    }
+    catch {
+        throw "AGENT_IDENTITY_SYNC_FAILED: $Path ($($_.Exception.Message))"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $serviceExe)) { throw "Service binary not found: $serviceExe" }
 if ($null -ne $recorderHostExe -and -not (Test-Path -LiteralPath $recorderHostExe -PathType Leaf)) {
     throw "RECORDER_HOST_BINARY_NOT_FOUND: $recorderHostExe"
@@ -247,6 +276,9 @@ if (-not (Test-Path -LiteralPath $agentConfigPath -PathType Leaf)) {
     $agentConfigPart = "$agentConfigPath.part"
     Set-Content -LiteralPath $agentConfigPart -Value $agentConfig -Encoding utf8
     Move-Item -LiteralPath $agentConfigPart -Destination $agentConfigPath -Force
+}
+if (Sync-LegacyInstallationId -Path $agentConfigPath -InstallationId $installationId) {
+    Write-Host "AGENT_INSTALLATION_ID_SYNCED=true"
 }
 $existingMachine = if (Test-Path -LiteralPath $machineConfigPath -PathType Leaf) {
     try { Get-Content -LiteralPath $machineConfigPath -Raw | ConvertFrom-Json } catch { $null }

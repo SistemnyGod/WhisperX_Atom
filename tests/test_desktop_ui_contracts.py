@@ -200,6 +200,29 @@ def test_settings_changes_password_context_after_authentication():
     assert 'ChangePasswordButton.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed' in codebehind
 
 
+def test_settings_exposes_repeatable_setup_wizard_and_collapses_technical_details():
+    page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="OpenSetupWizardButton"' in page
+    assert 'Content="Повторить настройку"' in page
+    assert 'Header="Техническая диагностика Recorder Host"' in page
+    assert 'Header="Экспериментальные функции · Мифодий"' in page
+    assert 'OpenSetupWizardButton_Click' in codebehind
+    assert 'Шаг 1 из 7 · Вход' in codebehind
+    assert 'Начать первую запись' in codebehind
+
+
+def test_meetings_support_file_drop_without_changing_import_backend_contract():
+    page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="ImportDropZone"' in page
+    assert 'AllowDrop="True"' in page
+    assert 'DragOver="ImportDropZone_DragOver"' in page
+    assert 'Drop="ImportDropZone_Drop"' in page
+    assert 'GetStorageItemsAsync' in codebehind
+    assert 'ImportFileAsync(file.Path' in codebehind
+
+
 def test_title_bar_statuses_explain_runtime_health():
     shell = (DESKTOP / "MainWindow.xaml").read_text(encoding="utf-8")
     assert 'ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона"' in shell
@@ -210,6 +233,41 @@ def test_title_bar_statuses_explain_runtime_health():
     assert "ToolTipService.SetToolTip" in codebehind
     assert "LAN-сервер не отвечает" in codebehind
     assert "WhisperX или GPU/worker ещё не готовы" in codebehind
+
+
+def test_global_recording_controller_keeps_stop_available_across_navigation():
+    shell = (DESKTOP / "MainWindow.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="GlobalRecordingController"' in shell
+    assert 'x:Name="GlobalStopButton"' in shell
+    assert 'Click="GlobalStopButton_Click"' in shell
+    assert 'UpdateGlobalRecordingController(recorderResponse)' in codebehind
+    assert 'GlobalRecordingTimer_Tick' in codebehind
+
+
+def test_home_activity_card_explains_independent_background_pipeline():
+    page = (DESKTOP / "Pages" / "HomePage.xaml").read_text(encoding="utf-8")
+    assert 'Text="Активность"' in page
+    assert 'Локальная запись, кодирование, доставка и WhisperX выполняются независимо.' in page
+
+
+def test_meeting_workspace_uses_overflow_actions_and_protocol_tab():
+    page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="WorkspaceMoreButton"' in page
+    assert 'MenuFlyoutItem x:Name="RetryMenuItem"' in page
+    assert 'MenuFlyoutItem x:Name="DeleteMeetingMenuItem"' in page
+    assert 'Header="Протокол"' in page
+    assert 'WorkspaceMoreButton.IsEnabled' in codebehind
+
+
+def test_meeting_decisions_and_tasks_use_human_status_labels():
+    page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
+    client = (DESKTOP / "ServerApiClient.cs").read_text(encoding="utf-8")
+    assert 'Text="{Binding StatusText}"' in page
+    assert 'public string StatusText => UiStatusMapper.Text(Status);' in client
+    assert 'public string ResponsibleText' in client
+    assert 'public string DeadlineText' in client
 
 
 def test_recorder_liveness_is_not_confused_with_optional_audio_warning():

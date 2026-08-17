@@ -105,6 +105,7 @@ public interface IBackendService : IDisposable
     Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default);
     Task<string?> DownloadPreviewAsync(Guid mediaId, CancellationToken cancellationToken = default);
+    Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default);
 }
 
 public sealed record AssistantEvidenceItem(

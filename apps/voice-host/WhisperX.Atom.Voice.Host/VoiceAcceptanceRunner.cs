@@ -48,7 +48,7 @@ internal static class VoiceAcceptanceRunner
         return 0;
     }
 
-    public static async Task<int> MicrophoneAsync(int targetDetections, TimeSpan timeout, CancellationToken cancellationToken)
+    public static async Task<int> MicrophoneAsync(int targetDetections, TimeSpan timeout, CancellationToken cancellationToken, string? microphoneDeviceId = null)
     {
         var modelPath = ResolveModelPath();
         var assets = VoiceAssetVerifier.Check(Path.GetDirectoryName(modelPath)!, modelPath);
@@ -86,10 +86,13 @@ internal static class VoiceAcceptanceRunner
         };
 
         var detections = 0;
-        capture.Start();
-        Console.WriteLine($"Microphone dry-run started. Say {targetDetections} commands beginning with 'Атом'.");
+        string? effectiveDeviceId = null;
+        string? effectiveDeviceName = null;
+        string? captureErrorCode = null;
         try
         {
+            capture.Start(microphoneDeviceId);
+            Console.WriteLine($"Microphone dry-run started on '{capture.DeviceName ?? microphoneDeviceId ?? "DEFAULT"}'. Say {targetDetections} commands beginning with 'Мифодий'.");
             while (await queue.Reader.WaitToReadAsync(linked.Token))
             {
                 while (queue.Reader.TryRead(out var block))
@@ -108,8 +111,15 @@ internal static class VoiceAcceptanceRunner
             }
         }
         catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            captureErrorCode = "VOICE_MICROPHONE_UNAVAILABLE";
+            Console.Error.WriteLine(captureErrorCode);
+        }
         finally
         {
+            effectiveDeviceId = capture.DeviceId;
+            effectiveDeviceName = capture.DeviceName;
             capture.Stop();
             queue.Writer.TryComplete();
             while (queue.Reader.TryRead(out var block)) block.Dispose();
@@ -121,9 +131,15 @@ internal static class VoiceAcceptanceRunner
             detections,
             targetDetections,
             audioQueueDrops = drops,
+            microphoneDeviceId = effectiveDeviceId,
+            microphoneName = effectiveDeviceName,
+            errorCode = captureErrorCode,
+            aliases = analyzer.AcceptedByAlias,
+            falseActivations = analyzer.FalseActivations,
+            recognizedEndpoints = analyzer.RecognizedEndpoints,
             completed = detections >= targetDetections
         }));
-        return detections >= targetDetections ? 0 : 4;
+        return captureErrorCode is null && detections >= targetDetections ? 0 : captureErrorCode is null ? 4 : 5;
     }
 
     private static string ResolveModelPath()
@@ -150,6 +166,9 @@ internal static class VoiceAcceptanceRunner
     {
         private readonly VoskRecognizer _recognizer;
         private readonly VoiceIntentParser _parser = new();
+        public Dictionary<string, int> AcceptedByAlias { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public int FalseActivations { get; private set; }
+        public int RecognizedEndpoints { get; private set; }
 
         public DryRunAnalyzer(string modelPath) =>
             _recognizer = new VoskRecognizer(modelPath, grammar: VoiceHostRuntime.WakePhrases);
@@ -165,10 +184,25 @@ internal static class VoiceAcceptanceRunner
         private int Report(VoiceRecognitionResult result)
         {
             if (string.IsNullOrWhiteSpace(result.Text)) return 0;
+            RecognizedEndpoints++;
             var hasWake = _parser.HasWakeWord(result.Text);
             var command = _parser.Parse(result.Text, result.Confidence);
             var accepted = hasWake && !result.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
                 && result.Confidence >= 0.65 && command.Intent != VoiceIntent.Unknown;
+            if (hasWake && command.Intent == VoiceIntent.Unknown) FalseActivations++;
+            if (accepted)
+            {
+                var alias = result.Text.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim(',', ':')?.ToLowerInvariant() ?? "unknown";
+                alias = alias switch
+                {
+                    "мифодий" => "myfodiy",
+                    "мефодий" => "mefodiy",
+                    "атом" => "atom",
+                    _ => alias
+                };
+                if (alias is "myfodiy" or "mefodiy" or "atom")
+                    AcceptedByAlias[alias] = AcceptedByAlias.TryGetValue(alias, out var count) ? count + 1 : 1;
+            }
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 text = result.Text,

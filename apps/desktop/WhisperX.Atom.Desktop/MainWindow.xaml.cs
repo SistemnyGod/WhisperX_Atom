@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using WinRT.Interop;
 using WhisperX.Atom.Desktop;
+using WhisperX.Atom.Recorder;
 using WhisperX_Atom_Desktop.Pages;
 using WhisperX_Atom_Desktop.Services;
 
@@ -19,6 +20,11 @@ public sealed partial class MainWindow : Window
     private bool _suppressNavigation;
     private int _agentRecoveryRunning;
     private DateTimeOffset _nextAgentRecoveryAtUtc = DateTimeOffset.MinValue;
+    private AgentIpcResponse? _lastRecorderResponse;
+    private DispatcherQueueTimer? _globalRecordingTimer;
+    private long _globalRecordingMediaTimeMs;
+    private DateTimeOffset _globalRecordingSampleAtUtc;
+    private bool _globalRecordingPaused;
 
     public MainWindow(FrontendServices services)
     {
@@ -39,6 +45,9 @@ public sealed partial class MainWindow : Window
             AppWindow.SetIcon(iconPath);
 
         _services = services;
+        _globalRecordingTimer = _uiDispatcherQueue.CreateTimer();
+        _globalRecordingTimer.Interval = TimeSpan.FromSeconds(1);
+        _globalRecordingTimer.Tick += GlobalRecordingTimer_Tick;
         var settings = services.Settings.Load();
         PageTitleText.Text = "Главная";
         HomeNavItem.Content = "Главная";
@@ -177,11 +186,20 @@ public sealed partial class MainWindow : Window
         var backendAvailable = false;
         DesktopSystemVersion? serverVersion = null;
         var recorderAvailable = false;
+        AgentIpcResponse? recorderResponse = null;
+        AgentIpcHealth? recorderHealth = null;
         DesktopProcessingReadiness? processingReadiness = null;
         try { backendAvailable = await backendTask; } catch (OperationCanceledException) { throw; } catch { }
         try { serverVersion = await versionTask; } catch (OperationCanceledException) { throw; } catch { }
         try { processingReadiness = await processingTask; } catch (OperationCanceledException) { throw; } catch { }
-        try { recorderAvailable = (await recorderTask).IsReachable; } catch (OperationCanceledException) { throw; } catch { }
+        try
+        {
+            recorderResponse = await recorderTask;
+            recorderAvailable = recorderResponse.IsReachable;
+            recorderHealth = recorderResponse.Health;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { }
         var voice = await voiceTask;
         SetVoiceStatus(voice);
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
@@ -202,8 +220,116 @@ public sealed partial class MainWindow : Window
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
-        SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady);
+        SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady, recorderHealth);
+        _lastRecorderResponse = recorderResponse;
+        UpdateGlobalRecordingController(recorderResponse);
         SetSystemStatus(status.Item1, status.Item2);
+    }
+
+    private void UpdateGlobalRecordingController(AgentIpcResponse? response)
+    {
+        if (!_uiDispatcherQueue.HasThreadAccess)
+        {
+            _uiDispatcherQueue.TryEnqueue(() => UpdateGlobalRecordingController(response));
+            return;
+        }
+
+        var state = response?.State?.ToUpperInvariant() ?? string.Empty;
+        var sessionId = response?.SessionId ?? response?.Health?.ActiveSessionId;
+        var active = !string.IsNullOrWhiteSpace(sessionId)
+            && state is "RECORDING" or "PAUSED" or "STARTING";
+        GlobalRecordingController.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        if (!active)
+        {
+            _globalRecordingTimer?.Stop();
+            return;
+        }
+
+        var paused = state == "PAUSED";
+        _globalRecordingPaused = paused;
+        _globalRecordingMediaTimeMs = Math.Max(0, response?.MediaTimeMs ?? 0);
+        _globalRecordingSampleAtUtc = DateTimeOffset.UtcNow;
+        _globalRecordingTimer?.Start();
+        GlobalRecordingStateText.Text = paused ? "Запись приостановлена" : "Идёт запись";
+        GlobalRecordingTimerText.Text = FormatMediaTime(_globalRecordingMediaTimeMs);
+        GlobalRecordingMicrophoneText.Text = string.IsNullOrWhiteSpace(response?.Health?.EffectiveMicrophoneDeviceName)
+            ? "Микрофон"
+            : response.Health.EffectiveMicrophoneDeviceName;
+        GlobalPauseResumeButton.Content = paused ? "Продолжить" : "Пауза";
+        GlobalPauseResumeButton.IsEnabled = state is "RECORDING" or "PAUSED";
+        GlobalMarkerButton.IsEnabled = state is "RECORDING" or "PAUSED";
+        GlobalStopButton.IsEnabled = state is "RECORDING" or "PAUSED" or "STARTING";
+        if (Application.Current.Resources[paused ? "WarningBrush" : "DangerBrush"] is Brush brush)
+            GlobalRecordingIndicator.Fill = brush;
+    }
+
+    private void GlobalRecordingTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        if (GlobalRecordingController.Visibility != Visibility.Visible) return;
+        var elapsedMs = _globalRecordingPaused
+            ? 0
+            : Math.Clamp((long)(DateTimeOffset.UtcNow - _globalRecordingSampleAtUtc).TotalMilliseconds, 0, 6000);
+        GlobalRecordingTimerText.Text = FormatMediaTime(_globalRecordingMediaTimeMs + elapsedMs);
+    }
+
+    private static string FormatMediaTime(long? mediaTimeMs)
+    {
+        if (mediaTimeMs is not long value || value < 0) return "00:00:00";
+        var duration = TimeSpan.FromMilliseconds(value);
+        return duration.TotalHours >= 1
+            ? duration.ToString(@"hh\:mm\:ss")
+            : duration.ToString(@"mm\:ss");
+    }
+
+    private async void GlobalPauseResumeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastRecorderResponse?.State is null) return;
+        try
+        {
+            var response = _lastRecorderResponse.State.Equals("PAUSED", StringComparison.OrdinalIgnoreCase)
+                ? await _services.Recorder.ResumeAsync(_statusCts.Token)
+                : await _services.Recorder.PauseAsync(_statusCts.Token);
+            if (!response.Ok)
+                SetSystemStatus(response.Error ?? "Не удалось изменить состояние записи", "WarningBrush");
+            await RefreshSystemStatusAsync(_statusCts.Token);
+        }
+        catch (OperationCanceledException) when (_statusCts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            SetSystemStatus($"Не удалось изменить запись: {UiErrorFormatter.Format(ex)}", "WarningBrush");
+        }
+    }
+
+    private async void GlobalMarkerButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var response = await _services.Recorder.AddMarkerAsync("MARKER", _statusCts.Token);
+            if (!response.Ok)
+                SetSystemStatus(response.Error ?? "Не удалось добавить метку", "WarningBrush");
+            await RefreshSystemStatusAsync(_statusCts.Token);
+        }
+        catch (OperationCanceledException) when (_statusCts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            SetSystemStatus($"Не удалось добавить метку: {UiErrorFormatter.Format(ex)}", "WarningBrush");
+        }
+    }
+
+    private async void GlobalStopButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var response = await _services.Recorder.StopAsync(_statusCts.Token);
+            if (!response.Ok)
+                SetSystemStatus(response.Error ?? "Не удалось завершить запись", "WarningBrush");
+            await RefreshSystemStatusAsync(_statusCts.Token);
+        }
+        catch (OperationCanceledException) when (_statusCts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            SetSystemStatus($"Не удалось завершить запись: {UiErrorFormatter.Format(ex)}", "WarningBrush");
+        }
     }
 
     private void SetVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot)
@@ -215,18 +341,22 @@ public sealed partial class MainWindow : Window
         }
         if (snapshot is null)
         {
-            VoiceStatusText.Text = _services.VoiceHost.State == "NEEDS_SETUP" ? "Мифодий · требуется настройка" : "Мифодий · выключен";
-            SetStatusPill(VoiceStatusPill, VoiceStatusText, _services.VoiceHost.State == "NEEDS_SETUP" ? "warning" : "neutral");
+            var controllerError = _services.VoiceHost.LastErrorCode;
+            VoiceStatusText.Text = controllerError is not null
+                ? $"Мифодий · {controllerError}"
+                : _services.VoiceHost.State == "NEEDS_SETUP" ? "Мифодий · требуется настройка" : "Мифодий · выключен";
+            SetStatusPill(VoiceStatusPill, VoiceStatusText, controllerError is not null || _services.VoiceHost.State == "NEEDS_SETUP" ? "warning" : "neutral");
             return;
         }
-        var stale = DateTimeOffset.UtcNow - snapshot.UpdatedAt > TimeSpan.FromSeconds(10);
+        var heartbeat = snapshot.HeartbeatAtUtc ?? snapshot.UpdatedAt;
+        var stale = DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() > TimeSpan.FromSeconds(10);
         var voiceState = stale ? "Мифодий · нет heartbeat" : snapshot.State.ToUpperInvariant() switch
         {
             "LISTENING" => "Мифодий · слушает",
             "STARTING" => "Мифодий · запускается",
-            "RECOGNIZING" or "CAPTURING" or "WAKEDETECTED" => "Мифодий · распознаёт",
+            "RECOGNIZING" or "CAPTURING" or "WAKEDETECTED" or "CONFIRMING" => "Мифодий · распознаёт",
             "EXECUTING" => "Мифодий · выполняет",
-            "RESPONDING" => "Мифодий · говорит",
+            "RESPONDING" or "COOLDOWN" => "Мифодий · говорит",
             "DEGRADED" or "ERROR" => "Мифодий · требуется настройка",
             _ => "Мифодий · выключен"
         };
@@ -276,11 +406,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void SetRuntimeStatus(bool backendAvailable, bool authenticated, bool recorderAvailable, bool processingReady)
+    private void SetRuntimeStatus(bool backendAvailable, bool authenticated, bool recorderAvailable, bool processingReady, AgentIpcHealth? recorderHealth = null)
     {
         if (!_uiDispatcherQueue.HasThreadAccess)
         {
-            _uiDispatcherQueue.TryEnqueue(() => SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady));
+            _uiDispatcherQueue.TryEnqueue(() => SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, processingReady, recorderHealth));
             return;
         }
 
@@ -311,6 +441,42 @@ public sealed partial class MainWindow : Window
             processingReady
                 ? "WhisperX и обязательные worker-компоненты готовы к транскрибации."
                 : "WhisperX или GPU/worker ещё не готовы. Откройте «Состояние системы» для деталей.");
+
+        StatusFlyoutRecorderText.Text = recorderAvailable
+            ? "Recorder Host · готов"
+            : "Recorder Host · недоступен";
+        StatusFlyoutMicrophoneText.Text = recorderHealth is null
+            ? "Микрофон · нет данных"
+            : string.IsNullOrWhiteSpace(recorderHealth.EffectiveMicrophoneDeviceName)
+                ? "Микрофон · устройство не выбрано"
+                : $"Микрофон · {recorderHealth.EffectiveMicrophoneDeviceName}";
+        StatusFlyoutStorageText.Text = recorderHealth is { FreeBytes: > 0, TotalBytes: > 0 }
+            ? $"Локальное место · {FormatBytes(recorderHealth.FreeBytes)} свободно"
+            : "Локальное место · нет данных";
+        StatusFlyoutServerText.Text = !backendAvailable
+            ? "Сервер · офлайн"
+            : authenticated ? "Сервер · доступен" : "Сервер · требуется вход";
+        StatusFlyoutWhisperText.Text = processingReady
+            ? "WhisperX · готов"
+            : "WhisperX · не готов";
+        StatusFlyoutSummaryText.Text = backendAvailable && recorderAvailable && processingReady
+            ? "Основной цикл готов: запись сохраняется локально, обработка выполняется отдельно."
+            : "Есть компоненты, требующие внимания. Подробные коды доступны в настройках и состоянии системы.";
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} Б";
+        string[] units = ["КБ", "МБ", "ГБ", "ТБ"];
+        var value = (double)bytes;
+        var index = -1;
+        do
+        {
+            value /= 1024;
+            index++;
+        }
+        while (value >= 1024 && index < units.Length - 1);
+        return $"{value:0.#} {units[index]}";
     }
 
     private static void SetStatusPill(Border pill, TextBlock text, string state)
@@ -330,6 +496,7 @@ public sealed partial class MainWindow : Window
 
     private async void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        _globalRecordingTimer?.Stop();
         _statusCts.Cancel();
         _statusCts.Dispose();
         try { await _services.VoiceHost.StopAsync(); } catch { }

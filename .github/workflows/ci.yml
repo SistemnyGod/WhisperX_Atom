@@ -31,11 +31,15 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
       - run: dotnet restore apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj
       - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj
+      - run: dotnet restore apps/recorder-host/WhisperX.Atom.Recorder.Host.csproj
       - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj
+      - run: dotnet restore apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj
       - run: dotnet restore apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj
       - run: dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --no-restore -c Release
       - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj --no-restore -c Release
+      - run: dotnet build apps/recorder-host/WhisperX.Atom.Recorder.Host.csproj --no-restore -c Release
       - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj --no-restore -c Release
+      - run: dotnet build apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj --no-restore -c Release
       - run: dotnet publish apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore -c Release -r win-x64 -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -o artifacts/ci/desktop
       - uses: actions/upload-artifact@v4
         with:
@@ -45,13 +49,15 @@ jobs:
 
   python-targeted-tests:
     runs-on: ubuntu-latest
+    env:
+      WHISPERX_RUN_FILESYSTEM_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
           cache: pip
-      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pip install --upgrade pip pytest numpy
       - run: python -m pytest -q tests/test_*contracts.py tests/test_media_retry.py
 
   migration-validation:

@@ -37,7 +37,8 @@ public sealed record VoiceCommand(
     string Text,
     double Confidence = 1.0,
     string? Parameter = null,
-    DateTimeOffset? CreatedAt = null);
+    DateTimeOffset? CreatedAt = null,
+    string? CommandId = null);
 
 public sealed record VoiceHostSnapshot(
     VoiceHostState State,
@@ -74,8 +75,21 @@ public sealed record VoiceHostSnapshot(
     string? BuildIdentity = null,
     string? WakeWordMode = null,
     int? ProcessId = null,
-    string? LastTraceId = null);
+    string? LastTraceId = null,
+    DateTimeOffset? HeartbeatAtUtc = null,
+    string? RequestedMicrophoneDeviceId = null,
+    string? EffectiveMicrophoneDeviceId = null,
+    string? LastCommandId = null,
+    int RestartCount = 0,
+    string? RestartState = null,
+    string? MicrophoneErrorDetail = null);
 
-public sealed record VoiceResponse(string Text, bool Speak = true, bool Success = true, string? LocalSessionId = null);
+public sealed record VoiceResponse(
+    string Text,
+    bool Speak = true,
+    bool Success = true,
+    string? LocalSessionId = null,
+    string? CommandId = null,
+    string? TraceId = null);
 
 public sealed record VoiceTransition(VoiceHostState From, VoiceHostState To, DateTimeOffset At, string Reason);

@@ -583,6 +583,26 @@ public sealed class SpoolStore
         return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, "NO_AUDIO_CAPTURED");
     }
 
+    /// <summary>
+    /// Returns the authoritative sample-based end time for technical events.
+    /// Client wall-clock timestamps are intentionally ignored; for a completed
+    /// session the last durable PCM boundary is the only trusted timeline.
+    /// </summary>
+    public async Task<long?> GetSessionMediaTimeMsAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) return null;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(start_sample + sample_count), MAX(sample_rate) FROM recording_raw_chunks WHERE session_id=$session AND status NOT IN ('DISCARDED','ENCODE_TERMINAL_FAILED') AND sample_count>0";
+        command.Parameters.AddWithValue("$session", sessionId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1)) return null;
+        var endSample = reader.GetInt64(0);
+        var sampleRate = reader.GetInt32(1);
+        return endSample >= 0 && sampleRate > 0 ? (long)Math.Round(endSample * 1000d / sampleRate) : null;
+    }
+
     private static bool IsUsableFlac(
         string path,
         int expectedSampleRate,

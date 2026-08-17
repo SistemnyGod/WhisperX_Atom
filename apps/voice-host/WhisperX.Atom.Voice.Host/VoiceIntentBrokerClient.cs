@@ -18,7 +18,8 @@ internal sealed class VoiceIntentBrokerClient
         double confidence,
         bool testMode,
         CancellationToken cancellationToken,
-        string? traceId = null)
+        string? traceId = null,
+        string? commandId = null)
     {
         traceId ??= Guid.NewGuid().ToString("N");
         try
@@ -37,6 +38,7 @@ internal sealed class VoiceIntentBrokerClient
                 confidence,
                 timestamp = DateTimeOffset.UtcNow,
                 traceId,
+                commandId,
                 testMode
             };
             await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);

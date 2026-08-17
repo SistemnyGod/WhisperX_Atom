@@ -818,7 +818,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
         var mediaTimeMs = string.Equals(sessionId, _sessionId, StringComparison.Ordinal)
             ? (long?)_engine.CurrentMediaTimeMs
-            : null;
+            : await _spool.GetSessionMediaTimeMsAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (await _spool.AttachPendingEventAsync(eventId, sessionId, mediaTimeMs, cancellationToken).ConfigureAwait(false))
         {
             var meeting = await _spool.GetMeetingIdAsync(sessionId, cancellationToken).ConfigureAwait(false);

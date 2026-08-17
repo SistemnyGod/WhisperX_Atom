@@ -11,34 +11,18 @@ namespace WhisperX.Atom.Recorder;
 /// </summary>
 internal static class FlacEncoder
 {
-    public static void Encode(string ffmpegPath, string input, string output, AudioStreamFormat format)
+    public static async Task EncodeAsync(string ffmpegPath, string input, string output, AudioStreamFormat format, CancellationToken cancellationToken = default)
     {
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        process.StartInfo.ArgumentList.Add("-hide_banner");
-        process.StartInfo.ArgumentList.Add("-loglevel"); process.StartInfo.ArgumentList.Add("error");
-        process.StartInfo.ArgumentList.Add("-f"); process.StartInfo.ArgumentList.Add(format.FfmpegInput);
-        process.StartInfo.ArgumentList.Add("-ar"); process.StartInfo.ArgumentList.Add(format.SampleRate.ToString());
-        process.StartInfo.ArgumentList.Add("-ac"); process.StartInfo.ArgumentList.Add(format.Channels.ToString());
-        process.StartInfo.ArgumentList.Add("-i"); process.StartInfo.ArgumentList.Add(input);
-        process.StartInfo.ArgumentList.Add("-c:a"); process.StartInfo.ArgumentList.Add("flac");
-        process.StartInfo.ArgumentList.Add("-compression_level"); process.StartInfo.ArgumentList.Add("1");
-        process.StartInfo.ArgumentList.Add("-f"); process.StartInfo.ArgumentList.Add("flac");
-        process.StartInfo.ArgumentList.Add("-y"); process.StartInfo.ArgumentList.Add(output);
         try
         {
-            if (!process.Start()) throw new InvalidOperationException("ffmpeg_start_failed");
-            var error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0) throw new InvalidOperationException($"FFmpeg FLAC encode failed ({process.ExitCode}): {error.Trim()}");
+            var result = await ExternalProcessRunner.RunEncoderAsync(
+                ffmpegPath,
+                ["-hide_banner", "-loglevel", "error", "-f", format.FfmpegInput,
+                 "-ar", format.SampleRate.ToString(), "-ac", format.Channels.ToString(),
+                 "-i", input, "-c:a", "flac", "-compression_level", "1", "-f", "flac", "-y", output],
+                cancellationToken).ConfigureAwait(false);
+            if (result.ExitCode != 0)
+                throw new InvalidOperationException($"FFmpeg FLAC encode failed ({result.ExitCode}): {result.StandardError.Trim()}");
         }
         catch (System.ComponentModel.Win32Exception ex)
         {
@@ -80,12 +64,9 @@ internal static class FlacEncoder
         process.StartInfo.ArgumentList.Add(path);
         try
         {
-            if (!process.Start()) return false;
-            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-            await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            if (process.ExitCode != 0) return false;
-            using var document = JsonDocument.Parse(output);
+            var result = await ExternalProcessRunner.RunEncoderAsync(ffprobePath, process.StartInfo.ArgumentList, cancellationToken).ConfigureAwait(false);
+            if (result.ExitCode != 0) return false;
+            using var document = JsonDocument.Parse(result.StandardOutput);
             if (!document.RootElement.TryGetProperty("streams", out var streams)
                 || streams.ValueKind != JsonValueKind.Array
                 || streams.GetArrayLength() == 0) return false;
@@ -134,24 +115,10 @@ internal static class FlacEncoder
     private static async Task<bool> DecodeFullyAsync(string path, CancellationToken cancellationToken)
     {
         var ffmpegPath = RecorderToolPaths.Ffmpeg();
-        using var decoder = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        foreach (var argument in new[] { "-v", "error", "-i", path, "-f", "null", "-" })
-            decoder.StartInfo.ArgumentList.Add(argument);
         try
         {
-            if (!decoder.Start()) return false;
-            await decoder.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-            await decoder.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            return decoder.ExitCode == 0;
+            var result = await ExternalProcessRunner.RunEncoderAsync(ffmpegPath, ["-v", "error", "-i", path, "-f", "null", "-"], cancellationToken).ConfigureAwait(false);
+            return result.ExitCode == 0;
         }
         catch (System.ComponentModel.Win32Exception ex) { throw new InvalidOperationException("ffmpeg_not_found", ex); }
     }
@@ -179,9 +146,5 @@ internal static class FlacEncoder
 internal sealed class FfmpegAudioChunkEncoder(string ffmpegPath) : IAudioChunkEncoder
 {
     public Task EncodeAsync(string inputPath, string outputPath, AudioStreamFormat format, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        FlacEncoder.Encode(ffmpegPath, inputPath, outputPath, format);
-        return Task.CompletedTask;
-    }
+        => FlacEncoder.EncodeAsync(ffmpegPath, inputPath, outputPath, format, cancellationToken);
 }

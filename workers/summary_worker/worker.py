@@ -8,10 +8,10 @@ from datetime import datetime
 from typing import Any
 import logging
 
-import psycopg
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
+from workers.db_pool import DatabaseConnectionPool
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 from .contracts import (
@@ -62,9 +62,13 @@ def retry_delay_seconds(attempt: int) -> float:
 class SummaryRepository:
     def __init__(self) -> None:
         self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
+        self._db = DatabaseConnectionPool(self.conninfo, "summary-worker")
+
+    def close(self) -> None:
+        self._db.close()
 
     def claim(self, message_id: str, job_id: str) -> bool:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 """
                 INSERT INTO inbox_messages(message_id, job_id, lease_expires_at, worker_id)
@@ -78,18 +82,18 @@ class SummaryRepository:
             return row is not None
 
     def job_state(self, job_id: str) -> str | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT status FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row else None
 
     def release_message(self, message_id: str | None) -> None:
         if not message_id:
             return
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
     def pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             if row and row[0]:
                 return str(row[0])
@@ -100,14 +104,14 @@ class SummaryRepository:
             return str(row[0]) if row and row[0] else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, socket.gethostname(), job_id),
             )
 
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')",
                 (job_id,),
@@ -119,7 +123,7 @@ class SummaryRepository:
                 )
 
     def mark_failed(self, job_id: str, meeting_id: str, error: str) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,error_message=%s,error_code='SUMMARY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (error, job_id),
@@ -135,7 +139,7 @@ class SummaryRepository:
         and a still-live inbox lease would make the retry look like a duplicate
         and be acknowledged without executing the job.
         """
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             with connection.transaction():
                 row = connection.execute(
                     """
@@ -154,7 +158,7 @@ class SummaryRepository:
                     connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
             return int(row[0]) if row else None
     def load_segments(self, meeting_id: str, transcript_id: str | None = None) -> list[TranscriptSegment]:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             if transcript_id:
                 rows = connection.execute(
                     """
@@ -220,7 +224,7 @@ class SummaryRepository:
         # migration. A changed transcript, model, prompt or schema therefore
         # produces a new logical generation even when the NATS job is retried.
         result["generation_fingerprint"] = ":".join((source_hash, model_name, prompt_version, schema_version))
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             # Serialize summary versions and decision/task inserts for this meeting.
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":
@@ -370,6 +374,19 @@ class SummaryWorker:
         self._gpu_lease = PostgresGpuLease(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
+        self._llm_client: LlamaCppClient | None = None
+
+    def _client_for(self, base_url: str) -> LlamaCppClient:
+        normalized = base_url.rstrip("/")
+        if self._llm_client is None or not self._llm_client.url.startswith(normalized):
+            self._llm_client = LlamaCppClient(normalized, self.model_alias)
+        return self._llm_client
+
+    async def close(self) -> None:
+        if self._llm_client is not None:
+            await self._llm_client.aclose()
+            self._llm_client = None
+        self.repository.close()
 
 
     async def handle(self, payload: dict[str, Any]) -> None:
@@ -396,7 +413,7 @@ class SummaryWorker:
                 LOGGER.info("job=%s acquired GPU lease", job_id)
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 try:
-                    client = LlamaCppClient(server.base_url, self.model_alias)
+                    client = self._client_for(server.base_url)
 
                     async def report_progress(stage: str, progress: int) -> None:
                         await asyncio.to_thread(self.repository.update_job, job_id, "RUNNING", stage, progress)
@@ -568,7 +585,11 @@ async def run() -> None:
                     heartbeat.set_job(None)
                     set_runtime_state()
 
-    await asyncio.gather(consume_assistant(), consume_summary())
+    try:
+        await asyncio.gather(consume_assistant(), consume_summary())
+    finally:
+        await summary_worker.close()
+        await assistant_worker.close()
 
 if __name__ == "__main__":
     asyncio.run(run())

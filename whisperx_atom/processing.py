@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import copy
+import hashlib
 import subprocess
 import threading
 import time
@@ -124,6 +125,7 @@ class ProcessingService:
             if str(request.profile or "").strip().lower() == "enrich":
                 return self._process_enrichment(request, pipeline, ctx, config, duration_seconds, report)
             report("NORMALIZING", 10)
+            source_audio_hash = _sha256_file(request.media_path)
             ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(request.media_path)
             if ctx.asr_audio_path != request.media_path:
                 ctx.register_temp(ctx.asr_audio_path)
@@ -147,6 +149,7 @@ class ProcessingService:
                     config,
                     duration_seconds,
                     ctx.asr_preprocessing,
+                    source_audio_hash,
                 )
                 emit_asr_ready(no_speech)
                 return no_speech
@@ -179,6 +182,7 @@ class ProcessingService:
                     config,
                     duration_seconds,
                     ctx.asr_preprocessing,
+                    source_audio_hash,
                 )
                 emit_asr_ready(no_speech)
                 return no_speech
@@ -207,11 +211,12 @@ class ProcessingService:
                     "asr_sample_rate": 16000,
                     "asr_channels": 1,
                     "asr_duration_seconds": duration_seconds,
+                    "asr_audio_hash": source_audio_hash,
                 },
                 status="PARTIAL_READY",
                 warnings=[],
                 stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"},
-                quality=selected_report.to_dict(),
+                quality={**selected_report.to_dict(), "asr_audio_hash": source_audio_hash},
             )
             emit_asr_ready(asr_draft)
             if asr_only:
@@ -386,14 +391,40 @@ class ProcessingService:
         }
         expected_key = str((source.get("quality_metadata") or {}).get("asr_storage_key") or "").strip()
         actual_key = str(request.source_storage_key or "").strip()
+        expected_hash = str((source.get("quality_metadata") or {}).get("asr_audio_hash") or "").strip().lower()
+        # The worker-provided hash is an optimization/transport hint, not
+        # proof of the bytes currently mounted at media_path. Re-hash the
+        # canonical asset here so replacing a file behind the same storage key
+        # cannot produce a V2 from different audio.
+        actual_hash = _sha256_file(request.media_path).strip().lower()
+        supplied_hash = str(request.source_audio_hash or "").strip().lower()
+        expected_rate = (source.get("quality_metadata") or {}).get("asr_sample_rate")
+        expected_channels = (source.get("quality_metadata") or {}).get("asr_channels")
+        expected_duration = (source.get("quality_metadata") or {}).get("asr_duration_seconds")
+        expected_preprocessing = (source.get("quality_metadata") or {}).get("asr_preprocessing")
         # The enrichment job must use the exact canonical asset that produced
         # V1. Treat a missing key as a mismatch too; silently accepting it
         # would allow alignment/diarization to run against a different media
         # object while leaving V1 apparently valid.
         if not expected_key or not actual_key or expected_key != actual_key:
             raise ValueError("ASR_INPUT_MISMATCH")
-        ctx.asr_audio_path = request.media_path
-        ctx.asr_preprocessing = (source.get("quality_metadata") or {}).get("asr_preprocessing") or {}
+        if (
+            len(expected_hash) != 64 or len(actual_hash) != 64 or expected_hash != actual_hash
+            or (supplied_hash and supplied_hash != actual_hash)
+            or not isinstance(expected_rate, (int, float)) or int(expected_rate) <= 0
+            or not isinstance(expected_channels, (int, float)) or int(expected_channels) <= 0
+            or not isinstance(expected_duration, (int, float)) or float(expected_duration) <= 0
+            or not isinstance(expected_preprocessing, dict)
+            or duration_seconds is None or abs(float(duration_seconds) - float(expected_duration)) > 0.1
+        ):
+            raise ValueError("ASR_INPUT_MISMATCH")
+        ctx.asr_audio_path, actual_preprocessing = pipeline.prepare_asr_input(request.media_path)
+        if ctx.asr_audio_path != request.media_path:
+            ctx.register_temp(ctx.asr_audio_path)
+        stable_keys = {"asr_input_path_kind", "preprocessing_mode", "preprocessing_applied", "preprocessing_profile"}
+        if any(actual_preprocessing.get(key) != expected_preprocessing.get(key) for key in stable_keys):
+            raise ValueError("ASR_INPUT_MISMATCH")
+        ctx.asr_preprocessing = actual_preprocessing
         ctx.asr_result = result
         if config.enable_diarization:
             diar_path = pipeline._preprocess_audio(request.media_path, asr=False)
@@ -438,7 +469,7 @@ class ProcessingService:
         final_report_dict = final_report.to_dict()
         final_report_dict.update({
             key: enrichment_metadata[key]
-            for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds")
+            for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash")
             if key in enrichment_metadata
         })
         if not final_report.to_dict().get("segment_count") and not source.get("segments"):
@@ -463,6 +494,7 @@ class ProcessingService:
                 "asr_sample_rate": enrichment_metadata.get("asr_sample_rate"),
                 "asr_channels": enrichment_metadata.get("asr_channels"),
                 "asr_duration_seconds": enrichment_metadata.get("asr_duration_seconds"),
+                "asr_audio_hash": enrichment_metadata.get("asr_audio_hash"),
             },
             status="PARTIAL_READY" if warnings else "READY",
             warnings=list(dict.fromkeys(warnings)),
@@ -474,6 +506,14 @@ class ProcessingService:
 def _is_cuda_oom(exc: BaseException) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return "cuda" in text and ("out of memory" in text or "oom" in text)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _probe_duration_seconds(path: Path) -> float | None:
@@ -496,6 +536,12 @@ def _is_silent_pcm(path: Path | None, threshold: float = 0.003) -> bool:
     if path is None or not path.is_file():
         return False
     try:
+        # NumPy keeps the operation bounded by the WAV block size while
+        # moving the sample loop into compiled code.  A two-hour recording is
+        # therefore checked in a few-second windows instead of executing
+        # hundreds of millions of Python exponentiations.
+        import numpy as np
+
         with wave.open(str(path), "rb") as source:
             if source.getsampwidth() != 2 or source.getnchannels() < 1:
                 return False
@@ -505,11 +551,14 @@ def _is_silent_pcm(path: Path | None, threshold: float = 0.003) -> bool:
                 block = source.readframes(max(1, source.getframerate() * 5))
                 if not block:
                     break
-                values = memoryview(block).cast("h")
-                total += len(values)
-                sum_squares += sum((value / 32768.0) ** 2 for value in values)
+                values = np.frombuffer(block, dtype="<i2")
+                if values.size == 0:
+                    continue
+                normalized = values.astype(np.float32) / 32768.0
+                total += int(values.size)
+                sum_squares += float(np.sum(normalized * normalized, dtype=np.float64))
             return total > 0 and (sum_squares / total) ** 0.5 < threshold
-    except (OSError, EOFError, ValueError):
+    except (OSError, EOFError, ValueError, ImportError):
         return False
 
 
@@ -518,6 +567,7 @@ def _build_no_speech_result(
     config: Any,
     duration_seconds: float | None,
     preprocessing: dict[str, Any] | None,
+    audio_hash: str | None = None,
 ) -> ProcessingResult:
     quality = {
         "quality_score": 0.0,
@@ -527,6 +577,11 @@ def _build_no_speech_result(
         "duration_seconds": duration_seconds,
         "audio_signal": "SILENT_PCM",
         "asr_preprocessing": preprocessing or {},
+        "asr_storage_key": request.source_storage_key,
+        "asr_sample_rate": 16000,
+        "asr_channels": 1,
+        "asr_duration_seconds": duration_seconds,
+        "asr_audio_hash": audio_hash,
     }
     return ProcessingResult(
         job_id=request.job_id,
@@ -541,6 +596,11 @@ def _build_no_speech_result(
             "compute_type": config.compute_type,
             "processing_profile": request.profile,
             "audio_signal": "SILENT_PCM",
+            "asr_storage_key": request.source_storage_key,
+            "asr_sample_rate": 16000,
+            "asr_channels": 1,
+            "asr_duration_seconds": duration_seconds,
+            "asr_audio_hash": audio_hash,
             **(preprocessing or {}),
         },
         status="PARTIAL_READY",

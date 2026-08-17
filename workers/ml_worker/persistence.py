@@ -7,6 +7,7 @@ from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
+from workers.db_pool import DatabaseConnectionPool
 from diarization_quality import normalize_speaker_label
 from .technical_events import build_technical_intervals, segment_technical_flags
 
@@ -28,10 +29,14 @@ def _technical_intervals(connection: psycopg.Connection[Any], meeting_id: str) -
 class JobRepository:
     def __init__(self) -> None:
         self._conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
+        self._db = DatabaseConnectionPool(self._conninfo, "ml-worker")
 
     @property
     def conninfo(self) -> str:
         return self._conninfo
+
+    def close(self) -> None:
+        self._db.close()
 
     def reset_stale_leases(self) -> int:
         """Requeue ASR jobs abandoned by a crashed/restarted GPU worker.
@@ -42,7 +47,7 @@ class JobRepository:
         signal; stale RUNNING jobs and their inbox rows are safe to reclaim.
         """
         stale_seconds = max(30, int(os.getenv("GPU_STALE_LEASE_SECONDS", "90")))
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             with connection.transaction():
                 connection.execute(
                     f"""
@@ -90,7 +95,7 @@ class JobRepository:
     def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
         if not message_id:
             return True
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 """
                 INSERT INTO inbox_messages(message_id, job_id, lease_expires_at, worker_id)
@@ -109,13 +114,13 @@ class JobRepository:
     def job_state(self, job_id: str | None) -> tuple[str, str] | None:
         if not job_id:
             return None
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             return connection.execute("SELECT status, stage FROM jobs WHERE id=%s", (job_id,)).fetchone()
 
     def release_message(self, message_id: str | None) -> None:
         if not message_id:
             return
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
     def schedule_retry(self, job_id: str, error: str, error_code: str, message_id: str | None = None, max_attempts: int = 3) -> int | None:
@@ -126,7 +131,7 @@ class JobRepository:
         if it could be retried: JetStream redelivery would otherwise be
         acknowledged by the terminal-state guard without doing any work.
         """
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             with connection.transaction():
                 row = connection.execute(
                     """
@@ -146,7 +151,7 @@ class JobRepository:
             return int(row[0]) if row else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, error_code, socket.gethostname(), status, job_id),
@@ -170,7 +175,7 @@ class JobRepository:
                 )
 
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='RUNNING'",
                 (job_id,),
@@ -182,7 +187,7 @@ class JobRepository:
                 )
 
     def resolve_pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             if row and row[0]:
                 return str(row[0])
@@ -193,19 +198,19 @@ class JobRepository:
             return str(row[0]) if row and row[0] else None
 
     def job_type(self, job_id: str) -> str | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT type FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row and row[0] else None
 
     def input_transcript_id(self, job_id: str) -> str | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT input_transcript_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row and row[0] else None
 
     def load_transcript_source(self, transcript_id: str | None) -> dict[str, Any] | None:
         if not transcript_id:
             return None
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             transcript = connection.execute(
                 "SELECT language,quality_metadata FROM transcripts WHERE id=%s",
                 (transcript_id,),
@@ -234,7 +239,7 @@ class JobRepository:
 
     def complete_asr_job(self, job_id: str, meeting_id: str) -> None:
         """Close an ASR-only job without creating a second transcript version."""
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             with connection.transaction():
                 error_row = connection.execute("SELECT error_code FROM jobs WHERE id=%s", (job_id,)).fetchone()
                 no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
@@ -254,7 +259,7 @@ class JobRepository:
         worker retry therefore returns the same draft instead of creating a
         second V1. Enrichment later creates V2 and never mutates this row.
         """
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             with connection.transaction():
                 meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
                 if meeting is None or str(meeting[0]) == "CANCELLED":
@@ -273,7 +278,7 @@ class JobRepository:
                 quality = dict(draft.get("quality") or {})
                 quality["processing_job_id"] = job_id
                 metadata = dict(draft.get("metadata") or {})
-                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds"):
+                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash"):
                     if key in metadata:
                         quality[key] = metadata[key]
                 warnings = list(draft.get("warnings") or [])
@@ -323,7 +328,7 @@ class JobRepository:
                 return str(transcript_id)
 
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             # Serialize transcript versions and summary-job creation per meeting.
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":

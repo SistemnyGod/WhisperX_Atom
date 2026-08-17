@@ -1,17 +1,24 @@
 param(
     [string]$OutputRoot = (Join-Path $PSScriptRoot "..\artifacts\desktop"),
-    [switch]$NoRestore
+    [switch]$NoRestore,
+    [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ([string]::IsNullOrWhiteSpace($gitCommit)) { throw "Unable to resolve release commit; refusing to publish an unidentified runtime." }
-$dirtyFiles = @(& git -C $repoRoot status --porcelain 2>$null)
-if ($dirtyFiles.Count -gt 0 -and $env:WHISPERX_ALLOW_DIRTY_RELEASE -notin @("1", "true", "yes")) {
+# A large local test cache can contain ACL-protected temporary directories.
+# Tracked changes are sufficient to gate this development publish (the
+# publish itself is already marked dirty); avoid turning Git's warning stream
+# into a PowerShell terminating error before the actual build starts.
+$dirtyFiles = @(& git -C $repoRoot status --porcelain --untracked-files=no 2>$null)
+$dirtyAllowed = $AllowDirty -or ($env:WHISPERX_ALLOW_DIRTY_RELEASE -in @("1", "true", "yes"))
+if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
     throw "Working tree is dirty; commit the release or set WHISPERX_ALLOW_DIRTY_RELEASE only for an explicit development package."
 }
-$buildIdentity = "1.0.1+$gitCommit"
+$dirtySuffix = if ($dirtyFiles.Count -gt 0) { "-dirty" } else { "" }
+$buildIdentity = "1.0.1+$gitCommit$dirtySuffix"
 Write-Host "Publishing build identity $buildIdentity"
 $output = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
 if ([string]::IsNullOrWhiteSpace($output) -or $output -eq $repoRoot -or $output.Length -lt ($repoRoot.Length + 8)) {

@@ -74,7 +74,7 @@ def test_desktop_maps_finalize_codes_and_never_displays_raw_finalize_error():
     assert "MapRecordingError" in view_model
     assert "LOCAL_ARCHIVE_FAILED" in view_model
     assert "SERVER_UNAVAILABLE" in view_model
-    assert "Открыть локальный архив" in page
+    assert "Открыть совещание" in page or "Открыть предварительную стенограмму" in page
     assert "LocalFinalizeStatusLabel" in page
     assert "DeliveryStatusLabel" in page
 

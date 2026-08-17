@@ -25,13 +25,37 @@
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>
             <TitleBar.Content>
-                <Grid MinWidth="560" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="20,0,16,0">
+                <Grid MinWidth="420" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="16,0,12,0">
                     <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <Border x:Name="RecorderStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
                         <Border x:Name="ServerStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
                         <Border x:Name="WhisperXStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" /></Border>
-                        <Border x:Name="VoiceStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
+                        <Border x:Name="VoiceStatusPill" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
+                        <Button x:Name="StatusDetailsButton" Content="Состояние" Style="{StaticResource GhostButtonStyle}" Padding="8,4" MinHeight="32" AutomationProperties.Name="Подробности состояния системы">
+                            <Button.Flyout>
+                                <Flyout Placement="Bottom">
+                                    <StackPanel MinWidth="280" MaxWidth="360" Spacing="8" Padding="4">
+                                        <TextBlock Text="Состояние системы" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock x:Name="StatusFlyoutSummaryText" Text="Проверяем компоненты…" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock x:Name="StatusFlyoutRecorderText" Text="Recorder Host · проверка" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutMicrophoneText" Text="Микрофон · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutStorageText" Text="Локальное место · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock x:Name="StatusFlyoutServerText" Text="Сервер · проверка" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutWhisperText" Text="WhisperX · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                                <TextBlock Text="Qwen · отключена" Style="{StaticResource CaptionStyle}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
                         <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" ToolTipService.ToolTip="Текущий пользователь и состояние локальной сессии" AutomationProperties.Name="Текущий пользователь" />
                     </StackPanel>
                     <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />
@@ -78,6 +102,7 @@
                         <FontIcon Glyph="&#xE787;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItemHeader Content="ДОПОЛНИТЕЛЬНО" Style="{StaticResource NavigationHeaderStyle}" />
                     <NavigationViewItem x:Name="SeriesNavItem" Visibility="Collapsed" Content="Серии оперативок" Tag="series">
                     <ToolTipService.ToolTip>Повторяющиеся оперативки</ToolTipService.ToolTip>
                     <AutomationProperties.Name>Серии оперативок</AutomationProperties.Name>
@@ -160,6 +185,33 @@
             </NavigationView.MenuItems>
             <Frame x:Name="NavFrame" />
         </NavigationView>
+
+        <Border
+            x:Name="GlobalRecordingController"
+            Grid.Row="1"
+            Visibility="Collapsed"
+            VerticalAlignment="Bottom"
+            HorizontalAlignment="Stretch"
+            Margin="12,0,12,12"
+            Padding="14,10"
+            Background="{StaticResource SurfaceBrush}"
+            BorderBrush="{StaticResource BorderStrongBrush}"
+            BorderThickness="1"
+            CornerRadius="10">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Ellipse x:Name="GlobalRecordingIndicator" Width="9" Height="9" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingStateText" Text="Запись" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingTimerText" Text="00:00:00" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingMicrophoneText" Text="Микрофон" Foreground="{StaticResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="240" VerticalAlignment="Center" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="GlobalPauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" Click="GlobalPauseResumeButton_Click" AutomationProperties.Name="Пауза текущей записи" />
+                    <Button x:Name="GlobalMarkerButton" Content="Метка" Style="{StaticResource GhostButtonStyle}" Click="GlobalMarkerButton_Click" AutomationProperties.Name="Добавить метку в текущую запись" />
+                    <Button x:Name="GlobalStopButton" Content="Завершить" Style="{StaticResource DangerButtonStyle}" Click="GlobalStopButton_Click" AutomationProperties.Name="Завершить текущую запись" />
+                </StackPanel>
+            </Grid>
+        </Border>
 
     </Grid>
 </Window>

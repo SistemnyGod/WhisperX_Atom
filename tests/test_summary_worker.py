@@ -264,7 +264,7 @@ class SummaryWorkerTests(unittest.TestCase):
         ]))
         self.assertEqual(1, result["block_count"])
         self.assertEqual(64, len(result["source_hash"]))
-        self.assertEqual(0.0, result["quality_score"])
+        self.assertEqual(1.0, result["quality_score"])
 
     def test_v2_schema_does_not_have_artificial_four_item_caps(self):
         self.assertEqual("summary-v2", SUMMARY_SCHEMA_VERSION)

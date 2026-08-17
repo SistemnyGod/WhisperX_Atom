@@ -6,6 +6,7 @@ public sealed class VoiceStateMachine
     private readonly List<VoiceTransition> _history = [];
     private VoiceHostState _state = VoiceHostState.Disabled;
     private DateTimeOffset _updatedAt = DateTimeOffset.UtcNow;
+    private DateTimeOffset _heartbeatAtUtc = DateTimeOffset.UtcNow;
     private bool _enabled;
     private string? _lastText;
     private string? _lastResponse;
@@ -19,7 +20,7 @@ public sealed class VoiceStateMachine
     /// <summary>Marks that the host answered a health/status request.</summary>
     public void TouchHeartbeat()
     {
-        lock (_gate) _updatedAt = DateTimeOffset.UtcNow;
+        lock (_gate) _heartbeatAtUtc = DateTimeOffset.UtcNow;
     }
 
     public void Enable(bool enabled)
@@ -167,7 +168,15 @@ public sealed class VoiceStateMachine
         return true;
     }
 
-    private VoiceHostSnapshot CreateSnapshot() => new(_state, _enabled, _pushToTalk, _lastText, _lastResponse, _pendingConfirmation, _updatedAt);
+    private VoiceHostSnapshot CreateSnapshot() => new(
+        _state,
+        _enabled,
+        _pushToTalk,
+        _lastText,
+        _lastResponse,
+        _pendingConfirmation,
+        _updatedAt,
+        HeartbeatAtUtc: _heartbeatAtUtc);
 
     private static bool Allowed(VoiceHostState from, VoiceHostState to) => (from, to) switch
     {

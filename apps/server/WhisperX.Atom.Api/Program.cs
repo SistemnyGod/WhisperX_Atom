@@ -1404,6 +1404,38 @@ app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) 
     return Results.File(File.OpenRead(path), "audio/ogg", enableRangeProcessing: true);
 });
 
+// The permanent archive is the download source.  The original storage key is
+// retained as a recovery fallback for assets whose media derivatives have not
+// been built yet; access is still checked against the meeting before the path
+// is resolved.
+app.MapGet("/api/media/{id:guid}/download", async (Guid id, HttpContext context) =>
+{
+    var media = await db.GetMediaAsync(id);
+    if (media is null || !await CanAccessMeetingAsync(context, media.MeetingId)) return Results.NotFound();
+    var storageKey = media.ArchiveStorageKey ?? media.StorageKey;
+    if (string.IsNullOrWhiteSpace(storageKey)) return Results.NotFound();
+
+    string path;
+    try { path = StorageHelpers.StoragePath(storageKey); }
+    catch (InvalidOperationException) { return Results.NotFound(); }
+    if (!File.Exists(path)) return Results.NotFound();
+
+    var extension = Path.GetExtension(media.OriginalName);
+    if (string.IsNullOrWhiteSpace(extension)) extension = Path.GetExtension(storageKey);
+    var contentType = extension.ToLowerInvariant() switch
+    {
+        ".flac" => "audio/flac",
+        ".wav" => "audio/wav",
+        ".mp3" => "audio/mpeg",
+        ".m4a" => "audio/mp4",
+        ".ogg" or ".opus" => "audio/ogg",
+        _ => "application/octet-stream"
+    };
+    var downloadName = Path.GetFileName(media.OriginalName);
+    if (string.IsNullOrWhiteSpace(downloadName)) downloadName = $"meeting-{id:N}{extension}";
+    return Results.File(File.OpenRead(path), contentType, downloadName, enableRangeProcessing: true);
+});
+
 app.MapGet("/api/jobs/{id:guid}", async (Guid id, HttpContext context) =>
 {
     var job = await db.GetJobAsync(id);

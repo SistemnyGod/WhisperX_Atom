@@ -6,10 +6,21 @@ public static class VoiceHostIpc
 {
     public const string PipeName = "WhisperXAtomVoiceHost";
     public const string DesktopBrokerPipeName = "WhisperXAtomDesktopVoiceBroker";
+    public const string TelemetryPipeName = "WhisperXAtomVoiceTelemetry";
 }
 
 public sealed record VoiceHostRequest(string Command, JsonElement Payload);
 public sealed record VoiceHostResponse(bool Ok, object? Data = null, string? Error = null);
+
+public sealed record VoiceTelemetryPacket(
+    long Sequence,
+    DateTimeOffset? AtUtc,
+    double Rms,
+    double Peak,
+    bool Clipping,
+    string SignalState,
+    string? DeviceId = null,
+    string? DeviceName = null);
 
 internal sealed record VoiceBrokerResponse(
     bool Ok,
@@ -19,4 +30,5 @@ internal sealed record VoiceBrokerResponse(
     string? LocalFinalizeState = null,
     string? SpokenText = null,
     string? Detail = null,
-    string? TraceId = null);
+    string? TraceId = null,
+    string? CommandId = null);

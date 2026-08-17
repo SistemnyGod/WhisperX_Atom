@@ -292,7 +292,7 @@ def test_recording_ui_renders_real_peak_history_as_waveform():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     assert "SamplesProperty" in control and "SignalStateProperty" in control
     assert "barCount = 24" in control and "WaveformCanvas.Children.Add" in control
-    assert "MicrophoneWaveform" in page and "SystemAudioWaveform" in page
+    assert "MicrophoneWaveform" in page
     assert "AppendWaveformSample" in view_model
     assert "MicrophonePeak" in view_model and "SystemAudioPeak" in view_model
 

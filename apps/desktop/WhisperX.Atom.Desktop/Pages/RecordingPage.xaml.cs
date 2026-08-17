@@ -52,7 +52,10 @@ public sealed partial class RecordingPage : Page
         {
             UpdateStateIndicator();
             UpdateActionButtons();
+            UpdateStateLayout();
         }
+        if (e.PropertyName is nameof(RecordingViewModel.HasTranscript) or nameof(RecordingViewModel.IsProcessing))
+            UpdateStateLayout();
     }
 
     private void SyncSelections()
@@ -81,6 +84,7 @@ public sealed partial class RecordingPage : Page
         WarningInfoBar.Severity = InfoBarSeverity.Warning;
         UpdateStateIndicator();
         UpdateActionButtons();
+        UpdateStateLayout();
     }
 
     private async void CheckDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -183,11 +187,24 @@ public sealed partial class RecordingPage : Page
 
     private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        ResponsiveLayout.SetTwoColumn(RecordingHeroGrid, RecordingMainColumn, RecordingSourcesColumn, 340, e.NewSize.Width);
-        ResponsiveLayout.SetCardColumns(LifeCycleGrid, LifeCycleGrid.Children.OfType<FrameworkElement>().ToArray(), e.NewSize.Width);
-        // Keep the primary controls in one scan line when there is room, but
-        // avoid horizontal clipping in the compact shell/sidebar layout.
+        // The new recorder card is single-column by design. Only the action
+        // bar changes at the compact breakpoint, so the primary actions remain
+        // visible at 100/125/150% Windows scaling without horizontal overflow.
         RecordingActionsPanel.Orientation = e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal;
+        UpdateActionButtons();
+    }
+
+    private void UpdateStateLayout()
+    {
+        if (ViewModel is null) return;
+        var active = ViewModel.State is RecordingState.Recording or RecordingState.Paused;
+        var finalizing = ViewModel.State == RecordingState.Finalizing;
+        var showProcessing = finalizing || ViewModel.HasTranscript || ViewModel.IsProcessing;
+
+        IdleSetupPanel.Visibility = active || finalizing ? Visibility.Collapsed : Visibility.Visible;
+        ActiveRecordingPanel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        FinalizingPanel.Visibility = finalizing ? Visibility.Visible : Visibility.Collapsed;
+        ProcessingPanel.Visibility = showProcessing ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateStateIndicator()

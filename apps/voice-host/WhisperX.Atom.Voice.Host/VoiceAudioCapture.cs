@@ -1,6 +1,8 @@
 using System.Buffers;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace WhisperX.Atom.Voice.Host;
 
@@ -32,7 +34,9 @@ public sealed record VoiceAudioTelemetry(
     double Rms,
     double Peak,
     bool Clipping,
-    string SignalState)
+    string SignalState,
+    string? DeviceId = null,
+    string? DeviceName = null)
 {
     public static VoiceAudioTelemetry Empty { get; } = new(0, null, 0, 0, false, "WAITING_FOR_AUDIO");
 }
@@ -48,7 +52,9 @@ public sealed class VoiceAudioCapture : IDisposable
     public event Action<VoiceAudioBlock>? AudioAvailable;
     public event Action<Exception>? CaptureError;
     public bool IsRunning => _capture is not null;
+    public string? DeviceId { get; private set; }
     public string? DeviceName { get; private set; }
+    public string? LastErrorDetail { get; private set; }
     public VoiceAudioTelemetry Telemetry { get { lock (_telemetryGate) return _telemetry; } }
     public double LastPeak => Telemetry.Peak;
     public DateTimeOffset LastAudioAtUtc => Telemetry.AtUtc ?? default;
@@ -58,6 +64,7 @@ public sealed class VoiceAudioCapture : IDisposable
         lock (_gate)
         {
             if (_capture is not null) return;
+            LastErrorDetail = null;
             WasapiCapture capture;
             if (string.IsNullOrWhiteSpace(deviceId) || string.Equals(deviceId, "DEFAULT", StringComparison.OrdinalIgnoreCase))
             {
@@ -65,13 +72,21 @@ public sealed class VoiceAudioCapture : IDisposable
                 MMDevice device;
                 try { device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications); }
                 catch { device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia); }
+                DeviceId = device.ID;
                 DeviceName = device.FriendlyName;
                 capture = new WasapiCapture(device);
             }
             else
             {
                 using var enumerator = new MMDeviceEnumerator();
-                var device = enumerator.GetDevice(deviceId);
+                MMDevice device;
+                try { device = ResolveRequestedDevice(enumerator, deviceId); }
+                catch (Exception ex)
+                {
+                    LastErrorDetail = ex.Message;
+                    throw;
+                }
+                DeviceId = device.ID;
                 DeviceName = device.FriendlyName;
                 capture = new WasapiCapture(device);
             }
@@ -79,14 +94,70 @@ public sealed class VoiceAudioCapture : IDisposable
             capture.RecordingStopped += OnStopped;
             _capture = capture;
             try { capture.StartRecording(); }
-            catch
+            catch (Exception ex)
             {
+                LastErrorDetail ??= ex.Message;
                 capture.DataAvailable -= OnDataAvailable;
                 capture.RecordingStopped -= OnStopped;
                 capture.Dispose();
                 _capture = null;
                 throw;
             }
+        }
+    }
+
+    /// <summary>
+    /// AudioGraph exposes the PnP form of an endpoint id while NAudio's
+    /// MMDeviceEnumerator expects the shorter MMDevice id.  Keep this
+    /// conversion deliberately narrow: fixed endpoints are never silently
+    /// replaced with the Windows default device.
+    /// </summary>
+    internal static string? NormalizeEndpointId(string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)
+            || string.Equals(deviceId.Trim(), "DEFAULT", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var value = deviceId.Trim();
+        const string prefix = @"\\?\SWD#MMDEVAPI#";
+        if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return value;
+
+        var suffix = value[prefix.Length..];
+        var classMarker = suffix.IndexOf('#');
+        return (classMarker > 0 ? suffix[..classMarker] : suffix).Trim();
+    }
+
+    private static MMDevice ResolveRequestedDevice(MMDeviceEnumerator enumerator, string requestedId)
+    {
+        var requested = requestedId.Trim();
+        var normalized = NormalizeEndpointId(requested);
+        var candidates = new[] { normalized, requested }
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var candidate in candidates)
+        {
+            try { return enumerator.GetDevice(candidate!); }
+            catch (ArgumentException) { }
+            catch (COMException) { }
+        }
+
+        var available = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active).ToArray();
+        MMDevice? selected = null;
+        try
+        {
+            selected = available.FirstOrDefault(device => candidates.Any(candidate =>
+                string.Equals(device.ID, candidate, StringComparison.OrdinalIgnoreCase)));
+            if (selected is not null) return selected;
+
+            var list = string.Join("; ", available.Select(device => $"{device.ID} ({device.FriendlyName})"));
+            throw new ArgumentException(
+                $"Requested microphone endpoint '{requested}' mapped to '{normalized ?? "<default>"}' was not found. Active endpoints: {list}");
+        }
+        finally
+        {
+            foreach (var device in available)
+                if (!ReferenceEquals(device, selected)) device.Dispose();
         }
     }
 
@@ -101,6 +172,7 @@ public sealed class VoiceAudioCapture : IDisposable
             capture.DataAvailable -= OnDataAvailable;
             capture.RecordingStopped -= OnStopped;
             capture.Dispose();
+            DeviceId = null;
         }
     }
 
@@ -117,7 +189,7 @@ public sealed class VoiceAudioCapture : IDisposable
             {
                 var sequence = _telemetry.Sequence + 1;
                 var state = metrics.Clipping ? "CLIPPING" : metrics.Rms < 0.005 ? "SILENCE" : "VOICE";
-                _telemetry = new VoiceAudioTelemetry(sequence, DateTimeOffset.UtcNow, metrics.Rms, metrics.Peak, metrics.Clipping, state);
+                _telemetry = new VoiceAudioTelemetry(sequence, DateTimeOffset.UtcNow, metrics.Rms, metrics.Peak, metrics.Clipping, state, DeviceId, DeviceName);
             }
             block = new VoiceAudioBlock(rented, args.BytesRecorded, capture.WaveFormat);
             var handler = AudioAvailable;

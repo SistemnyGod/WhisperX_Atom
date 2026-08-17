@@ -384,12 +384,8 @@ public sealed class LocalArchiveWriter(
     private async Task<long> GetDurationMsAsync(string path, CancellationToken cancellationToken)
     {
         var ffprobePath = RecorderToolPaths.Ffprobe();
-        using var process = new Process { StartInfo = new ProcessStartInfo { FileName = ffprobePath, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
-        foreach (var argument in new[] { "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path }) process.StartInfo.ArgumentList.Add(argument);
-        if (!process.Start()) throw new InvalidOperationException("ffprobe_start_failed");
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        if (process.ExitCode != 0 || !double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+        var result = await ExternalProcessRunner.RunArchiveAsync(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path], cancellationToken);
+        if (result.ExitCode != 0 || !double.TryParse(result.StandardOutput.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
             throw new InvalidOperationException("ffprobe_invalid_audio");
         return (long)Math.Round(seconds * 1000d);
     }
@@ -397,24 +393,10 @@ public sealed class LocalArchiveWriter(
     private async Task RunFfmpegAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
         var ffmpegPath = RecorderToolPaths.Ffmpeg();
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        foreach (var argument in arguments) process.StartInfo.ArgumentList.Add(argument);
         try
         {
-            if (!process.Start()) throw new InvalidOperationException("ffmpeg_start_failed");
-            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-            var error = await errorTask;
-            if (process.ExitCode != 0) throw new InvalidOperationException($"ffmpeg_failed:{error.Trim()}");
+            var result = await ExternalProcessRunner.RunArchiveAsync(ffmpegPath, arguments, cancellationToken);
+            if (result.ExitCode != 0) throw new InvalidOperationException($"ffmpeg_failed:{result.StandardError.Trim()}");
         }
         catch (Win32Exception ex)
         {
@@ -428,27 +410,11 @@ public sealed class LocalArchiveWriter(
             throw new InvalidOperationException("local_audio_output_empty");
 
         var ffprobePath = RecorderToolPaths.Ffprobe();
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffprobePath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        foreach (var argument in new[] { "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels,nb_samples:format=duration", "-of", "json", path })
-            process.StartInfo.ArgumentList.Add(argument);
         try
         {
-            if (!process.Start()) throw new InvalidOperationException("ffprobe_start_failed");
-            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var error = await process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-            if (process.ExitCode != 0) throw new InvalidOperationException($"ffprobe_invalid_audio:{error.Trim()}");
-            using var document = JsonDocument.Parse(output);
+            var result = await ExternalProcessRunner.RunArchiveAsync(ffprobePath, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels,nb_samples:format=duration", "-of", "json", path], cancellationToken);
+            if (result.ExitCode != 0) throw new InvalidOperationException($"ffprobe_invalid_audio:{result.StandardError.Trim()}");
+            using var document = JsonDocument.Parse(result.StandardOutput);
             if (!document.RootElement.TryGetProperty("streams", out var streams)
                 || streams.ValueKind != JsonValueKind.Array
                 || streams.GetArrayLength() == 0)
@@ -486,25 +452,11 @@ public sealed class LocalArchiveWriter(
         // as an additional integrity gate so a truncated FLAC cannot be sent
         // to the server and fail later during ASR.
         var ffmpegPath = RecorderToolPaths.Ffmpeg();
-        using var decoder = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        foreach (var argument in new[] { "-v", "error", "-i", path, "-f", "null", "-" })
-            decoder.StartInfo.ArgumentList.Add(argument);
         try
         {
-            if (!decoder.Start()) throw new InvalidOperationException("ffmpeg_start_failed");
-            var decodeError = await decoder.StandardError.ReadToEndAsync(cancellationToken);
-            await decoder.WaitForExitAsync(cancellationToken);
-            if (decoder.ExitCode != 0)
-                throw new InvalidOperationException($"ffmpeg_decode_failed:{decodeError.Trim()}");
+            var result = await ExternalProcessRunner.RunArchiveAsync(ffmpegPath, ["-v", "error", "-i", path, "-f", "null", "-"], cancellationToken);
+            if (result.ExitCode != 0)
+                throw new InvalidOperationException($"ffmpeg_decode_failed:{result.StandardError.Trim()}");
         }
         catch (Win32Exception ex)
         {

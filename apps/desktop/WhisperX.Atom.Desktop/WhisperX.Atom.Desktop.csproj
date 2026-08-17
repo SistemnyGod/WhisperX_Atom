@@ -18,6 +18,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationTitle>WhisperX Atom Desktop</ApplicationTitle>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <AssemblyName>WhisperX.Atom.Desktop</AssemblyName>
     <!-- Must match the Host build identity shown in runtime diagnostics. -->
     <Version>1.0.1</Version>

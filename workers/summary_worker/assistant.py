@@ -7,9 +7,9 @@ import re
 import socket
 from typing import Any
 
-import psycopg
 from psycopg.types.json import Jsonb
 
+from workers.db_pool import DatabaseConnectionPool
 from workers.gpu_lease import PostgresGpuLease
 from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
@@ -30,9 +30,13 @@ ASSISTANT_SCHEMA: dict[str, Any] = {
 class AssistantRepository:
     def __init__(self) -> None:
         self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
+        self._db = DatabaseConnectionPool(self.conninfo, "assistant-worker")
+
+    def close(self) -> None:
+        self._db.close()
 
     def claim(self, message_id: str, query_id: str) -> bool:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 """
                 INSERT INTO inbox_messages(message_id,job_id,lease_expires_at,worker_id)
@@ -46,7 +50,7 @@ class AssistantRepository:
             return row is not None
 
     def renew_lease(self, query_id: str, message_id: str | None = None) -> None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             connection.execute(
                 "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')",
                 (query_id,),
@@ -58,12 +62,12 @@ class AssistantRepository:
                 )
 
     def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None, str] | None:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id,assistant_mode FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
             return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY")) if row else None
 
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute("""
                 UPDATE assistant_queries SET status=%s,error_code=%s
                 WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')
@@ -74,7 +78,7 @@ class AssistantRepository:
             return row is not None
 
     def context(self, meeting_id: str | None, query: str = "") -> tuple[str, dict[str, tuple[str, int, int]]]:
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             if meeting_id:
                 rows = connection.execute(
                     """
@@ -127,7 +131,7 @@ class AssistantRepository:
             return []
         max_messages = max(2, int(os.getenv("ASSISTANT_MAX_HISTORY_MESSAGES", "12")))
         max_chars = max(1000, int(os.getenv("ASSISTANT_MAX_HISTORY_CHARS", "12000")))
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT role,content FROM assistant_messages
@@ -155,7 +159,7 @@ class AssistantRepository:
         voice = " ".join(voice[:3])[:500].strip()
         status = "READY" if assistant_mode == "GENERAL_CHAT" or evidence_ids else "NEEDS_REVIEW"
         evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
-        with psycopg.connect(self.conninfo) as connection:
+        with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW') RETURNING assistant_message_id,conversation_id",
                 (status, answer, voice, Jsonb(evidence), query_id),
@@ -175,6 +179,19 @@ class AssistantWorker:
         self.lease = PostgresGpuLease(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
+        self._llm_client: LlamaCppClient | None = None
+
+    def _client_for(self, base_url: str) -> LlamaCppClient:
+        normalized = base_url.rstrip("/")
+        if self._llm_client is None or not self._llm_client.url.startswith(normalized):
+            self._llm_client = LlamaCppClient(normalized, self.model_alias)
+        return self._llm_client
+
+    async def close(self) -> None:
+        if self._llm_client is not None:
+            await self._llm_client.aclose()
+            self._llm_client = None
+        self.repository.close()
 
     async def handle(self, payload: dict[str, Any]) -> None:
         query_id = str(payload["query_id"])
@@ -215,7 +232,7 @@ class AssistantWorker:
             async with self.lease:
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 try:
-                    result = await LlamaCppClient(server.base_url, self.model_alias).invoke_json(messages, ASSISTANT_SCHEMA)
+                    result = await self._client_for(server.base_url).invoke_json(messages, ASSISTANT_SCHEMA)
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
             await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode)

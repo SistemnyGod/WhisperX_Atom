@@ -32,6 +32,13 @@ if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($
 if ($allowHttp -ne "true") { throw "LAN_HTTP_EXPLICIT_REQUIRED: set ALLOW_INSECURE_LAN_HTTP=true only for the isolated LAN profile." }
 if ($gpuMode -ne "container") { throw "LAN_GPU_MODE_REQUIRED: set GPU_WORKER_MODE=container in .env.lan." }
 if (-not $EnableQwen -and $autoSummary -ne "false") { throw "LAN_QWEN_DISABLED_REQUIRED: set AUTO_SUMMARY_ENABLED=false until transcript gates pass." }
+# The switch is the explicit opt-in.  Exporting the value for this Compose
+# invocation is important: compose.lan.yml otherwise expands the .env.lan
+# default (false), starts summary-worker but never queues automatic summaries.
+if ($EnableQwen) {
+    $env:AUTO_SUMMARY_ENABLED = "true"
+    $autoSummary = "true"
+}
 $originUri = $null
 if (-not [Uri]::TryCreate($serverOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$originUri) -or $originUri.Scheme -ne "http") { throw "LAN_SERVER_ORIGIN_INVALID: use http://<private-ip>:8080." }
 $originAddress = $null

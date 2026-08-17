@@ -19,6 +19,9 @@ class ProcessingRequest:
     # Storage identity of the canonical ASR asset. It is metadata only and is
     # never an absolute filesystem path or a secret.
     source_storage_key: str | None = None
+    # SHA-256 of the canonical ASR asset persisted in V1. Enrichment must
+    # reproduce and verify this value before reusing the transcript.
+    source_audio_hash: str | None = None
 
 
 @dataclass

@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Core;
 using Windows.Storage;
 using Windows.Storage.Pickers;
@@ -274,6 +275,38 @@ public sealed partial class MeetingsPage : Page
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
     }
 
+    private void ImportDropZone_DragOver(object sender, DragEventArgs e)
+    {
+        if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            e.DragUIOverride.Caption = "Импортировать файлы";
+            e.DragUIOverride.IsGlyphVisible = true;
+        }
+        else
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+        }
+    }
+
+    private async void ImportDropZone_Drop(object sender, DragEventArgs e)
+    {
+        if (_services is null || _viewModel is null || _pageCts is null || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+        try
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            var files = items.OfType<StorageFile>().ToList();
+            if (files.Count == 0) return;
+            ErrorInfoBar.IsOpen = false;
+            foreach (var file in files)
+                await _services.Backend.ImportFileAsync(file.Path, Path.GetFileNameWithoutExtension(file.Name), _pageCts.Token);
+            await _viewModel.RefreshAsync(_pageCts.Token);
+            UpdateListState();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось импортировать перетащенные файлы.")); }
+    }
+
     private async void RefreshWorkspaceButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel?.SelectedMeeting is null || _workspace is null || _pageCts is null) return;
@@ -436,6 +469,37 @@ public sealed partial class MeetingsPage : Page
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { PreviewStatusText.Text = UiErrorFormatter.Format(ex, "Не удалось загрузить preview."); }
+    }
+
+    private async void DownloadAudioButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: DesktopMedia media } || _workspace is null || _pageCts is null) return;
+        var extension = Path.GetExtension(media.OriginalName);
+        if (string.IsNullOrWhiteSpace(extension)) extension = ".flac";
+        var baseName = SanitizeFileName(Path.GetFileNameWithoutExtension(media.OriginalName));
+        if (string.IsNullOrWhiteSpace(baseName)) baseName = SanitizeFileName(_workspace.Meeting?.Title ?? "meeting-audio");
+        try
+        {
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.MusicLibrary,
+                SuggestedFileName = baseName + extension
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            var label = extension.Equals(".flac", StringComparison.OrdinalIgnoreCase) ? "FLAC аудио" : "Аудиофайл";
+            picker.FileTypeChoices.Add(label, new List<string> { extension });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+
+            PreviewStatusText.Text = "Скачивание аудио…";
+            var downloaded = await _workspace.DownloadMediaAsync(media, file.Path, _pageCts.Token);
+            PreviewStatusText.Text = downloaded
+                ? $"Аудио сохранено: {file.Path}"
+                : "Аудио пока недоступно: архив ещё не готов.";
+            if (!downloaded) ShowError("Сервер ещё не подготовил архив аудиозаписи. Повторите после завершения обработки.");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось скачать аудио совещания.")); }
     }
 
     private void TranscriptSearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -624,10 +688,16 @@ public sealed partial class MeetingsPage : Page
         ApplyWorkspaceLayout(MeetingsGrid.ActualWidth > 0 ? MeetingsGrid.ActualWidth : PageRoot.ActualWidth);
         OpenWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         OpenWorkspaceButton.Content = _workspaceExpanded ? "Свернуть" : "Открыть совещание";
+        WorkspaceMoreButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         RefreshWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         RetryButton.IsEnabled = _workspace.CanRetryLatestJob && !_workspace.IsLoading;
         CancelProcessingButton.IsEnabled = CanCancelProcessing(_workspace.Meeting) && !_workspace.IsLoading;
         DeleteMeetingButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
+        RefreshWorkspaceMenuItem.IsEnabled = RefreshWorkspaceButton.IsEnabled;
+        RetryMenuItem.IsEnabled = RetryButton.IsEnabled;
+        CancelProcessingMenuItem.IsEnabled = CancelProcessingButton.IsEnabled;
+        ExportTranscriptMenuItem.IsEnabled = _workspace.HasTranscript && !_workspace.IsLoading;
+        DeleteMeetingMenuItem.IsEnabled = DeleteMeetingButton.IsEnabled;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_workspace.ErrorText);
         ErrorInfoBar.Message = _workspace.ErrorText;
         UpdateEmptyStates();

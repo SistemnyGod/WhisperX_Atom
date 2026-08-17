@@ -43,6 +43,7 @@ public sealed partial class SettingsPage : Page
         _voiceRefreshCts = new CancellationTokenSource();
         _voiceBarsTimer?.Start();
         _ = RefreshVoiceLoopAsync(_voiceRefreshCts.Token);
+        _ = RefreshVoiceTelemetryAsync(_voiceRefreshCts.Token);
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -76,6 +77,22 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.RefreshVoiceDiagnosticsAsync();
+    }
+
+    private async Task RefreshVoiceTelemetryAsync(CancellationToken cancellationToken)
+    {
+        if (_services is null) return;
+        try
+        {
+            await new WhisperX.Atom.Desktop.VoiceHostClient().SubscribeTelemetryAsync(packet =>
+            {
+                if (ViewModel is not null)
+                    DispatcherQueue.TryEnqueue(() => ViewModel.ApplyVoiceTelemetry(packet));
+                return Task.CompletedTask;
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch { /* polling status remains the compatibility fallback */ }
     }
 
     private void InitializeVoiceBars()
@@ -144,6 +161,153 @@ public sealed partial class SettingsPage : Page
     {
         await RefreshVoiceDiagnosticsAsync();
         UpdateStatus();
+    }
+
+    private void OpenRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
+
+    private async void OpenSetupWizardButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || _services is null) return;
+
+        var recorderReady = false;
+        var microphoneName = "Не выбран";
+        var storageText = "Нет данных";
+        var serverReady = false;
+        var processingReady = false;
+        try
+        {
+            await ViewModel.RefreshRecorderDiagnosticsAsync();
+            await ViewModel.RefreshVoiceDiagnosticsAsync();
+            var recorder = await _services.Recorder.GetHealthAsync();
+            recorderReady = recorder.IsReachable;
+            microphoneName = recorder.Health?.EffectiveMicrophoneDeviceName
+                ?? recorder.Health?.SelectedMicrophoneDeviceId
+                ?? "Windows по умолчанию";
+            if (recorder.Health is { FreeBytes: > 0 } health)
+                storageText = FormatBytes(health.FreeBytes);
+            if (_services.Backend.HasSession)
+            {
+                serverReady = await _services.Backend.CheckReadyAsync();
+                processingReady = (await _services.Backend.GetProcessingReadinessAsync())?.Ready == true;
+            }
+        }
+        catch
+        {
+            // The wizard remains useful offline: it reports the failed step and
+            // lets the user continue to the recording page for recovery.
+        }
+
+        var wizardBody = new StackPanel { Spacing = 12, MinWidth = 420 };
+        var stepProgress = new ProgressBar { Minimum = 0, Maximum = 7, Height = 6 };
+        var stepTitle = new TextBlock { FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        var stepDescription = new TextBlock { Foreground = GetBrush("MutedTextBrush"), TextWrapping = TextWrapping.Wrap };
+        var checks = new StackPanel { Spacing = 7 };
+        wizardBody.Children.Add(stepProgress);
+        wizardBody.Children.Add(stepTitle);
+        wizardBody.Children.Add(stepDescription);
+        wizardBody.Children.Add(checks);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Настройка WhisperX Atom",
+            Content = wizardBody,
+            PrimaryButtonText = "Далее",
+            SecondaryButtonText = "Назад",
+            CloseButtonText = "Закрыть",
+            XamlRoot = Content.XamlRoot,
+            DefaultButton = ContentDialogButton.Primary
+        };
+        var step = 0;
+
+        void RenderStep()
+        {
+            stepProgress.Value = step + 1;
+            checks.Children.Clear();
+            var title = step switch
+            {
+                0 => "Шаг 1 из 7 · Вход",
+                1 => "Шаг 2 из 7 · LAN-сервер",
+                2 => "Шаг 3 из 7 · Recorder Host",
+                3 => "Шаг 4 из 7 · Микрофон",
+                4 => "Шаг 5 из 7 · Голосовой помощник",
+                5 => "Шаг 6 из 7 · Локальное хранилище",
+                _ => "Готово к работе"
+            };
+            stepTitle.Text = title;
+            stepDescription.Text = step switch
+            {
+                0 => ViewModel.IsLoggedIn ? "Вход в API уже выполнен." : "Выполните вход через окно авторизации приложения.",
+                1 => "Сервер нужен для доставки и обработки. Локальная запись доступна и без сети.",
+                2 => "Проверяем установленный Recorder Host и его IPC.",
+                3 => "Устройство будет выбрано на странице записи; до старта аудио не сохраняется.",
+                4 => "Мифодий остаётся экспериментальной функцией и не блокирует запись.",
+                5 => "Папка архива используется для локального master-файла и raw-сегментов.",
+                _ => "Основной сценарий готов: выберите микрофон и начните первую запись."
+            };
+            if (step == 0) AddWizardCheck("Пользователь", ViewModel.IsLoggedIn ? "Вход выполнен" : "Требуется вход", ViewModel.IsLoggedIn);
+            if (step == 1) AddWizardCheck("LAN-сервер", serverReady ? "Доступен" : "Офлайн или вход не выполнен", serverReady);
+            if (step == 2) AddWizardCheck("Recorder Host", recorderReady ? ViewModel.RecorderRuntimeState : "Недоступен", recorderReady);
+            if (step == 3) AddWizardCheck("Микрофон", microphoneName, recorderReady && microphoneName is not "Не выбран");
+            if (step == 4) AddWizardCheck("Мифодий", ViewModel.VoiceStatus, false, "Проверка доступна в экспериментальных функциях");
+            if (step == 5) AddWizardCheck("Локальное место", storageText, storageText is not "Нет данных");
+            if (step == 6)
+            {
+                AddWizardCheck("Recorder Host", recorderReady ? "Готов" : "Требует проверки", recorderReady);
+                AddWizardCheck("Микрофон", microphoneName, recorderReady && microphoneName is not "Не выбран");
+                AddWizardCheck("Локальное хранение", storageText, storageText is not "Нет данных");
+                AddWizardCheck("LAN-сервер", serverReady ? "Доступен" : "Будет доставлено позже", serverReady, serverReady ? null : "Можно продолжить в offline-режиме");
+                AddWizardCheck("WhisperX", processingReady ? "Готов" : "Ожидает сервер/GPU", processingReady, processingReady ? null : "Не блокирует локальную запись");
+            }
+            dialog.PrimaryButtonText = step == 6 ? "Начать первую запись" : "Далее";
+            dialog.IsSecondaryButtonEnabled = step > 0;
+        }
+
+        void AddWizardCheck(string label, string value, bool success, string? hint = null)
+        {
+            var row = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } }, ColumnSpacing = 12 };
+            row.Children.Add(new TextBlock { Text = label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            var result = new StackPanel { Spacing = 1, HorizontalAlignment = HorizontalAlignment.Right };
+            Grid.SetColumn(result, 1);
+            result.Children.Add(new TextBlock { Text = (success ? "✓ " : "⚠ ") + value, Foreground = GetBrush(success ? "SuccessBrush" : "WarningBrush"), TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Right });
+            if (!string.IsNullOrWhiteSpace(hint)) result.Children.Add(new TextBlock { Text = hint, Foreground = GetBrush("MutedTextBrush"), FontSize = 12, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Right });
+            row.Children.Add(result);
+            checks.Children.Add(row);
+        }
+
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            if (step < 6)
+            {
+                step++;
+                RenderStep();
+                args.Cancel = true;
+            }
+        };
+        dialog.SecondaryButtonClick += (_, args) =>
+        {
+            if (step > 0)
+            {
+                step--;
+                RenderStep();
+                args.Cancel = true;
+            }
+        };
+        RenderStep();
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary && step == 6)
+            App.MainWindow.NavigateTo("recording");
+    }
+
+    private static Brush GetBrush(string key) => Application.Current.Resources[key] as Brush ?? new SolidColorBrush(Microsoft.UI.Colors.Gray);
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} Б";
+        var value = (double)bytes;
+        var units = new[] { "КБ", "МБ", "ГБ", "ТБ" };
+        var index = -1;
+        do { value /= 1024; index++; } while (value >= 1024 && index < units.Length - 1);
+        return $"{value:0.#} {units[index]} свободно";
     }
 
     private async void ChangePasswordButton_Click(object sender, RoutedEventArgs e)

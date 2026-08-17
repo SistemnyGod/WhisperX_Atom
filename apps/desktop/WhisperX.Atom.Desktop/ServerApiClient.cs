@@ -34,8 +34,22 @@ public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long Start
 }
 public sealed record DesktopSpeaker(string Id, string StableKey, string DisplayName);
 public sealed record DesktopSummary(string Id, string MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
-public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
-public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
+public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt)
+{
+    [JsonIgnore]
+    public string StatusText => UiStatusMapper.Text(Status);
+}
+public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt)
+{
+    [JsonIgnore]
+    public string StatusText => UiStatusMapper.Text(Status);
+
+    [JsonIgnore]
+    public string ResponsibleText => string.IsNullOrWhiteSpace(Responsible) ? "Ответственный не назначен" : Responsible;
+
+    [JsonIgnore]
+    public string DeadlineText => Deadline is DateTime value ? value.ToLocalTime().ToString("dd.MM.yyyy") : "Срок не указан";
+}
 public sealed record DesktopAgentEnrollment(string AgentId, string Token);
 public sealed record DesktopAgentBootstrapResult(
     string AgentId,
@@ -995,6 +1009,32 @@ public sealed class ServerApiClient : IDisposable
         File.Move(temporary, path, true);
         CleanupPreviewCache(directory, path);
         return path;
+    }
+
+    public async Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(destinationPath)) throw new ArgumentException("Путь сохранения не задан.", nameof(destinationPath));
+        var directory = Path.GetDirectoryName(destinationPath);
+        if (string.IsNullOrWhiteSpace(directory)) throw new ArgumentException("Путь сохранения не содержит каталога.", nameof(destinationPath));
+        Directory.CreateDirectory(directory);
+        var temporary = destinationPath + ".part";
+        try
+        {
+            using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/media/{mediaId}/download", null, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound) return false;
+            response.EnsureSuccessStatusCode();
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await input.CopyToAsync(output, cancellationToken);
+            var info = new FileInfo(temporary);
+            if (!info.Exists || info.Length == 0) throw new DesktopApiException(0, "MEDIA_DOWNLOAD_EMPTY", "Сервер вернул пустой аудиофайл.");
+            File.Move(temporary, destinationPath, true);
+            return true;
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); } catch (IOException) { }
+        }
     }
 
     private static void CleanupPreviewCache(string directory, string currentPath)

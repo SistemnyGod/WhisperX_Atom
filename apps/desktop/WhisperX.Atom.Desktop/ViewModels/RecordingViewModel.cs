@@ -791,6 +791,16 @@ public sealed class RecordingViewModel : ObservableObject
                 NormalizeDeviceId(confirmed?.SelectedSystemAudioDeviceId), _systemAudioDeviceId, StringComparison.OrdinalIgnoreCase);
             if (!microphoneConfirmed || !systemConfirmed)
                 throw new InvalidOperationException("DEVICE_SELECTION_NOT_CONFIRMED");
+            if (microphoneChanged)
+            {
+                var settings = _services.Settings.Load();
+                if (!await _services.VoiceHost.ConfigureAsync(
+                        _microphoneDeviceId,
+                        settings.VoiceAlwaysListening,
+                        settings.VoiceQuietMode,
+                        settings.VoiceSensitivity))
+                    throw new InvalidOperationException(_services.VoiceHost.LastErrorCode ?? "VOICE_MICROPHONE_UNAVAILABLE");
+            }
             _confirmedMicrophoneDeviceId = _microphoneDeviceId;
             _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
             SaveSettings();
@@ -808,6 +818,19 @@ public sealed class RecordingViewModel : ObservableObject
                     ? FormatAgentError(response)
                 : SafeError(ex);
             try { await _services.Recorder.SetAudioDevicesAsync(previousMicrophoneId, previousSystemAudioId); } catch { }
+            if (microphoneChanged)
+            {
+                try
+                {
+                    var settings = _services.Settings.Load();
+                    await _services.VoiceHost.ConfigureAsync(
+                        previousMicrophoneId,
+                        settings.VoiceAlwaysListening,
+                        settings.VoiceQuietMode,
+                        settings.VoiceSensitivity);
+                }
+                catch { /* the next settings refresh will retry synchronization */ }
+            }
         }
     }
 

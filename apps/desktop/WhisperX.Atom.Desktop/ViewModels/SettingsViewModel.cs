@@ -36,6 +36,13 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceRuntimeBuild = "—";
     private string _voiceRuntimeProcess = "—";
     private string _voiceLastTraceId = "—";
+    private string _voiceLastCommandId = "—";
+    private string _voiceRequestedMicrophone = "—";
+    private string _voiceEffectiveMicrophone = "—";
+    private string _voiceRuntimePath = "—";
+    private string _voiceExpectedBuild = "—";
+    private string _voiceObservedBuild = "—";
+    private string _voiceDiagnosticsDetail = "—";
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -94,6 +101,14 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceRuntimeBuild { get => _voiceRuntimeBuild; private set => SetProperty(ref _voiceRuntimeBuild, value); }
     public string VoiceRuntimeProcess { get => _voiceRuntimeProcess; private set => SetProperty(ref _voiceRuntimeProcess, value); }
     public string VoiceLastTraceId { get => _voiceLastTraceId; private set => SetProperty(ref _voiceLastTraceId, value); }
+    public string VoiceLastCommandId { get => _voiceLastCommandId; private set => SetProperty(ref _voiceLastCommandId, value); }
+    public string VoiceRequestedMicrophone { get => _voiceRequestedMicrophone; private set => SetProperty(ref _voiceRequestedMicrophone, value); }
+    public string VoiceEffectiveMicrophone { get => _voiceEffectiveMicrophone; private set => SetProperty(ref _voiceEffectiveMicrophone, value); }
+    public string VoiceRuntimePath { get => _voiceRuntimePath; private set => SetProperty(ref _voiceRuntimePath, value); }
+    public string VoiceExpectedBuild { get => _voiceExpectedBuild; private set => SetProperty(ref _voiceExpectedBuild, value); }
+    public string VoiceObservedBuild { get => _voiceObservedBuild; private set => SetProperty(ref _voiceObservedBuild, value); }
+    public string VoiceDiagnosticsDetail { get => _voiceDiagnosticsDetail; private set => SetProperty(ref _voiceDiagnosticsDetail, value); }
+    public int VoiceRestartCount => _services.VoiceHost.RestartCount;
     public bool IsLoggedIn => _services.Backend.HasSession;
     public bool CanLogin => !IsBusy && !IsLoggedIn;
     public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
@@ -142,18 +157,37 @@ public sealed class SettingsViewModel : ObservableObject
             var response = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync().ConfigureAwait(true);
             if (response is null)
             {
-                VoiceStatus = "Voice Host не запущен";
-                VoiceErrorCode = "VOICE_HOST_NOT_INSTALLED";
+                var controllerError = _services.VoiceHost.LastErrorCode;
+                VoiceStatus = controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}";
+                VoiceErrorCode = controllerError ?? "VOICE_HOST_NOT_INSTALLED";
+                VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
+                VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
+                VoiceObservedBuild = _services.VoiceHost.LastObservedBuildIdentity ?? "—";
+                VoiceDiagnosticsDetail = _services.VoiceHost.LastErrorDetail ?? "—";
                 return;
             }
-            VoiceStatus = $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}";
+            var heartbeat = response.HeartbeatAtUtc ?? response.UpdatedAt;
+            var heartbeatStale = DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() > TimeSpan.FromSeconds(10);
+            VoiceStatus = heartbeatStale
+                ? "Нет heartbeat от Voice Host"
+                : $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}";
             VoiceLastRecognition = response.LastRecognizedText ?? "—";
             VoiceErrorCode = response.LastErrorCode ?? "—";
             VoiceMicrophone = response.EffectiveMicrophoneName ?? "—";
+            VoiceRequestedMicrophone = response.RequestedMicrophoneDeviceId ?? "DEFAULT";
+            VoiceEffectiveMicrophone = response.EffectiveMicrophoneDeviceId ?? response.EffectiveMicrophoneName ?? "—";
             VoiceWakeWordMode = response.WakeWordMode ?? "—";
             VoiceRuntimeBuild = response.BuildIdentity ?? "—";
+            VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
+            VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
+            VoiceObservedBuild = response.BuildIdentity ?? _services.VoiceHost.LastObservedBuildIdentity ?? "—";
+            VoiceDiagnosticsDetail = response.MicrophoneErrorDetail
+                ?? _services.VoiceHost.LastErrorDetail
+                ?? "—";
             VoiceRuntimeProcess = response.ProcessId is int pid ? $"PID {pid}" : "PID —";
             VoiceLastTraceId = response.LastTraceId ?? "—";
+            VoiceLastCommandId = response.LastCommandId ?? "—";
+            OnPropertyChanged(nameof(VoiceRestartCount));
             var telemetryFresh = response.LastAudioAtUtc is DateTimeOffset at
                 && DateTimeOffset.UtcNow - at <= TimeSpan.FromMilliseconds(750)
                 && response.AudioTelemetrySequence > 0;
@@ -170,9 +204,32 @@ public sealed class SettingsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            VoiceStatus = "Voice Host недоступен";
-            VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+            VoiceStatus = _services.VoiceHost.LastErrorCode is { } code ? $"Voice Host: {code}" : "Voice Host недоступен";
+            VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+            VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
+            VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
+            VoiceObservedBuild = _services.VoiceHost.LastObservedBuildIdentity ?? "—";
+            VoiceDiagnosticsDetail = _services.VoiceHost.LastErrorDetail ?? ex.Message;
         }
+    }
+
+    public void ApplyVoiceTelemetry(WhisperX.Atom.Desktop.VoiceTelemetryPacket packet)
+    {
+        var fresh = packet.AtUtc is DateTimeOffset at
+            && DateTimeOffset.UtcNow - at <= TimeSpan.FromMilliseconds(750)
+            && packet.Sequence > 0;
+        VoiceRequestedMicrophone = packet.DeviceId ?? VoiceRequestedMicrophone;
+        VoiceEffectiveMicrophone = packet.DeviceName ?? packet.DeviceId ?? VoiceEffectiveMicrophone;
+        VoiceMicrophone = packet.DeviceName ?? VoiceMicrophone;
+        VoiceLevelNormalized = fresh ? Math.Clamp(packet.Peak, 0d, 1d) : 0d;
+        VoiceLevel = fresh ? $"{VoiceLevelNormalized * 100:0}% peak · RMS {packet.Rms * 100:0}%" : "Нет данных от микрофона";
+        VoiceSignalState = !fresh
+            ? "Нет данных от микрофона"
+            : packet.Clipping || string.Equals(packet.SignalState, "CLIPPING", StringComparison.OrdinalIgnoreCase)
+                ? "Перегрузка"
+                : string.Equals(packet.SignalState, "VOICE", StringComparison.OrdinalIgnoreCase)
+                    ? "Голос записывается"
+                    : "Тишина или слабый сигнал";
     }
 
     public async Task TestVoiceSpeechAsync(string phrase)
@@ -198,9 +255,17 @@ public sealed class SettingsViewModel : ObservableObject
         _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity });
         try
         {
-            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("ENABLE", new { enabled = VoiceAlwaysListening });
-            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("QUIET_MODE", new { enabled = VoiceQuietMode });
-            await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SET_SENSITIVITY", new { sensitivity = VoiceSensitivity });
+            var effectiveMicrophone = current.MicrophoneDeviceId;
+            try
+            {
+                var health = await _services.Recorder.GetHealthAsync().ConfigureAwait(true);
+                effectiveMicrophone = health.Health?.EffectiveMicrophoneDeviceId
+                    ?? health.Health?.SelectedMicrophoneDeviceId
+                    ?? effectiveMicrophone;
+            }
+            catch { }
+            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity))
+                VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE";
         }
         catch { if (VoiceAlwaysListening) _ = _services.VoiceHost.StartAsync(); }
     }

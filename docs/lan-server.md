@@ -9,6 +9,9 @@ compose.dev.yml + compose.lan.yml
 origin: http://192.168.2.194:8080
 GPU_WORKER_MODE=container
 AUTO_SUMMARY_ENABLED=false
+WHISPERX_MODEL=large-v3
+COMPUTE_TYPE=int8_float16
+BATCH_SIZE=2
 ```
 
 Development uses `compose.dev.yml` alone and binds only to `127.0.0.1`; it is for local tests, not the LAN server. Production uses the separate HTTPS profile in `compose.prod.yml`.
@@ -64,7 +67,20 @@ $credential = Get-Credential -UserName admin
 повторена после восстановления LAN. Если Recorder Service не запущен, вход
 разрешён, но запись остаётся недоступной до запуска службы через UAC.
 
-Qwen remains disabled until the 60-second and 5-minute transcript gates pass. Enable it only with the explicit `-EnableQwen` launcher option.
+Qwen remains disabled until the 60-second and 5-minute transcript gates pass. The
+Summary Worker, Qwen3-8B runtime and download script are present, but the feature
+is deliberately off while `AUTO_SUMMARY_ENABLED=false`. To enable it after the
+gate, first verify/create the pinned model manifest and then start explicitly:
+
+```powershell
+.\scripts\llm-download.ps1
+.\scripts\start-whisperx-lan-server.ps1 -EnableQwen
+```
+
+The launcher starts `summary-worker` and explicitly enables automatic summary
+jobs only with `-EnableQwen`; it does not silently turn on a GPU workload. The
+current model is `Qwen3-8B-Q5_K_M.gguf` and its
+manifest must match the pinned SHA256 before the worker reports `READY`.
 
 The launcher writes non-sensitive evidence to `artifacts/acceptance/lan-server/`:
 `compose-config.txt`, `core-readiness.json`, and `processing-readiness.json`.
@@ -76,6 +92,16 @@ Readiness is intentionally split into `SERVER_CORE_READY` (API, PostgreSQL,
 NATS, storage and gateway) and `PROCESSING_READY` (workers, fresh heartbeats,
 GPU lease/queue state). A GPU worker that is processing is reported as `BUSY`,
 not as a failure. Qwen is `DISABLED` while `AUTO_SUMMARY_ENABLED=false`.
+
+The 8 GB GPU LAN preset keeps WhisperX `large-v3`, uses `int8_float16` and
+`BATCH_SIZE=2`, and leaves pyannote diarization off until a measured acceptance
+run confirms enough VRAM headroom. Alignment remains enabled. This avoids a
+silent OOM while preserving the large-v3 ASR quality; diarization can be enabled
+later by setting `ENABLE_DIARIZATION=true` and repeating the runtime gate.
+
+When a meeting is ready, the Desktop **Файлы** tab exposes **Скачать аудио**.
+The API downloads the permanent archive (or the original asset while derivatives
+are still being built) with the same meeting access check as the transcript.
 
 The Recorder installer uses only the verified `ffmpeg.exe`/`ffprobe.exe`
 payload staged under `vendor\ffmpeg\win-x64`; use

@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace WhisperX.Atom.Desktop;
 
-public sealed record DesktopVoiceSnapshot(string State, bool Enabled, bool PushToTalk, string? LastRecognizedText, string? LastResponse, string? PendingConfirmation, DateTimeOffset UpdatedAt, bool IsSpeaking = false, bool ModelReady = false, bool ModelIntegrityReady = false, bool NativeRuntimeReady = false, bool MicrophoneReady = false, bool RecorderPipeReady = false, string? RecorderPipeError = null, string Sensitivity = "balanced", string? LastIntent = null, string? LastErrorCode = null, double? WakeLatencyMs = null, double? IntentLatencyMs = null, double? RecorderAckLatencyMs = null, double? TotalLatencyMs = null, double? LastCommandLatencyMs = null, int AudioQueueDepth = 0, long AudioQueueDrops = 0, string? EffectiveMicrophoneName = null, double? MicrophonePeak = null, DateTimeOffset? LastAudioAtUtc = null, double? MicrophoneRms = null, bool MicrophoneClipping = false, string? AudioSignalState = null, long AudioTelemetrySequence = 0, string? BuildIdentity = null, string? WakeWordMode = null, int? ProcessId = null, string? LastTraceId = null);
+public sealed record DesktopVoiceSnapshot(string State, bool Enabled, bool PushToTalk, string? LastRecognizedText, string? LastResponse, string? PendingConfirmation, DateTimeOffset UpdatedAt, bool IsSpeaking = false, bool ModelReady = false, bool ModelIntegrityReady = false, bool NativeRuntimeReady = false, bool MicrophoneReady = false, bool RecorderPipeReady = false, string? RecorderPipeError = null, string Sensitivity = "balanced", string? LastIntent = null, string? LastErrorCode = null, double? WakeLatencyMs = null, double? IntentLatencyMs = null, double? RecorderAckLatencyMs = null, double? TotalLatencyMs = null, double? LastCommandLatencyMs = null, int AudioQueueDepth = 0, long AudioQueueDrops = 0, string? EffectiveMicrophoneName = null, double? MicrophonePeak = null, DateTimeOffset? LastAudioAtUtc = null, double? MicrophoneRms = null, bool MicrophoneClipping = false, string? AudioSignalState = null, long AudioTelemetrySequence = 0, string? BuildIdentity = null, string? WakeWordMode = null, int? ProcessId = null, string? LastTraceId = null, DateTimeOffset? HeartbeatAtUtc = null, string? RequestedMicrophoneDeviceId = null, string? EffectiveMicrophoneDeviceId = null, string? LastCommandId = null, int RestartCount = 0, string? RestartState = null, string? MicrophoneErrorDetail = null);
 public sealed record DesktopVoiceResponse(bool Ok, JsonElement? Data, string? Error);
 
 public sealed class VoiceHostClient
@@ -31,4 +31,29 @@ public sealed class VoiceHostClient
         var response = await SendAsync("STATUS", cancellationToken: cancellationToken);
         return response.Ok && response.Data is JsonElement data ? data.Deserialize<DesktopVoiceSnapshot>(_json) : null;
     }
+
+    /// <summary>Reads the latest-only telemetry stream until the page is closed or the host disconnects.</summary>
+    public async Task SubscribeTelemetryAsync(Func<VoiceTelemetryPacket, Task> onPacket, CancellationToken cancellationToken = default)
+    {
+        await using var pipe = new NamedPipeClientStream(".", "WhisperXAtomVoiceTelemetry", PipeDirection.In, PipeOptions.Asynchronous);
+        await pipe.ConnectAsync(1000, cancellationToken);
+        using var reader = new StreamReader(pipe);
+        while (!cancellationToken.IsCancellationRequested && pipe.IsConnected)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(line)) break;
+            var packet = JsonSerializer.Deserialize<VoiceTelemetryPacket>(line, _json);
+            if (packet is not null) await onPacket(packet).ConfigureAwait(false);
+        }
+    }
 }
+
+public sealed record VoiceTelemetryPacket(
+    long Sequence,
+    DateTimeOffset? AtUtc,
+    double Rms,
+    double Peak,
+    bool Clipping,
+    string SignalState,
+    string? DeviceId = null,
+    string? DeviceName = null);
