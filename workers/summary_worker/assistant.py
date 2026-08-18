@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import socket
+import hashlib
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -25,7 +26,7 @@ LEGACY_EMPTY_CONTEXT_ERROR = "assistant_context_empty"
 
 ASSISTANT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["answer", "voice_answer", "evidence_segment_ids"],
+    "required": ["answer", "voice_answer", "evidence_segment_ids", "claims"],
     "properties": {
         "answer": {"type": "string", "maxLength": 4000},
         "voice_answer": {"type": "string", "maxLength": 500},
@@ -46,14 +47,11 @@ ASSISTANT_SCHEMA: dict[str, Any] = {
 }
 
 
-def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str) -> bool:
+def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str) -> bool:
     """Fail closed on evidence IDs without trying to judge prose semantics."""
     claims = result.get("claims")
     if assistant_mode == "GENERAL_CHAT":
         return not claims or all(not isinstance(item, dict) or not (item.get("evidenceIds") or []) for item in claims)
-    if claims is None:
-        # Old Qwen contract remains accepted during rolling upgrades.
-        return True
     if not isinstance(claims, list) or not claims:
         return False
     for claim in claims:
@@ -73,7 +71,7 @@ _GROUNDING_STOPWORDS = {
 }
 
 
-def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str) -> bool:
+def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str) -> bool:
     """Apply a deterministic second gate to claims before they can be spoken.
 
     The model is still asked for structured claims, but IDs alone are not
@@ -102,6 +100,23 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
             return False
         numeric_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", claim_text))
         if any(token not in evidence_text for token in numeric_tokens):
+            return False
+    # The UI answer and shorter spoken answer must be summaries of verified
+    # claims, not a second unverified generation channel.  Exact lexical
+    # containment is intentional here: names, numbers, dates and equipment
+    # identifiers cannot be invented through paraphrase.
+    covered = " ".join(str(claim.get("text", "")) for claim in claims).lower()
+    cited = " ".join(
+        valid[str(item).removeprefix("SEG-")][3]
+        for claim in claims for item in claim.get("evidenceIds", [])
+        if str(item).removeprefix("SEG-") in valid
+    ).lower()
+    for value in (str(result.get("answer", "")), str(result.get("voice_answer", ""))):
+        tokens = {
+            token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", value.lower())
+            if token not in _GROUNDING_STOPWORDS
+        }
+        if tokens and not tokens.issubset(set(re.findall(r"[\wА-Яа-яЁё-]{2,}", covered)) | set(re.findall(r"[\wА-Яа-яЁё-]{2,}", cited))):
             return False
     return True
 
@@ -156,7 +171,7 @@ class AssistantRepository:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
 
-    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str]], str, str | None]:
+    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         # Retrieval is performed by PostgreSQL's Russian FTS instead of
         # loading an entire meeting and scoring it in Python. The CTE keeps
         # the twelve strongest hits and adds one neighbouring segment on each
@@ -165,7 +180,7 @@ class AssistantRepository:
             rows = connection.execute(
                 """
                 WITH source AS (
-                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,t.id AS transcript_id,t.version AS transcript_version,
                            COALESCE(ms.display_name,s.speaker_label,'Спикер N') AS speaker,
                            s.text,t.version_kind,s.ordinal,
                            to_tsvector('russian', COALESCE(s.text,'')) AS search_vector,
@@ -192,7 +207,7 @@ class AssistantRepository:
                       ON hits.meeting_id=source.meeting_id
                      AND source.ordinal BETWEEN hits.ordinal-1 AND hits.ordinal+1
                 )
-                SELECT id,meeting_id,start_ms,end_ms,speaker,text,version_kind
+                SELECT id,meeting_id,start_ms,end_ms,transcript_id,transcript_version,speaker,text,version_kind
                 FROM expanded
                 ORDER BY rank DESC,meeting_id,ordinal
                 LIMIT 36
@@ -226,14 +241,14 @@ class AssistantRepository:
                         allowed_meetings.append(key)
                 rows = [row for row in rows if str(row[1]) in allowed_meetings]
 
-        valid: dict[str, tuple[str, int, int, str, str]] = {}
+        valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
         lines: list[str] = []
         kinds: set[str] = set()
-        for segment_id, meeting_id_value, start_ms, end_ms, speaker, text, version_kind in rows:
+        for segment_id, meeting_id_value, start_ms, end_ms, transcript_id, transcript_version, speaker, text, version_kind in rows:
             key = str(segment_id)
             kind = str(version_kind or "ASR_DRAFT").upper()
             kinds.add(kind)
-            valid[key] = (str(meeting_id_value), int(start_ms), int(end_ms), str(text).strip(), kind)
+            valid[key] = (str(meeting_id_value), int(start_ms), int(end_ms), str(text).strip(), kind, str(transcript_id), int(transcript_version))
             lines.append(f"[SEG-{key} {int(start_ms)//1000}s {speaker}] {str(text).strip()}")
         context = "\n".join(lines)
         if len(context) > max_chars:
@@ -266,7 +281,22 @@ class AssistantRepository:
             used += len(value)
         return result
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None) -> None:
+    def snapshot_evidence(self, query_id: str, valid: dict[str, tuple[str, int, int, str, str, str, int]]) -> None:
+        """Persist the exact prompt evidence before Qwen sees it."""
+        if not valid:
+            return
+        with self._db.connection() as connection:
+            with connection.transaction():
+                for rank, (segment_id, value) in enumerate(valid.items(), start=1):
+                    meeting_id, start_ms, end_ms, text, _, transcript_id, transcript_version = value
+                    connection.execute(
+                        """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                           VALUES(%s,%s,%s,%s,%s,'RETRIEVED',%s,%s,%s,%s)
+                           ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
+                        (query_id, segment_id, rank, transcript_id, transcript_version, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                    )
+
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None) -> None:
         claims = result.get("claims") if isinstance(result.get("claims"), list) else []
         claim_ids = [str(item).removeprefix("SEG-") for claim in claims if isinstance(claim, dict) for item in (claim.get("evidenceIds") or [])]
         evidence_ids = claim_ids or [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
@@ -313,12 +343,13 @@ class AssistantRepository:
                 (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "claimsValidated": bool(claims), "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
             ).fetchone()
             if evidence_ids:
-                connection.execute("DELETE FROM assistant_query_evidence WHERE query_id=%s", (query_id,))
                 for rank, segment_id in enumerate(evidence_ids, start=1):
-                    meeting_value, start_ms, end_ms, _, _ = valid[segment_id]
+                    meeting_value, start_ms, end_ms, text, _, transcript_id, transcript_version = valid[segment_id]
                     connection.execute(
-                        "INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version) SELECT %s,%s,%s,t.id,t.version FROM transcripts t WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) LIMIT 1 ON CONFLICT DO NOTHING",
-                        (query_id, segment_id, rank, meeting_value),
+                        """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                           VALUES(%s,%s,%s,%s,%s,'CITED',%s,%s,%s,%s)
+                           ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
+                        (query_id, segment_id, rank, transcript_id, transcript_version, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
                     )
             if row and row[0]:
                 connection.execute(
@@ -376,6 +407,10 @@ class AssistantWorker:
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error)
                     return
+                # Persist the prompt snapshot before any model invocation.
+                # A failed Qwen request remains diagnosable and cannot alter
+                # the evidence it actually received.
+                await asyncio.to_thread(self.repository.snapshot_evidence, query_id, valid)
                 system_prompt = (
                     "Отвечай по-русски. Используй только приведённые сегменты стенограмм. "
                     "Не выдумывай факты. Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds."

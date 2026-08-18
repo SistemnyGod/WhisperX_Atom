@@ -42,6 +42,10 @@ def test_assistant_retrieval_uses_russian_fts_and_fails_closed_without_evidence(
     assert "LOW_TRANSCRIPT_QUALITY" in worker
     assert "self.repository.persist, query_id, {}, valid" in worker
     assert "claims_are_semantically_grounded" in worker
+    assert "snapshot_evidence" in worker
+    assert "self.repository.snapshot_evidence, query_id, valid" in worker
+    snapshot = read("apps/server/WhisperX.Atom.Api/Migrations/031_assistant_evidence_snapshot.sql")
+    assert "snapshot_kind" in snapshot and "RETRIEVED" in snapshot and "CITED" in snapshot
 
 
 def test_voice_questions_are_blocked_during_capture():

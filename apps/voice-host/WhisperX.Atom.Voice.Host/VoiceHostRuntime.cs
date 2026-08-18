@@ -49,22 +49,17 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return phrases.Distinct(StringComparer.Ordinal).ToArray();
     }
 
-    private static readonly string[] CommandGrammar =
-    [
-        "начни запись", "запись", "пауза", "продолжи", "продолжи запись", "поставь на паузу",
-        "приостанови запись", "поставь метку", "добавь метку",
-        "отметь решение", "зафиксируй решение", "отметь поручение", "зафиксируй поручение",
-        "статус", "заверши запись", "останови запись", "подтверждаю", "отмена", "да", "нет", "[unk]"
-    ];
+    // Recorder actions stay deterministic in VoiceIntentParser.  The audio
+    // recognizer used after a wake word intentionally has no grammar: a
+    // meeting question cannot be represented by the short command grammar.
     internal static IReadOnlyList<string> WakePhrases => WakeGrammar;
-    internal static IReadOnlyList<string> CommandPhrases => CommandGrammar;
     private readonly VoiceStateMachine _state = new();
     private readonly VoiceIntentParser _parser = new();
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
     private readonly SpeechResponder _speech = new();
     private readonly VoskRecognizer? _wakeRecognizer;
-    private readonly VoskRecognizer? _commandRecognizer;
+    private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly ILogger<VoiceHostRuntime>? _logger;
     private readonly Channel<VoiceAudioBlock> _audioQueue = Channel.CreateBounded<VoiceAudioBlock>(new BoundedChannelOptions(20)
     {
@@ -154,7 +149,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             if (_modelIntegrityReady)
             {
                 _wakeRecognizer = new VoskRecognizer(modelPath, grammar: WakeGrammar);
-                _commandRecognizer = _wakeRecognizer.CreateSession(CommandGrammar);
+                _utteranceRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _nativeRuntimeReady = true;
                 _modelReady = true;
             }
@@ -367,7 +362,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var normalized = pushToTalk && !_parser.HasWakeWord(text) ? "Мифодий " + text : text;
         if (!_parser.HasWakeWord(normalized)) return new VoiceResponse("Нужна кодовая фраза «Мифодий»", true, false);
         var command = _parser.Parse(normalized, confidence);
-        if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown || pushToTalk && command.Intent == VoiceIntent.HistoryQuestion)
+        if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown)
             return await RespondAsync("Команда не распознана", cancellationToken, false);
         if (_state.Snapshot.State == VoiceHostState.Confirming && command.Intent is VoiceIntent.Confirm or VoiceIntent.Cancel)
             return await ExecuteAsync(command, cancellationToken);
@@ -400,6 +395,18 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             case "SET_SENSITIVITY": SetSensitivity(ReadString(payload, "sensitivity")); return new VoiceHostResponse(true, Snapshot);
             case "QUIET_MODE": QuietMode = ReadBool(payload, "enabled", false); return new VoiceHostResponse(true, Snapshot);
             case "TEST_TTS": return new VoiceHostResponse(_speech.Test(), new { ok = true });
+            case "LIST_RUSSIAN_VOICES": return new VoiceHostResponse(true, new { voices = _speech.GetRussianVoiceNames(), selectedVoice = _speech.VoiceName });
+            case "SPEAK_ASSISTANT_RESULT":
+            {
+                var answer = ReadString(payload, "voiceAnswer") ?? string.Empty;
+                var status = ReadString(payload, "status");
+                var commandId = ReadString(payload, "commandId");
+                var traceId = ReadString(payload, "traceId");
+                if (string.IsNullOrWhiteSpace(answer) || status is not ("READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "LOW_TRANSCRIPT_QUALITY" or "GROUNDING_REJECTED"))
+                    return new VoiceHostResponse(false, Error: "VOICE_COMMAND_REJECTED");
+                var spoken = await RespondAsync(answer, cancellationToken, status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING", commandId: commandId, traceId: traceId).ConfigureAwait(false);
+                return new VoiceHostResponse(spoken.Success, spoken);
+            }
             case "SHUTDOWN": _shutdownRequested.TrySetResult(); SetEnabled(false); return new VoiceHostResponse(true, Snapshot);
             case "TEST_SPEECH":
             {
@@ -594,7 +601,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         if (_commandSession)
         {
             VoiceRecognitionResult result;
-            lock (_recognitionGate) result = _commandRecognizer!.Accept(pcm);
+            lock (_recognitionGate) result = _utteranceRecognizer!.Accept(pcm);
             if (speech)
             {
                 _speechSeen = true;
@@ -606,15 +613,23 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 if (result.Confidence > 0) { _pendingConfidenceSum += result.Confidence; _pendingConfidenceSegments++; }
             }
 
-            var silence = _speechSeen && now - _lastSpeechAt >= TimeSpan.FromMilliseconds(400);
-            var timeout = now - _commandStartedAt >= TimeSpan.FromSeconds(4);
+            var silence = _speechSeen && now - _lastSpeechAt >= TimeSpan.FromMilliseconds(700);
+            var timeout = now - _commandStartedAt >= TimeSpan.FromSeconds(20);
             if (silence || timeout)
                 await FinishCommandSessionAsync(cancellationToken);
             return;
         }
 
         VoiceRecognitionResult wakeResult;
-        lock (_recognitionGate) wakeResult = _wakeRecognizer!.Accept(pcm);
+        lock (_recognitionGate)
+        {
+            // This recognizer never leaves the process and is reset at each
+            // utterance boundary.  It supplies the full one-shot phrase
+            // while the constrained recognizer decides whether a wake word
+            // was actually present.
+            _utteranceRecognizer!.Accept(pcm);
+            wakeResult = _wakeRecognizer!.Accept(pcm);
+        }
         var partial = wakeResult.Partial;
         if (!string.IsNullOrWhiteSpace(partial) && _parser.HasWakeWord(partial) && _state.Snapshot.State == VoiceHostState.Listening)
         {
@@ -629,16 +644,23 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
         if (wakeResult.IsEndpoint && !string.IsNullOrWhiteSpace(wakeResult.Text))
         {
-            var text = wakeResult.Text!;
-            lock (_recognitionGate) _wakeRecognizer.ResetSession();
+            var wakeText = wakeResult.Text!;
+            VoiceRecognitionResult utterance;
+            lock (_recognitionGate)
+            {
+                utterance = _utteranceRecognizer!.FinalizeSessionResult();
+                _wakeRecognizer.ResetSession();
+            }
+            var text = _parser.HasWakeWord(utterance.Text ?? string.Empty) ? utterance.Text! : wakeText;
             if (!_parser.HasWakeWord(text) || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase))
             {
                 ResetRecognitionSessions();
                 _state.ReturnToListening("wake-unknown");
                 return;
             }
-            var command = _parser.Parse(text, wakeResult.Confidence);
-            if (wakeResult.Confidence < MinimumConfidence())
+            var confidence = utterance.Confidence > 0 ? utterance.Confidence : wakeResult.Confidence;
+            var command = _parser.Parse(text, confidence);
+            if (confidence < MinimumConfidence())
             {
                 ResetRecognitionSessions();
                 _state.ReturnToListening("wake-low-confidence");
@@ -670,7 +692,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private void BeginCommandSession()
     {
-        lock (_recognitionGate) _commandRecognizer!.ResetSession();
+        lock (_recognitionGate) _utteranceRecognizer!.ResetSession();
         _commandSession = true;
         _pendingRecognizedText = null;
         _pendingConfidenceSum = 0;
@@ -684,18 +706,19 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private async Task FinishCommandSessionAsync(CancellationToken cancellationToken)
     {
         VoiceRecognitionResult tail;
-        lock (_recognitionGate) tail = _commandRecognizer!.FinalizeSessionResult();
+        lock (_recognitionGate) tail = _utteranceRecognizer!.FinalizeSessionResult();
         var text = AppendText(_pendingRecognizedText, tail.Text);
         if (!string.IsNullOrWhiteSpace(tail.Text) && tail.Confidence > 0) { _pendingConfidenceSum += tail.Confidence; _pendingConfidenceSegments++; }
         var confidence = _pendingConfidenceSegments == 0 ? 0 : _pendingConfidenceSum / _pendingConfidenceSegments;
         _commandSession = false;
         _pendingRecognizedText = null;
         _intentLatencyMs = _speechSeen ? Math.Max(0, (DateTimeOffset.UtcNow - _lastSpeechAt).TotalMilliseconds) : null;
-        if (string.IsNullOrWhiteSpace(text))
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 2000)
         {
             ResetRecognitionSessions();
             _state.ReturnToListening("command-empty");
-            await RespondAsync("Команда не распознана", cancellationToken, false);
+            _lastErrorCode = "VOICE_QUESTION_NOT_RECOGNIZED";
+            await RespondAsync("Вопрос не распознан", cancellationToken, false);
             return;
         }
         var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
@@ -704,7 +727,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         {
             ResetRecognitionSessions();
             _state.ReturnToListening("command-unknown");
-            await RespondAsync("Команда не распознана", cancellationToken, false);
+            _lastErrorCode = "VOICE_QUESTION_NOT_RECOGNIZED";
+            await RespondAsync("Вопрос или команда не распознаны", cancellationToken, false);
             return;
         }
         EnsureRecognitionState(normalized);
@@ -745,7 +769,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
 
         VoiceRecognitionResult recognition;
-        lock (_recognitionGate) recognition = _commandRecognizer?.RecognizeBatchResult(audio) ?? new VoiceRecognitionResult(null, null, true, 0);
+        lock (_recognitionGate) recognition = _utteranceRecognizer?.RecognizeBatchResult(audio) ?? new VoiceRecognitionResult(null, null, true, 0);
         var text = recognition.Text;
         if (string.IsNullOrWhiteSpace(text) || recognition.Confidence < MinimumConfidence())
         {
@@ -995,35 +1019,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var result = await _desktopBroker.AskAssistantAsync(normalizedQuestion, requestedMode, false, cancellationToken, traceId, commandId);
         if (result.Ok && !string.IsNullOrWhiteSpace(result.QueryId))
         {
-            _ = CompleteAssistantQuestionAsync(Guid.Parse(result.QueryId), commandId, traceId);
             return await RespondAsync(result.SpokenText ?? "Вопрос принят, отвечу после обработки.", cancellationToken, true, commandId: commandId, traceId: traceId);
         }
         return new VoiceResponse(VoiceErrorText(result.ErrorCode ?? "VOICE_ASSISTANT_UNAVAILABLE"), true, false, CommandId: commandId, TraceId: traceId);
-    }
-
-    private async Task CompleteAssistantQuestionAsync(Guid queryId, string? commandId, string? traceId)
-    {
-        try
-        {
-            if (_desktopBroker is null) return;
-            for (var attempt = 0; attempt < 90 && !_shutdown.IsCancellationRequested; attempt++)
-            {
-                var result = await _desktopBroker.GetAssistantResultAsync(queryId, _shutdown.Token, traceId, commandId);
-                if (result.Ok && !string.IsNullOrWhiteSpace(result.SpokenText) && _state.Snapshot.State == VoiceHostState.Listening)
-                {
-                    await RespondAsync(result.SpokenText, CancellationToken.None, true, commandId: commandId, traceId: traceId);
-                    return;
-                }
-                if (result.ErrorCode is not null && result.AssistantStatus is not ("QUEUED" or "RUNNING"))
-                {
-                    if (_state.Snapshot.State == VoiceHostState.Listening)
-                        await RespondAsync(VoiceErrorText(result.ErrorCode), CancellationToken.None, false, commandId: commandId, traceId: traceId);
-                    return;
-                }
-                await Task.Delay(TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex) { _logger?.LogWarning(ex, "Voice assistant query completion failed: {QueryId}", queryId); }
     }
 
     private static (string RequestedMode, string Question) ResolveAssistantQuestion(string question)
@@ -1081,17 +1079,24 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private async Task CompleteResponseAfterPlaybackAsync(string responseId, Task playbackCompleted, string? localSessionId, string? commandId, string? traceId)
     {
+        var cancelled = false;
         try
         {
             await playbackCompleted.WaitAsync(_shutdown.Token).ConfigureAwait(false);
-            var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { eventId = Guid.NewGuid().ToString("N"), responseId, commandId, traceId, localSessionId, playbackStarted = true }, CancellationToken.None, localSessionId);
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            cancelled = true;
+        }
+        finally
+        {
+            var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { eventId = Guid.NewGuid().ToString("N"), responseId, commandId, traceId, localSessionId, playbackStarted = !cancelled, cancelled }, CancellationToken.None, localSessionId);
             if (!finishedSaved)
                 _logger?.LogWarning("SYSTEM_RESPONSE_FINISHED event could not be persisted. ResponseId={ResponseId}", responseId);
             _state.FinishResponse();
             DrainAudioQueue();
-            if (_state.Snapshot.State == VoiceHostState.Cooldown) await CompleteCooldownAsync();
+            if (!cancelled && _state.Snapshot.State == VoiceHostState.Cooldown) await CompleteCooldownAsync();
         }
-        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
     }
     private async Task CompleteCooldownAsync()
     {
@@ -1126,7 +1131,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         lock (_recognitionGate)
         {
             _wakeRecognizer?.ResetSession();
-            _commandRecognizer?.ResetSession();
+            _utteranceRecognizer?.ResetSession();
         }
         _commandSession = false;
         _pendingRecognizedText = null;
@@ -1210,7 +1215,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audioQueue.Writer.TryComplete();
         _shutdown.Cancel();
         try { if (_audioWorker is not null) await _audioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
-        _commandRecognizer?.Dispose();
+        _utteranceRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
         _speech.Dispose();
         _executionGate.Dispose();

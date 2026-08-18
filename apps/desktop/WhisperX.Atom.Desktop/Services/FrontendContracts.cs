@@ -150,6 +150,47 @@ public sealed class ActiveMeetingContext
     public void Clear() { lock (_gate) { _meetingId = null; _title = null; } }
 }
 
+/// <summary>
+/// Keeps only opaque server conversation identifiers for voice follow-ups.
+/// The key deliberately includes the authenticated user and the resolved
+/// scope, so a question from another meeting or user cannot inherit context.
+/// </summary>
+public sealed class VoiceAssistantConversationStore
+{
+    private readonly object _gate = new();
+    private readonly Dictionary<(Guid UserId, string Mode, Guid? MeetingId), (Guid ConversationId, DateTimeOffset ExpiresAt)> _items = new();
+
+    public Guid? Get(Guid userId, string mode, Guid? meetingId)
+    {
+        lock (_gate)
+        {
+            Prune();
+            return _items.TryGetValue((userId, NormalizeMode(mode), meetingId), out var item) ? item.ConversationId : null;
+        }
+    }
+
+    public void Set(Guid userId, string mode, Guid? meetingId, Guid conversationId)
+    {
+        lock (_gate)
+        {
+            Prune();
+            _items[(userId, NormalizeMode(mode), meetingId)] = (conversationId, DateTimeOffset.UtcNow.AddMinutes(30));
+        }
+    }
+
+    public void Clear() { lock (_gate) _items.Clear(); }
+
+    private void Prune()
+    {
+        foreach (var key in _items.Where(item => item.Value.ExpiresAt <= DateTimeOffset.UtcNow).Select(item => item.Key).ToArray())
+            _items.Remove(key);
+    }
+
+    private static string NormalizeMode(string? mode) => string.Equals(mode, "MEETING_HISTORY", StringComparison.OrdinalIgnoreCase)
+        ? "MEETING_MEMORY"
+        : (mode ?? "AUTO").Trim().ToUpperInvariant();
+}
+
 public sealed class FrontendNavigationState
 {
     public MeetingNavigationTarget? PendingMeetingTarget { get; set; }
@@ -244,6 +285,7 @@ public sealed class FrontendServices
     public ISettingsStore Settings { get; }
     public FrontendNavigationState Navigation { get; } = new();
     public ActiveMeetingContext ActiveMeeting { get; } = new();
+    public VoiceAssistantConversationStore VoiceAssistantConversations { get; } = new();
     public AgentBootstrapCoordinator AgentBootstrap { get; }
     public ProcessingJobTracker JobTracker { get; }
     public RecorderServiceController RecorderService { get; }
@@ -264,4 +306,11 @@ public sealed class FrontendServices
     public event Action? LoggedOut;
 
     public void RaiseLoggedOut() => LoggedOut?.Invoke();
+
+    public void ClearUserAssistantState()
+    {
+        ActiveMeeting.Clear();
+        VoiceAssistantConversations.Clear();
+        VoiceHost.ClearAssistantState();
+    }
 }

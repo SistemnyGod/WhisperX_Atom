@@ -145,7 +145,7 @@
                                         <ComboBoxItem Tag="high" Content="Высокая" />
                                     </ComboBox>
                                     <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" />
-                                    <TextBox Text="{Binding VoiceName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Microsoft Irina" Style="{StaticResource InputStyle}" />
+                                    <ComboBox ItemsSource="{Binding VoiceOptions}" SelectedItem="{Binding VoiceName, Mode=TwoWay}" PlaceholderText="Выберите русский голос" AutomationProperties.Name="Голос ответов Мифодия" />
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
                                         <StackPanel Spacing="2">
                                             <TextBlock Text="Скорость" Style="{StaticResource CaptionStyle}" />

@@ -108,6 +108,23 @@ public sealed class SpeechResponder : IDisposable
             catch (ArgumentException) { _russianVoiceAvailable = false; return false; }
         }
     }
+    public IReadOnlyList<string> GetRussianVoiceNames()
+    {
+        lock (_gate)
+        {
+            try
+            {
+                return _synthesizer.GetInstalledVoices()
+                    .Where(voice => voice.Enabled && voice.VoiceInfo.Culture.Name.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
+                    .Select(voice => voice.VoiceInfo.Name)
+                    .OrderBy(name => string.Equals(name, "Microsoft Irina", StringComparison.OrdinalIgnoreCase) ? 0
+                        : string.Equals(name, "Microsoft Irina Desktop", StringComparison.OrdinalIgnoreCase) ? 1 : 2)
+                    .ThenBy(name => name, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+            catch (InvalidOperationException) { return []; }
+        }
+    }
     public bool IsSpeaking => Volatile.Read(ref _speaking) != 0;
     public bool IsBusy => Volatile.Read(ref _busy) != 0;
     public event Action<Exception>? Error;
@@ -144,7 +161,7 @@ public sealed class SpeechResponder : IDisposable
                 {
                     if (QuietMode) continue;
                     Volatile.Write(ref _speaking, 1);
-                    await Task.Run(() => { lock (_gate) _synthesizer.Speak(request.Text); }, _shutdown.Token);
+                    await SpeakAsync(request.Text, _shutdown.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
                 catch (Exception ex) { Error?.Invoke(ex); }
@@ -162,6 +179,40 @@ public sealed class SpeechResponder : IDisposable
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
     }
 
+    private Task SpeakAsync(string text, CancellationToken cancellationToken)
+    {
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<SpeakCompletedEventArgs>? handler = null;
+        handler = (_, _) => completed.TrySetResult();
+        lock (_gate)
+        {
+            _synthesizer.SpeakCompleted += handler;
+            try { _synthesizer.SpeakAsync(text); }
+            catch
+            {
+                _synthesizer.SpeakCompleted -= handler;
+                throw;
+            }
+        }
+        return AwaitPlaybackAsync(completed.Task, handler, cancellationToken);
+    }
+
+    private async Task AwaitPlaybackAsync(Task playback, EventHandler<SpeakCompletedEventArgs> handler, CancellationToken cancellationToken)
+    {
+        try { await playback.WaitAsync(cancellationToken).ConfigureAwait(false); }
+        finally
+        {
+            lock (_gate)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    try { _synthesizer.SpeakAsyncCancelAll(); } catch (InvalidOperationException) { }
+                }
+                _synthesizer.SpeakCompleted -= handler;
+            }
+        }
+    }
+
     private static int ReadIntEnvironment(string name, int fallback, int minimum, int maximum)
         => int.TryParse(Environment.GetEnvironmentVariable(name), out var value)
             ? Math.Clamp(value, minimum, maximum)
@@ -175,7 +226,11 @@ public sealed class SpeechResponder : IDisposable
         _disposed = true;
         _queue.Writer.TryComplete();
         _shutdown.Cancel();
-        try { _worker.Wait(TimeSpan.FromSeconds(1)); } catch { }
+        lock (_gate)
+        {
+            try { _synthesizer.SpeakAsyncCancelAll(); } catch (InvalidOperationException) { }
+        }
+        try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { }
         lock (_gate) _synthesizer.Dispose();
         _shutdown.Dispose();
     }

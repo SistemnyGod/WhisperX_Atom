@@ -45,7 +45,7 @@ internal static class VoiceHostSelfTest
         Assert(VoiceHostRuntime.WakePhrases.Any(value => value == "мефодий" || value.StartsWith("мефодий ", StringComparison.Ordinal)), "wake grammar requires phonetic mifodiy");
         Assert(VoiceHostRuntime.WakePhrases.Any(value => value.StartsWith("атом", StringComparison.Ordinal)), "wake grammar keeps atom alias");
         Assert(VoiceHostRuntime.WakePhrases.Contains("[unk]"), "wake grammar unknown token");
-        Assert(VoiceHostRuntime.CommandPhrases.Contains("[unk]"), "command grammar unknown token");
+        Assert(!VoiceHostRuntime.WakePhrases.Contains("что решили по ремонту"), "wake grammar must not contain arbitrary questions");
         var missingConfidence = VoskRecognizer.ParseResult("{\"text\":\"атом запись\"}", true);
         Assert(missingConfidence.Confidence == 0, "missing Vosk confidence is rejected");
         using var firstMutex = new Mutex(true, "Local\\WhisperXAtomVoiceHostSelfTest-" + Environment.ProcessId, out var ownsFirst);

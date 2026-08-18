@@ -47,6 +47,13 @@ public sealed class VoskRecognizer : IDisposable
     }
 
     public VoskRecognizer CreateSession(IEnumerable<string> grammar) => new(_model, _sampleRate, grammar, false);
+
+    /// <summary>
+    /// Creates a recognizer with the full model vocabulary.  The wake-word
+    /// recognizer remains grammar constrained; this session is used only for
+    /// the short, in-memory phrase that follows a confirmed wake word.
+    /// </summary>
+    public VoskRecognizer CreateUnrestrictedSession() => new(_model, _sampleRate, null, false);
     public VoiceRecognitionResult Accept(ReadOnlySpan<byte> pcm16kMono) => pcm16kMono.IsEmpty ? new(null, null, false, 0) : Accept(pcm16kMono.ToArray());
     public VoiceRecognitionResult Accept(byte[] pcm16kMono)
     {

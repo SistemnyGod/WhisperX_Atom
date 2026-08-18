@@ -15,6 +15,7 @@
 | [Эксплуатация host-runtime](operations-host-runtime.md) | Запуск, остановка, doctor, watchdog и восстановление |
 | [API и IPC](api-and-ipc.md) | Основные REST, SSE, TUS и Named Pipe контракты |
 | [Тестирование](testing.md) | Сборка, targeted tests, doctor и E2E |
+| [«Мифодий»: текущее состояние](mifodiy-current-state.md) | Реализованные функции, подтверждённые gates и оставшиеся дефекты Voice/Assistant |
 
 ## Справочные и исторические документы
 

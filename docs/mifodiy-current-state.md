@@ -1,0 +1,226 @@
+# «Мифодий»: фактическое состояние и план завершения
+
+Дата ревью: 18 августа 2026 года.
+
+Этот документ отделяет реализованный код от установленного runtime и от
+запланированных функций. Он является текущим источником истины для голосового
+помощника и Assistant-контура.
+
+## Обозначения готовности
+
+| Статус | Значение |
+| --- | --- |
+| `IMPLEMENTED` | Функция присутствует в текущем рабочем дереве |
+| `AUTOMATED_VERIFIED` | Сборка, self-test или контрактные тесты проходят |
+| `RUNTIME_REQUIRED` | Код есть, но нужна установленная проверка с микрофоном и сервером |
+| `NOT_IMPLEMENTED` | Для сценария отсутствует обязательная часть |
+
+## Целевая граница компонентов
+
+```text
+выбранный микрофон
+  → Voice Host / Vosk
+  → Desktop Voice Broker
+      ├─ RecordingCommandService → Recorder Host
+      └─ пользовательская API-сессия → Assistant API
+          → Russian FTS → Qwen3-8B → grounding
+          → Desktop → Voice Host → Microsoft Irina
+```
+
+Voice Host не получает пользовательский API token, не управляет Recorder
+напрямую и не имеет доступа к spool. Все серверные вопросы идут через Desktop
+Broker и текущую пользовательскую сессию.
+
+## Что реализовано
+
+### Lifecycle и приватность
+
+- `IMPLEMENTED`: скрытый Voice Host запускается только вместе с Desktop.
+- `IMPLEMENTED`: путь, PID, build identity и SID процесса проверяются перед
+  использованием; глобальный mutex запрещает второй экземпляр.
+- `IMPLEMENTED`: Desktop supervisor ограниченно перезапускает аварийно
+  завершившийся Host и отправляет `SHUTDOWN` при закрытии приложения.
+- `IMPLEMENTED`: используется выбранный Recorder endpoint; для фиксированного
+  устройства запрещён молчаливый переход на другой микрофон.
+- `IMPLEMENTED`: аудио до wake word существует только в памяти, проходит через
+  bounded queue и не попадает в Recorder spool или сеть.
+- `IMPLEMENTED`: live-телеметрия содержит RMS, peak, clipping, signal state,
+  sequence и фактически открытый endpoint, но не содержит аудио.
+
+### Wake word и команды записи
+
+- `IMPLEMENTED`: основное имя — «Мифодий»; поддерживаются «Мефодий» и временный
+  alias «Атом».
+- `IMPLEMENTED`: bundled Vosk small RU использует фонетический режим
+  `Мефодий`; exact-режим разрешён только для модели с соответствующим токеном.
+- `IMPLEMENTED`: START, STOP, PAUSE, RESUME, STATUS, marker, decision и action
+  item распознаются до Assistant routing.
+- `IMPLEMENTED`: низкоуверенный STOP требует отдельного подтверждения в течение
+  десяти секунд; повтор одной команды в течение двух секунд подавляется.
+- `IMPLEMENTED`: кнопки Desktop и голос используют один
+  `RecordingCommandService`. TTS START выполняется после Recorder ACK, а STOP
+  сообщает «сохранена» только для `LOCAL_READY`.
+- `IMPLEMENTED`: `commandId`, `traceId`, `responseId` и `localSessionId`
+  связывают команду, Recorder и системный ответ.
+
+### TTS и технические интервалы
+
+- `IMPLEMENTED`: ответы создаются живым Windows TTS. Приоритет голосов:
+  `Microsoft Irina` → `Microsoft Irina Desktop` → любой установленный `ru-RU`.
+- `IMPLEMENTED`: английский голос не используется как fallback.
+- `IMPLEMENTED`: имя голоса, скорость и громкость передаются командой
+  `CONFIGURE`; значения по умолчанию — Irina, rate `0`, volume `90`.
+- `IMPLEMENTED`: legacy WAV-ответы не читаются runtime и исключены из новой
+  публикации Voice Host.
+- `IMPLEMENTED`: `SYSTEM_RESPONSE_STARTED/FINISHED` создают sample-based
+  технические интервалы. Сервер скрывает пересекающиеся технические сегменты
+  из пользовательской стенограммы.
+
+### Текстовый Assistant
+
+- `IMPLEMENTED`: Desktop имеет страницу «ИИ-помощник», постоянные диалоги,
+  сообщения, источники и переход к сегменту по таймкоду.
+- `IMPLEMENTED`: публичные режимы — `CURRENT_MEETING`, `MEETING_HISTORY` и
+  `GENERAL_CHAT`; внутренний `MEETING_MEMORY` сохраняется как alias истории.
+- `IMPLEMENTED`: `CURRENT_MEETING` получает активный `meetingId` из открытой
+  карточки совещания. Ordinary user ищет только по собственным доступным
+  встречам; расширенный scope разрешён серверной ролью.
+- `IMPLEMENTED`: retrieval использует PostgreSQL Russian FTS, до 12 основных
+  результатов, соседние сегменты, максимум 36 сегментов, пять встреч и 36 000
+  символов.
+- `IMPLEMENTED`: скрытые технические сегменты и стенограммы с критическими
+  quality warnings не передаются Qwen.
+- `IMPLEMENTED`: Qwen3-8B возвращает экранный `answer`, короткий
+  `voice_answer`, evidence IDs и claims. Voice answer ограничивается тремя
+  предложениями и 500 символами.
+- `IMPLEMENTED`: для meeting-режимов проверяются evidence IDs, пересечение
+  содержательных токенов и числовые значения. При первой ошибке разрешена одна
+  повторная генерация; затем возвращается `GROUNDING_REJECTED`.
+- `IMPLEMENTED`: `NO_EVIDENCE` и `LOW_TRANSCRIPT_QUALITY` завершаются без
+  публикации неподтверждённого ответа как готового факта.
+- `IMPLEMENTED`: Assistant имеет GPU priority между ASR и Summary. Resident
+  Qwen выключен; модель освобождается после задания.
+
+### Автоматическое саммари
+
+- `IMPLEMENTED`: `AUTO_SUMMARY_ENABLED` и `ASSISTANT_ENABLED` независимы.
+- `IMPLEMENTED`: один Summary Worker обрабатывает `llm.assistant` и Summary;
+  Qwen запускается через общий GPU lease.
+- `IMPLEMENTED`: автоматическое Summary создаётся только после пригодной V2 и
+  блокируется для `NO_SPEECH_DETECTED`, `ASR_LANGUAGE_MISMATCH`,
+  `AUDIO_SIGNAL_UNUSABLE` и стенограмм, требующих проверки.
+
+## Что подтверждено автоматикой
+
+- `AUTOMATED_VERIFIED`: Voice Core и Voice Host self-test проходят.
+- `AUTOMATED_VERIFIED`: Release-сборки Voice Host, Desktop и API проходят без
+  ошибок и предупреждений.
+- `AUTOMATED_VERIFIED`: целевые voice/assistant contract tests проходят.
+- `AUTOMATED_VERIFIED`: Docker-контейнеры API, GPU Worker, Summary Worker,
+  Media Worker, Import Worker, PostgreSQL и NATS запущены и имеют healthy
+  status; API отвечает внутри Docker-сети.
+- `AUTOMATED_VERIFIED`: `.env.lan` включает `ASSISTANT_ENABLED=true` и
+  `AUTO_SUMMARY_ENABLED=true`.
+
+Эти проверки не заменяют реальный voice-to-answer gate.
+
+## Текущее состояние установленного приложения
+
+Рабочая ветка на момент ревью основана на commit
+`d5e4a2639913d74da9f9ae92061eef406e1bc1c2` и содержит дополнительные
+незакоммиченные изменения.
+
+Установленные Desktop и Voice Host имеют identity
+`1.0.1+349570081037edae4ebfc3984ea1477d939c65d3-dirty`. Следовательно, текущие
+изменения Assistant-вопросов и live Irina TTS ещё не подтверждены в
+`Program Files`. До новой чистой сборки runtime нельзя помечать как
+`VOICE_ASSISTANT_READY`.
+
+## Найденные дефекты и незавершённые части
+
+### P0 — блокирует голосовые вопросы
+
+1. **Свободный вопрос распознаётся отдельной unrestricted Vosk-сессией.**
+
+   Parser уже распознаёт «кто», «что», «покажи», «расскажи» и другие формы,
+   Wake recognizer остаётся фиксированным и подтверждает только кодовое слово.
+   После него full-vocabulary recognizer хранит короткую фразу только в
+   памяти; затем parser детерминированно выбирает Recorder-команду или вопрос.
+
+   Поддержаны one-shot и двухфазный режимы. Recorder-команды после
+   распознавания по-прежнему проходят строгий deterministic allowlist.
+
+2. **Текущий код не установлен.**
+
+   Необходимо собрать Desktop, Recorder Host и Voice Host из одного чистого
+   commit, установить пакет и подтвердить совпадение build identity.
+
+### P1 — надёжность и защита ответа
+
+1. **Голосовые follow-up вопросы имеют scoped-память.** Desktop хранит только
+   conversation ID с TTL 30 минут по ключу user/mode/meeting и очищает его при
+   logout.
+
+2. **Claims обязательны для meeting-режимов.** Ответ без непустых claims с
+   допустимыми evidence IDs, именами, числами и фактами из источников не может
+   стать READY.
+
+3. **Prompt evidence фиксируется до Qwen.** Миграция `031` сохраняет
+   `RETRIEVED` evidence до запроса модели и `CITED` evidence после ответа.
+
+4. **Финальный голосовой ответ ожидает Desktop.** Voice Host больше не делает
+   180-секундный polling. Desktop дедуплицирует query ID и доставляет terminal
+   result через `SPEAK_ASSISTANT_RESULT`, пока он актуален.
+
+5. **Logout очищает ActiveMeeting, conversation scope и pending queries** до
+   удаления пользовательской API-сессии.
+
+6. **TTS shutdown отменяем.** Windows `SpeakAsync` прерывается через
+   `SpeakAsyncCancelAll`, а системное событие завершения получает
+   `cancelled=true`.
+
+### P2 — качество и сопровождение
+
+1. Russian FTS не находит смысловые переформулировки без общих слов. После
+   базового gate нужен hybrid retrieval: FTS + embeddings/синонимы с теми же
+   RBAC и meeting boundaries.
+2. Legacy `VoiceAssistantClient` с server-token контрактом удалён: Voice Host
+   получает Assistant-результаты только через Desktop Broker и пользовательскую
+   API-сессию.
+3. Большая часть текущих contract tests проверяет наличие строк в исходниках.
+   Нужны поведенческие тесты unrestricted question recognizer, voice memory,
+   delayed Assistant result, logout isolation и строгого claims grounding.
+4. Поле выбора голоса в Desktop является свободным TextBox. Следует получать
+   список реально установленных русских голосов от Voice Host и показывать
+   ComboBox с тестовым прослушиванием.
+
+## Порядок завершения
+
+1. Реализовать wake-only → unrestricted question capture и тесты one-shot и
+   двухфазного вопроса.
+2. Ввести scoped voice conversation memory и очистку при logout/смене встречи.
+3. Сделать claims обязательными и сохранять retrieval evidence до Qwen.
+4. Передать ожидание результата Desktop и сделать durable TTS completion.
+5. Исправить отмену TTS и выбор только из установленных русских голосов.
+6. Собрать чистый installer и установить его поверх текущей версии.
+7. Выполнить установленный gate:
+
+```text
+Мифодий → вопрос по открытой встрече
+→ пользовательская API-сессия
+→ CURRENT_MEETING retrieval
+→ Qwen → strict grounding
+→ полный ответ и таймкоды в Desktop
+→ короткий ответ Microsoft Irina
+```
+
+## Критерий `VOICE_ASSISTANT_READY`
+
+- не менее 45 из 50 контрольных вопросов распознаны и маршрутизированы;
+- `CURRENT_MEETING` ни разу не использует другую встречу;
+- `NO_EVIDENCE` не запускает неподтверждённый голосовой ответ;
+- follow-up вопрос использует только текущий scoped conversation;
+- logout исключает перенос meeting context к другому пользователю;
+- Assistant result не теряется при ожидании более трёх минут;
+- spoken answer соответствует сохранённому `voice_answer` и имеет evidence;
+- установленный Desktop и Voice Host имеют одну clean build identity.

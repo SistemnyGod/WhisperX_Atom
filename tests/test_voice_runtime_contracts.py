@@ -5,6 +5,7 @@ from workers.ml_worker.technical_events import build_technical_intervals, segmen
 
 ROOT = Path(__file__).resolve().parents[1]
 VOICE_RUNTIME = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs").read_text(encoding="utf-8")
+VOICE_RECOGNIZERS = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceRecognizers.cs").read_text(encoding="utf-8")
 VOICE_PARSER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
 SPEECH_RESPONDER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/SpeechResponder.cs").read_text(encoding="utf-8")
 VOICE_CAPTURE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioCapture.cs").read_text(encoding="utf-8")
@@ -111,10 +112,25 @@ def test_voice_questions_use_the_user_scoped_assistant_and_speak_safe_terminal_r
     assert '"MEETING_HISTORY"' in VOICE_RUNTIME
     assert '"CURRENT_MEETING"' in VOICE_RUNTIME
     assert '"GENERAL_CHAT"' in VOICE_RUNTIME
-    assert "CompleteAssistantQuestionAsync" in VOICE_RUNTIME
-    assert "VoiceErrorText(result.ErrorCode)" in VOICE_RUNTIME
+    # Voice Host never performs the old bounded 180-second polling loop.
+    # Desktop owns durable query polling and sends a terminal response back
+    # through the backwards-compatible control command.
+    assert "CompleteAssistantQuestionAsync" not in VOICE_RUNTIME
+    assert '"SPEAK_ASSISTANT_RESULT"' in VOICE_RUNTIME
+    assert "DeliverAssistantResultsAsync" in BROKER
+    assert "VoiceAssistantConversationStore" in BROKER
     assert 'value.StartsWith("покажи ", StringComparison.Ordinal)' in VOICE_PARSER
     assert 'value.StartsWith("расскажи ", StringComparison.Ordinal)' in VOICE_PARSER
+
+
+def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
+    assert "CreateUnrestrictedSession" in VOICE_RECOGNIZERS
+    assert "_utteranceRecognizer" in VOICE_RUNTIME
+    assert "_wakeRecognizer!.Accept(pcm)" in VOICE_RUNTIME
+    assert "_utteranceRecognizer!.Accept(pcm)" in VOICE_RUNTIME
+    # Actions remain parser-controlled, therefore arbitrary text cannot call
+    # Recorder before it is classified as an explicit intent.
+    assert "var command = _parser.Parse(text, confidence);" in VOICE_RUNTIME
 
 
 def test_voice_responder_never_uses_legacy_wav_replies():

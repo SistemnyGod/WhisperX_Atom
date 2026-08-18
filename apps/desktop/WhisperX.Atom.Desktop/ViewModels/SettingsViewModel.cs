@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using System.Collections.ObjectModel;
 using System.Text.Json;
 using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
@@ -48,6 +49,7 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceDiagnosticsDetail = "—";
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
+    public ObservableCollection<string> VoiceOptions { get; } = new();
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -166,7 +168,18 @@ public sealed class SettingsViewModel : ObservableObject
     {
         try
         {
-            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync().ConfigureAwait(true);
+            var client = new WhisperX.Atom.Desktop.VoiceHostClient();
+            var response = await client.GetStatusAsync().ConfigureAwait(true);
+            if (VoiceOptions.Count == 0)
+            {
+                var voices = await client.SendAsync("LIST_RUSSIAN_VOICES").ConfigureAwait(true);
+                if (voices.Ok && voices.Data is JsonElement data && data.TryGetProperty("voices", out var voiceItems) && voiceItems.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var voice in voiceItems.EnumerateArray().Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item)))
+                        VoiceOptions.Add(voice!);
+                }
+                if (VoiceOptions.Count == 0) VoiceOptions.Add("Microsoft Irina");
+            }
             if (response is null)
             {
                 var controllerError = _services.VoiceHost.LastErrorCode;
@@ -580,6 +593,10 @@ public sealed class SettingsViewModel : ObservableObject
 
     public async Task LogoutAsync()
     {
+        // Clear local scopes before the cookie is removed.  Voice Host can
+        // keep listening for Recorder commands, but it must not retain a
+        // meeting, a conversation id or a pending answer from this user.
+        _services.ClearUserAssistantState();
         await _services.Backend.LogoutAsync();
         var current = _services.Settings.Load();
         _services.Settings.Save(current with { ProtectedSessionCookie = null, SessionExpiresAtUtc = null, OwnerUserId = null, AgentBootstrapConfirmed = false });

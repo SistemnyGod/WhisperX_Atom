@@ -27,6 +27,8 @@ public sealed class VoiceHostController : IAsyncDisposable
     public int RestartCount { get; private set; }
     public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
 
+    public void ClearAssistantState() => _broker?.ClearAssistantState();
+
     public async Task<bool> StartAsync(CancellationToken cancellationToken = default)
     {
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -157,7 +159,7 @@ public sealed class VoiceHostController : IAsyncDisposable
             }
         }
 
-        _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting);
+        _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting, _services.VoiceAssistantConversations);
         _broker.Start();
         var settings = _services.Settings.Load();
         // Keep the always-listening host on the same endpoint that Recorder

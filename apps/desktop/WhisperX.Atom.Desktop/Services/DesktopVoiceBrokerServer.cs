@@ -11,22 +11,36 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private readonly RecordingCommandService _commands;
     private readonly IBackendService _backend;
     private readonly ActiveMeetingContext _activeMeeting;
+    private readonly VoiceAssistantConversationStore _voiceConversations;
     private readonly Action<Exception>? _log;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private readonly object _commandCacheGate = new();
     private readonly Dictionary<string, (DateTimeOffset ExpiresAt, BrokerResponse Response)> _commandCache = new(StringComparer.Ordinal);
+    private readonly object _pendingGate = new();
+    private readonly Dictionary<Guid, PendingAssistantResult> _pendingAssistantResults = new();
     private Task? _loop;
+    private Task? _assistantDeliveryLoop;
 
-    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, Action<Exception>? log = null)
+    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, VoiceAssistantConversationStore voiceConversations, Action<Exception>? log = null)
     {
         _commands = commands;
         _backend = backend;
         _activeMeeting = activeMeeting;
+        _voiceConversations = voiceConversations;
         _log = log;
     }
 
-    public void Start() => _loop ??= Task.Run(RunAsync);
+    public void Start()
+    {
+        _loop ??= Task.Run(RunAsync);
+        _assistantDeliveryLoop ??= Task.Run(DeliverAssistantResultsAsync);
+    }
+
+    public void ClearAssistantState()
+    {
+        lock (_pendingGate) _pendingAssistantResults.Clear();
+    }
 
     private async Task RunAsync()
     {
@@ -89,9 +103,22 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 _log?.Invoke(ex);
                 return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: "recording_state_unavailable", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
-            var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, _activeMeeting.MeetingId, null, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
+            var currentUser = await _backend.GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
+            if (currentUser is null)
+                return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_user_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            var activeMeetingId = _activeMeeting.MeetingId;
+            var scopedMode = VoiceScopeFor(requestedMode, activeMeetingId);
+            var conversationId = _voiceConversations.Get(currentUser.Id, scopedMode, scopedMode == "CURRENT_MEETING" ? activeMeetingId : null);
+            var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, activeMeetingId, conversationId, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
             if (accepted is null)
                 return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            if (Guid.TryParse(accepted.ConversationId, out var acceptedConversation))
+                _voiceConversations.Set(currentUser.Id, accepted.ResolvedMode, Guid.TryParse(accepted.MeetingId, out var acceptedMeeting) ? acceptedMeeting : null, acceptedConversation);
+            if (Guid.TryParse(accepted.QueryId, out var queryId))
+            {
+                lock (_pendingGate)
+                    _pendingAssistantResults.TryAdd(queryId, new PendingAssistantResult(queryId, assistantCommandId, assistantTraceId, accepted.ResolvedMode, DateTimeOffset.UtcNow.AddHours(24)));
+            }
             var assistantResponse = new BrokerResponse(true, RecorderState: "ASSISTANT_QUEUED", SpokenText: "Вопрос принят, отвечу после обработки", Detail: accepted.ResolvedMode, TraceId: assistantTraceId, CommandId: assistantCommandId, QueryId: accepted.QueryId, AssistantStatus: accepted.Status, ResolvedMode: accepted.ResolvedMode);
             CacheCommand(assistantCommandId, assistantResponse);
             return assistantResponse;
@@ -223,13 +250,89 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
     }
 
+    private async Task DeliverAssistantResultsAsync()
+    {
+        while (!_shutdown.IsCancellationRequested)
+        {
+            try
+            {
+                PendingAssistantResult[] pending;
+                lock (_pendingGate)
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    foreach (var expired in _pendingAssistantResults.Where(item => item.Value.ExpiresAt <= now).Select(item => item.Key).ToArray())
+                        _pendingAssistantResults.Remove(expired);
+                    pending = _pendingAssistantResults.Values.ToArray();
+                }
+                foreach (var item in pending)
+                    await TryDeliverAssistantResultAsync(item, _shutdown.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
+            catch (Exception ex) { _log?.Invoke(ex); }
+            try { await Task.Delay(TimeSpan.FromSeconds(3), _shutdown.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
+        }
+    }
+
+    private async Task TryDeliverAssistantResultAsync(PendingAssistantResult pending, CancellationToken cancellationToken)
+    {
+        if (!_backend.HasSession) return;
+        var query = await _backend.GetAssistantQueryAsync(pending.QueryId, cancellationToken).ConfigureAwait(false);
+        if (query is null) return;
+        var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
+        if (!terminal) return;
+        var voiceAnswer = !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer)
+            ? query.VoiceAnswer ?? query.Answer
+            : AssistantErrorSpeech(query.ErrorCode);
+        if (string.IsNullOrWhiteSpace(voiceAnswer))
+        {
+            lock (_pendingGate) _pendingAssistantResults.Remove(pending.QueryId);
+            return;
+        }
+        try
+        {
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SPEAK_ASSISTANT_RESULT", new
+            {
+                queryId = pending.QueryId,
+                commandId = pending.CommandId,
+                traceId = pending.TraceId,
+                voiceAnswer,
+                status = query.Status
+            }, cancellationToken).ConfigureAwait(false);
+            if (response.Ok)
+            {
+                lock (_pendingGate) _pendingAssistantResults.Remove(pending.QueryId);
+            }
+        }
+        catch (IOException) { /* Voice Host is temporarily unavailable; retry while the query is fresh. */ }
+        catch (TimeoutException) { }
+    }
+
+    private static string? AssistantErrorSpeech(string? errorCode) => errorCode switch
+    {
+        "NO_EVIDENCE" => "В стенограмме не найден подтверждённый ответ.",
+        "LOW_TRANSCRIPT_QUALITY" => "Сначала проверьте качество стенограммы.",
+        "GROUNDING_REJECTED" => "Не удалось подтвердить ответ по стенограмме.",
+        _ => null
+    };
+
+    private static string VoiceScopeFor(string? requestedMode, Guid? activeMeetingId)
+    {
+        var mode = (requestedMode ?? "AUTO").Trim().ToUpperInvariant();
+        if (mode == "MEETING_HISTORY") return "MEETING_MEMORY";
+        if (mode is "CURRENT_MEETING" or "GENERAL_CHAT" or "MEETING_MEMORY") return mode;
+        return activeMeetingId.HasValue ? "CURRENT_MEETING" : "GENERAL_CHAT";
+    }
+
     public async ValueTask DisposeAsync()
     {
         _shutdown.Cancel();
         try { if (_loop is not null) await _loop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
+        try { if (_assistantDeliveryLoop is not null) await _assistantDeliveryLoop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
         _shutdown.Dispose();
     }
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
         string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null, string? QueryId = null, string? AssistantStatus = null, string? ResolvedMode = null);
+    private sealed record PendingAssistantResult(Guid QueryId, string? CommandId, string? TraceId, string? Mode, DateTimeOffset ExpiresAt);
 }

@@ -6,12 +6,12 @@
 | Desktop | `apps/desktop/WhisperX.Atom.Desktop` | WinUI 3 shell, pages, ViewModels, REST/SSE и Named Pipe client |
 | Recorder Core | `apps/recorder-agent` | Capture, FLAC encoding, SQLite spool, archive, session state |
 | Recorder Service | `apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj` | Windows Service host, IPC pipe, background delivery |
-| Voice Host | `apps/voice-host` | Wake phrase и фиксированные голосовые команды; не хранит записи |
+| Voice Host | `apps/voice-host` | Wake phrase, локальное распознавание, команды и доставка вопросов через Desktop Broker; не хранит записи и API token |
 | Host GPU Worker | `workers/ml_worker` | WhisperX, quality, alignment, diarization, persistence, long-job heartbeat |
 | Media Worker | `workers/media_worker` | Probe, assembly, normalization и подготовка ASR audio |
 | Import Worker | `workers/import_worker` | Inbox watcher и импорт локальных файлов через internal API |
 | Outbox Relay | `workers/outbox_relay` | Доставка durable outbox событий в NATS JetStream |
-| Summary Worker | `workers/summary_worker` | Qwen Summary v2, extraction, evidence, decisions и tasks; отключён в Transcript MVP |
+| Summary Worker | `workers/summary_worker` | Qwen Summary v2 и grounded Assistant; включается независимо флагами Summary/Assistant |
 | Shared Python package | `whisperx_atom` | Processing contracts и общая transcript-quality логика |
 | Legacy GUI/watch | `app.py`, `app/`, `auto_transcribe_watch.py` | Совместимость, локальные сценарии и regression surface; не расширять как новый pipeline |
 | Automation | `scripts/` | Runtime launch/stop/doctor, E2E, watchdog, build и acceptance |
