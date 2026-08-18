@@ -73,6 +73,11 @@ public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeByt
 public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
 public sealed record DesktopProcessingReadiness(bool Ready, JsonElement Components, JsonElement? Queue, DateTimeOffset? CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
+public sealed record DesktopImportProgress(string Stage, long UploadedBytes, long TotalBytes, string? MeetingId = null, string? Message = null)
+{
+    [JsonIgnore]
+    public double Fraction => TotalBytes <= 0 ? 0 : Math.Clamp((double)UploadedBytes / TotalBytes, 0, 1);
+}
 public sealed record DesktopJob(
     string Id,
     string MeetingId,
@@ -139,6 +144,7 @@ public sealed class ServerApiClient : IDisposable
     private readonly CookieContainer _cookies = new();
     private readonly HttpClient _http;
     private readonly HttpClient _uploadHttp;
+    private readonly DesktopImportTransferStore _importTransfers = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private long _authVersion;
@@ -895,7 +901,7 @@ public sealed class ServerApiClient : IDisposable
         return response.IsSuccessStatusCode;
     }
 
-    public async Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, IProgress<DesktopImportProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(path)) throw new FileNotFoundException("Файл записи не найден.", path);
         var file = new FileInfo(path);
@@ -903,27 +909,54 @@ public sealed class ServerApiClient : IDisposable
         var allowed = new[] { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
         if (!allowed.Contains(file.Extension, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("Формат файла не поддерживается.");
 
-        var meeting = await CreateMeetingAsync(string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(file.Name) : title.Trim(), cancellationToken: cancellationToken);
-        using var reservationResponse = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meeting.Id}/uploads", new { fileName = file.Name, sizeBytes = file.Length }, cancellationToken);
-        reservationResponse.EnsureSuccessStatusCode();
-        var reservation = await reservationResponse.Content.ReadFromJsonAsync<UploadReservation>(_json, cancellationToken)
-            ?? throw new InvalidOperationException("API не вернул резервирование загрузки.");
+        var fullPath = Path.GetFullPath(path);
+        var apiOrigin = new Uri(BaseAddress.GetLeftPart(UriPartial.Authority));
+        var transfer = _importTransfers.Find(fullPath, file.Length, file.LastWriteTimeUtc, apiOrigin);
+        DesktopMeeting meeting;
+        Uri location;
 
-        var uploadUri = Uri.TryCreate(reservation.UploadUrl, UriKind.Absolute, out var absolute)
-            ? absolute : new Uri(TusBaseAddress, reservation.UploadUrl.TrimStart('/'));
-        using var request = new HttpRequestMessage(new HttpMethod("POST"), new Uri(TusBaseAddress, "files/"));
-        request.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
-        request.Headers.TryAddWithoutValidation("Upload-Length", file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        request.Headers.TryAddWithoutValidation("Upload-Metadata", string.Join(",",
-            $"filename {Convert.ToBase64String(Encoding.UTF8.GetBytes(file.Name))}",
-            $"reservationId {Convert.ToBase64String(Encoding.UTF8.GetBytes(reservation.UploadId.ToString()))}"));
-        using var createResponse = await _uploadHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        createResponse.EnsureSuccessStatusCode();
-        var location = createResponse.Headers.Location ?? uploadUri;
-        if (!location.IsAbsoluteUri) location = new Uri(TusBaseAddress, location);
+        if (transfer is not null && Guid.TryParse(transfer.MeetingId, out var persistedMeetingId) && Uri.TryCreate(transfer.UploadUrl, UriKind.Absolute, out var persistedUploadUrl))
+        {
+            meeting = new DesktopMeeting(persistedMeetingId.ToString(), transfer.MeetingTitle, null, "IMPORTING", DateTimeOffset.UtcNow);
+            location = persistedUploadUrl;
+            progress?.Report(new DesktopImportProgress(transfer.UploadCompleted ? "FINALIZING" : "RESUMING", transfer.ConfirmedOffset, file.Length, meeting.Id, "Продолжаем ранее начатую загрузку."));
+        }
+        else
+        {
+            progress?.Report(new DesktopImportProgress("CREATING", 0, file.Length, Message: "Создаём карточку совещания."));
+            meeting = await CreateMeetingAsync(string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(file.Name) : title.Trim(), cancellationToken: cancellationToken);
+            using var reservationResponse = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meeting.Id}/uploads", new { fileName = file.Name, sizeBytes = file.Length }, cancellationToken);
+            reservationResponse.EnsureSuccessStatusCode();
+            var reservation = await reservationResponse.Content.ReadFromJsonAsync<UploadReservation>(_json, cancellationToken)
+                ?? throw new InvalidOperationException("API не вернул резервирование загрузки.");
+
+            var uploadUri = Uri.TryCreate(reservation.UploadUrl, UriKind.Absolute, out var absolute)
+                ? absolute : new Uri(TusBaseAddress, reservation.UploadUrl.TrimStart('/'));
+            using var request = new HttpRequestMessage(new HttpMethod("POST"), new Uri(TusBaseAddress, "files/"));
+            request.Headers.TryAddWithoutValidation("Tus-Resumable", "1.0.0");
+            request.Headers.TryAddWithoutValidation("Upload-Length", file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            request.Headers.TryAddWithoutValidation("Upload-Metadata", string.Join(",",
+                $"filename {Convert.ToBase64String(Encoding.UTF8.GetBytes(file.Name))}",
+                $"reservationId {Convert.ToBase64String(Encoding.UTF8.GetBytes(reservation.UploadId.ToString()))}"));
+            using var createResponse = await _uploadHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            createResponse.EnsureSuccessStatusCode();
+            location = createResponse.Headers.Location ?? uploadUri;
+            if (!location.IsAbsoluteUri) location = new Uri(TusBaseAddress, location);
+            transfer = new DesktopImportTransfer(Guid.NewGuid(), apiOrigin.GetLeftPart(UriPartial.Authority), fullPath, meeting.Id, meeting.Title,
+                location.ToString(), file.Length, 0, file.LastWriteTimeUtc, DateTimeOffset.UtcNow);
+            _importTransfers.Upsert(transfer);
+        }
+
+        if (transfer.UploadCompleted)
+        {
+            if (Guid.TryParse(meeting.Id, out var completedMeetingId) && (await GetJobsAsync(completedMeetingId, cancellationToken)).Count > 0)
+                _importTransfers.Remove(transfer.Id);
+            progress?.Report(new DesktopImportProgress("PROCESSING", file.Length, file.Length, meeting.Id, "Файл уже передан серверу. Ожидается запуск обработки."));
+            return meeting;
+        }
 
         const int chunkSize = 16 * 1024 * 1024;
-        long offset = 0;
+        long offset = Math.Clamp(transfer.ConfirmedOffset, 0, file.Length);
         var retries = 0;
         while (offset < file.Length)
         {
@@ -949,7 +982,9 @@ public sealed class ServerApiClient : IDisposable
                         ? serverOffset : offset + length;
                     if (nextOffset <= offset || nextOffset > file.Length) throw new InvalidOperationException("TUS вернул некорректную позицию загрузки.");
                     offset = nextOffset;
-                    progress?.Report(offset);
+                    transfer = transfer with { ConfirmedOffset = offset, UpdatedAtUtc = DateTimeOffset.UtcNow };
+                    _importTransfers.Upsert(transfer);
+                    progress?.Report(new DesktopImportProgress("UPLOADING", offset, file.Length, meeting.Id));
                 }
             }
             catch (HttpRequestException) when (retries++ < 5)
@@ -962,6 +997,13 @@ public sealed class ServerApiClient : IDisposable
                 throw new DesktopApiException(0, "UPLOAD_CONNECTION_LOST", "Соединение с сервером загрузки потеряно. Загрузка продолжится с последнего подтверждённого блока.", ex);
             }
         }
+
+        // tusd finalizes asynchronously through its authenticated hook. Keep
+        // a completed coordinate locally until a later cleanup; clicking the
+        // import action again cannot create a duplicate meeting or upload.
+        transfer = transfer with { ConfirmedOffset = file.Length, UploadCompleted = true, UpdatedAtUtc = DateTimeOffset.UtcNow };
+        _importTransfers.Upsert(transfer);
+        progress?.Report(new DesktopImportProgress("PROCESSING", file.Length, file.Length, meeting.Id, "Файл принят. Подготавливаем аудио и запускаем распознавание."));
         return meeting;
     }
 
@@ -1023,7 +1065,13 @@ public sealed class ServerApiClient : IDisposable
         return path;
     }
 
-    public async Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default)
+    public Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default) =>
+        DownloadMediaVariantAsync(mediaId, destinationPath, "archive", cancellationToken);
+
+    public Task<bool> DownloadOriginalMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default) =>
+        DownloadMediaVariantAsync(mediaId, destinationPath, "original", cancellationToken);
+
+    private async Task<bool> DownloadMediaVariantAsync(Guid mediaId, string destinationPath, string variant, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(destinationPath)) throw new ArgumentException("Путь сохранения не задан.", nameof(destinationPath));
         var directory = Path.GetDirectoryName(destinationPath);
@@ -1032,7 +1080,7 @@ public sealed class ServerApiClient : IDisposable
         var temporary = destinationPath + ".part";
         try
         {
-            using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/media/{mediaId}/download", null, cancellationToken);
+            using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/media/{mediaId}/download?variant={Uri.EscapeDataString(variant)}", null, cancellationToken);
             if (response.StatusCode == HttpStatusCode.NotFound) return false;
             response.EnsureSuccessStatusCode();
             await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);

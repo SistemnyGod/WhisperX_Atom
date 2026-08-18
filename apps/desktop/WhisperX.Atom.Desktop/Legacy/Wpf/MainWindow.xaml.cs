@@ -1010,7 +1010,10 @@ public partial class MainWindow : Window
             ImportStatusText.Text = $"Загрузка: {Path.GetFileName(dialog.FileName)}";
             ImportStatusText.Foreground = Brushes.LightSkyBlue;
             ImportButton.IsEnabled = false;
-            var progress = new Progress<long>(bytes => ImportStatusText.Text = $"Файл загружен: {FormatBytes(bytes)}");
+            var progress = new Progress<DesktopImportProgress>(state =>
+                ImportStatusText.Text = state.Stage == "UPLOADING"
+                    ? $"Файл загружен: {FormatBytes(state.UploadedBytes)} из {FormatBytes(state.TotalBytes)}"
+                    : state.Message ?? "Подготавливаем импорт…");
             var meeting = await _server.ImportFileAsync(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), progress);
             ImportStatusText.Text = "Файл принят. Запущена обработка.";
             ImportStatusText.Foreground = Brushes.LightGreen;

@@ -831,7 +831,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.HistoryQuestion when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
-                VoiceIntent.HistoryQuestion => await AskHistoryAsync(command.Parameter ?? command.Text, commandId, traceId, cancellationToken),
+                VoiceIntent.HistoryQuestion => await AskAssistantAsync(command.Parameter ?? command.Text, commandId, traceId, cancellationToken),
                 _ => new VoiceResponse("Команда не распознана", true, false)
             };
             if (command.Intent == VoiceIntent.StartRecording)
@@ -972,29 +972,36 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
         "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",
+        "ASSISTANT_RECORDING_ACTIVE" => "Ответы по совещанию будут доступны после завершения записи и обработки стенограммы.",
         "VOICE_ASSISTANT_UNAVAILABLE" => "Помощник временно недоступен.",
         "ASSISTANT_MEETING_REQUIRED" => "Откройте совещание, по которому нужен ответ.",
         "ASSISTANT_HISTORY_FORBIDDEN" => "История совещаний недоступна в текущем контексте.",
         "ASSISTANT_CONTEXT_REQUIRED" => "Уточните, отвечать по текущему совещанию или в общем чате.",
+        "NO_EVIDENCE" => "В стенограмме не найден подтверждённый ответ.",
+        "LOW_TRANSCRIPT_QUALITY" => "Стенограмма требует проверки качества перед ответом.",
+        "GROUNDING_REJECTED" => "Не удалось подтвердить ответ по стенограмме.",
         "ASSISTANT_NO_GROUNDED_ANSWER" => "В стенограмме не найден подтверждённый ответ.",
         "NO_AUDIO_CAPTURED" => "Аудио не было захвачено, запись не сохранена.",
         _ => "Не удалось выполнить голосовую команду."
     };
 
-    private async Task<VoiceResponse> AskHistoryAsync(string question, string? commandId, string? traceId, CancellationToken cancellationToken)
+    private async Task<VoiceResponse> AskAssistantAsync(string question, string? commandId, string? traceId, CancellationToken cancellationToken)
     {
         if (_desktopBroker is null)
             return new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId);
-        var result = await _desktopBroker.AskAssistantAsync(question, "AUTO", false, cancellationToken, traceId, commandId);
+        var (requestedMode, normalizedQuestion) = ResolveAssistantQuestion(question);
+        if (string.IsNullOrWhiteSpace(normalizedQuestion))
+            return new VoiceResponse("Сформулируйте вопрос после кодовой фразы «Мифодий».", true, false, CommandId: commandId, TraceId: traceId);
+        var result = await _desktopBroker.AskAssistantAsync(normalizedQuestion, requestedMode, false, cancellationToken, traceId, commandId);
         if (result.Ok && !string.IsNullOrWhiteSpace(result.QueryId))
         {
-            _ = CompleteHistoryQuestionAsync(Guid.Parse(result.QueryId), commandId, traceId);
+            _ = CompleteAssistantQuestionAsync(Guid.Parse(result.QueryId), commandId, traceId);
             return await RespondAsync(result.SpokenText ?? "Вопрос принят, отвечу после обработки.", cancellationToken, true, commandId: commandId, traceId: traceId);
         }
         return new VoiceResponse(VoiceErrorText(result.ErrorCode ?? "VOICE_ASSISTANT_UNAVAILABLE"), true, false, CommandId: commandId, TraceId: traceId);
     }
 
-    private async Task CompleteHistoryQuestionAsync(Guid queryId, string? commandId, string? traceId)
+    private async Task CompleteAssistantQuestionAsync(Guid queryId, string? commandId, string? traceId)
     {
         try
         {
@@ -1007,11 +1014,30 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                     await RespondAsync(result.SpokenText, CancellationToken.None, true, commandId: commandId, traceId: traceId);
                     return;
                 }
-                if (result.ErrorCode is not null && result.AssistantStatus is not ("QUEUED" or "RUNNING")) return;
+                if (result.ErrorCode is not null && result.AssistantStatus is not ("QUEUED" or "RUNNING"))
+                {
+                    if (_state.Snapshot.State == VoiceHostState.Listening)
+                        await RespondAsync(VoiceErrorText(result.ErrorCode), CancellationToken.None, false, commandId: commandId, traceId: traceId);
+                    return;
+                }
                 await Task.Delay(TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false);
             }
         }
         catch (Exception ex) { _logger?.LogWarning(ex, "Voice assistant query completion failed: {QueryId}", queryId); }
+    }
+
+    private static (string RequestedMode, string Question) ResolveAssistantQuestion(string question)
+    {
+        var normalized = (question ?? string.Empty).Trim();
+        if (normalized.StartsWith("в общем чате ", StringComparison.OrdinalIgnoreCase))
+            return ("GENERAL_CHAT", normalized["в общем чате ".Length..].Trim());
+        if (normalized.StartsWith("общий вопрос ", StringComparison.OrdinalIgnoreCase))
+            return ("GENERAL_CHAT", normalized["общий вопрос ".Length..].Trim());
+        if (normalized.StartsWith("по истории совещаний ", StringComparison.OrdinalIgnoreCase))
+            return ("MEETING_HISTORY", normalized["по истории совещаний ".Length..].Trim());
+        if (normalized.StartsWith("по текущему совещанию ", StringComparison.OrdinalIgnoreCase))
+            return ("CURRENT_MEETING", normalized["по текущему совещанию ".Length..].Trim());
+        return ("AUTO", normalized);
     }
 
     private async Task<VoiceResponse> RespondAsync(

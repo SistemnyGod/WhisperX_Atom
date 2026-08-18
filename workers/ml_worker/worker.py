@@ -99,7 +99,7 @@ class GpuWorker:
         self._semaphore = asyncio.Semaphore(1)
         self._service = ProcessingService()
         self._repository = JobRepository()
-        self._gpu_lease = PostgresGpuLease(self._repository.conninfo)
+        self._gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
         self._heartbeat = heartbeat
 
     def close(self) -> None:

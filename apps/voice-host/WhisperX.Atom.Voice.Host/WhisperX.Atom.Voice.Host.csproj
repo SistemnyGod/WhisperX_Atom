@@ -16,7 +16,10 @@
     <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
-    <Content Include="..\Assets\VoiceResponses\*.wav" Link="Assets\VoiceResponses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Legacy prerecorded replies are intentionally not published.  They
+         were produced by an old encoding path and can pronounce Russian text
+         incorrectly. Voice Host now always uses the configured live Windows
+         Russian voice. -->
     <Content Include="..\Models\Voice\voice-models.manifest.json" Link="Models\Voice\voice-models.manifest.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\..\vendor\voice-models\voice-models.lock.json" Link="Models\Voice\voice-models.lock.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\..\vendor\voice-models\vosk-model-small-ru-0.22\**\*" Link="Models\Voice\vosk-model-small-ru-0.22\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

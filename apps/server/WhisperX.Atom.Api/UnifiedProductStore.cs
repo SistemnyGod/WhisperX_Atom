@@ -44,6 +44,7 @@ public sealed record RecordingCorrelationRow(Guid ServerSessionId, string? Local
 public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
+public sealed record SummaryEligibility(bool HasTranscript, bool Allowed, string? Reason = null);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", string? RequestedMode = null, double? RouterConfidence = null, string Source = "DESKTOP", string GroundingStatus = "PENDING", JsonDocument? AnswerMetadata = null, Guid? TranscriptId = null, int? TranscriptVersion = null);
@@ -1332,6 +1333,40 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var meeting = new NpgsqlCommand("UPDATE meetings SET status='SUMMARIZING' WHERE id=@meeting", connection, tx);
         meeting.Parameters.AddWithValue("meeting", meetingId); await meeting.ExecuteNonQueryAsync();
         await tx.CommitAsync(); return jobId;
+    }
+
+    /// <summary>
+    /// Manual summary requests obey the same quality boundary as automatic
+    /// summaries.  A draft V1 is useful to a person but must not become an
+    /// authoritative Qwen protocol before enrichment and quality checks pass.
+    /// </summary>
+    public async Task<SummaryEligibility> GetSummaryEligibilityAsync(Guid meetingId, int? transcriptVersion = null)
+    {
+        await using var connection = await OpenAsync();
+        var sql = transcriptVersion is int
+            ? "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
+            : "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        if (transcriptVersion is int version) command.Parameters.AddWithValue("version", version);
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return new SummaryEligibility(false, false, "TRANSCRIPT_REQUIRED");
+
+        var status = reader.GetString(0).ToUpperInvariant();
+        var versionKind = reader.GetString(1).ToUpperInvariant();
+        string[] warnings;
+        try { warnings = JsonSerializer.Deserialize<string[]>(reader.GetString(2)) ?? []; }
+        catch (JsonException) { return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY"); }
+
+        var warningSet = new HashSet<string>(warnings.Select(item => item.ToUpperInvariant()), StringComparer.Ordinal);
+        var blockingWarnings = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE", "NEEDS_REVIEW", "REQUIRES_REVIEW", "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY"
+        };
+        if (versionKind != "ENRICHED") return new SummaryEligibility(true, false, "SUMMARY_REQUIRES_ENRICHED_V2");
+        if (status is not "READY" || warningSet.Overlaps(blockingWarnings))
+            return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY");
+        return new SummaryEligibility(true, true);
     }
     private static string FormatTimecode(long milliseconds)
     {

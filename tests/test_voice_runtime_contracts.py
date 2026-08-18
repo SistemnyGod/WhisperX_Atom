@@ -5,6 +5,8 @@ from workers.ml_worker.technical_events import build_technical_intervals, segmen
 
 ROOT = Path(__file__).resolve().parents[1]
 VOICE_RUNTIME = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs").read_text(encoding="utf-8")
+VOICE_PARSER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
+SPEECH_RESPONDER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/SpeechResponder.cs").read_text(encoding="utf-8")
 VOICE_CAPTURE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioCapture.cs").read_text(encoding="utf-8")
 VOICE_IPC = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostIpc.cs").read_text(encoding="utf-8")
 VOICE_TELEMETRY = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceTelemetryPipeServer.cs").read_text(encoding="utf-8")
@@ -99,6 +101,28 @@ def test_broker_test_mode_does_not_call_recorder_and_returns_trace():
     assert "TraceId" in BROKER
     assert "ConnectWithRetryAsync" in BROKER_CLIENT
     assert "commandId" in BROKER and "CacheCommand" in BROKER
+
+
+def test_voice_questions_use_the_user_scoped_assistant_and_speak_safe_terminal_results():
+    assert 'AskAssistantAsync(string question, string? requestedMode' in BROKER_CLIENT
+    assert '"ASSISTANT_QUESTION"' in BROKER
+    assert '"ASSISTANT_RECORDING_ACTIVE"' in BROKER
+    assert "ResolveAssistantQuestion" in VOICE_RUNTIME
+    assert '"MEETING_HISTORY"' in VOICE_RUNTIME
+    assert '"CURRENT_MEETING"' in VOICE_RUNTIME
+    assert '"GENERAL_CHAT"' in VOICE_RUNTIME
+    assert "CompleteAssistantQuestionAsync" in VOICE_RUNTIME
+    assert "VoiceErrorText(result.ErrorCode)" in VOICE_RUNTIME
+    assert 'value.StartsWith("покажи ", StringComparison.Ordinal)' in VOICE_PARSER
+    assert 'value.StartsWith("расскажи ", StringComparison.Ordinal)' in VOICE_PARSER
+
+
+def test_voice_responder_never_uses_legacy_wav_replies():
+    assert "public bool UsesPreRecordedResponses => false" in SPEECH_RESPONDER
+    assert "PlayWavAsync" not in SPEECH_RESPONDER
+    assert "ResponseKey" not in SPEECH_RESPONDER
+    assert "ATOM_VOICE_USE_PRERECORDED_RESPONSES" not in SPEECH_RESPONDER
+    assert '"Microsoft Irina"' in SPEECH_RESPONDER
 
 
 def test_server_builds_bounded_system_response_intervals():

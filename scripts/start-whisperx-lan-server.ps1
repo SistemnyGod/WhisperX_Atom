@@ -34,10 +34,15 @@ if ([string]::IsNullOrWhiteSpace($assistantEnabled)) { $assistantEnabled = "true
 if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($serverOrigin)) { throw "LAN_CONFIG_INVALID: LAN_BIND_ADDRESS and SERVER_ORIGIN are required." }
 if ($allowHttp -ne "true") { throw "LAN_HTTP_EXPLICIT_REQUIRED: set ALLOW_INSECURE_LAN_HTTP=true only for the isolated LAN profile." }
 if ($gpuMode -ne "container") { throw "LAN_GPU_MODE_REQUIRED: set GPU_WORKER_MODE=container in .env.lan." }
-if (-not $EnableQwen -and $autoSummary -ne "false") { throw "LAN_QWEN_DISABLED_REQUIRED: set AUTO_SUMMARY_ENABLED=false until transcript gates pass." }
-# The switch is the explicit opt-in.  Exporting the value for this Compose
-# invocation is important: compose.lan.yml otherwise expands the .env.lan
-# default (false), starts summary-worker but never queues automatic summaries.
+# A persisted true value is an explicit operator choice and must survive a
+# reboot/startup task. The switch remains available for one-off development
+# runs, while invalid values fail closed instead of silently changing GPU
+# behaviour.
+if ($autoSummary -notin @("true", "false", "")) { throw "LAN_QWEN_FLAG_INVALID: AUTO_SUMMARY_ENABLED must be true or false." }
+if ($autoSummary -eq "true") { $EnableQwen = $true }
+# Exporting the value for this Compose invocation is important: compose.lan.yml
+# otherwise expands the .env.lan default and may start a worker that never
+# queues automatic summaries.
 if ($EnableQwen) {
     $env:AUTO_SUMMARY_ENABLED = "true"
     $autoSummary = "true"
@@ -215,6 +220,9 @@ COMMIT;
         project = $projectName
         serverOrigin = $serverOrigin
         status = if ($degraded.Count -eq 0) { "PROCESSING_READY" } else { "SERVER_DEGRADED" }
+        assistantMode = if ($EnableQwen) { "AUTO_SUMMARY_ENABLED" } elseif ($assistantEnabled -eq "true" -or $EnableAssistant) { "ASSISTANT_ONLY" } else { "DISABLED" }
+        qwen = if ($EnableQwen) { "ENABLED" } else { "DISABLED" }
+        summaryWorkerRequired = ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true")
         requiredServices = $requiredServices
         degradedServices = $degraded
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifact "processing-readiness.json") -Encoding utf8
@@ -224,7 +232,8 @@ COMMIT;
         envFile = ".env.lan"
         serverOrigin = $serverOrigin
         profiles = @("core", "gpu", "lan")
-        qwen = if ($EnableQwen) { "EXPLICITLY_ENABLED" } else { "DISABLED" }
+        assistant = if ($assistantEnabled -eq "true" -or $EnableAssistant) { "ENABLED" } else { "DISABLED" }
+        qwen = if ($EnableQwen) { "ENABLED" } else { "DISABLED" }
         publicBinding = "$lanAddress`:8080"
         legacyPolicy = "preserve_and_stop"
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifact "compose-config.txt") -Encoding utf8
@@ -234,7 +243,7 @@ COMMIT;
     if ($InstallStartupTask) {
         & (Join-Path $PSScriptRoot "install-whisperx-lan-startup-task.ps1") -EnvFile $EnvFile
     }
-    $qwenText = if ($EnableQwen) { "Qwen enabled" } else { "Qwen disabled; enable with -EnableQwen after transcript gates" }
+    $qwenText = if ($EnableQwen) { "Qwen enabled; automatic summary after quality V2" } else { "Qwen disabled; enable with -EnableQwen after transcript gates or set AUTO_SUMMARY_ENABLED=true" }
     Write-Host "WhisperX Atom LAN server core started at $serverOrigin ($qwenText)" -ForegroundColor Green
 }
 finally { Pop-Location }

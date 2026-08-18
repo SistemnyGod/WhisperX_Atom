@@ -8,7 +8,7 @@ The only supported server runtime is the Compose project `whisperx-atom`:
 compose.dev.yml + compose.lan.yml
 origin: http://192.168.2.194:8080
 GPU_WORKER_MODE=container
-AUTO_SUMMARY_ENABLED=false
+AUTO_SUMMARY_ENABLED=true
 WHISPERX_MODEL=large-v3
 COMPUTE_TYPE=int8_float16
 BATCH_SIZE=2
@@ -67,19 +67,17 @@ $credential = Get-Credential -UserName admin
 повторена после восстановления LAN. Если Recorder Service не запущен, вход
 разрешён, но запись остаётся недоступной до запуска службы через UAC.
 
-Qwen remains disabled until the 60-second and 5-minute transcript gates pass. The
-Summary Worker, Qwen3-8B runtime and download script are present, but the feature
-is deliberately off while `AUTO_SUMMARY_ENABLED=false`. To enable it after the
-gate, first verify/create the pinned model manifest and then start explicitly:
+The LAN profile enables Qwen3-8B after the transcript quality gates. The Summary
+Worker consumes both automatic summary and Assistant requests through the shared
+GPU lease. First verify/create the pinned model manifest and then start or rebuild:
 
 ```powershell
 .\scripts\llm-download.ps1
-.\scripts\start-whisperx-lan-server.ps1 -EnableQwen
+.\scripts\start-whisperx-lan-server.ps1 -Rebuild -EnableAssistant -EnableQwen
 ```
 
-The launcher starts `summary-worker` and explicitly enables automatic summary
-jobs only with `-EnableQwen`; it does not silently turn on a GPU workload. The
-current model is `Qwen3-8B-Q5_K_M.gguf` and its
+The launcher starts `summary-worker` and enables automatic summaries from the
+persisted LAN setting. The current model is `Qwen3-8B-Q5_K_M.gguf` and its
 manifest must match the pinned SHA256 before the worker reports `READY`.
 
 The launcher writes non-sensitive evidence to `artifacts/acceptance/lan-server/`:
@@ -91,7 +89,8 @@ healthy LAN core fail. Do not pass passwords or tokens on a command line.
 Readiness is intentionally split into `SERVER_CORE_READY` (API, PostgreSQL,
 NATS, storage and gateway) and `PROCESSING_READY` (workers, fresh heartbeats,
 GPU lease/queue state). A GPU worker that is processing is reported as `BUSY`,
-not as a failure. Qwen is `DISABLED` while `AUTO_SUMMARY_ENABLED=false`.
+not as a failure. Qwen is `ENABLED` when `AUTO_SUMMARY_ENABLED=true` and the
+Summary Worker reports a valid model manifest and heartbeat.
 
 The 8 GB GPU LAN preset keeps WhisperX `large-v3`, uses `int8_float16` and
 `BATCH_SIZE=2`, and leaves pyannote diarization off until a measured acceptance
@@ -119,6 +118,10 @@ Copy-Item .env.lan.example .env.lan
 .\scripts\start-whisperx-lan-server.ps1 -ConfigureFirewall -InstallStartupTask
 .\scripts\doctor-whisperx-lan-server.ps1
 ```
+
+Регистрацию Scheduled Task выполняйте из PowerShell «Запуск от имени
+администратора»; скрипт проверяет результат регистрации и не сообщает об
+успехе при отказе в доступе.
 
 Профиль публикует только `http://192.168.2.194:8080` (или адрес из `.env.lan`). API, TUS, PostgreSQL и NATS не имеют host-портов. Gateway направляет `/api/*`, `/health/*`, `/ready` в API и `/files/*` в TUS.
 

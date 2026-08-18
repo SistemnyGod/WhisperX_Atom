@@ -93,6 +93,7 @@ public sealed class BackendService : IBackendService
     public Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default) => _client.UpdateTaskAsync(task, cancellationToken);
     public Task<string?> DownloadPreviewAsync(Guid mediaId, CancellationToken cancellationToken = default) => _client.DownloadPreviewAsync(mediaId, cancellationToken);
     public Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default) => _client.DownloadMediaAsync(mediaId, destinationPath, cancellationToken);
+    public Task<bool> DownloadOriginalMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default) => _client.DownloadOriginalMediaAsync(mediaId, destinationPath, cancellationToken);
 
     public async Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default)
     {
@@ -142,6 +143,8 @@ public sealed class BackendService : IBackendService
 
     public Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default) =>
         _client.ImportFileAsync(path, title, cancellationToken: cancellationToken);
+    public Task<DesktopMeeting> ImportFileWithProgressAsync(string path, string? title, IProgress<DesktopImportProgress>? progress, CancellationToken cancellationToken = default) =>
+        _client.ImportFileAsync(path, title, progress, cancellationToken);
 
     public void Dispose() => _client.Dispose();
 }

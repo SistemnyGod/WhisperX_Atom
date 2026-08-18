@@ -35,6 +35,35 @@ def test_assistant_modes_are_additive_and_general_chat_is_transcript_independent
     assert "request.AssistantMode" in api
 
 
+def test_assistant_retrieval_uses_russian_fts_and_fails_closed_without_evidence():
+    worker = read("workers/summary_worker/assistant.py")
+    assert "websearch_to_tsquery('russian'" in worker
+    assert "LIMIT 12" in worker and "LIMIT 36" in worker
+    assert "LOW_TRANSCRIPT_QUALITY" in worker
+    assert "self.repository.persist, query_id, {}, valid" in worker
+    assert "claims_are_semantically_grounded" in worker
+
+
+def test_voice_questions_are_blocked_during_capture():
+    broker = read("apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs")
+    voice = read("apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs")
+    assert "ASSISTANT_RECORDING_ACTIVE" in broker
+    assert "ASSISTANT_RECORDING_ACTIVE" in voice
+    assert "A question must never compete with active capture" in broker
+
+
+def test_gpu_lease_prioritizes_asr_over_assistant_over_summary():
+    lease = read("workers/gpu_lease.py")
+    ml = read("workers/ml_worker/worker.py")
+    summary = read("workers/summary_worker/worker.py")
+    assistant = read("workers/summary_worker/assistant.py")
+    assert "Lower values have precedence" in lease
+    assert "TRANSCRIBE_ASR" in lease and "assistant_queries" in lease
+    assert "priority=10" in ml
+    assert "priority=50" in assistant
+    assert "priority=100" in summary
+
+
 def test_conversation_api_is_user_scoped_and_has_message_sse():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     assert 'app.MapGet("/api/assistant/conversations"' in api

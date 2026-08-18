@@ -52,8 +52,7 @@ internal static class VoiceHostSelfTest
         using var secondMutex = new Mutex(true, "Local\\WhisperXAtomVoiceHostSelfTest-" + Environment.ProcessId, out var ownsSecond);
         Assert(ownsFirst && !ownsSecond, "single-instance mutex");
         using var quietResponder = new SpeechResponder { QuietMode = true };
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_VOICE_USE_PRERECORDED_RESPONSES")))
-            Assert(!quietResponder.UsesPreRecordedResponses, "unverified prerecorded responses are disabled by default");
+        Assert(!quietResponder.UsesPreRecordedResponses, "legacy prerecorded responses are disabled");
         Assert(!quietResponder.TryEnqueue("Запись начата") && !quietResponder.IsBusy, "quiet mode does not stick busy");
         Console.WriteLine("Voice host audio self-test passed.");
     }

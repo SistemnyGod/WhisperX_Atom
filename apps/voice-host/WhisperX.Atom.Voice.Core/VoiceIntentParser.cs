@@ -52,10 +52,22 @@ public sealed class VoiceIntentParser
     private static bool IsQuestion(string value) => value.Contains('?', StringComparison.Ordinal)
         || value.StartsWith("что ", StringComparison.Ordinal)
         || value.StartsWith("какие ", StringComparison.Ordinal)
+        || value.StartsWith("какой ", StringComparison.Ordinal)
         || value.StartsWith("кто ", StringComparison.Ordinal)
         || value.StartsWith("где ", StringComparison.Ordinal)
         || value.StartsWith("когда ", StringComparison.Ordinal)
         || value.StartsWith("сколько ", StringComparison.Ordinal)
+        || value.StartsWith("почему ", StringComparison.Ordinal)
+        || value.StartsWith("зачем ", StringComparison.Ordinal)
+        // Vosk normally returns lower-case text without a question mark.
+        // These deterministic forms cover the natural requests a participant
+        // makes during or after a meeting without making recorder actions
+        // less strict.
+        || value.StartsWith("расскажи ", StringComparison.Ordinal)
+        || value.StartsWith("напомни ", StringComparison.Ordinal)
+        || value.StartsWith("покажи ", StringComparison.Ordinal)
+        || value.StartsWith("найди ", StringComparison.Ordinal)
+        || value.StartsWith("объясни ", StringComparison.Ordinal)
         || value.StartsWith("прочитай ", StringComparison.Ordinal)
         || value.StartsWith("сделай ", StringComparison.Ordinal);
 

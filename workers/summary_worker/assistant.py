@@ -15,6 +15,10 @@ from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
+# Kept as a compatibility marker for older Desktop/Voice clients. New
+# clients receive the explicit NO_EVIDENCE error code below, while rolling
+# upgrades may still look for the historical empty-context name.
+LEGACY_EMPTY_CONTEXT_ERROR = "assistant_context_empty"
 # The original terminal set remains part of the compatibility contract:
 # status NOT IN ('READY','FAILED','NEEDS_REVIEW'). New explicit terminal
 # states are appended below rather than changing the meaning of old clients.
@@ -57,6 +61,47 @@ def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tu
             return False
         ids = claim.get("evidenceIds")
         if not isinstance(ids, list) or not ids or any(str(item).removeprefix("SEG-") not in valid for item in ids):
+            return False
+    return True
+
+
+_GROUNDING_STOPWORDS = {
+    "это", "этот", "эта", "эти", "что", "как", "кто", "где", "когда", "были", "было",
+    "будет", "есть", "для", "при", "или", "и", "в", "во", "на", "по", "из", "с", "со",
+    "у", "к", "о", "об", "за", "не", "нет", "да", "так", "мы", "они", "он", "она", "их",
+    "его", "её", "может", "можно", "нужно", "решили", "говорили", "сказал", "сказали",
+}
+
+
+def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str) -> bool:
+    """Apply a deterministic second gate to claims before they can be spoken.
+
+    The model is still asked for structured claims, but IDs alone are not
+    sufficient: meaningful words and every numeric/date token must occur in
+    the cited evidence. This catches fabricated names, amounts and dates
+    without requiring another model or changing the database schema.
+    """
+    if assistant_mode == "GENERAL_CHAT":
+        return True
+    if not claims_are_structurally_grounded(result, valid, assistant_mode):
+        return False
+    claims = result.get("claims") or []
+    for claim in claims:
+        evidence_text = " ".join(
+            valid[str(item).removeprefix("SEG-")][3]
+            for item in claim.get("evidenceIds", [])
+            if str(item).removeprefix("SEG-") in valid
+        ).lower()
+        claim_text = str(claim.get("text", "")).lower()
+        claim_tokens = {
+            token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", claim_text)
+            if token not in _GROUNDING_STOPWORDS and not token.startswith("seg-")
+        }
+        evidence_tokens = set(re.findall(r"[\wА-Яа-яЁё-]{2,}", evidence_text))
+        if claim_tokens and not (claim_tokens & evidence_tokens):
+            return False
+        numeric_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", claim_text))
+        if any(token not in evidence_text for token in numeric_tokens):
             return False
     return True
 
@@ -111,57 +156,74 @@ class AssistantRepository:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
 
-    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str]], str]:
+    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str]], str, str | None]:
+        # Retrieval is performed by PostgreSQL's Russian FTS instead of
+        # loading an entire meeting and scoring it in Python. The CTE keeps
+        # the twelve strongest hits and adds one neighbouring segment on each
+        # side, while the outer limit protects the model prompt.
         with self._db.connection() as connection:
-            if meeting_id:
-                rows = connection.execute(
-                    """
-                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text,t.version_kind
-                    FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
+            rows = connection.execute(
+                """
+                WITH source AS (
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,
+                           COALESCE(ms.display_name,s.speaker_label,'Спикер N') AS speaker,
+                           s.text,t.version_kind,s.ordinal,
+                           to_tsvector('russian', COALESCE(s.text,'')) AS search_vector,
+                           ts_rank_cd(to_tsvector('russian', COALESCE(s.text,'')), websearch_to_tsquery('russian', %s)) AS rank
+                    FROM transcript_segments s
+                    JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
-                    WHERE t.meeting_id=%s AND (%s OR m.owner_id=%s) AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED']) AND COALESCE(s.is_hidden,false)=false
-                    ORDER BY s.ordinal LIMIT 1200
-                    """,
-                    (meeting_id, include_all, owner_user_id),
-                ).fetchall()
-            else:
-                rows = connection.execute(
+                    WHERE (%s::uuid IS NULL OR t.meeting_id=%s::uuid)
+                      AND (%s OR m.owner_id=%s::uuid)
+                      AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                      AND t.status IN ('READY','PARTIAL_READY')
+                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
+                      AND COALESCE(s.is_hidden,false)=false
+                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-interval '90 days')
+                ), hits AS (
+                    SELECT meeting_id,ordinal FROM source
+                    WHERE search_vector @@ websearch_to_tsquery('russian', %s)
+                    ORDER BY rank DESC, meeting_id, ordinal
+                    LIMIT 12
+                ), expanded AS (
+                    SELECT DISTINCT source.*
+                    FROM source JOIN hits
+                      ON hits.meeting_id=source.meeting_id
+                     AND source.ordinal BETWEEN hits.ordinal-1 AND hits.ordinal+1
+                )
+                SELECT id,meeting_id,start_ms,end_ms,speaker,text,version_kind
+                FROM expanded
+                ORDER BY rank DESC,meeting_id,ordinal
+                LIMIT 36
+                """,
+                (query, meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query),
+            ).fetchall()
+            low_quality = False
+            if not rows and meeting_id:
+                low_quality = bool(connection.execute(
                     """
-                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label,'Спикер N'),s.text,t.version_kind
-                    FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
-                    LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
-                    JOIN meetings m ON m.id=t.meeting_id
-                    WHERE (%s OR m.owner_id=%s) AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED']) AND m.created_at >= now()-interval '90 days' AND COALESCE(s.is_hidden,false)=false
-                    ORDER BY m.created_at DESC,s.ordinal LIMIT 2400
+                    SELECT EXISTS(
+                        SELECT 1 FROM transcripts t
+                        WHERE t.meeting_id=%s
+                          AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                          AND (t.status IN ('PARTIAL_READY','READY') AND (
+                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
+                               OR COALESCE(t.quality_score,0) < 0.45)))
                     """,
-                    (include_all, owner_user_id),
-                ).fetchall()
+                    (meeting_id,),
+                ).fetchone()[0])
         max_chars = min(36000, max(4000, int(os.getenv("ASSISTANT_MAX_CONTEXT_CHARS", "36000"))))
-        # Retrieval is deliberately bounded even when a transcript is short:
-        # Qwen receives the strongest twelve hits plus one neighbour on each
-        # side, never the whole meeting by accident.
         if rows:
-            tokens = {token.lower() for token in re.findall(r"[\wА-Яа-яЁё]{3,}", query)}
-            scored = []
-            for index, row in enumerate(rows):
-                text_tokens = {token.lower() for token in re.findall(r"[\wА-Яа-яЁё]{3,}", str(row[5]))}
-                scored.append((len(tokens & text_tokens), index, row))
-            top = sorted(scored, key=lambda item: (item[0], item[1]), reverse=True)[:12]
-            selected_indexes: set[int] = set()
-            for score, index, _ in top:
-                if score == 0 and selected_indexes:
-                    break
-                selected_indexes.update(range(max(0, index - 1), min(len(rows), index + 2)))
-            rows = [row for index, row in enumerate(rows) if index in selected_indexes][:36]
             if meeting_id is None:
-                # History mode is bounded to five meetings, ranked by the
-                # strongest lexical hit, to prevent cross-meeting context
-                # leakage and oversized prompts.
-                ranked_meetings: dict[str, int] = {}
-                for score, _, row in scored:
-                    ranked_meetings[str(row[1])] = max(score, ranked_meetings.get(str(row[1]), 0))
-                allowed_meetings = {key for key, _ in sorted(ranked_meetings.items(), key=lambda item: item[1], reverse=True)[:5]}
+                # Rows are already ordered by FTS rank. Keep at most five
+                # meetings in history mode, preserving each meeting's local
+                # neighbours.
+                allowed_meetings: list[str] = []
+                for row in rows:
+                    key = str(row[1])
+                    if key not in allowed_meetings and len(allowed_meetings) < 5:
+                        allowed_meetings.append(key)
                 rows = [row for row in rows if str(row[1]) in allowed_meetings]
 
         valid: dict[str, tuple[str, int, int, str, str]] = {}
@@ -178,7 +240,7 @@ class AssistantRepository:
             context = context[:max_chars].rsplit("\n", 1)[0]
             allowed = {line.split(" ", 1)[0].removeprefix("[SEG-") for line in context.splitlines()}
             valid = {key: value for key, value in valid.items() if key in allowed}
-        return context, valid, ("ASR_DRAFT" if kinds and kinds <= {"ASR_DRAFT", "V1"} else "ENRICHED")
+        return context, valid, ("ASR_DRAFT" if kinds and kinds <= {"ASR_DRAFT", "V1"} else "ENRICHED"), ("LOW_TRANSCRIPT_QUALITY" if low_quality else None)
 
     def history(self, conversation_id: str | None, current_user_message_id: str | None) -> list[dict[str, str]]:
         if not conversation_id:
@@ -204,7 +266,7 @@ class AssistantRepository:
             used += len(value)
         return result
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str, transcript_kind: str = "ENRICHED") -> None:
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None) -> None:
         claims = result.get("claims") if isinstance(result.get("claims"), list) else []
         claim_ids = [str(item).removeprefix("SEG-") for claim in claims if isinstance(claim, dict) for item in (claim.get("evidenceIds") or [])]
         evidence_ids = claim_ids or [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
@@ -221,7 +283,13 @@ class AssistantRepository:
             status = "READY"
             grounding_status = "GROUNDED"
             error_code = None
-        elif evidence_ids and answer and claims_are_structurally_grounded(result, valid, assistant_mode):
+        elif reason == "LOW_TRANSCRIPT_QUALITY":
+            status = "NEEDS_REVIEW"
+            grounding_status = "WARNING"
+            error_code = "LOW_TRANSCRIPT_QUALITY"
+            answer = "Эта стенограмма требует проверки качества перед ответом."
+            voice = "Сначала проверьте качество стенограммы."
+        elif evidence_ids and answer and claims_are_semantically_grounded(result, valid, assistant_mode):
             status = "ANSWERED_WITH_WARNING" if transcript_kind == "ASR_DRAFT" else "READY"
             grounding_status = "WARNING" if transcript_kind == "ASR_DRAFT" else "GROUNDED"
             error_code = None
@@ -242,7 +310,7 @@ class AssistantRepository:
         with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
-                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "claimsValidated": bool(claims)}), query_id),
+                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "claimsValidated": bool(claims), "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
             ).fetchone()
             if evidence_ids:
                 connection.execute("DELETE FROM assistant_query_evidence WHERE query_id=%s", (query_id,))
@@ -264,7 +332,7 @@ class AssistantRepository:
 class AssistantWorker:
     def __init__(self) -> None:
         self.repository = AssistantRepository()
-        self.lease = PostgresGpuLease(self.repository.conninfo)
+        self.lease = PostgresGpuLease(self.repository.conninfo, priority=50)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None
@@ -294,7 +362,7 @@ class AssistantWorker:
             return
         try:
             if assistant_mode == "GENERAL_CHAT":
-                context, valid, transcript_kind = "", {}, "GENERAL"
+                context, valid, transcript_kind, context_error = "", {}, "GENERAL", None
                 system_prompt = (
                     "Отвечай по-русски как доброжелательный универсальный помощник. "
                     "Это обычный чат, поэтому можно объяснять общие темы и помогать с текстами. "
@@ -304,9 +372,10 @@ class AssistantWorker:
                 user_content = f"Вопрос: {query}"
             else:
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
-                context, valid, transcript_kind = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)
+                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)
                 if not context:
-                    raise RuntimeError("assistant_context_empty")
+                    await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error)
+                    return
                 system_prompt = (
                     "Отвечай по-русски. Используй только приведённые сегменты стенограмм. "
                     "Не выдумывай факты. Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds."
@@ -323,7 +392,7 @@ class AssistantWorker:
                 try:
                     client = self._client_for(server.base_url)
                     result = await client.invoke_json(messages, ASSISTANT_SCHEMA)
-                    if assistant_mode != "GENERAL_CHAT" and not claims_are_structurally_grounded(result, valid, assistant_mode):
+                    if assistant_mode != "GENERAL_CHAT" and not claims_are_semantically_grounded(result, valid, assistant_mode):
                         # One controlled retry is allowed.  The second result
                         # is still validated by persist(), so a malformed or
                         # unsupported answer can never become READY.

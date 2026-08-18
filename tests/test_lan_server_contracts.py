@@ -279,6 +279,20 @@ def test_lan_launcher_waits_for_worker_health_not_only_running_state():
     assert 'if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true") { $required += "summary-worker" }' in doctor
 
 
+def test_lan_launcher_persists_qwen_and_assistant_flags_for_startup():
+    launcher = read("scripts/start-whisperx-lan-server.ps1")
+    startup = read("scripts/install-whisperx-lan-startup-task.ps1")
+    assert 'if ($autoSummary -eq "true") { $EnableQwen = $true }' in launcher
+    assert 'assistant = if ($assistantEnabled -eq "true" -or $EnableAssistant) { "ENABLED" }' in launcher
+    assert "-EnableQwen" in startup and "-EnableAssistant" in startup
+
+
+def test_summary_worker_image_contains_shared_runtime_modules():
+    dockerfile = read("workers/summary_worker/Dockerfile")
+    assert "COPY workers/db_pool.py /srv/workers/db_pool.py" in dockerfile
+    assert "COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py" in dockerfile
+
+
 def test_installer_requires_pinned_ffmpeg_payload_and_manifest():
     installer = read("apps/desktop/Installer/Install-Service.ps1")
     publish = read("scripts/publish-desktop.ps1")

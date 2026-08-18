@@ -73,6 +73,22 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             if (!_backend.HasSession)
                 return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_api_session_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
             var requestedMode = root.TryGetProperty("requestedMode", out var modeElement) ? modeElement.GetString() : "AUTO";
+            // A question must never compete with active capture. This applies
+            // to general chat as well: Voice Host shares the same microphone
+            // and TTS timeline as Recorder, while meeting answers must wait
+            // for a completed transcript in any case.
+            try
+            {
+                var recorderStatus = await _commands.StatusAsync(cancellationToken).ConfigureAwait(false);
+                if (recorderStatus.State is "Recording" or "Paused" or "Starting" or "Finalizing"
+                    || recorderStatus.SessionStatus?.CaptureState is "RECORDING" or "PAUSED")
+                    return new(false, "ASSISTANT_RECORDING_ACTIVE", recorderStatus.State, TraceId: assistantTraceId, CommandId: assistantCommandId);
+            }
+            catch (Exception ex)
+            {
+                _log?.Invoke(ex);
+                return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: "recording_state_unavailable", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            }
             var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, _activeMeeting.MeetingId, null, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
             if (accepted is null)
                 return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);

@@ -28,7 +28,8 @@ Copy-Item .env.example .env
 | `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | Совместимость загрузки pyannote | `1` |
 | `HF_TOKEN` | Доступ к Hugging Face/diarization | Локальный секрет, можно оставить пустым для degraded |
 | `DIARIZATION_MODE` | Политика diarization | `preferred` |
-| `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen | `false` для Transcript MVP |
+  | `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
+  | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
 

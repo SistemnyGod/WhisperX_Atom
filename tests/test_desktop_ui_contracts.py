@@ -246,7 +246,8 @@ def test_meetings_support_file_drop_without_changing_import_backend_contract():
     assert 'DragOver="ImportDropZone_DragOver"' in page
     assert 'Drop="ImportDropZone_Drop"' in page
     assert 'GetStorageItemsAsync' in codebehind
-    assert 'ImportFileAsync(file.Path' in codebehind
+    assert 'ImportFileWithProgressAsync' in codebehind
+    assert 'ImportFilesAsync(files)' in codebehind
 
 
 def test_title_bar_statuses_explain_runtime_health():

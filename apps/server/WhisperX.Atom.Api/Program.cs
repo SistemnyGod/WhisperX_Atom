@@ -902,7 +902,9 @@ static bool RoleAllows(string role, string method, PathString path)
     if (HttpMethods.IsPatch(method)) return true;
     if (HttpMethods.IsDelete(method) && path.StartsWithSegments("/api/assistant/conversations")) return true;
     return HttpMethods.IsPost(method) &&
-        (path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/conversations") ||
+        (path == "/api/meetings" ||
+         (path.StartsWithSegments("/api/meetings/") && path.Value?.EndsWith("/uploads", StringComparison.OrdinalIgnoreCase) == true) ||
+         path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/conversations") ||
          path.Value?.Contains("/speakers/merge", StringComparison.OrdinalIgnoreCase) == true ||
          path.Value?.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) == true ||
          path.Value?.EndsWith("/transcript/reprocess", StringComparison.OrdinalIgnoreCase) == true);
@@ -1242,6 +1244,10 @@ app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRe
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     if (request?.Profile is { Length: > 40 } || request?.PromptVersion is { Length: > 120 } || request?.Reason is { Length: > 500 })
         return Results.BadRequest(new { error = "summary_options_too_long" });
+    var eligibility = await store.GetSummaryEligibilityAsync(id, request?.TranscriptVersion);
+    if (!eligibility.HasTranscript) return Results.Conflict(new { error = "transcript_required" });
+    if (!eligibility.Allowed)
+        return Results.Conflict(new { error = "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY", reason = eligibility.Reason });
     var jobId = await store.QueueSummaryAsync(id, CurrentUserId(context), request);
     if (jobId is null) return Results.Conflict(new { error = "transcript_required" });
 
@@ -1472,11 +1478,21 @@ app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) 
 // retained as a recovery fallback for assets whose media derivatives have not
 // been built yet; access is still checked against the meeting before the path
 // is resolved.
-app.MapGet("/api/media/{id:guid}/download", async (Guid id, HttpContext context) =>
+app.MapGet("/api/media/{id:guid}/download", async (Guid id, string? variant, HttpContext context) =>
 {
     var media = await db.GetMediaAsync(id);
     if (media is null || !await CanAccessMeetingAsync(context, media.MeetingId)) return Results.NotFound();
-    var storageKey = media.ArchiveStorageKey ?? media.StorageKey;
+
+    // Imported video has two intentionally distinct assets: the untouched
+    // source and the derived FLAC archive. Never return a FLAC payload using
+    // the original .mp4/.mkv filename.
+    var requestedVariant = string.IsNullOrWhiteSpace(variant) ? "archive" : variant.Trim().ToLowerInvariant();
+    if (requestedVariant is not ("archive" or "original"))
+        return Results.BadRequest(new { error = "invalid_media_download_variant" });
+    var original = requestedVariant == "original";
+    if (!original && string.IsNullOrWhiteSpace(media.ArchiveStorageKey) && MediaPolicy.IsVideoExtension(media.OriginalName))
+        return Results.NotFound();
+    var storageKey = original ? media.StorageKey : media.ArchiveStorageKey ?? media.StorageKey;
     if (string.IsNullOrWhiteSpace(storageKey)) return Results.NotFound();
 
     string path;
@@ -1484,8 +1500,9 @@ app.MapGet("/api/media/{id:guid}/download", async (Guid id, HttpContext context)
     catch (InvalidOperationException) { return Results.NotFound(); }
     if (!File.Exists(path)) return Results.NotFound();
 
-    var extension = Path.GetExtension(media.OriginalName);
+    var extension = original ? Path.GetExtension(media.OriginalName) : Path.GetExtension(storageKey);
     if (string.IsNullOrWhiteSpace(extension)) extension = Path.GetExtension(storageKey);
+    if (string.IsNullOrWhiteSpace(extension)) extension = original ? ".bin" : ".flac";
     var contentType = extension.ToLowerInvariant() switch
     {
         ".flac" => "audio/flac",
@@ -1493,9 +1510,17 @@ app.MapGet("/api/media/{id:guid}/download", async (Guid id, HttpContext context)
         ".mp3" => "audio/mpeg",
         ".m4a" => "audio/mp4",
         ".ogg" or ".opus" => "audio/ogg",
+        ".mp4" => "video/mp4",
+        ".mkv" => "video/x-matroska",
+        ".mov" => "video/quicktime",
+        ".webm" => "video/webm",
+        ".avi" => "video/x-msvideo",
         _ => "application/octet-stream"
     };
-    var downloadName = Path.GetFileName(media.OriginalName);
+    var originalBaseName = Path.GetFileNameWithoutExtension(media.OriginalName);
+    var downloadName = original
+        ? Path.GetFileName(media.OriginalName)
+        : string.IsNullOrWhiteSpace(originalBaseName) ? $"meeting-{id:N}{extension}" : originalBaseName + extension;
     if (string.IsNullOrWhiteSpace(downloadName)) downloadName = $"meeting-{id:N}{extension}";
     return Results.File(File.OpenRead(path), contentType, downloadName, enableRangeProcessing: true);
 });
@@ -1694,7 +1719,9 @@ public static class MediaPolicy
 {
     public const long MaxUploadBytes = 8L * 1024 * 1024 * 1024;
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
+    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".mkv", ".mov", ".webm", ".avi" };
     public static bool IsAllowedExtension(string name) => Extensions.Contains(Path.GetExtension(name));
+    public static bool IsVideoExtension(string name) => VideoExtensions.Contains(Path.GetExtension(name));
 }
 
 public static class MeetingStorageCleanup

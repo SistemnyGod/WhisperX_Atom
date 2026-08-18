@@ -376,7 +376,7 @@ def parse_deadline(value: Any) -> datetime | None:
 class SummaryWorker:
     def __init__(self) -> None:
         self.repository = SummaryRepository()
-        self._gpu_lease = PostgresGpuLease(self.repository.conninfo)
+        self._gpu_lease = PostgresGpuLease(self.repository.conninfo, priority=100)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None

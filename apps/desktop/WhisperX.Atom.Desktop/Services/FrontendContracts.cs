@@ -85,6 +85,7 @@ public interface IBackendService : IDisposable
     Task<DesktopMeeting> CreateMeetingAsync(string title, string? description = null, CancellationToken cancellationToken = default);
     Task<DesktopAgentEnrollment?> EnrollAgentAsync(string name, string secret, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);
+    Task<DesktopMeeting> ImportFileWithProgressAsync(string path, string? title, IProgress<DesktopImportProgress>? progress, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default);
@@ -107,6 +108,7 @@ public interface IBackendService : IDisposable
     Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default);
     Task<string?> DownloadPreviewAsync(Guid mediaId, CancellationToken cancellationToken = default);
     Task<bool> DownloadMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default);
+    Task<bool> DownloadOriginalMediaAsync(Guid mediaId, string destinationPath, CancellationToken cancellationToken = default);
 }
 
 public sealed record AssistantEvidenceItem(

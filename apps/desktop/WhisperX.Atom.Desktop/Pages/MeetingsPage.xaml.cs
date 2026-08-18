@@ -268,7 +268,7 @@ public sealed partial class MeetingsPage : Page
         try
         {
             ErrorInfoBar.IsOpen = false;
-            await _services.Backend.ImportFileAsync(file.Path, cancellationToken: _pageCts.Token);
+            await ImportFilesAsync(new[] { file });
             await _viewModel.RefreshAsync(_pageCts.Token);
             UpdateListState();
         }
@@ -299,13 +299,60 @@ public sealed partial class MeetingsPage : Page
             var files = items.OfType<StorageFile>().ToList();
             if (files.Count == 0) return;
             ErrorInfoBar.IsOpen = false;
-            foreach (var file in files)
-                await _services.Backend.ImportFileAsync(file.Path, Path.GetFileNameWithoutExtension(file.Name), _pageCts.Token);
+            await ImportFilesAsync(files);
             await _viewModel.RefreshAsync(_pageCts.Token);
             UpdateListState();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось импортировать перетащенные файлы.")); }
+    }
+
+    private async Task ImportFilesAsync(IEnumerable<StorageFile> files)
+    {
+        if (_services is null || _pageCts is null) return;
+        var batch = files.ToList();
+        if (batch.Count == 0) return;
+        ImportProgressPanel.Visibility = Visibility.Visible;
+        foreach (var file in batch)
+        {
+            var progress = new Progress<DesktopImportProgress>(UpdateImportProgress);
+            await _services.Backend.ImportFileWithProgressAsync(
+                file.Path,
+                Path.GetFileNameWithoutExtension(file.Name),
+                progress,
+                _pageCts.Token);
+        }
+
+        ImportProgressText.Text = batch.Count == 1
+            ? "Файл принят. Аудио будет подготовлено и отправлено на распознавание."
+            : $"Файлы приняты: {batch.Count}. Обработка выполняется в фоне.";
+        ImportProgressPercentText.Text = "100%";
+        ImportProgressBar.Value = 100;
+    }
+
+    private void UpdateImportProgress(DesktopImportProgress progress)
+    {
+        ImportProgressPanel.Visibility = Visibility.Visible;
+        var percent = (int)Math.Round(progress.Fraction * 100, MidpointRounding.AwayFromZero);
+        ImportProgressBar.Value = percent;
+        ImportProgressPercentText.Text = $"{percent}%";
+        ImportProgressText.Text = progress.Stage switch
+        {
+            "CREATING" => progress.Message ?? "Создаём карточку совещания…",
+            "RESUMING" => progress.Message ?? "Продолжаем загрузку…",
+            "UPLOADING" => $"Загрузка: {FormatImportBytes(progress.UploadedBytes)} из {FormatImportBytes(progress.TotalBytes)}",
+            "PROCESSING" => progress.Message ?? "Файл загружен. Сервер готовит аудио…",
+            _ => progress.Message ?? "Подготавливаем импорт…"
+        };
+    }
+
+    private static string FormatImportBytes(long bytes)
+    {
+        string[] units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+        var value = Math.Max(0, (double)bytes);
+        var index = 0;
+        while (value >= 1024 && index < units.Length - 1) { value /= 1024; index++; }
+        return index == 0 ? $"{value:0} {units[index]}" : $"{value:0.0} {units[index]}";
     }
 
     private async void RefreshWorkspaceButton_Click(object sender, RoutedEventArgs e)
@@ -478,6 +525,12 @@ public sealed partial class MeetingsPage : Page
         await DownloadAudioAsync(media);
     }
 
+    private async void DownloadOriginalButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: DesktopMedia media } || _workspace is null || _pageCts is null) return;
+        await DownloadOriginalAsync(media);
+    }
+
     private async void DownloadPrimaryAudioButton_Click(object sender, RoutedEventArgs e)
     {
         if (_workspace?.Media.FirstOrDefault() is not { } media)
@@ -491,7 +544,8 @@ public sealed partial class MeetingsPage : Page
     private async Task DownloadAudioAsync(DesktopMedia media)
     {
         if (_workspace is null || _pageCts is null) return;
-        var extension = Path.GetExtension(media.OriginalName);
+        var extension = Path.GetExtension(media.ArchiveStorageKey);
+        if (string.IsNullOrWhiteSpace(extension)) extension = Path.GetExtension(media.OriginalName);
         if (string.IsNullOrWhiteSpace(extension)) extension = ".flac";
         var baseName = SanitizeFileName(Path.GetFileNameWithoutExtension(media.OriginalName));
         if (string.IsNullOrWhiteSpace(baseName)) baseName = SanitizeFileName(_workspace.Meeting?.Title ?? "meeting-audio");
@@ -517,6 +571,36 @@ public sealed partial class MeetingsPage : Page
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось скачать аудио совещания.")); }
+    }
+
+    private async Task DownloadOriginalAsync(DesktopMedia media)
+    {
+        if (_workspace is null || _pageCts is null) return;
+        var extension = Path.GetExtension(media.OriginalName);
+        if (string.IsNullOrWhiteSpace(extension)) extension = ".bin";
+        var baseName = SanitizeFileName(Path.GetFileNameWithoutExtension(media.OriginalName));
+        if (string.IsNullOrWhiteSpace(baseName)) baseName = SanitizeFileName(_workspace.Meeting?.Title ?? "meeting-source");
+        try
+        {
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.VideosLibrary,
+                SuggestedFileName = baseName + extension
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            picker.FileTypeChoices.Add("Исходный медиафайл", new List<string> { extension });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+
+            PreviewStatusText.Text = "Скачивание исходного файла…";
+            var downloaded = await _workspace.DownloadOriginalMediaAsync(media, file.Path, _pageCts.Token);
+            PreviewStatusText.Text = downloaded
+                ? $"Исходный файл сохранён: {file.Path}"
+                : "Исходный файл пока недоступен.";
+            if (!downloaded) ShowError("Сервер ещё не подготовил или не сохранил исходный медиафайл.");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось скачать исходный медиафайл.")); }
     }
 
     private void TranscriptSearchBox_TextChanged(object sender, TextChangedEventArgs e)

@@ -36,6 +36,15 @@
                                 <TextBlock Text="Перетащите аудио или видео сюда · MP3, WAV, FLAC, M4A, MP4" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
+                        <Border x:Name="ImportProgressPanel" Visibility="Collapsed" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1" CornerRadius="7" Padding="12,10">
+                            <Grid RowDefinitions="Auto,Auto" RowSpacing="7">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <TextBlock x:Name="ImportProgressText" Text="Подготавливаем импорт…" Foreground="{StaticResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock x:Name="ImportProgressPercentText" Grid.Column="1" Text="0%" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                </Grid>
+                                <ProgressBar x:Name="ImportProgressBar" Grid.Row="1" Minimum="0" Maximum="100" Value="0" Height="6" />
+                            </Grid>
+                        </Border>
                         <Grid Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="100,*,150">
                             <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
                             <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
@@ -374,6 +383,7 @@
                                                         <TextBlock Grid.Column="1" Text="{Binding SizeBytes}" Foreground="{StaticResource MutedTextBrush}" />
                                                         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
                                                             <Button Content="Скачать аудио" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="DownloadAudioButton_Click" />
+                                                            <Button Content="Скачать исходник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="DownloadOriginalButton_Click" />
                                                             <Button Content="Открыть preview" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenPreviewButton_Click" />
                                                         </StackPanel>
                                                     </Grid>
