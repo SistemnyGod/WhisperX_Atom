@@ -9,6 +9,8 @@ namespace WhisperX_Atom_Desktop.Services;
 public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 {
     private readonly RecordingCommandService _commands;
+    private readonly IBackendService _backend;
+    private readonly ActiveMeetingContext _activeMeeting;
     private readonly Action<Exception>? _log;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -16,9 +18,11 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private readonly Dictionary<string, (DateTimeOffset ExpiresAt, BrokerResponse Response)> _commandCache = new(StringComparer.Ordinal);
     private Task? _loop;
 
-    public DesktopVoiceBrokerServer(RecordingCommandService commands, Action<Exception>? log = null)
+    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, Action<Exception>? log = null)
     {
         _commands = commands;
+        _backend = backend;
+        _activeMeeting = activeMeeting;
         _log = log;
     }
 
@@ -50,8 +54,46 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private async Task<BrokerResponse> HandleAsync(JsonElement root, CancellationToken cancellationToken)
     {
         if (!root.TryGetProperty("command", out var commandElement)
-            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT"))
+            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT" and not "ASSISTANT_QUESTION" and not "ASSISTANT_RESULT"))
             return new(false, "VOICE_COMMAND_REJECTED", Detail: "unsupported_command");
+
+        if (string.Equals(commandElement.GetString(), "ASSISTANT_QUESTION", StringComparison.OrdinalIgnoreCase))
+        {
+            var question = root.TryGetProperty("question", out var questionElement) ? questionElement.GetString() : null;
+            var assistantTraceId = root.TryGetProperty("traceId", out var assistantTraceElement) ? assistantTraceElement.GetString() : null;
+            var assistantCommandId = root.TryGetProperty("commandId", out var assistantCommandElementId) ? assistantCommandElementId.GetString() : null;
+            var assistantTestMode = root.TryGetProperty("testMode", out var assistantTestElement) && assistantTestElement.ValueKind == JsonValueKind.True;
+            if (string.IsNullOrWhiteSpace(question)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "question_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            if (assistantTestMode)
+            {
+                var test = new BrokerResponse(true, RecorderState: "TEST_ONLY", SpokenText: "Тест вопроса завершён", Detail: question, TraceId: assistantTraceId, CommandId: assistantCommandId);
+                CacheCommand(assistantCommandId, test);
+                return test;
+            }
+            if (!_backend.HasSession)
+                return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_api_session_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            var requestedMode = root.TryGetProperty("requestedMode", out var modeElement) ? modeElement.GetString() : "AUTO";
+            var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, _activeMeeting.MeetingId, null, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
+            if (accepted is null)
+                return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            var assistantResponse = new BrokerResponse(true, RecorderState: "ASSISTANT_QUEUED", SpokenText: "Вопрос принят, отвечу после обработки", Detail: accepted.ResolvedMode, TraceId: assistantTraceId, CommandId: assistantCommandId, QueryId: accepted.QueryId, AssistantStatus: accepted.Status, ResolvedMode: accepted.ResolvedMode);
+            CacheCommand(assistantCommandId, assistantResponse);
+            return assistantResponse;
+        }
+
+        if (string.Equals(commandElement.GetString(), "ASSISTANT_RESULT", StringComparison.OrdinalIgnoreCase))
+        {
+            var queryText = root.TryGetProperty("queryId", out var queryElement) ? queryElement.GetString() : null;
+            var resultTraceId = root.TryGetProperty("traceId", out var resultTraceElement) ? resultTraceElement.GetString() : null;
+            var resultCommandId = root.TryGetProperty("commandId", out var resultCommandElementId) ? resultCommandElementId.GetString() : null;
+            if (!Guid.TryParse(queryText, out var queryId)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "query_id_invalid", TraceId: resultTraceId, CommandId: resultCommandId);
+            if (!_backend.HasSession) return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", TraceId: resultTraceId, CommandId: resultCommandId);
+            var query = await _backend.GetAssistantQueryAsync(queryId, cancellationToken).ConfigureAwait(false);
+            if (query is null) return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "query_not_found", TraceId: resultTraceId, CommandId: resultCommandId);
+            var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
+            var assistantSpoken = terminal && !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer) ? query.VoiceAnswer ?? query.Answer : null;
+            return new(terminal && assistantSpoken is not null, terminal && assistantSpoken is not null ? null : query.ErrorCode ?? (terminal ? "ASSISTANT_NO_GROUNDED_ANSWER" : null), query.Status, SpokenText: assistantSpoken, Detail: query.Status, TraceId: resultTraceId, CommandId: resultCommandId, QueryId: queryText, AssistantStatus: query.Status, ResolvedMode: query.AssistantMode);
+        }
 
         if (string.Equals(commandElement.GetString(), "RECORD_EVENT", StringComparison.OrdinalIgnoreCase))
         {
@@ -173,5 +215,5 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     }
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
-        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null);
+        string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null, string? QueryId = null, string? AssistantStatus = null, string? ResolvedMode = null);
 }

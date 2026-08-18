@@ -11,8 +11,24 @@ from pathlib import Path
 from whisperx_atom.audio_signal import analyze_wav
 
 
+# Recording is explicitly user-controlled and may last for hours.  Keep the
+# size guard as the hard resource boundary, but do not impose a hidden four
+# hour processing cutoff.  Operators may still set MAX_MEDIA_DURATION_MS to a
+# positive value when a deployment deliberately wants a policy limit; ``0``
+# (the default) means unlimited duration.
 MAX_BYTES = int(os.getenv("MAX_MEDIA_BYTES", str(8 * 1024 * 1024 * 1024)))
-MAX_DURATION_MS = int(os.getenv("MAX_MEDIA_DURATION_MS", str(4 * 60 * 60 * 1000)))
+
+
+def _duration_limit_from_env() -> int:
+    try:
+        return max(0, int(os.getenv("MAX_MEDIA_DURATION_MS", "0")))
+    except (TypeError, ValueError):
+        # A malformed optional cap must not prevent the media worker from
+        # starting or turn into an accidental recording stop.
+        return 0
+
+
+MAX_DURATION_MS = _duration_limit_from_env()
 
 
 @dataclass(frozen=True)
@@ -49,7 +65,7 @@ def probe_audio(path: Path) -> dict:
     duration_ms = int(duration * 1000)
     if duration_ms <= 0:
         raise ValueError("media duration is unavailable")
-    if duration_ms > MAX_DURATION_MS:
+    if MAX_DURATION_MS > 0 and duration_ms > MAX_DURATION_MS:
         raise ValueError("media exceeds configured duration limit")
     return {"streams": streams, "format": payload.get("format", {}), "duration_ms": duration_ms}
 

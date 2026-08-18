@@ -74,6 +74,7 @@ public interface IBackendService : IDisposable
     Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
     Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
     Task<bool> EnsureAuthenticatedAsync(CancellationToken cancellationToken = default);
@@ -135,6 +136,17 @@ public sealed record DesktopAssistantMessageCreateResult(DesktopAssistantMessage
 
 public sealed record MeetingNavigationTarget(string MeetingId, string? SegmentId = null, long? StartMs = null);
 public sealed record MeetingNavigationRequest(FrontendServices Services, MeetingNavigationTarget Target);
+
+public sealed class ActiveMeetingContext
+{
+    private readonly object _gate = new();
+    public Guid? MeetingId { get { lock (_gate) return _meetingId; } }
+    public string? Title { get { lock (_gate) return _title; } }
+    private Guid? _meetingId;
+    private string? _title;
+    public void Set(Guid meetingId, string? title) { lock (_gate) { _meetingId = meetingId; _title = title; } }
+    public void Clear() { lock (_gate) { _meetingId = null; _title = null; } }
+}
 
 public sealed class FrontendNavigationState
 {
@@ -229,6 +241,7 @@ public sealed class FrontendServices
     public IBackendService Backend { get; }
     public ISettingsStore Settings { get; }
     public FrontendNavigationState Navigation { get; } = new();
+    public ActiveMeetingContext ActiveMeeting { get; } = new();
     public AgentBootstrapCoordinator AgentBootstrap { get; }
     public ProcessingJobTracker JobTracker { get; }
     public RecorderServiceController RecorderService { get; }

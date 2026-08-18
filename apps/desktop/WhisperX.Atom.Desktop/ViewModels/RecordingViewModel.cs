@@ -952,11 +952,14 @@ public sealed class RecordingViewModel : ObservableObject
 
     private async Task TrackSessionAsync(string sessionId, CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddHours(24);
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
-            while (DateTimeOffset.UtcNow < deadline && await timer.WaitForNextTickAsync(cancellationToken))
+            // Session tracking has no wall-clock deadline.  A meeting may run
+            // for hours and offline delivery may legitimately remain pending;
+            // cancellation/terminal state, rather than elapsed time, ends the
+            // poller.
+            while (await timer.WaitForNextTickAsync(cancellationToken))
             {
                 var response = await _services.Recorder.GetSessionStatusAsync(sessionId, cancellationToken);
                 if (!response.Ok || response.SessionStatus is null) continue;

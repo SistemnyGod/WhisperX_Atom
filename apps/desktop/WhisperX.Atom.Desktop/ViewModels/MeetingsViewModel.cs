@@ -290,6 +290,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
 
     public void ClearSelection()
     {
+        _services.ActiveMeeting.Clear();
         Meeting = null;
         ErrorText = string.Empty;
         PreviewPath = null;
@@ -306,6 +307,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         }
 
         Meeting = meeting;
+        _services.ActiveMeeting.Set(meetingId, meeting.Title);
         IsLoading = true;
         ErrorText = string.Empty;
         PreviewPath = null;

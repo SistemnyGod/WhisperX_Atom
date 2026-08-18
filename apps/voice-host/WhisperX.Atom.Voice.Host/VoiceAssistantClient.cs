@@ -51,7 +51,7 @@ internal sealed class VoiceAssistantClient : IDisposable
         for (var attempt = 0; attempt < 90; attempt++)
         {
             var current = await GetAsync(id, cancellationToken);
-            if (current.Status is "READY" or "FAILED" or "NEEDS_REVIEW") return current;
+            if (current.Status is "READY" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED") return current;
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         }
         return new VoiceAssistantResult(id, "QUEUED", null, "\u0417\u0430\u043f\u0440\u043e\u0441 \u043f\u0440\u0438\u043d\u044f\u0442, \u043e\u0442\u0432\u0435\u0447\u0443 \u043f\u043e\u0441\u043b\u0435 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438.", null, []);

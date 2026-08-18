@@ -882,7 +882,12 @@ static bool IsAdministrator(HttpContext context) => context.Items.TryGetValue("u
 
 async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
 {
-    if (IsPrivileged(context) || context.Items.ContainsKey("voice_host")) return true;
+    // Assistant access is always evaluated against the authenticated Desktop
+    // user. The legacy Voice Host token is intentionally not an ownership
+    // bypass; managed Voice Host requests arrive through the Desktop broker.
+    // context.Items.ContainsKey("voice_host") is therefore diagnostic-only,
+    // never an authorization decision.
+    if (IsPrivileged(context)) return true;
     var userId = CurrentUserId(context);
     return userId.HasValue && await db.UserOwnsMeetingAsync(meetingId, userId.Value);
 }
@@ -1287,7 +1292,8 @@ app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRe
     var userId = CurrentUserId(context);
     if (userId is null) return Results.Unauthorized();
     var scope = request.ScopeType?.Trim().ToUpperInvariant();
-    if (scope == "GLOBAL" && !IsPrivileged(context)) return Results.Forbid();
+    if (scope == "GLOBAL" && !IsPrivileged(context)
+        && request.AssistantMode?.Trim().ToUpperInvariant() is not ("MEETING_MEMORY" or "MEETING_HISTORY")) return Results.Forbid();
     if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
     if (scope is not ("MEETING" or "GLOBAL" or "GENERAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
     var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId, request.AssistantMode);
@@ -1339,9 +1345,53 @@ app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{message
         if (message is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
         await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(message)}\n\n", cancellationToken);
         await response.Body.FlushAsync(cancellationToken);
-        if (message.Status is "READY" or "FAILED" or "NEEDS_REVIEW") return;
+        if (message.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
         await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
     }
+});
+// Unified entry point used by Desktop text chat and the managed Voice Host.
+// Voice never receives a server token: the Desktop broker forwards this call
+// with the user's authenticated API session and its active meeting context.
+app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var question = request.Question?.Trim() ?? string.Empty;
+    if (question.Length is 0 or > 2000) return Results.BadRequest(new { error = "assistant_query_invalid" });
+    if (request.ActiveMeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
+        return Results.NotFound();
+
+    var route = UnifiedProductStore.RouteAssistantRequest(question, request.RequestedMode, request.ActiveMeetingId, IsPrivileged(context));
+    if (!string.IsNullOrWhiteSpace(route.ErrorCode))
+        return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
+
+    var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
+    var resolvedMeetingId = route.ResolvedMode == "CURRENT_MEETING" ? request.ActiveMeetingId : null;
+    // Keep voice and text requests in the same scoped conversation. A caller
+    // may provide an existing conversation; otherwise create one atomically
+    // in the resolved scope so follow-up questions retain context.
+    var conversationId = request.ConversationId;
+    if (conversationId is null)
+    {
+        var scope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : resolvedMeetingId.HasValue ? "MEETING" : "GLOBAL";
+        var conversation = await store.CreateAssistantConversationAsync(userId.Value, "Мифодий", scope, resolvedMeetingId, route.ResolvedMode);
+        conversationId = conversation?.Id;
+    }
+    var query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, route.ResolvedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
+    if (query is null)
+        return Results.Conflict(new { error = "assistant_context_not_ready", status = "TRANSCRIPT_NOT_READY" });
+    return Results.Accepted($"/api/assistant/queries/{query.Id}", new
+    {
+        queryId = query.Id,
+        conversationId,
+        resolvedMode = query.AssistantMode,
+        meetingId = query.MeetingId,
+        status = query.Status,
+        source = query.Source,
+        routerConfidence = route.Confidence,
+        pollUrl = $"/api/assistant/queries/{query.Id}",
+        eventsUrl = $"/api/assistant/queries/{query.Id}/events"
+    });
 });
 app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1353,14 +1403,14 @@ app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, Http
         if (CurrentUserId(context) is null) return Results.Unauthorized();
         if (request.MeetingId is not null) return Results.BadRequest(new { error = "general_chat_cannot_use_meeting" });
     }
-    else if (request.MeetingId is null && !IsPrivileged(context) && !context.Items.ContainsKey("voice_host"))
+    else if (request.MeetingId is null && !IsPrivileged(context))
         return Results.BadRequest(new { error = "meeting_required" });
     var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query, CurrentUserId(context), request.AssistantMode);
     return query is null ? Results.BadRequest(new { error = "meeting_not_ready_or_query_invalid" }) : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
 });
 app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
-    var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context) || context.Items.ContainsKey("voice_host"));
+    var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context));
     return query is null ? Results.NotFound() : Results.Ok(query);
 });
 app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
@@ -1369,11 +1419,11 @@ app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpContex
     response.Headers.CacheControl = "no-cache";
     for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
     {
-        var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context) || context.Items.ContainsKey("voice_host"));
+        var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context));
         if (query is null) { response.StatusCode = 404; return; }
         await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(query)}\n\n", cancellationToken);
         await response.Body.FlushAsync(cancellationToken);
-        if (query.Status is "READY" or "FAILED" or "NEEDS_REVIEW") return;
+        if (query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
         await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
     }
 });
@@ -1543,6 +1593,7 @@ public record CreateTrackRequest(string TrackType, string? DeviceId, string? Dev
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
+public record AssistantRequestRequest(string Question, string? RequestedMode = "AUTO", Guid? ActiveMeetingId = null, Guid? ConversationId = null, string? Source = "DESKTOP", string? CommandId = null, string? TraceId = null);
 public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
 public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);

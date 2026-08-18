@@ -87,6 +87,7 @@
                             </Border>
                         </Grid>
                         <Button x:Name="StartButton" Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="{Binding CanAttemptStart}" Click="StartButton_Click" AutomationProperties.Name="Начать запись" ToolTipService.ToolTip="Запустить локальную запись" HorizontalAlignment="Stretch" MinHeight="50" FontSize="15" />
+                        <TextBlock Text="Запись не останавливается по таймеру. Завершите её кнопкой «Остановить запись» или голосовой командой." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                         <TextBlock Text="{Binding StartReadinessMessage}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     </StackPanel>
 
@@ -247,6 +248,7 @@
                     <TextBlock Text="Акустика кабинета" Style="{StaticResource WorkspaceLabelStyle}" />
                     <ComboBox x:Name="AcousticProfileSelector" ItemsSource="{Binding AcousticProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding AcousticProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectDevices}" SelectionChanged="AcousticProfile_SelectionChanged" Style="{StaticResource FormComboBoxStyle}" AutomationProperties.Name="Акустический профиль" />
                     <TextBlock Text="Авто выберет усиление для дальнего микрофона; исходная запись не изменяется." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                    <TextBlock Text="Для большой комнаты и 8+ участников рекомендуется USB-конференц-микрофон в центре стола. Усиление улучшает распознавание, но не заменяет физический охват микрофона." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
                         <StackPanel Spacing="7">
                             <TextBlock Text="Проверка кабинета · 10 секунд" Style="{StaticResource SectionTitleStyle}" />

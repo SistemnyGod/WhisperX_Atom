@@ -15,6 +15,9 @@ from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
+# The original terminal set remains part of the compatibility contract:
+# status NOT IN ('READY','FAILED','NEEDS_REVIEW'). New explicit terminal
+# states are appended below rather than changing the meaning of old clients.
 
 ASSISTANT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -52,7 +55,7 @@ class AssistantRepository:
     def renew_lease(self, query_id: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')",
+                "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')",
                 (query_id,),
             )
             if message_id:
@@ -61,23 +64,23 @@ class AssistantRepository:
                     (socket.gethostname(), message_id),
                 )
 
-    def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None, str] | None:
+    def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None, str, str | None] | None:
         with self._db.connection() as connection:
-            row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id,assistant_mode FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
-            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY")) if row else None
+            row = connection.execute("SELECT query,meeting_id,status,conversation_id,user_message_id,assistant_message_id,assistant_mode,user_id FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
+            return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY"), str(row[7]) if row[7] else None) if row else None
 
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with self._db.connection() as connection:
             row = connection.execute("""
                 UPDATE assistant_queries SET status=%s,error_code=%s
-                WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW')
+                WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
                 RETURNING id,assistant_message_id
                 """, (status, error, query_id)).fetchone()
             if row and row[1]:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
 
-    def context(self, meeting_id: str | None, query: str = "") -> tuple[str, dict[str, tuple[str, int, int]]]:
+    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None) -> tuple[str, dict[str, tuple[str, int, int]]]:
         with self._db.connection() as connection:
             if meeting_id:
                 rows = connection.execute(
@@ -86,7 +89,7 @@ class AssistantRepository:
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
-                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND COALESCE(s.is_hidden,false)=false
+                    WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED']) AND COALESCE(s.is_hidden,false)=false
                     ORDER BY s.ordinal LIMIT 1200
                     """,
                     (meeting_id,),
@@ -98,9 +101,10 @@ class AssistantRepository:
                     FROM transcript_segments s JOIN transcripts t ON t.id=s.transcript_id
                     LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
                     JOIN meetings m ON m.id=t.meeting_id
-                    WHERE t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND m.created_at >= now()-interval '90 days' AND COALESCE(s.is_hidden,false)=false
+                    WHERE (%s IS NULL OR m.owner_id=%s) AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED']) AND m.created_at >= now()-interval '90 days' AND COALESCE(s.is_hidden,false)=false
                     ORDER BY m.created_at DESC,s.ordinal LIMIT 2400
-                    """
+                    """,
+                    (owner_user_id, owner_user_id),
                 ).fetchall()
         max_chars = max(4000, int(os.getenv("ASSISTANT_MAX_CONTEXT_CHARS", "36000")))
         if rows:
@@ -157,17 +161,43 @@ class AssistantRepository:
         voice = str(result.get("voice_answer", answer)).strip()
         voice = re.split(r"(?<=[.!?])\s+", voice)
         voice = " ".join(voice[:3])[:500].strip()
-        status = "READY" if assistant_mode == "GENERAL_CHAT" or evidence_ids else "NEEDS_REVIEW"
+        # A meeting answer without immutable segment evidence is not a valid
+        # answer. Keep the query visible to Desktop/Voice, but make the
+        # missing-grounding state explicit so it cannot be spoken as fact or
+        # feed an automatic summary.
+        if assistant_mode == "GENERAL_CHAT":
+            status = "READY"
+            grounding_status = "GROUNDED"
+            error_code = None
+        elif evidence_ids and answer:
+            status = "READY"
+            grounding_status = "GROUNDED"
+            error_code = None
+        else:
+            status = "NO_EVIDENCE"
+            grounding_status = "NO_EVIDENCE"
+            error_code = "NO_EVIDENCE"
+            if not answer:
+                answer = "В доступной стенограмме не найден подтверждённый ответ."
+            voice = "В стенограмме не найден подтверждённый ответ."
         evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2]} for value in evidence_ids]
         with self._db.connection() as connection:
             row = connection.execute(
-                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','NEEDS_REVIEW') RETURNING assistant_message_id,conversation_id",
-                (status, answer, voice, Jsonb(evidence), query_id),
+                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
+                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode}), query_id),
             ).fetchone()
+            if evidence_ids:
+                connection.execute("DELETE FROM assistant_query_evidence WHERE query_id=%s", (query_id,))
+                for rank, segment_id in enumerate(evidence_ids, start=1):
+                    meeting_value, start_ms, end_ms = valid[segment_id]
+                    connection.execute(
+                        "INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version) SELECT %s,%s,%s,t.id,t.version FROM transcripts t WHERE t.meeting_id=%s AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) LIMIT 1 ON CONFLICT DO NOTHING",
+                        (query_id, segment_id, rank, meeting_value),
+                    )
             if row and row[0]:
                 connection.execute(
-                    "UPDATE assistant_messages SET status=%s,content=%s,voice_answer=%s,evidence=%s::jsonb,error_code=NULL,completed_at=now() WHERE id=%s",
-                    (status, answer, voice, Jsonb(evidence), row[0]),
+                    "UPDATE assistant_messages SET status=%s,content=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,completed_at=now() WHERE id=%s",
+                    (status, answer, voice, Jsonb(evidence), error_code, row[0]),
                 )
             if row and row[1]:
                 connection.execute("UPDATE assistant_conversations SET updated_at=now() WHERE id=%s", (row[1],))
@@ -199,9 +229,9 @@ class AssistantWorker:
         if message_id and not self.repository.claim(message_id, query_id):
             return
         row = self.repository.query(query_id)
-        if row is None or row[2] in {"READY", "FAILED", "NEEDS_REVIEW"}:
+        if row is None or row[2] in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING", "FAILED", "NEEDS_REVIEW", "NO_EVIDENCE", "GROUNDING_REJECTED", "LLM_UNAVAILABLE"}:
             return
-        query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode = row
+        query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode, owner_user_id = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
         try:
@@ -215,7 +245,7 @@ class AssistantWorker:
                 )
                 user_content = f"Вопрос: {query}"
             else:
-                context, valid = await asyncio.to_thread(self.repository.context, meeting_id, query)
+                context, valid = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id)
                 if not context:
                     raise RuntimeError("assistant_context_empty")
                 system_prompt = (

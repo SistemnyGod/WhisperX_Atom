@@ -52,7 +52,7 @@ public sealed class AssistantViewModel : ObservableObject
     public ObservableCollection<AssistantModeOption> Modes { get; } =
     [
         new("Обычный чат", "GENERAL_CHAT"),
-        new("Память совещаний", "MEETING_MEMORY"),
+        new("История совещаний", "MEETING_MEMORY"),
         new("Текущее совещание", "CURRENT_MEETING")
     ];
     public ObservableCollection<DesktopAssistantConversation> Conversations { get; } = [];
@@ -152,11 +152,6 @@ public sealed class AssistantViewModel : ObservableObject
             }
             IsGlobalAllowed = user.IsPrivileged;
             RoleText = $"Роль API: {user.Role}";
-            if (!IsGlobalAllowed)
-            {
-                var memoryMode = Modes.FirstOrDefault(item => item.Value == "MEETING_MEMORY");
-                if (memoryMode is not null) Modes.Remove(memoryMode);
-            }
             await LoadContextsAsync(cancellationToken);
             SelectedMode = Modes.FirstOrDefault();
             await LoadConversationsAsync(cancellationToken);
@@ -180,11 +175,6 @@ public sealed class AssistantViewModel : ObservableObject
         if (!IsGeneralChat && SelectedContext is null)
         {
             ErrorText = "Выберите встречу или глобальный контекст.";
-            return;
-        }
-        if (IsMeetingMemory && !IsGlobalAllowed)
-        {
-            ErrorText = "Глобальный контекст доступен только Administrator и Operator.";
             return;
         }
         var scope = IsGeneralChat ? "GENERAL" : IsMeetingMemory ? "GLOBAL" : "MEETING";
@@ -359,6 +349,12 @@ public sealed class AssistantViewModel : ObservableObject
         "RUNNING" => "Помощник обрабатывает вопрос",
         "READY" => "Ответ готов",
         "NEEDS_REVIEW" => "Ответ требует проверки источников",
+        "ANSWERED" => "Ответ готов",
+        "ANSWERED_WITH_WARNING" => "Ответ готов с предупреждением",
+        "NO_EVIDENCE" => "В источниках нет подтверждённого ответа",
+        "GROUNDING_REJECTED" => "Ответ отклонён проверкой источников",
+        "LLM_UNAVAILABLE" => "ИИ-помощник временно недоступен",
+        "CLARIFICATION_REQUIRED" => "Нужно уточнить контекст вопроса",
         "FAILED" => "Помощник завершил запрос с ошибкой",
         _ => "Состояние неизвестно"
     };

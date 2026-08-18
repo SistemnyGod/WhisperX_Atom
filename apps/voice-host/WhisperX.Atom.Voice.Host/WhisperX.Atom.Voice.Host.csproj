@@ -12,6 +12,7 @@
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
     <FileVersion>1.0.1.0</FileVersion>
     <WhisperXBuildIdentity Condition="'$(WhisperXBuildIdentity)' == ''">1.0.1+audio-float32-pcm16</WhisperXBuildIdentity>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>

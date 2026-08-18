@@ -31,4 +31,7 @@ internal sealed record VoiceBrokerResponse(
     string? SpokenText = null,
     string? Detail = null,
     string? TraceId = null,
-    string? CommandId = null);
+    string? CommandId = null,
+    string? QueryId = null,
+    string? AssistantStatus = null,
+    string? ResolvedMode = null);

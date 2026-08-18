@@ -10,9 +10,11 @@ PREPROCESS_PROFILES: dict[str, dict[str, str]] = {
     # Close microphones need only a conservative pass.  Keep the historical
     # names below for compatibility with older manifests and workers.
     "asr_standard": {"suffix": ".asr_standard.wav", "filter": "highpass=f=60,lowpass=f=7600,afftdn=nf=-24,dynaudnorm=f=150:g=7,acompressor=threshold=-24dB:ratio=2:attack=20:release=250:makeup=1,alimiter=limit=-1dB"},
-    # The gain is deliberately bounded by dynaudnorm/limiter.  This is a
-    # derivative used for ASR only; canonical raw/FLAC remains untouched.
-    "asr_far_field": {"suffix": ".asr_far_field.wav", "filter": "highpass=f=50,lowpass=f=7600,afftdn=nf=-20,dynaudnorm=f=100:g=24,acompressor=threshold=-30dB:ratio=3:attack=15:release=220:makeup=6,alimiter=limit=-1dB"},
+    # The gain is deliberately bounded to 24 dB by dynaudnorm.  Compressor
+    # makeup is zero so the far-field profile cannot silently exceed that
+    # ceiling; the limiter only protects the derivative from clipping.  This
+    # is an ASR-only derivative; canonical raw/FLAC remains untouched.
+    "asr_far_field": {"suffix": ".asr_far_field.wav", "filter": "highpass=f=50,lowpass=f=7600,afftdn=nf=-20,dynaudnorm=f=100:g=24,acompressor=threshold=-30dB:ratio=3:attack=15:release=220:makeup=0,alimiter=limit=-1dB"},
     "asr": {"suffix": ".asr.wav", "filter": "highpass=f=60,lowpass=f=7600,afftdn=nf=-20,dynaudnorm=f=150:g=15,acompressor=threshold=-26dB:ratio=2.5:attack=5:release=70,alimiter=limit=-1dB"},
     "asr_soft": {"suffix": ".asr_soft.wav", "filter": "highpass=f=40,lowpass=f=7800,afftdn=nf=-20,dynaudnorm=f=120:g=21,acompressor=threshold=-30dB:ratio=2.0:attack=10:release=120,alimiter=limit=-1dB"},
     "diar": {"suffix": ".diar.wav", "filter": "highpass=f=90,lowpass=f=7600,afftdn=nf=-20,dynaudnorm=f=200:g=17,acompressor=threshold=-30dB:ratio=3:attack=5:release=90,alimiter=limit=-1dB"},

@@ -2,6 +2,9 @@ namespace WhisperX.Atom.Recorder;
 
 public static class RecordingContract
 {
+    // There is intentionally no maximum session duration.  Chunk rotation is
+    // a durability mechanism only; it never issues STOP and therefore does
+    // not limit a meeting that runs for hours.
     // Kept at 10 seconds as the compatibility interval for legacy spool
     // rows. New sessions use the configurable raw segment size below.
     public const int ChunkDurationSeconds = 10;

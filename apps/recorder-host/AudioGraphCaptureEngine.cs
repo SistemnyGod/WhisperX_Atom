@@ -362,6 +362,9 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        // STOP is only reached through an explicit command, shutdown, or an
+        // unrecoverable capture error.  Do not add a wall-clock auto-stop:
+        // long meetings are supported by rotating durable raw chunks.
         cancellationToken.ThrowIfCancellationRequested();
         _graph?.Stop();
         _frames.Writer.TryComplete();

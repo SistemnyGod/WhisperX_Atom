@@ -157,7 +157,7 @@ public sealed class VoiceHostController : IAsyncDisposable
             }
         }
 
-        _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands);
+        _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting);
         _broker.Start();
         var settings = _services.Settings.Load();
         // Keep the always-listening host on the same endpoint that Recorder

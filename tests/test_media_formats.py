@@ -4,8 +4,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
+from workers.media_worker import media_worker
 from workers.media_worker.media_worker import prepare_media, probe_audio
 
 
@@ -53,6 +55,16 @@ class MediaFormatTests(unittest.TestCase):
             source.write_bytes(b"not an audio container")
             with self.assertRaises(Exception):
                 probe_audio(source)
+
+    def test_duration_limit_is_opt_in_and_malformed_values_do_not_block_worker(self) -> None:
+        with patch.dict("os.environ", {"MAX_MEDIA_DURATION_MS": "0"}, clear=False):
+            self.assertEqual(media_worker._duration_limit_from_env(), 0)
+        with patch.dict("os.environ", {"MAX_MEDIA_DURATION_MS": "-1"}, clear=False):
+            self.assertEqual(media_worker._duration_limit_from_env(), 0)
+        with patch.dict("os.environ", {"MAX_MEDIA_DURATION_MS": "not-a-number"}, clear=False):
+            self.assertEqual(media_worker._duration_limit_from_env(), 0)
+        with patch.dict("os.environ", {"MAX_MEDIA_DURATION_MS": "7200000"}, clear=False):
+            self.assertEqual(media_worker._duration_limit_from_env(), 7200000)
 
 
 if __name__ == "__main__":

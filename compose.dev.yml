@@ -157,6 +157,9 @@ services:
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       MEDIA_ROOT: /data
+      # No wall-clock recording limit by default. Set a positive value only
+      # when a deployment explicitly wants a media policy cap.
+      MAX_MEDIA_DURATION_MS: "${MAX_MEDIA_DURATION_MS:-0}"
       NATS_URL: nats://nats:4222
       WORKER_NAME: media-worker
       WORKER_INSTANCE_ID: media-worker

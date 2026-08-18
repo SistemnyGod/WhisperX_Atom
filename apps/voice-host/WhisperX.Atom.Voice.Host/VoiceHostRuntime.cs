@@ -63,7 +63,6 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
     private readonly SpeechResponder _speech = new();
-    private readonly VoiceAssistantClient _assistant = new();
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _commandRecognizer;
     private readonly ILogger<VoiceHostRuntime>? _logger;
@@ -126,9 +125,6 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private int _wakePartialHits;
     private int _audioQueueOverflow;
     private VoiceCommand? _pendingStop;
-    private static readonly bool HistoryQuestionsEnabled =
-        string.Equals(Environment.GetEnvironmentVariable("ATOM_VOICE_HISTORY_ENABLED"), "1", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Environment.GetEnvironmentVariable("ATOM_VOICE_HISTORY_ENABLED"), "true", StringComparison.OrdinalIgnoreCase);
 
     public VoiceHostRuntime(ILogger<VoiceHostRuntime>? logger = null)
     {
@@ -834,8 +830,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.MarkDecision => await SendRecorderAsync("DECISION", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId, command.Confidence),
-                VoiceIntent.HistoryQuestion when !HistoryQuestionsEnabled => new VoiceResponse("Свободный диалог пока недоступен.", true, false, CommandId: commandId, TraceId: traceId),
-                VoiceIntent.HistoryQuestion => await AskHistoryAsync(command.Parameter ?? command.Text, cancellationToken),
+                VoiceIntent.HistoryQuestion when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.HistoryQuestion => await AskHistoryAsync(command.Parameter ?? command.Text, commandId, traceId, cancellationToken),
                 _ => new VoiceResponse("Команда не распознана", true, false)
             };
             if (command.Intent == VoiceIntent.StartRecording)
@@ -975,36 +971,45 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_COMMAND_REJECTED" => "Команда отклонена текущим состоянием записи.",
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
+        "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",
+        "VOICE_ASSISTANT_UNAVAILABLE" => "Помощник временно недоступен.",
+        "ASSISTANT_MEETING_REQUIRED" => "Откройте совещание, по которому нужен ответ.",
+        "ASSISTANT_HISTORY_FORBIDDEN" => "История совещаний недоступна в текущем контексте.",
+        "ASSISTANT_CONTEXT_REQUIRED" => "Уточните, отвечать по текущему совещанию или в общем чате.",
+        "ASSISTANT_NO_GROUNDED_ANSWER" => "В стенограмме не найден подтверждённый ответ.",
         "NO_AUDIO_CAPTURED" => "Аудио не было захвачено, запись не сохранена.",
         _ => "Не удалось выполнить голосовую команду."
     };
 
-    private async Task<VoiceResponse> AskHistoryAsync(string question, CancellationToken cancellationToken)
+    private async Task<VoiceResponse> AskHistoryAsync(string question, string? commandId, string? traceId, CancellationToken cancellationToken)
     {
-        var result = await _assistant.EnqueueAsync(question, cancellationToken);
-        if (result.Status is "QUEUED" or "RUNNING")
+        if (_desktopBroker is null)
+            return new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId);
+        var result = await _desktopBroker.AskAssistantAsync(question, "AUTO", false, cancellationToken, traceId, commandId);
+        if (result.Ok && !string.IsNullOrWhiteSpace(result.QueryId))
         {
-            _ = CompleteHistoryQuestionAsync(result.QueryId);
-            return new VoiceResponse("Запрос принят, отвечу после обработки.", true, true);
+            _ = CompleteHistoryQuestionAsync(Guid.Parse(result.QueryId), commandId, traceId);
+            return await RespondAsync(result.SpokenText ?? "Вопрос принят, отвечу после обработки.", cancellationToken, true, commandId: commandId, traceId: traceId);
         }
-        if (result.Status is "FAILED")
-            return result.ErrorCode == "VOICE_HOST_TOKEN_NOT_CONFIGURED"
-                ? new VoiceResponse("Доступ к локальному серверу не настроен.", true, false)
-                : new VoiceResponse("Не удалось получить ответ по истории совещаний.", true, false);
-        var answer = result.VoiceAnswer ?? result.Answer;
-        return string.IsNullOrWhiteSpace(answer)
-            ? new VoiceResponse("В готовых совещаниях нет подтверждённого ответа.", true, false)
-            : new VoiceResponse(answer, true, result.Status == "READY");
+        return new VoiceResponse(VoiceErrorText(result.ErrorCode ?? "VOICE_ASSISTANT_UNAVAILABLE"), true, false, CommandId: commandId, TraceId: traceId);
     }
 
-    private async Task CompleteHistoryQuestionAsync(Guid queryId)
+    private async Task CompleteHistoryQuestionAsync(Guid queryId, string? commandId, string? traceId)
     {
         try
         {
-            var result = await _assistant.WaitAsync(queryId, CancellationToken.None);
-            var answer = result.VoiceAnswer ?? result.Answer;
-            if (result.Status is "READY" && !string.IsNullOrWhiteSpace(answer) && _state.Snapshot.State == VoiceHostState.Listening)
-                await RespondAsync(answer, CancellationToken.None, true);
+            if (_desktopBroker is null) return;
+            for (var attempt = 0; attempt < 90 && !_shutdown.IsCancellationRequested; attempt++)
+            {
+                var result = await _desktopBroker.GetAssistantResultAsync(queryId, _shutdown.Token, traceId, commandId);
+                if (result.Ok && !string.IsNullOrWhiteSpace(result.SpokenText) && _state.Snapshot.State == VoiceHostState.Listening)
+                {
+                    await RespondAsync(result.SpokenText, CancellationToken.None, true, commandId: commandId, traceId: traceId);
+                    return;
+                }
+                if (result.ErrorCode is not null && result.AssistantStatus is not ("QUEUED" or "RUNNING")) return;
+                await Task.Delay(TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false);
+            }
         }
         catch (Exception ex) { _logger?.LogWarning(ex, "Voice assistant query completion failed: {QueryId}", queryId); }
     }
@@ -1181,7 +1186,6 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         try { if (_audioWorker is not null) await _audioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         _commandRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
-        _assistant.Dispose();
         _speech.Dispose();
         _executionGate.Dispose();
         _audioOperationGate.Dispose();

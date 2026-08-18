@@ -57,6 +57,48 @@ internal sealed class VoiceIntentBrokerClient
         }
     }
 
+    public async Task<VoiceBrokerResponse> AskAssistantAsync(string question, string? requestedMode, bool testMode, CancellationToken cancellationToken, string? traceId = null, string? commandId = null)
+    {
+        traceId ??= Guid.NewGuid().ToString("N");
+        try
+        {
+            await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(pipe);
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            var request = new { command = "ASSISTANT_QUESTION", question, requestedMode = requestedMode ?? "AUTO", testMode, timestamp = DateTimeOffset.UtcNow, traceId, commandId };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(line)
+                ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId)
+                : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json) ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId);
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException)
+        {
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
+        }
+    }
+
+    public async Task<VoiceBrokerResponse> GetAssistantResultAsync(Guid queryId, CancellationToken cancellationToken, string? traceId = null, string? commandId = null)
+    {
+        traceId ??= Guid.NewGuid().ToString("N");
+        try
+        {
+            await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(pipe);
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            var request = new { command = "ASSISTANT_RESULT", queryId, timestamp = DateTimeOffset.UtcNow, traceId, commandId };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(line)
+                ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId)
+                : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json) ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId);
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException)
+        {
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
+        }
+    }
+
     private async Task<NamedPipeClientStream> ConnectWithRetryAsync(CancellationToken cancellationToken)
     {
         for (var attempt = 0; ; attempt++)

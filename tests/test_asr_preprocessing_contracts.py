@@ -32,3 +32,10 @@ def test_preprocessing_decision_is_persisted_in_metadata():
     pipeline = read("app/transcription_pipeline.py")
     for field in ("asr_input_path_kind", "preprocessing_mode", "preprocessing_applied", "preprocessing_profile", "preprocessing_ms"):
         assert field in pipeline
+
+
+def test_large_room_derivative_keeps_gain_bounded():
+    quality = read("transcription_quality.py")
+    assert 'dynaudnorm=f=100:g=24' in quality
+    assert 'acompressor=threshold=-30dB:ratio=3:attack=15:release=220:makeup=0' in quality
+    assert 'alimiter=limit=-1dB' in quality
