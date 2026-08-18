@@ -3,6 +3,7 @@ param(
     [string]$EnvFile = "",
     [switch]$Rebuild,
     [switch]$EnableQwen,
+    [switch]$EnableAssistant,
     [switch]$SkipLegacyStop,
     [switch]$InstallStartupTask,
     [switch]$ConfigureFirewall
@@ -28,6 +29,8 @@ $serverOrigin = Read-EnvValue "SERVER_ORIGIN"
 $allowHttp = Read-EnvValue "ALLOW_INSECURE_LAN_HTTP"
 $gpuMode = Read-EnvValue "GPU_WORKER_MODE"
 $autoSummary = Read-EnvValue "AUTO_SUMMARY_ENABLED"
+$assistantEnabled = Read-EnvValue "ASSISTANT_ENABLED"
+if ([string]::IsNullOrWhiteSpace($assistantEnabled)) { $assistantEnabled = "true" }
 if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($serverOrigin)) { throw "LAN_CONFIG_INVALID: LAN_BIND_ADDRESS and SERVER_ORIGIN are required." }
 if ($allowHttp -ne "true") { throw "LAN_HTTP_EXPLICIT_REQUIRED: set ALLOW_INSECURE_LAN_HTTP=true only for the isolated LAN profile." }
 if ($gpuMode -ne "container") { throw "LAN_GPU_MODE_REQUIRED: set GPU_WORKER_MODE=container in .env.lan." }
@@ -38,6 +41,13 @@ if (-not $EnableQwen -and $autoSummary -ne "false") { throw "LAN_QWEN_DISABLED_R
 if ($EnableQwen) {
     $env:AUTO_SUMMARY_ENABLED = "true"
     $autoSummary = "true"
+}
+if ($EnableAssistant) {
+    # Assistant uses the same Qwen worker but does not enable automatic
+    # meeting summaries.  This keeps the user-facing assistant independent
+    # from AUTO_SUMMARY_ENABLED.
+    $env:ASSISTANT_ENABLED = "true"
+    $assistantEnabled = "true"
 }
 $originUri = $null
 if (-not [Uri]::TryCreate($serverOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$originUri) -or $originUri.Scheme -ne "http") { throw "LAN_SERVER_ORIGIN_INVALID: use http://<private-ip>:8080." }
@@ -160,18 +170,18 @@ COMMIT;
     $recoveryOutput | Where-Object { $_ -and $_ -notmatch '^BEGIN$|^COMMIT$' } | ForEach-Object { Write-Verbose "Startup recovery: $_" }
 
     $workerCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
-    if ($EnableQwen) { $workerCompose += @("--profile", "llm") }
+    if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $workerCompose += @("--profile", "llm") }
     $workerCompose += @("up", "-d", "--pull", "never")
     if ($Rebuild) { $workerCompose += "--build" }
     $workerServices = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
-    if ($EnableQwen) { $workerServices += "summary-worker" }
+    if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $workerServices += "summary-worker" }
     $workerCompose += $workerServices
     & docker @workerCompose
     if ($LASTEXITCODE -ne 0) { throw "LAN_WORKER_START_FAILED" }
 
-    $requiredServices = if ($EnableQwen) { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "lan-gateway") } else { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "lan-gateway") }
+    $requiredServices = if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "lan-gateway") } else { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "lan-gateway") }
     $psArgs = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
-    if ($EnableQwen) { $psArgs += @("--profile", "llm") }
+    if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $psArgs += @("--profile", "llm") }
     $psArgs += @("ps", "--format", "{{.Service}} {{.State}}")
     $stateText = (& docker @psArgs | Out-String)
     $degraded = @($requiredServices | Where-Object { $stateText -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
@@ -182,7 +192,7 @@ COMMIT;
     # the launcher cannot report PROCESSING_READY while a worker is stuck
     # during startup or has lost its database connection.
     $healthCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
-    if ($EnableQwen) { $healthCompose += @("--profile", "llm") }
+    if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $healthCompose += @("--profile", "llm") }
     function Test-WorkerHealthy([string]$service) {
         $containerId = ((& docker @healthCompose ps -q $service 2>$null | Select-Object -First 1) | Out-String).Trim()
         if ([string]::IsNullOrWhiteSpace($containerId)) { return $false }

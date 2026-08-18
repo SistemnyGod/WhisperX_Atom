@@ -46,6 +46,8 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceExpectedBuild = "—";
     private string _voiceObservedBuild = "—";
     private string _voiceDiagnosticsDetail = "—";
+    private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
+    private int _voiceRestartCountCache = -1;
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -100,6 +102,7 @@ public sealed class SettingsViewModel : ObservableObject
     public int VoiceRate { get => _voiceRate; set { var valueToSet = Math.Clamp(value, -10, 10); if (SetProperty(ref _voiceRate, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public string VoiceStatusLabel => ToVoiceStatusLabel(VoiceStatus);
     public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
     public string VoiceErrorCode { get => _voiceErrorCode; private set => SetProperty(ref _voiceErrorCode, value); }
     public string VoiceMicrophone { get => _voiceMicrophone; private set => SetProperty(ref _voiceMicrophone, value); }
@@ -167,78 +170,144 @@ public sealed class SettingsViewModel : ObservableObject
             if (response is null)
             {
                 var controllerError = _services.VoiceHost.LastErrorCode;
-                VoiceStatus = controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}";
-                VoiceErrorCode = controllerError ?? "VOICE_HOST_NOT_INSTALLED";
-                VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
-                VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
-                VoiceObservedBuild = _services.VoiceHost.LastObservedBuildIdentity ?? "—";
-                VoiceDiagnosticsDetail = _services.VoiceHost.LastErrorDetail ?? "—";
+                ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
+                    controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}",
+                    "—",
+                    controllerError ?? "VOICE_HOST_NOT_INSTALLED",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    _services.VoiceHost.InstalledPath ?? "—",
+                    _services.VoiceHost.ExpectedBuildIdentity,
+                    _services.VoiceHost.LastObservedBuildIdentity ?? "—",
+                    "PID —",
+                    "—",
+                    "—",
+                    _services.VoiceHost.LastErrorDetail ?? "—"));
                 return;
             }
             var heartbeat = response.HeartbeatAtUtc ?? response.UpdatedAt;
             var heartbeatStale = DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() > TimeSpan.FromSeconds(10);
-            VoiceStatus = heartbeatStale
-                ? "Нет heartbeat от Voice Host"
-                : $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}";
-            VoiceLastRecognition = response.LastRecognizedText ?? "—";
-            VoiceErrorCode = response.LastErrorCode ?? "—";
-            VoiceMicrophone = response.EffectiveMicrophoneName ?? "—";
-            VoiceRequestedMicrophone = response.RequestedMicrophoneDeviceId ?? "DEFAULT";
-            VoiceEffectiveMicrophone = response.EffectiveMicrophoneDeviceId ?? response.EffectiveMicrophoneName ?? "—";
-            VoiceWakeWordMode = response.WakeWordMode ?? "—";
-            VoiceRuntimeBuild = response.BuildIdentity ?? "—";
-            VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
-            VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
-            VoiceObservedBuild = response.BuildIdentity ?? _services.VoiceHost.LastObservedBuildIdentity ?? "—";
-            VoiceDiagnosticsDetail = response.MicrophoneErrorDetail
-                ?? _services.VoiceHost.LastErrorDetail
-                ?? "—";
-            VoiceRuntimeProcess = response.ProcessId is int pid ? $"PID {pid}" : "PID —";
-            VoiceLastTraceId = response.LastTraceId ?? "—";
-            VoiceLastCommandId = response.LastCommandId ?? "—";
-            OnPropertyChanged(nameof(VoiceRestartCount));
-            var telemetryFresh = response.LastAudioAtUtc is DateTimeOffset at
-                && DateTimeOffset.UtcNow - at <= TimeSpan.FromMilliseconds(750)
-                && response.AudioTelemetrySequence > 0;
-            var peak = response.MicrophonePeak ?? 0d;
-            VoiceLevelNormalized = telemetryFresh ? Math.Clamp(peak, 0d, 1d) : 0d;
-            VoiceLevel = telemetryFresh ? $"{VoiceLevelNormalized * 100:0}% peak · RMS {(response.MicrophoneRms ?? 0d) * 100:0}%" : "Нет данных от микрофона";
-            VoiceSignalState = !telemetryFresh
-                ? "Нет данных от микрофона"
-                : response.MicrophoneClipping || string.Equals(response.AudioSignalState, "CLIPPING", StringComparison.OrdinalIgnoreCase)
-                    ? "Перегрузка"
-                    : string.Equals(response.AudioSignalState, "VOICE", StringComparison.OrdinalIgnoreCase)
-                        ? "Голос записывается"
-                        : "Тишина или слабый сигнал";
+            ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
+                heartbeatStale
+                    ? "Нет heartbeat от Voice Host"
+                    : $"{response.State} · модель {(response.ModelReady ? "готова" : "не готова")} · микрофон {(response.MicrophoneReady ? "готов" : "недоступен")}",
+                response.LastRecognizedText ?? "—",
+                response.LastErrorCode ?? "—",
+                response.RequestedMicrophoneDeviceId ?? "DEFAULT",
+                response.EffectiveMicrophoneDeviceId ?? "—",
+                response.EffectiveMicrophoneName ?? "—",
+                response.WakeWordMode ?? "—",
+                response.BuildIdentity ?? "—",
+                _services.VoiceHost.InstalledPath ?? "—",
+                _services.VoiceHost.ExpectedBuildIdentity,
+                response.BuildIdentity ?? _services.VoiceHost.LastObservedBuildIdentity ?? "—",
+                response.ProcessId is int pid ? $"PID {pid}" : "PID —",
+                response.LastTraceId ?? "—",
+                response.LastCommandId ?? "—",
+                response.MicrophoneErrorDetail ?? _services.VoiceHost.LastErrorDetail ?? "—"));
+            var restartCount = _services.VoiceHost.RestartCount;
+            if (_voiceRestartCountCache != restartCount)
+            {
+                _voiceRestartCountCache = restartCount;
+                OnPropertyChanged(nameof(VoiceRestartCount));
+            }
+            if (!_voiceTelemetry.IsFresh(DateTimeOffset.UtcNow))
+                ApplyVoiceTelemetry(new VoiceTelemetryUiState(
+                    response.AudioTelemetrySequence,
+                    response.LastAudioAtUtc,
+                    response.MicrophoneRms ?? 0d,
+                    response.MicrophonePeak ?? 0d,
+                    response.MicrophoneClipping,
+                    response.AudioSignalState ?? "WAITING"));
         }
         catch (Exception ex)
         {
-            VoiceStatus = _services.VoiceHost.LastErrorCode is { } code ? $"Voice Host: {code}" : "Voice Host недоступен";
-            VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
-            VoiceRuntimePath = _services.VoiceHost.InstalledPath ?? "—";
-            VoiceExpectedBuild = _services.VoiceHost.ExpectedBuildIdentity;
-            VoiceObservedBuild = _services.VoiceHost.LastObservedBuildIdentity ?? "—";
-            VoiceDiagnosticsDetail = _services.VoiceHost.LastErrorDetail ?? ex.Message;
+            var errorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+            ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
+                $"Voice Host: {errorCode}",
+                "—",
+                errorCode,
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                _services.VoiceHost.InstalledPath ?? "—",
+                _services.VoiceHost.ExpectedBuildIdentity,
+                _services.VoiceHost.LastObservedBuildIdentity ?? "—",
+                "PID —",
+                "—",
+                "—",
+                _services.VoiceHost.LastErrorDetail ?? ex.Message));
         }
     }
 
     public void ApplyVoiceTelemetry(WhisperX.Atom.Desktop.VoiceTelemetryPacket packet)
     {
-        var fresh = packet.AtUtc is DateTimeOffset at
-            && DateTimeOffset.UtcNow - at <= TimeSpan.FromMilliseconds(750)
-            && packet.Sequence > 0;
-        VoiceRequestedMicrophone = packet.DeviceId ?? VoiceRequestedMicrophone;
-        VoiceEffectiveMicrophone = packet.DeviceName ?? packet.DeviceId ?? VoiceEffectiveMicrophone;
-        VoiceMicrophone = packet.DeviceName ?? VoiceMicrophone;
-        VoiceLevelNormalized = fresh ? Math.Clamp(packet.Peak, 0d, 1d) : 0d;
-        VoiceLevel = fresh ? $"{VoiceLevelNormalized * 100:0}% peak · RMS {packet.Rms * 100:0}%" : "Нет данных от микрофона";
+        ApplyVoiceTelemetry(new VoiceTelemetryUiState(packet.Sequence, packet.AtUtc, packet.Rms, packet.Peak, packet.Clipping, packet.SignalState ?? "WAITING"));
+    }
+
+    private void ApplyVoiceDiagnostics(VoiceDiagnosticsUiState state)
+    {
+        VoiceStatus = state.Status;
+        OnPropertyChanged(nameof(VoiceStatusLabel));
+        VoiceLastRecognition = state.LastRecognition;
+        VoiceErrorCode = state.ErrorCode;
+        VoiceMicrophone = state.EffectiveDeviceName;
+        VoiceRequestedMicrophone = state.RequestedDeviceId;
+        VoiceEffectiveMicrophone = state.EffectiveDeviceId;
+        VoiceWakeWordMode = state.WakeWordMode;
+        VoiceRuntimeBuild = state.RuntimeBuild;
+        VoiceRuntimePath = state.RuntimePath;
+        VoiceExpectedBuild = state.ExpectedBuild;
+        VoiceObservedBuild = state.ObservedBuild;
+        VoiceRuntimeProcess = state.RuntimeProcess;
+        VoiceLastTraceId = state.LastTraceId;
+        VoiceLastCommandId = state.LastCommandId;
+        VoiceDiagnosticsDetail = state.Detail;
+    }
+
+    private void ApplyVoiceTelemetry(VoiceTelemetryUiState state)
+    {
+        if (state.Sequence > 0
+            && state.Sequence < _voiceTelemetry.Sequence
+            && state.AtUtc is DateTimeOffset at
+            && _voiceTelemetry.AtUtc is DateTimeOffset currentAt
+            && at <= currentAt) return;
+        _voiceTelemetry = state;
+        var fresh = state.IsFresh(DateTimeOffset.UtcNow);
+        VoiceLevelNormalized = fresh ? Math.Clamp(state.Peak, 0d, 1d) : 0d;
+        VoiceLevel = fresh
+            ? $"{VoiceLevelNormalized * 100:0}% peak · RMS {state.Rms * 100:0}%"
+            : "Нет данных от микрофона";
         VoiceSignalState = !fresh
             ? "Нет данных от микрофона"
-            : packet.Clipping || string.Equals(packet.SignalState, "CLIPPING", StringComparison.OrdinalIgnoreCase)
+            : state.Clipping || string.Equals(state.SignalState, "CLIPPING", StringComparison.OrdinalIgnoreCase)
                 ? "Перегрузка"
-                : string.Equals(packet.SignalState, "VOICE", StringComparison.OrdinalIgnoreCase)
+                : string.Equals(state.SignalState, "VOICE", StringComparison.OrdinalIgnoreCase)
                     ? "Голос записывается"
                     : "Тишина или слабый сигнал";
+    }
+
+    public void RefreshVoiceTelemetryStaleness()
+    {
+        if (_voiceTelemetry.IsFresh(DateTimeOffset.UtcNow)) return;
+        ApplyVoiceTelemetry(_voiceTelemetry);
+    }
+
+    private static string ToVoiceStatusLabel(string status)
+    {
+        if (status.Contains("LISTENING", StringComparison.OrdinalIgnoreCase) || status.Contains("слушает", StringComparison.OrdinalIgnoreCase)) return "Мифодий слушает";
+        if (status.Contains("RECOGNIZING", StringComparison.OrdinalIgnoreCase)) return "Распознаёт";
+        if (status.Contains("EXECUTING", StringComparison.OrdinalIgnoreCase)) return "Выполняет";
+        if (status.Contains("RESPONDING", StringComparison.OrdinalIgnoreCase)) return "Говорит";
+        if (status.Contains("DISABLED", StringComparison.OrdinalIgnoreCase) || status.Contains("выключен", StringComparison.OrdinalIgnoreCase)) return "Выключен";
+        if (status.Contains("STARTING", StringComparison.OrdinalIgnoreCase)) return "Запускается";
+        if (status.Contains("heartbeat", StringComparison.OrdinalIgnoreCase) || status.Contains("недоступ", StringComparison.OrdinalIgnoreCase) || status.Contains("ошиб", StringComparison.OrdinalIgnoreCase)) return "Требуется настройка";
+        return "Проверяется";
     }
 
     public async Task TestVoiceSpeechAsync(string phrase)

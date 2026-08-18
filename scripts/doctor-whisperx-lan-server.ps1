@@ -80,6 +80,7 @@ Check "processingServices" {
     $states = (& docker @psArgs | Out-String)
     $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
     if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true") { $required += "summary-worker" }
+    elseif ((Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $required += "summary-worker" }
     $missing = @($required | Where-Object { $states -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running\s+healthy") })
     if ($missing.Count -gt 0) { throw "PROCESSING_SERVICES_UNHEALTHY:$($missing -join ',')" }
     "HEALTHY"
@@ -94,7 +95,9 @@ Check "legacyRuntime" {
     "STOPPED_OR_ABSENT"
 }
 Check "qwen" {
-    if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -ne "true") { "DISABLED" } else { "ENABLED_REQUIRES_EXPLICIT_GATE" }
+    if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true") { "ENABLED_REQUIRES_EXPLICIT_GATE" }
+    elseif ((Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { "ASSISTANT_ONLY" }
+    else { "DISABLED" }
 }
 Check "processingReadiness" {
     if (-not $Credential) { "AUTH_REQUIRED"; return }
@@ -106,7 +109,7 @@ Check "processingReadiness" {
     "READY"
 }
 
-$report = [ordered]@{ generatedAtUtc=[DateTimeOffset]::UtcNow; runtime="lan"; project=$projectName; serverOrigin=$origin; checks=$checks; failures=$failures; qwen=if((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true"){ "ENABLED" } else { "DISABLED" }; ok=($failures.Count -eq 0) }
+$report = [ordered]@{ generatedAtUtc=[DateTimeOffset]::UtcNow; runtime="lan"; project=$projectName; serverOrigin=$origin; checks=$checks; failures=$failures; qwen=if((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true"){ "ENABLED" } elseif((Read-EnvValue "ASSISTANT_ENABLED") -ne "false"){ "ASSISTANT_ONLY" } else { "DISABLED" }; ok=($failures.Count -eq 0) }
 $artifact = Join-Path $repo "artifacts\acceptance\lan-server"
 New-Item -ItemType Directory -Force -Path $artifact | Out-Null
 [ordered]@{

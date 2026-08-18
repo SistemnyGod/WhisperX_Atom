@@ -18,6 +18,7 @@ BROKER = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBroker
 BROKER_CLIENT = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceIntentBrokerClient.cs").read_text(encoding="utf-8")
 SETTINGS_PAGE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml.cs").read_text(encoding="utf-8")
 SETTINGS_VM = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs").read_text(encoding="utf-8")
+VOICE_UI_STATES = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/VoiceUiStates.cs").read_text(encoding="utf-8")
 ML_PERSISTENCE = (ROOT / "workers/ml_worker/persistence.py").read_text(encoding="utf-8")
 TECHNICAL_EVENTS = (ROOT / "workers/ml_worker/technical_events.py").read_text(encoding="utf-8")
 
@@ -110,7 +111,7 @@ def test_server_builds_bounded_system_response_intervals():
 
 
 def test_ui_exposes_live_telemetry_timeout_and_trace():
-    assert "TimeSpan.FromMilliseconds(750)" in SETTINGS_VM
+    assert "TimeSpan.FromMilliseconds(750)" in VOICE_UI_STATES
     assert "VoiceLastTraceId" in SETTINGS_VM
     assert "VoiceBarsPanel" in SETTINGS_PAGE
     assert "FromMilliseconds(33)" in SETTINGS_PAGE

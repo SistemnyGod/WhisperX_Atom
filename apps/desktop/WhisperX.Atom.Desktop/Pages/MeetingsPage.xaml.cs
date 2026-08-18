@@ -624,6 +624,9 @@ public sealed partial class MeetingsPage : Page
     private void WorkspaceTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_workspace is null) return;
+        if (e.AddedItems.OfType<TabViewItem>().FirstOrDefault()?.Header?.ToString() == "Мифодий"
+            && _services is not null && MeetingAssistantFrame.Content is null)
+            MeetingAssistantFrame.Navigate(typeof(AssistantPage), _services);
         UpdateEmptyStates();
     }
 

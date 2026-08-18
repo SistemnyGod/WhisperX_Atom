@@ -1356,6 +1356,9 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
 {
     var userId = CurrentUserId(context);
     if (userId is null) return Results.Unauthorized();
+    var assistantEnabled = context.RequestServices.GetRequiredService<IConfiguration>().GetValue("ASSISTANT_ENABLED", true);
+    if (!assistantEnabled)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     var question = request.Question?.Trim() ?? string.Empty;
     if (question.Length is 0 or > 2000) return Results.BadRequest(new { error = "assistant_query_invalid" });
     if (request.ActiveMeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
@@ -1364,6 +1367,17 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
     var route = UnifiedProductStore.RouteAssistantRequest(question, request.RequestedMode, request.ActiveMeetingId, IsPrivileged(context));
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
+
+    // Conversations are bound to a scope. Never reuse a user-owned chat for
+    // another meeting or for general chat; create a fresh scoped conversation.
+    if (request.ConversationId is Guid suppliedConversation)
+    {
+        var existing = await store.GetAssistantConversationAsync(suppliedConversation, userId.Value);
+        var expectedMeeting = route.ResolvedMode == "CURRENT_MEETING" ? request.ActiveMeetingId : null;
+        var expectedScope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
+        if (existing is null || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase) || existing.MeetingId != expectedMeeting)
+            request = request with { ConversationId = null };
+    }
 
     var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
     var resolvedMeetingId = route.ResolvedMode == "CURRENT_MEETING" ? request.ActiveMeetingId : null;

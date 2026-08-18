@@ -292,7 +292,9 @@ public sealed class AssistantViewModel : ObservableObject
     private async Task LoadContextsAsync(CancellationToken cancellationToken)
     {
         Contexts.Clear();
-        if (IsGlobalAllowed) Contexts.Add(new AssistantContextOption("Вся история", null, null));
+        // Every user gets a history scope; the server applies ownership/RBAC
+        // filtering. Privileged users see the same scope labelled globally.
+        Contexts.Add(new AssistantContextOption(IsGlobalAllowed ? "Вся история" : "Моя история", null, null));
         var meetings = await LoadAllMeetingsAsync(cancellationToken);
         foreach (var meeting in meetings.Where(item => item.Status is "READY" or "PARTIAL_READY" or "TRANSCRIPT_READY"))
             Contexts.Add(new AssistantContextOption(meeting.Title, meeting.Id, meeting));

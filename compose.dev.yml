@@ -205,6 +205,7 @@ services:
       LLM_HEALTH_HOST: llama-server
       LLM_HEALTH_PORT: "8080"
       AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
       DIARIZATION_MODE: ${DIARIZATION_MODE:-preferred}
       TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
     depends_on:
@@ -309,6 +310,7 @@ services:
       GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
       WORKER_INSTANCE_ID: summary-worker
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
     volumes:
       - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
     deploy:

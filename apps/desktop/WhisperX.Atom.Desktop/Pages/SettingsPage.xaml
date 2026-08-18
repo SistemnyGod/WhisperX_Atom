@@ -81,18 +81,18 @@
                     </StackPanel>
                 </Border>
             </Grid>
-            <Expander Header="Экспериментальные функции · Мифодий" IsExpanded="True">
+            <Expander Header="Мифодий" IsExpanded="True">
                 <Border x:Name="MifodiyDiagnosticsCard" Style="{StaticResource CardStyle}" Padding="20">
                     <StackPanel Spacing="16">
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
                             <StackPanel Spacing="4">
-                                <TextBlock Text="Проверка Мифодия" Style="{StaticResource SectionTitleStyle}" />
-                                <TextBlock Text="Локальное распознавание команд без сохранения аудио ожидания" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Text="Голосовой помощник" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Локально слушает кодовое слово. Аудио ожидания не сохраняется и не отправляется на сервер." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                             </StackPanel>
-                            <Border x:Name="MifodiyStatusBadge" Grid.Column="1" Background="{StaticResource SurfaceGreenBrush}" BorderBrush="{StaticResource SuccessBrush}" BorderThickness="1" CornerRadius="16" Padding="12,7" VerticalAlignment="Top">
+                            <Border x:Name="MifodiyStatusBadge" Grid.Column="1" Background="{StaticResource SurfaceGreenBrush}" BorderBrush="{StaticResource SuccessBrush}" BorderThickness="1" CornerRadius="16" Padding="12,7" VerticalAlignment="Top" MinWidth="166">
                                 <StackPanel Orientation="Horizontal" Spacing="7">
                                     <Ellipse x:Name="MifodiyStatusDot" Width="9" Height="9" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" />
-                                    <TextBlock x:Name="MifodiyStatusText" Text="{Binding VoiceStatus}" FontWeight="SemiBold" Foreground="{StaticResource SuccessBrush}" />
+                                    <TextBlock x:Name="MifodiyStatusText" Text="{Binding VoiceStatusLabel}" FontWeight="SemiBold" Foreground="{StaticResource SuccessBrush}" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
                             </Border>
                         </Grid>
@@ -100,9 +100,9 @@
                         <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,12">
                             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="20">
                                 <StackPanel Spacing="3">
-                                    <TextBlock Text="Состояние Voice Host" Style="{StaticResource CaptionStyle}" />
-                                    <TextBlock Text="{Binding VoiceStatus}" FontSize="16" FontWeight="SemiBold" />
-                                    <TextBlock Text="Wake word: Мифодий · Мефодий · Атом" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Состояние" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceStatusLabel}" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock Text="Кодовое слово: Мифодий · Мефодий · Атом" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="2">
                                     <TextBlock Text="Всегда слушать" Style="{StaticResource CaptionStyle}" />
@@ -115,109 +115,36 @@
                             </Grid>
                         </Border>
 
-                        <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
-                            <Border Style="{StaticResource CardStyle}" Padding="14" Background="{StaticResource SurfaceBlueBrush}">
-                                <StackPanel Spacing="9">
+                        <Grid x:Name="MifodiyPrimaryGrid" ColumnDefinitions="*,*" RowDefinitions="Auto" ColumnSpacing="16" RowSpacing="16">
+                            <Border x:Name="MifodiySignalCard" Style="{StaticResource CardStyle}" Padding="14" Background="{StaticResource SurfaceBlueBrush}" MinHeight="236">
+                                <Grid RowDefinitions="Auto,Auto,Auto,72,Auto,*" RowSpacing="8">
                                     <TextBlock Text="Микрофон и сигнал" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="Фактически используемое устройство" Style="{StaticResource CaptionStyle}" />
-                                    <TextBlock Text="{Binding VoiceMicrophone}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                                        <StackPanel Spacing="2">
-                                            <TextBlock Text="Запрошенный endpoint" Style="{StaticResource CaptionStyle}" />
-                                            <TextBlock Text="{Binding VoiceRequestedMicrophone}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Spacing="2">
-                                            <TextBlock Text="NAudio endpoint" Style="{StaticResource CaptionStyle}" />
-                                            <TextBlock Text="{Binding VoiceEffectiveMicrophone}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                        </StackPanel>
-                                    </Grid>
-                                    <TextBlock Text="Живой уровень сигнала" Style="{StaticResource CaptionStyle}" />
-                                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="8,6">
+                                    <StackPanel Grid.Row="1" Spacing="2">
+                                        <TextBlock Text="Фактически используемое устройство" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceMicrophone}" Height="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceMicrophone}" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="2" Text="Живой уровень сигнала" Style="{StaticResource CaptionStyle}" />
+                                    <Border Grid.Row="3" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="8,6">
                                         <Grid x:Name="VoiceBarsPanel" Height="58" ColumnSpacing="3" HorizontalAlignment="Stretch" />
                                     </Border>
-                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                                        <TextBlock Text="{Binding VoiceSignalState}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                        <TextBlock Grid.Column="1" Text="{Binding VoiceLevel}" Style="{StaticResource CaptionStyle}" HorizontalAlignment="Right" />
+                                    <Grid Grid.Row="4" ColumnDefinitions="*,148" ColumnSpacing="12">
+                                        <TextBlock Text="{Binding VoiceSignalState}" Height="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSignalState}" />
+                                        <TextBlock Grid.Column="1" Text="{Binding VoiceLevel}" Height="20" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextAlignment="Right" TextTrimming="CharacterEllipsis" />
                                     </Grid>
-                                    <TextBlock Text="До кодового слова аудио сразу удаляется и не попадает в стенограмму." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="1" Style="{StaticResource CardStyle}" Padding="14">
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="Компоненты" Style="{StaticResource SectionTitleStyle}" />
-                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                        <TextBlock Text="Vosk / модель" />
-                                        <TextBlock Grid.Column="1" Text="{Binding VoiceWakeWordMode}" Foreground="{StaticResource SuccessBrush}" TextWrapping="Wrap" />
-                                    </Grid>
-                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                        <TextBlock Text="Recorder Broker" />
-                                        <TextBlock Grid.Column="1" Text="{Binding VoiceRuntimeProcess}" Foreground="{StaticResource SuccessBrush}" />
-                                    </Grid>
-                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                        <TextBlock Text="Сборка Voice Host" />
-                                        <TextBlock Grid.Column="1" Text="{Binding VoiceRuntimeBuild}" Foreground="{StaticResource SuccessBrush}" TextWrapping="Wrap" />
-                                    </Grid>
-                                    <TextBlock Text="Путь Voice Host" Style="{StaticResource CaptionStyle}" />
-                                    <TextBlock Text="{Binding VoiceRuntimePath}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                    <TextBlock Text="Ожидаемая / наблюдаемая сборка" Style="{StaticResource CaptionStyle}" />
-                                    <TextBlock Text="{Binding VoiceExpectedBuild}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding VoiceObservedBuild}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                    <StackPanel Orientation="Horizontal" Spacing="4">
-                                        <TextBlock Text="Перезапуски:" Style="{StaticResource CaptionStyle}" />
-                                        <TextBlock Text="{Binding VoiceRestartCount}" Style="{StaticResource CaptionStyle}" />
-                                    </StackPanel>
-                                    <TextBlock Text="Код ошибки" Style="{StaticResource CaptionStyle}" />
-                                    <TextBlock Text="{Binding VoiceErrorCode}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding VoiceDiagnosticsDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                </StackPanel>
-                            </Border>
-                        </Grid>
-
-                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
-                            <StackPanel Spacing="10">
-                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                                    <StackPanel Spacing="3">
-                                        <TextBlock Text="Тест команды (без запуска записи)" Style="{StaticResource SectionTitleStyle}" />
-                                        <TextBlock Text="Проверяет Vosk, intent и confidence. Recorder Host не вызывается." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                    <TextBlock Grid.Column="1" Text="testMode=true" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Row="5" Text="До кодового слова аудио сразу удаляется и не попадает в стенограмму." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 </Grid>
-                                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
-                                    <TextBlock Text="Мифодий, начни запись" FontSize="15" />
-                                </Border>
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Начать тест" Style="{StaticResource PrimaryButtonStyle}" Click="TestVoiceSpeechButton_Click" />
-                                    <Button Content="Проверить TTS" Style="{StaticResource SecondaryButtonStyle}" Click="TestVoiceTtsButton_Click" />
-                                    <Button Content="Обновить статус" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshVoiceButton_Click" />
-                                </StackPanel>
-                                <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16">
-                                    <StackPanel Spacing="2">
-                                        <TextBlock Text="Последнее распознавание" Style="{StaticResource CaptionStyle}" />
-                                        <TextBlock Text="{Binding VoiceLastRecognition}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="1" Spacing="2">
-                                        <TextBlock Text="Последняя команда" Style="{StaticResource CaptionStyle}" />
-                                        <TextBlock Text="{Binding VoiceLastCommandId}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="2" Spacing="2">
-                                        <TextBlock Text="Trace ID" Style="{StaticResource CaptionStyle}" />
-                                        <TextBlock Text="{Binding VoiceLastTraceId}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Grid>
-                            </StackPanel>
-                        </Border>
+                            </Border>
 
-                        <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
-                            <Border Style="{StaticResource CardStyle}" Padding="14">
+                            <Border x:Name="MifodiyControlsCard" Style="{StaticResource CardStyle}" Padding="14" MinHeight="236">
                                 <StackPanel Spacing="8">
-                                    <TextBlock Text="Чувствительность" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Команды и голос" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Чувствительность" Style="{StaticResource CaptionStyle}" />
                                     <ComboBox SelectedValue="{Binding VoiceSensitivity, Mode=TwoWay}" SelectedValuePath="Tag" PlaceholderText="Выберите чувствительность" AutomationProperties.Name="Чувствительность распознавания Мифодия">
                                         <ComboBoxItem Tag="low" Content="Низкая" />
                                         <ComboBoxItem Tag="balanced" Content="Сбалансированная" />
                                         <ComboBoxItem Tag="high" Content="Высокая" />
                                     </ComboBox>
-                                    <TextBlock Text="Обычные команды исполняются только после кодового слова." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                    <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" Margin="0,6,0,0" />
+                                    <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" />
                                     <TextBox Text="{Binding VoiceName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Microsoft Irina" Style="{StaticResource InputStyle}" />
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
                                         <StackPanel Spacing="2">
@@ -229,17 +156,60 @@
                                             <NumberBox Value="{Binding VoiceVolume, Mode=TwoWay}" Minimum="0" Maximum="100" SpinButtonPlacementMode="Compact" />
                                         </StackPanel>
                                     </Grid>
-                                    <TextBlock Text="Используется только установленный русский голос; при отсутствии ru-RU TTS отключается." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="1" Background="{StaticResource SurfaceOrangeBrush}" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="Последнее событие" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="{Binding VoiceLastRecognition}" TextWrapping="Wrap" />
-                                    <TextBlock Text="Тестовый режим не меняет состояние записи." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
                         </Grid>
+
+                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+                            <StackPanel Spacing="10">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                    <StackPanel Spacing="3">
+                                        <TextBlock Text="Проверка команды" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Тест не запускает запись и проверяет только распознавание команды и голосовой ответ." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="Без записи" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" />
+                                </Grid>
+                                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                    <TextBlock Text="Мифодий, начни запись" FontSize="15" />
+                                </Border>
+                                <StackPanel x:Name="MifodiyTestActionsPanel" Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Начать тест" Style="{StaticResource PrimaryButtonStyle}" Click="TestVoiceSpeechButton_Click" />
+                                    <Button Content="Проверить голос" Style="{StaticResource SecondaryButtonStyle}" Click="TestVoiceTtsButton_Click" />
+                                    <Button Content="Обновить статус" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshVoiceButton_Click" />
+                                </StackPanel>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Последнее распознавание" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceLastRecognition}" MaxHeight="42" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLastRecognition}" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding VoiceErrorCode}" Foreground="{StaticResource WarningBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceDiagnosticsDetail}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Expander Header="Техническая диагностика Мифодия" IsExpanded="False">
+                            <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="{Binding VoiceStatus}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                    <TextBlock Text="Модель / wake word" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceWakeWordMode}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Запрошенный endpoint" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceRequestedMicrophone}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="Фактический endpoint" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceEffectiveMicrophone}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="Voice Host" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceRuntimeProcess}" />
+                                    <TextBlock Text="{Binding VoiceRuntimePath}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Ожидаемая / наблюдаемая сборка" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceExpectedBuild}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding VoiceObservedBuild}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="Последняя команда / trace" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceLastCommandId}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding VoiceLastTraceId}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                    <TextBlock Text="Перезапуски" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceRestartCount}" />
+                                    <TextBlock Text="{Binding VoiceDiagnosticsDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Expander>
                     </StackPanel>
                 </Border>
             </Expander>

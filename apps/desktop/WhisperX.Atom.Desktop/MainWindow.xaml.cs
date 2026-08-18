@@ -144,6 +144,21 @@ public sealed partial class MainWindow : Window
         if (NavFrame.CanGoBack) NavFrame.GoBack();
     }
 
+    private void TitleContentGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // The status labels have stable widths on wide screens. On smaller
+        // windows details remain available through one stable flyout button
+        // instead of forcing the title bar to reflow every health refresh.
+        var width = e.NewSize.Width;
+        var showPills = width >= 860;
+        var showVoice = width >= 1040;
+        RecorderStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
+        ServerStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
+        WhisperXStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
+        VoiceStatusPill.Visibility = showPills && showVoice ? Visibility.Visible : Visibility.Collapsed;
+        ProfileText.Visibility = width >= 1160 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (_suppressNavigation || args.SelectedItem is not NavigationViewItem item) return;

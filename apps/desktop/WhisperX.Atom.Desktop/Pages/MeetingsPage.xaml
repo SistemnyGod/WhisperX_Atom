@@ -163,6 +163,10 @@
                                     </ScrollViewer>
                                 </TabViewItem>
 
+                                <TabViewItem Header="Мифодий" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Frame x:Name="MeetingAssistantFrame" />
+                                </TabViewItem>
+
                                 <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20" RowDefinitions="Auto,*" RowSpacing="12">
                                         <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" ColumnSpacing="8">

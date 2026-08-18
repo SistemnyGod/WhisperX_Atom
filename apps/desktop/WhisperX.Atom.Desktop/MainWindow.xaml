@@ -25,13 +25,13 @@
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>
             <TitleBar.Content>
-                <Grid MinWidth="420" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="16,0,12,0">
+                <Grid x:Name="TitleContentGrid" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="16,0,12,0" SizeChanged="TitleContentGrid_SizeChanged">
                     <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
-                        <Border x:Name="RecorderStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
-                        <Border x:Name="ServerStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
-                        <Border x:Name="WhisperXStatusPill" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" /></Border>
-                        <Border x:Name="VoiceStatusPill" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
+                    <StackPanel x:Name="TopStatusCluster" Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <Border x:Name="RecorderStatusPill" Width="132" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
+                        <Border x:Name="ServerStatusPill" Width="132" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
+                        <Border x:Name="WhisperXStatusPill" Width="132" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" /></Border>
+                        <Border x:Name="VoiceStatusPill" Width="152" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
                         <Button x:Name="StatusDetailsButton" Content="Состояние" Style="{StaticResource GhostButtonStyle}" Padding="8,4" MinHeight="32" AutomationProperties.Name="Подробности состояния системы">
                             <Button.Flyout>
                                 <Flyout Placement="Bottom">
@@ -153,7 +153,7 @@
                         <FontIcon Glyph="&#xE9D2;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AssistantNavItem" Visibility="Collapsed" Content="ИИ-помощник" Tag="assistant">
+                <NavigationViewItem x:Name="AssistantNavItem" Content="ИИ-помощник" Tag="assistant">
                     <ToolTipService.ToolTip>Чат с локальной нейросетью по стенограммам</ToolTipService.ToolTip>
                     <AutomationProperties.Name>ИИ-помощник</AutomationProperties.Name>
                     <NavigationViewItem.Icon>

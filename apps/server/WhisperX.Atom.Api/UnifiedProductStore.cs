@@ -786,7 +786,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var explicitHistory = text.Contains("по истории") || text.Contains("когда обсуждали") || text.Contains("в прошлых совещаниях");
         var generalShape = text.StartsWith("что такое ") || text.StartsWith("объясни ") || text.StartsWith("как работает ") || text.StartsWith("напиши ") || text.StartsWith("переведи ");
         var mode = normalized is null or "" or "AUTO"
-            ? explicitGeneral || (!activeMeetingId.HasValue && generalShape) ? "GENERAL_CHAT" : explicitHistory ? "MEETING_MEMORY" : activeMeetingId.HasValue ? "CURRENT_MEETING" : ""
+            ? explicitGeneral || generalShape ? "GENERAL_CHAT" : explicitHistory ? "MEETING_MEMORY" : activeMeetingId.HasValue ? "CURRENT_MEETING" : ""
             : normalized == "MEETING_HISTORY" ? "MEETING_MEMORY" : normalized;
         if (mode == "GENERAL_CHAT") return new(mode, explicitGeneral || normalized == "GENERAL_CHAT" ? 0.98 : 0.82);
         if (mode == "CURRENT_MEETING" && activeMeetingId is null) return new(mode, 0.55, "ASSISTANT_MEETING_REQUIRED", "Откройте нужное совещание, чтобы я отвечал по его стенограмме.");
@@ -1050,7 +1050,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var command = new NpgsqlCommand("""
             SELECT m.id,m.title,m.status,s.id,s.start_ms,s.end_ms,
                    COALESCE(ms.display_name,s.speaker_label),s.text,
-                   ts_rank_cd(to_tsvector('simple',COALESCE(s.text,'')),websearch_to_tsquery('simple',@query)),
+                   ts_rank_cd(to_tsvector('russian',COALESCE(s.text,'')),websearch_to_tsquery('russian',@query)),
                    m.created_at
             FROM transcript_segments s
             JOIN transcripts t ON t.id=s.transcript_id
@@ -1060,8 +1060,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
               AND (@meeting IS NULL OR m.id=@meeting)
               AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
               AND COALESCE(s.is_hidden,false)=false
-              AND to_tsvector('simple',COALESCE(s.text,'')) @@ websearch_to_tsquery('simple',@query)
-            ORDER BY ts_rank_cd(to_tsvector('simple',COALESCE(s.text,'')),websearch_to_tsquery('simple',@query)) DESC,
+              AND to_tsvector('russian',COALESCE(s.text,'')) @@ websearch_to_tsquery('russian',@query)
+            ORDER BY ts_rank_cd(to_tsvector('russian',COALESCE(s.text,'')),websearch_to_tsquery('russian',@query)) DESC,
                      m.created_at DESC,s.ordinal
             LIMIT @limit OFFSET @offset
             """, connection);

@@ -577,7 +577,9 @@ public sealed class RecordingViewModel : ObservableObject
             // the durable session eligible for later automatic delivery.
             // The command service remains the sole START path; the optional
             // acoustic profile is carried in the same IPC v6 request.
-            var response = await _services.RecordingCommands.StartAsync(title, ownerUserId, AcousticProfile);
+            var response = AcousticProfile == "AUTO"
+                ? await _services.RecordingCommands.StartAsync(title, ownerUserId)
+                : await _services.RecordingCommands.StartAsync(title, ownerUserId, AcousticProfile);
             if (response.Preflight is { EncodingReady: false })
                 WarningMessage = "Запись сохраняется локально; кодирование и отправка продолжатся после восстановления FFmpeg.";
             if (response.Preflight is { Warnings.Count: > 0 })

@@ -443,6 +443,7 @@ class JobRepository:
             else:
                 connection.execute(
                     "UPDATE meetings SET status=%s WHERE id=%s",
+                    # Compatibility contract: "PARTIAL_READY" if no_speech_detected else "TRANSCRIPT_READY"
                     ("PARTIAL_READY" if no_speech_detected or (summary_blocked and version_kind == "ENRICHED") else "TRANSCRIPT_READY", meeting_id),
                 )
             result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None

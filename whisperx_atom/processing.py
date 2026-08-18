@@ -152,6 +152,8 @@ class ProcessingService:
             # outcome, not an ASR failure. Detect it before loading/running the
             # model so silent recordings cannot be reported as a generic
             # TRANSCRIPT_EMPTY (and do not spend GPU time on an empty decode).
+            # _is_silent_pcm(ctx.asr_audio_path) remains the low-level fallback
+            # inside _is_unusable_audio for legacy contract compatibility.
             if _is_unusable_audio(ctx.asr_audio_path, ctx.audio_signal_metrics):
                 report("TRANSCRIBING", 30)
                 no_speech = _build_no_speech_result(

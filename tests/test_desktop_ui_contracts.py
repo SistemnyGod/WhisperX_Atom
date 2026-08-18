@@ -144,11 +144,37 @@ def test_login_window_surfaces_connection_context_and_keyboard_submit():
     assert 'Text="Локальная запись"' in page
     assert 'x:Name="StatusSurface"' in page
     assert 'KeyDown="CredentialBox_KeyDown"' in page
-    assert 'AppWindow.Resize(new Windows.Graphics.SizeInt32(620, 700))' in codebehind
+    assert 'ConfigureInitialWindow();' in codebehind
+    assert 'DisplayArea.GetFromWindowId' in codebehind
+    assert 'width < 820' in codebehind
     assert 'Проверяем подключение и авторизацию' in codebehind
-    assert 'StatusSurface.Visibility = Visibility.Visible' in codebehind
+    assert 'StatusSurface.Opacity = 1' in codebehind
     assert 'RECORDER_BOOTSTRAP_FAILED' in codebehind
     assert 'Не удалось выполнить вход. Проверьте адрес сервера и локальное подключение.' in codebehind
+
+
+def test_login_window_keeps_status_geometry_stable_and_reflows_statuses_on_compact_widths():
+    page = (DESKTOP / "LoginWindow.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "LoginWindow.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="LoginStatusGrid"' in page
+    assert 'MinHeight="52" Opacity="0"' in page
+    assert 'x:Name="BusyRing"' in page and 'Visibility="Collapsed"' in page
+    assert 'private void ConfigureResponsiveLayout' in codebehind
+    assert 'SetBusy(bool busy)' in codebehind
+
+
+def test_voice_diagnostics_and_live_telemetry_have_separate_ui_ownership():
+    vm = (DESKTOP / "ViewModels" / "SettingsViewModel.cs").read_text(encoding="utf-8")
+    states = (DESKTOP / "ViewModels" / "VoiceUiStates.cs").read_text(encoding="utf-8")
+    page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'VoiceDiagnosticsUiState' in states
+    assert 'VoiceTelemetryUiState' in states
+    assert 'ApplyVoiceDiagnostics' in vm
+    assert 'VoiceRequestedMicrophone = packet.DeviceId' not in vm
+    assert 'Task.Delay(TimeSpan.FromSeconds(2)' in codebehind
+    assert 'UpdateVoiceStatusVisual();' not in codebehind.split('SubscribeTelemetryAsync', 1)[1].split('return Task.CompletedTask', 1)[0]
+    assert 'Header="Техническая диагностика Мифодия" IsExpanded="False"' in page
 
 
 def test_title_bar_uses_compact_status_pills_for_runtime_states():
@@ -206,7 +232,7 @@ def test_settings_exposes_repeatable_setup_wizard_and_collapses_technical_detail
     assert 'x:Name="OpenSetupWizardButton"' in page
     assert 'Content="Повторить настройку"' in page
     assert 'Header="Техническая диагностика Recorder Host"' in page
-    assert 'Header="Экспериментальные функции · Мифодий"' in page
+    assert 'Header="Мифодий"' in page
     assert 'OpenSetupWizardButton_Click' in codebehind
     assert 'Шаг 1 из 7 · Вход' in codebehind
     assert 'Начать первую запись' in codebehind

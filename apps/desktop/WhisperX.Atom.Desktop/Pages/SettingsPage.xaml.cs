@@ -43,6 +43,7 @@ public sealed partial class SettingsPage : Page
         _voiceRefreshCts?.Cancel();
         _voiceRefreshCts = new CancellationTokenSource();
         _voiceBarsTimer?.Start();
+        ApplyResponsiveLayout(ActualWidth);
         _ = RefreshVoiceLoopAsync(_voiceRefreshCts.Token);
         _ = RefreshVoiceTelemetryAsync(_voiceRefreshCts.Token);
     }
@@ -63,7 +64,7 @@ public sealed partial class SettingsPage : Page
             try { await RefreshVoiceDiagnosticsAsync(); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch { }
-            try { await Task.Delay(500, cancellationToken); }
+            try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
         }
     }
@@ -92,7 +93,6 @@ public sealed partial class SettingsPage : Page
                     DispatcherQueue.TryEnqueue(() =>
                     {
                         ViewModel.ApplyVoiceTelemetry(packet);
-                        UpdateVoiceStatusVisual();
                     });
                 return Task.CompletedTask;
             }, cancellationToken);
@@ -128,6 +128,7 @@ public sealed partial class SettingsPage : Page
     private void RenderVoiceBars()
     {
         if (ViewModel is null || _voiceBars.Count == 0) return;
+        ViewModel.RefreshVoiceTelemetryStaleness();
         var target = Math.Clamp(ViewModel.VoiceLevelNormalized, 0d, 1d);
         _voiceLevelSmoothed += (target - _voiceLevelSmoothed) * 0.22d;
         if (target == 0 && _voiceLevelSmoothed < 0.01) _voiceLevelSmoothed = 0;
@@ -446,11 +447,20 @@ public sealed partial class SettingsPage : Page
 
     private void SettingsPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 420, e.NewSize.Width);
-        ApiActionsPanel.Orientation = ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact
+        ApplyResponsiveLayout(e.NewSize.Width);
+    }
+
+    private void ApplyResponsiveLayout(double width)
+    {
+        ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 420, width);
+        ResponsiveLayout.SetCardColumns(MifodiyPrimaryGrid, new FrameworkElement?[] { MifodiySignalCard, MifodiyControlsCard }, width, 2);
+        ApiActionsPanel.Orientation = ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact
             ? Orientation.Vertical
             : Orientation.Horizontal;
-        ConfigureArchiveLayout(ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact);
+        MifodiyTestActionsPanel.Orientation = ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact
+            ? Orientation.Vertical
+            : Orientation.Horizontal;
+        ConfigureArchiveLayout(ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact);
     }
 
     private void ConfigureArchiveLayout(bool compact)
