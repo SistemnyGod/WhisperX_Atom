@@ -186,6 +186,19 @@
             <Frame x:Name="NavFrame" />
         </NavigationView>
 
+        <InfoBar
+            x:Name="GlobalNotificationBar"
+            Grid.Row="1"
+            Canvas.ZIndex="30"
+            Margin="0,12,20,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            MaxWidth="460"
+            IsOpen="False"
+            IsClosable="True"
+            Title="Состояние системы"
+            AutomationProperties.Name="Уведомление о состоянии системы" />
+
         <Border
             x:Name="GlobalRecordingController"
             Grid.Row="1"

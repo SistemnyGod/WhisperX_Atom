@@ -22,8 +22,8 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("GET_SESSION_STATUS", new { sessionId }, cancellationToken);
 
-    public Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default) =>
-        _client.SendAsync("START", new { title, meetingId, ownerUserId, localOnly }, cancellationToken);
+    public Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default, string acousticProfile = "AUTO") =>
+        _client.SendAsync("START", new { title, meetingId, ownerUserId, localOnly, acousticProfile }, cancellationToken);
 
     public Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default) =>
         _client.SendAsync("PAUSE", cancellationToken: cancellationToken);
@@ -57,8 +57,8 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> SetRecordingProfileAsync(string recordingProfile, CancellationToken cancellationToken = default) =>
         _client.SendAsync("SET_RECORDING_PROFILE", new { recordingProfile }, cancellationToken);
 
-    public Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default) =>
-        _client.SendAsync("TEST_AUDIO_SOURCE", new { deviceId, systemAudio }, cancellationToken);
+    public Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default, int durationSeconds = 3) =>
+        _client.SendAsync("TEST_AUDIO_SOURCE", new { deviceId, systemAudio, durationSeconds = Math.Clamp(durationSeconds, 1, 10) }, cancellationToken);
 
     public Task<AgentIpcResponse> SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default) =>
         _client.SendAsync("SET_ARCHIVE_ROOT", new { archiveRoot }, cancellationToken);

@@ -381,6 +381,21 @@ def test_server_periodically_reconciles_interrupted_recordings_and_failed_asr():
     assert '["ADMIN_REVIEW"]' in mapper
 
 
+def test_server_startup_recovery_does_not_close_a_live_recording_session():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    launcher = read("scripts/start-whisperx-lan-server.ps1")
+    for source in (api, launcher):
+        assert "activeSessionId" in source
+        assert "session.local_session_id IS NULL" in source
+        assert "deviceHealth" in source
+
+
+def test_operations_snapshot_does_not_report_a_confirmed_long_running_session_as_stale():
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    assert "s.local_session_id IS NULL" in store
+    assert "a.capabilities->'deviceHealth'->>'activeSessionId'" in store
+
+
 def test_gpu_failure_is_terminal_and_updates_meeting_without_hiding_existing_transcript():
     persistence = read("workers/ml_worker/persistence.py")
     assert "lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL" in persistence

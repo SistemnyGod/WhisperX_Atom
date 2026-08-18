@@ -27,7 +27,7 @@ public sealed record DesktopCurrentUser(Guid Id, string Username, string Role, b
 public sealed record DesktopTranscript(string Id, string MeetingId, string Status, IReadOnlyList<DesktopTranscriptSegment> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
 public sealed record DesktopTranscriptVersion(string Id, string MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
 public sealed record DesktopTranscriptRegistry(string TranscriptId, string MeetingId, string MeetingTitle, DateTimeOffset MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTimeOffset CreatedAt);
-public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words)
+public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string? SegmentKind = null, bool IsHidden = false)
 {
     [JsonIgnore]
     public string TimeLabel => $"{TimeSpan.FromMilliseconds(StartMs):hh\\:mm\\:ss}";

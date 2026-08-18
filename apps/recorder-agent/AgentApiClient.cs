@@ -349,7 +349,7 @@ public sealed class AgentApiClient : IDisposable
             var ownerUserId = sessionInfo?.OwnerUserId;
             var effectiveMeetingId = meetingId ?? sessionInfo?.MeetingId;
             await spool.SetMeetingBindStateAsync(localSessionId, "BIND_PENDING", cancellationToken);
-            var created = existingServerSession is null ? await CreateServerSessionAsync(effectiveMeetingId, title, localSessionId, correlationId, ownerUserId, cancellationToken) : (existingServerSession.Value, effectiveMeetingId ?? Guid.Empty);
+            var created = existingServerSession is null ? await CreateServerSessionAsync(effectiveMeetingId, title, localSessionId, correlationId, ownerUserId, sessionInfo?.AcousticProfile, cancellationToken) : (existingServerSession.Value, effectiveMeetingId ?? Guid.Empty);
             var serverSessionId = created.Item1;
             if (created.Item2 != Guid.Empty) await spool.SetMeetingIdAsync(localSessionId, created.Item2, cancellationToken);
             foreach (var track in tracks)
@@ -602,11 +602,11 @@ public sealed class AgentApiClient : IDisposable
     public async Task<bool> IsServerMediaReadyAsync(Guid serverSessionId, CancellationToken cancellationToken)
         => (await GetServerMediaStatusAsync(serverSessionId, cancellationToken)).Ready;
 
-    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, string localSessionId, string? pipelineCorrelationId, Guid? ownerUserId, CancellationToken cancellationToken)
+    private async Task<(Guid SessionId, Guid MeetingId)> CreateServerSessionAsync(Guid? meetingId, string? title, string localSessionId, string? pipelineCorrelationId, Guid? ownerUserId, string? acousticProfile, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, "api/v1/recording-sessions"));
         AddAuthentication(request, pipelineCorrelationId);
-        request.Content = JsonContent.Create(new { meetingId, ownerUserId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId });
+        request.Content = JsonContent.Create(new { meetingId, ownerUserId, title, startedAt = DateTimeOffset.UtcNow, localSessionId, pipelineCorrelationId, acousticProfile = string.Equals(acousticProfile, "STANDARD", StringComparison.OrdinalIgnoreCase) || string.Equals(acousticProfile, "LARGE_ROOM", StringComparison.OrdinalIgnoreCase) ? acousticProfile : "AUTO" });
         using var response = await _http.SendAsync(request, cancellationToken);
         await EnsureSuccessAsync(response, "SERVER_UNAVAILABLE");
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));

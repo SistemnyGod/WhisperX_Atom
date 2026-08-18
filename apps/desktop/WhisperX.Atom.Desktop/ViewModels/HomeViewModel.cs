@@ -20,6 +20,10 @@ public sealed class HomeViewModel : ObservableObject
     private string _effectiveMicrophoneText = "Микрофон ещё не подтверждён";
     private string _microphoneSignalText = "Сигнал проверяется перед стартом записи";
     private string _microphoneSignalState = "UNKNOWN";
+    private double _microphoneLevel;
+    private string _microphoneDbLabel = "Нет измерения";
+    private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
+    private bool _microphoneTelemetryStale = true;
     private string _storageText = "Ожидание проверки";
     private string _pendingUploadsText = "—";
     private string _archiveText = "Путь архива будет показан после проверки Agent";
@@ -47,6 +51,10 @@ public sealed class HomeViewModel : ObservableObject
     public string EffectiveMicrophoneText { get => _effectiveMicrophoneText; private set => SetProperty(ref _effectiveMicrophoneText, value); }
     public string MicrophoneSignalText { get => _microphoneSignalText; private set => SetProperty(ref _microphoneSignalText, value); }
     public string MicrophoneSignalState { get => _microphoneSignalState; private set => SetProperty(ref _microphoneSignalState, value); }
+    public double MicrophoneLevel { get => _microphoneLevel; private set => SetProperty(ref _microphoneLevel, value); }
+    public string MicrophoneDbLabel { get => _microphoneDbLabel; private set => SetProperty(ref _microphoneDbLabel, value); }
+    public IReadOnlyList<double> MicrophoneWaveform { get => _microphoneWaveform; private set => SetProperty(ref _microphoneWaveform, value); }
+    public bool MicrophoneTelemetryStale { get => _microphoneTelemetryStale; private set => SetProperty(ref _microphoneTelemetryStale, value); }
     public string StorageText { get => _storageText; private set => SetProperty(ref _storageText, value); }
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
     public string ArchiveText { get => _archiveText; private set => SetProperty(ref _archiveText, value); }
@@ -145,7 +153,7 @@ public sealed class HomeViewModel : ObservableObject
                 "Unavailable" => "Запись недоступна",
                 "Error" => "Ошибка записи",
                 "Checking" => "Проверка Recorder Agent",
-                _ => "Готов к новой записи"
+                _ => "Ожидание записи"
             };
             if (response.Health is { } health)
             {
@@ -157,6 +165,10 @@ public sealed class HomeViewModel : ObservableObject
                     : $"{health.EffectiveMicrophoneDeviceName}";
                 MicrophoneSignalState = health.MicrophoneSignalState ?? "UNKNOWN";
                 MicrophoneSignalText = FormatMicrophoneSignal(health.MicrophoneSignalState, health.MicrophoneRmsDb);
+                MicrophoneTelemetryStale = health.MicrophoneTelemetryStale;
+                MicrophoneLevel = Math.Clamp((health.MicrophonePeak ?? 0d) * 100d, 0d, 100d);
+                MicrophoneDbLabel = health.MicrophoneRmsDb is double rms ? $"{rms:0.0} dBFS" : "Нет измерения";
+                MicrophoneWaveform = AppendWaveformSample(MicrophoneWaveform, health.MicrophonePeak);
             }
             else
             {
@@ -165,6 +177,10 @@ public sealed class HomeViewModel : ObservableObject
                 EffectiveMicrophoneText = "Нет данных от Recorder Agent";
                 MicrophoneSignalState = "UNKNOWN";
                 MicrophoneSignalText = "Сигнал недоступен";
+                MicrophoneTelemetryStale = true;
+                MicrophoneLevel = 0;
+                MicrophoneDbLabel = "Нет измерения";
+                MicrophoneWaveform = Array.Empty<double>();
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -182,6 +198,10 @@ public sealed class HomeViewModel : ObservableObject
             EffectiveMicrophoneText = "Микрофон недоступен";
             MicrophoneSignalState = "UNAVAILABLE";
             MicrophoneSignalText = "Сигнал недоступен — проверьте Recorder Agent";
+            MicrophoneTelemetryStale = true;
+            MicrophoneLevel = 0;
+            MicrophoneDbLabel = "Нет измерения";
+            MicrophoneWaveform = Array.Empty<double>();
             ErrorText = SafeError(ex);
         }
     }
@@ -293,6 +313,14 @@ public sealed class HomeViewModel : ObservableObject
             _ => "Сигнал проверяется перед стартом записи"
         };
         return rmsDb is double value ? $"{label} · RMS {value:0.0} dB" : label;
+    }
+
+    private static IReadOnlyList<double> AppendWaveformSample(IReadOnlyList<double> current, double? peak)
+    {
+        var next = current is { Count: > 0 } ? current.ToList() : [];
+        next.Add(Math.Clamp(peak ?? 0d, 0d, 1d));
+        if (next.Count > 48) next.RemoveRange(0, next.Count - 48);
+        return next;
     }
 
     internal static string FormatBytes(long bytes)

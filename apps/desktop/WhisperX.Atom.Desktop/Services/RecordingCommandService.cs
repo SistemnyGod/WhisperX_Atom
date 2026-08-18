@@ -11,7 +11,7 @@ public sealed class RecordingCommandService(IRecorderService recorder)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public async Task<AgentIpcResponse> StartAsync(string title, Guid? ownerUserId, CancellationToken cancellationToken = default)
+    public async Task<AgentIpcResponse> StartAsync(string title, Guid? ownerUserId, string acousticProfile = "AUTO", CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -25,7 +25,7 @@ public sealed class RecordingCommandService(IRecorderService recorder)
 
             try
             {
-                var response = await recorder.StartAsync(title, ownerUserId: ownerUserId, localOnly: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var response = await recorder.StartAsync(title, ownerUserId: ownerUserId, localOnly: false, cancellationToken: cancellationToken, acousticProfile: acousticProfile).ConfigureAwait(false);
                 if (!response.Ok)
                 {
                     await AbortStartAsync(sessionBeforeStart, response.SessionId).ConfigureAwait(false);

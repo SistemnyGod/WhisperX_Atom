@@ -103,7 +103,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         {
             response = intent.ToUpperInvariant() switch
             {
-                "STARTRECORDING" => await _commands.StartAsync("Голосовая запись", null, cancellationToken).ConfigureAwait(false),
+                "STARTRECORDING" => await _commands.StartAsync("Голосовая запись", null, cancellationToken: cancellationToken).ConfigureAwait(false),
                 "STOPRECORDING" => await _commands.StopAsync(cancellationToken).ConfigureAwait(false),
                 "PAUSERECORDING" => await _commands.PauseAsync(cancellationToken).ConfigureAwait(false),
                 "RESUMERECORDING" => await _commands.ResumeAsync(cancellationToken).ConfigureAwait(false),

@@ -8,6 +8,8 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+from whisperx_atom.audio_signal import analyze_wav
+
 
 MAX_BYTES = int(os.getenv("MAX_MEDIA_BYTES", str(8 * 1024 * 1024 * 1024)))
 MAX_DURATION_MS = int(os.getenv("MAX_MEDIA_DURATION_MS", str(4 * 60 * 60 * 1000)))
@@ -129,6 +131,11 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     except (OSError, json.JSONDecodeError):
         assembly_result = {}
     drift_values = [float(item.get("driftMs", item.get("drift_ms", 0))) for item in assembly_result.get("tracks", []) if isinstance(item, dict)]
+    try:
+        signal_metrics = analyze_wav(asr)
+        signal_metadata = signal_metrics.to_dict()
+    except Exception:
+        signal_metadata = {"signal_state": "UNUSABLE", "analysis_error": "AUDIO_SIGNAL_ANALYSIS_FAILED"}
     quality_report = {
         "duration_ms": int(probe["duration_ms"]),
         "sample_rate": int(audio_stream.get("sample_rate") or 0),
@@ -144,6 +151,7 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "warnings": [],
         "recording_tracks": recording_tracks,
         "assembly": assembly_result,
+        "audio_signal_metrics": signal_metadata,
         **_measure_pcm_quality(asr),
     }
 

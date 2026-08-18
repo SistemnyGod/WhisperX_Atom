@@ -25,6 +25,9 @@ public sealed class SettingsViewModel : ObservableObject
     private bool _voiceAlwaysListening;
     private bool _voiceQuietMode;
     private string _voiceSensitivity = "balanced";
+    private string _voiceName = "Microsoft Irina";
+    private int _voiceRate;
+    private int _voiceVolume = 90;
     private string _voiceStatus = "Проверка Мифодия…";
     private string _voiceLastRecognition = "—";
     private string _voiceErrorCode = "—";
@@ -58,6 +61,9 @@ public sealed class SettingsViewModel : ObservableObject
         _voiceAlwaysListening = settings.VoiceAlwaysListening;
         _voiceQuietMode = settings.VoiceQuietMode;
         _voiceSensitivity = settings.VoiceSensitivity;
+        _voiceName = settings.VoiceName;
+        _voiceRate = settings.VoiceRate;
+        _voiceVolume = settings.VoiceVolume;
     }
 
     public string ApiUrl { get => _apiUrl; set { if (!ServerOriginManaged) SetProperty(ref _apiUrl, value); } }
@@ -90,6 +96,9 @@ public sealed class SettingsViewModel : ObservableObject
     public bool VoiceAlwaysListening { get => _voiceAlwaysListening; set { if (SetProperty(ref _voiceAlwaysListening, value)) _ = ApplyVoiceSettingsAsync(); } }
     public bool VoiceQuietMode { get => _voiceQuietMode; set { if (SetProperty(ref _voiceQuietMode, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string VoiceSensitivity { get => _voiceSensitivity; set { if (SetProperty(ref _voiceSensitivity, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public string VoiceName { get => _voiceName; set { if (SetProperty(ref _voiceName, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public int VoiceRate { get => _voiceRate; set { var valueToSet = Math.Clamp(value, -10, 10); if (SetProperty(ref _voiceRate, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
+    public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
     public string VoiceErrorCode { get => _voiceErrorCode; private set => SetProperty(ref _voiceErrorCode, value); }
@@ -252,7 +261,7 @@ public sealed class SettingsViewModel : ObservableObject
     private async Task ApplyVoiceSettingsAsync()
     {
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity });
+        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity, VoiceName = VoiceName, VoiceRate = VoiceRate, VoiceVolume = VoiceVolume });
         try
         {
             var effectiveMicrophone = current.MicrophoneDeviceId;
@@ -264,7 +273,7 @@ public sealed class SettingsViewModel : ObservableObject
                     ?? effectiveMicrophone;
             }
             catch { }
-            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity))
+            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity, voiceName: VoiceName, voiceRate: VoiceRate, voiceVolume: VoiceVolume))
                 VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE";
         }
         catch { if (VoiceAlwaysListening) _ = _services.VoiceHost.StartAsync(); }
@@ -628,7 +637,7 @@ public sealed class SettingsViewModel : ObservableObject
         DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc,
             current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed,
-            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity);
+            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume);
     }
 
     private static string SafeError(Exception ex, string? fallback = null) => UiErrorFormatter.Format(ex, fallback ?? "Не удалось выполнить операцию с настройками.");

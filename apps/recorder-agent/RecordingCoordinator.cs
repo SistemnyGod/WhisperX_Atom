@@ -134,7 +134,7 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
         }
     }
 
-    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false)
+    public async Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false, string acousticProfile = "AUTO")
     {
         EnsureStorageAvailable();
         lock (_gate)
@@ -151,7 +151,7 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
         {
             // Offline sessions deliberately keep meeting_id NULL. The server meeting is
             // created later by BindSessionAsync and persisted back into the spool.
-            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId, localOnly);
+            await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId, localOnly, acousticProfile);
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
             // Publish the local session id before starting WASAPI. A first callback
             // can fail immediately; the failure handler must still be able to

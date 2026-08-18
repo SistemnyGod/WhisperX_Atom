@@ -8,6 +8,8 @@
             <TextBlock Text="{x:Bind Label, Mode=OneWay}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
             <TextBlock Grid.Column="1" Text="{x:Bind DbText, Mode=OneWay}" Style="{StaticResource TableCellStyle}" FontSize="{StaticResource CaptionTextSize}" />
         </Grid>
-        <ProgressBar Value="{x:Bind Level, Mode=OneWay}" Minimum="0" Maximum="100" Height="6" />
+        <Border Background="{StaticResource DisabledSurfaceBrush}" CornerRadius="5" Padding="0,1">
+            <ProgressBar Value="{x:Bind Level, Mode=OneWay}" Minimum="0" Maximum="100" Height="9" Background="Transparent" Foreground="{StaticResource AccentBrush}" AutomationProperties.Name="Уровень сигнала" />
+        </Border>
     </StackPanel>
 </UserControl>

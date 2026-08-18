@@ -49,7 +49,7 @@
                                             <TextBlock Text="{Binding MeetingTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding MetaText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
-                                        <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
+                                        <controls:StatusBadge Grid.Column="1" Text="{Binding StatusText}" Status="{Binding StatusCode}" VerticalAlignment="Center" />
                                         <TextBlock Grid.Column="2" Text="{Binding MeetingDateText}" Foreground="{StaticResource MutedTextBrush}" />
                                     </Grid>
                                 </DataTemplate>
@@ -69,9 +69,7 @@
                         <TextBlock Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" />
                         <TextBlock x:Name="DetailsTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
                         <TextBlock x:Name="DetailsMeta" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                        <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
-                            <TextBlock x:Name="DetailsStatus" FontWeight="SemiBold" />
-                        </Border>
+                        <controls:StatusBadge x:Name="DetailsStatusBadge" HorizontalAlignment="Left" />
                         <TextBlock x:Name="DetailsReviewText" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                         <StackPanel x:Name="SummaryDetails" Spacing="10">
                             <ScrollViewer MaxHeight="360" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">

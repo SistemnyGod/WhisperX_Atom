@@ -123,9 +123,16 @@ def test_system_response_intervals_hide_only_their_media_window():
         [("VOICE_COMMAND", 1000), ("SYSTEM_RESPONSE_STARTED", 1200), ("SYSTEM_RESPONSE_FINISHED", 2400)],
         max_open_ms=5000,
     )
-    assert segment_technical_flags(1000, 1100, intervals) == ("TECHNICAL", True)
+    # VOICE_COMMAND is a point marker and must not hide an ASR segment that
+    # merely contains the command. Only the actual TTS interval is technical.
+    assert segment_technical_flags(1000, 1100, intervals) == ("SPEECH", False)
     assert segment_technical_flags(1300, 2000, intervals) == ("TECHNICAL", True)
     assert segment_technical_flags(3000, 4000, intervals) == ("SPEECH", False)
+
+
+def test_voice_command_marker_does_not_hide_long_user_segment():
+    intervals = build_technical_intervals([("VOICE_COMMAND", 1000)])
+    assert segment_technical_flags(0, 5000, intervals) == ("SPEECH", False)
 
 
 def test_orphaned_tts_start_is_bounded():

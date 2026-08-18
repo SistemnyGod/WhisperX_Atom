@@ -23,8 +23,8 @@ public sealed class RecordingCoordinator : IAsyncDisposable
     public AudioPeakSnapshot CurrentAudioPeaks => _legacy.CurrentAudioPeaks;
     public (bool Microphone, bool SystemAudio, string? Error) GetCaptureReadiness(string profile) => _legacy.GetCaptureReadiness(profile);
     public void ValidatePreflight() => _legacy.ValidatePreflight();
-    public Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false)
-        => _legacy.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly);
+    public Task<string> StartAsync(Guid? meetingId = null, string? title = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false, string acousticProfile = "AUTO")
+        => _legacy.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly, acousticProfile);
     public Task<AudioSourceTestResult> TestAudioSourceAsync(string? deviceId, bool systemAudio, CancellationToken cancellationToken = default)
         => _legacy.TestAudioSourceAsync(deviceId, systemAudio, cancellationToken);
     public Task<AudioSourceTestResult> TestAudioSourceAsync(string? deviceId, bool systemAudio, TimeSpan duration, CancellationToken cancellationToken = default)

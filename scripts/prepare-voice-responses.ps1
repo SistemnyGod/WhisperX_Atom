@@ -1,5 +1,11 @@
+#requires -Version 7.0
+
 param([string]$OutputRoot = (Join-Path $PSScriptRoot "..\apps\voice-host\Assets\VoiceResponses"))
 $ErrorActionPreference = "Stop"
+# This file is UTF-8 without a BOM. Windows PowerShell 5.1 reads such scripts
+# using the active ANSI code page and can silently turn Russian phrases into
+# mojibake before synthesis. Requiring PowerShell 7 makes the text decoding
+# deterministic and prevents publishing corrupted voice responses.
 Add-Type -AssemblyName System.Speech
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null

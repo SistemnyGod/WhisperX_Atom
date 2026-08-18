@@ -54,6 +54,7 @@ public sealed class GlobalRawEncoderWorker(
     RawEncoderRuntimeState runtimeState,
     ILogger<GlobalRawEncoderWorker> logger) : BackgroundService
 {
+    private const int MaxTransientEncodeAttempts = 5;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromSeconds(120);
     private readonly string _workerId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
@@ -172,6 +173,13 @@ public sealed class GlobalRawEncoderWorker(
             if (ex is RawEncoderValidationException && raw.EncodeAttempts < 3)
                 terminalCode = null;
             var code = terminalCode ?? ClassifyEncodeFailure(ex);
+            if (terminalCode is null
+                && code is not "LOCAL_ENCODER_UNAVAILABLE"
+                && raw.EncodeAttempts >= MaxTransientEncodeAttempts)
+            {
+                terminalCode = "ENCODER_RETRY_EXHAUSTED";
+            }
+            code = terminalCode ?? code;
             if (terminalCode is not null)
             {
                 var terminalClaimed = await spool.SetRawEncodingTerminalFailureAsync(raw, code, _workerId, cancellationToken).ConfigureAwait(false);

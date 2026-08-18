@@ -17,7 +17,11 @@ public sealed record DesktopSettings(
     bool AgentBootstrapConfirmed = false,
     bool VoiceAlwaysListening = true,
     bool VoiceQuietMode = false,
-    string VoiceSensitivity = "balanced")
+    string VoiceSensitivity = "balanced",
+    string AcousticProfile = "AUTO",
+    string VoiceName = "Microsoft Irina",
+    int VoiceRate = 0,
+    int VoiceVolume = 90)
 {
     private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -43,7 +47,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? UnconfiguredApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced")
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -58,7 +62,11 @@ public sealed record DesktopSettings(
             agentBootstrapConfirmed,
             voiceAlwaysListening,
             voiceQuietMode,
-            NormalizeVoiceSensitivity(voiceSensitivity));
+            NormalizeVoiceSensitivity(voiceSensitivity),
+            NormalizeAcousticProfile(acousticProfile),
+            string.IsNullOrWhiteSpace(voiceName) ? "Microsoft Irina" : voiceName.Trim(),
+            Math.Clamp(voiceRate, -10, 10),
+            Math.Clamp(voiceVolume, 0, 100));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -98,6 +106,12 @@ public sealed record DesktopSettings(
         return normalized is "low" or "high" or "balanced" ? normalized : "balanced";
     }
 
+    private static string NormalizeAcousticProfile(string? profile)
+    {
+        var normalized = profile?.Trim().ToUpperInvariant();
+        return normalized is "AUTO" or "STANDARD" or "LARGE_ROOM" ? normalized : "AUTO";
+    }
+
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 
     private static DesktopSettings MigrateApiUrl(DesktopSettings settings)
@@ -127,7 +141,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity, migrated.AcousticProfile, migrated.VoiceName, migrated.VoiceRate, migrated.VoiceVolume);
             }
         }
         catch

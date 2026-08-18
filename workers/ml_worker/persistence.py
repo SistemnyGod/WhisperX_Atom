@@ -207,6 +207,11 @@ class JobRepository:
             row = connection.execute("SELECT input_transcript_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             return str(row[0]) if row and row[0] else None
 
+    def technical_intervals(self, meeting_id: str) -> list[tuple[int, int, str]]:
+        """Return durable TTS intervals for the derived ASR muting pass."""
+        with self._db.connection() as connection:
+            return _technical_intervals(connection, meeting_id)
+
     def load_transcript_source(self, transcript_id: str | None) -> dict[str, Any] | None:
         if not transcript_id:
             return None
@@ -243,13 +248,14 @@ class JobRepository:
             with connection.transaction():
                 error_row = connection.execute("SELECT error_code FROM jobs WHERE id=%s", (job_id,)).fetchone()
                 no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
+                partial_quality = error_row is not None and str(error_row[0] or "").upper() in {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE"}
                 connection.execute(
-                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code='NO_SPEECH_DETECTED' THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code IN ('NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','ASR_ENHANCEMENT_FAILED') THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                     (job_id,),
                 )
                 connection.execute(
                     "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
-                    ("PARTIAL_READY" if no_speech else "TRANSCRIPT_READY", meeting_id),
+                    ("PARTIAL_READY" if no_speech or partial_quality else "TRANSCRIPT_READY", meeting_id),
                 )
 
     def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
@@ -278,7 +284,7 @@ class JobRepository:
                 quality = dict(draft.get("quality") or {})
                 quality["processing_job_id"] = job_id
                 metadata = dict(draft.get("metadata") or {})
-                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash"):
+                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash", "audio_signal_metrics", "acoustic_profile", "language_quality", "asr_pass_count", "asr_selection_reason"):
                     if key in metadata:
                         quality[key] = metadata[key]
                 warnings = list(draft.get("warnings") or [])
@@ -302,7 +308,7 @@ class JobRepository:
                 )
                 # ASR-only jobs expose V1 immediately and enqueue enrichment
                 # separately. The partial transcript is never mutated by V2.
-                if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code != "NO_SPEECH_DETECTED":
+                if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}:
                     media = connection.execute(
                         "SELECT a.asr_storage_key FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
                         (job_id,),
@@ -321,10 +327,20 @@ class JobRepository:
                             "transcript_id": str(transcript_id),
                             "stage": "ASR_READY",
                             "storage_key": storage_key,
+                            # Carry the exact request choices forward.  AUTO
+                            # here would let enrichment select a different
+                            # preprocessing profile after a user explicitly
+                            # chose LARGE_ROOM, causing a false provenance
+                            # mismatch or (worse) a V2 from different input.
+                            "language": draft.get("language") or quality.get("language") or "ru",
+                            "acousticProfile": quality.get("acoustic_profile") or "AUTO",
                             "correlation_id": str(job[2]) if job[2] else None,
                         })
                         connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'ml.transcribe',%s::jsonb)", (message_id, payload))
-                    connection.execute("UPDATE meetings SET status='TRANSCRIPT_READY' WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')", (meeting_id,))
+                    connection.execute(
+                        "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
+                        ("PARTIAL_READY" if "AUDIO_SIGNAL_WEAK" in {str(item).upper() for item in warnings} else "TRANSCRIPT_READY", meeting_id),
+                    )
                 return str(transcript_id)
 
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
@@ -354,11 +370,22 @@ class JobRepository:
             version_kind = str(result.get("version_kind") or ("REPROCESSED" if str(job[1]) == "TRANSCRIBE_REPROCESS" else "GENERATED"))
             transcript_status = result.get("status", "READY")
             result_error_code = str(result.get("error_code") or "").strip().upper() or None
-            warnings = result.get("warnings") or []
+            warnings = list(result.get("warnings") or [])
             quality = result.get("quality", {})
             no_speech_detected = result_error_code == "NO_SPEECH_DETECTED" or "NO_SPEECH_DETECTED" in {str(item).upper() for item in warnings}
             if no_speech_detected and result_error_code is None:
                 result_error_code = "NO_SPEECH_DETECTED"
+            quality_codes = {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE", "ASR_ENHANCEMENT_FAILED"}
+            quality_values = {str(item).upper() for item in warnings}
+            quality_values.update(str(item).upper() for item in (quality.get("reasons") or []))
+            quality_values.add(str(result_error_code or "").upper())
+            needs_review = str(transcript_status).upper() in {"PARTIAL_READY", "NEEDS_REVIEW", "REQUIRES_REVIEW"}
+            needs_review = needs_review or "NEEDS_REVIEW" in quality_values or "REQUIRES_REVIEW" in quality_values
+            summary_blocked = version_kind != "ENRICHED" or no_speech_detected or needs_review or bool(quality_values & quality_codes)
+            if summary_blocked and version_kind == "ENRICHED" and not no_speech_detected and "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY" not in warnings:
+                warnings.append("SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY")
+                if transcript_status == "READY":
+                    transcript_status = "PARTIAL_READY"
             transcript_id = connection.execute(
                 "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id",
                 (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), source_transcript_id, version_kind),
@@ -383,7 +410,7 @@ class JobRepository:
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
                     (transcript_id, ordinal, start_ms, end_ms, speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), technical_kind if technical_hidden else str(segment.get("segment_kind", "SPEECH")), bool(segment.get("is_hidden", False)) or technical_hidden),
                 )
-            if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not no_speech_detected:
+            if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not summary_blocked:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
                 prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v1")
                 summary_job = connection.execute(
@@ -416,7 +443,7 @@ class JobRepository:
             else:
                 connection.execute(
                     "UPDATE meetings SET status=%s WHERE id=%s",
-                    ("PARTIAL_READY" if no_speech_detected else "TRANSCRIPT_READY", meeting_id),
+                    ("PARTIAL_READY" if no_speech_detected or (summary_blocked and version_kind == "ENRICHED") else "TRANSCRIPT_READY", meeting_id),
                 )
             result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None
             final_stage = "ENRICHED_READY" if version_kind == "ENRICHED" else "ASR_READY"

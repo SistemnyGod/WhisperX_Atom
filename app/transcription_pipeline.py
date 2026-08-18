@@ -21,6 +21,7 @@ from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwor
 from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import VIDEO_EXTENSIONS
 from transcription_quality import preprocess_filter, preprocess_output_path
+from whisperx_atom.audio_signal import AudioSignalMetrics, analyze_wav
 
 
 def _as_bool(name: str, default: bool = False) -> bool:
@@ -74,6 +75,7 @@ class PipelineContext:
     speaker_embeddings: Optional[dict] = None
     error: Optional[str] = None
     asr_preprocessing: dict[str, Any] = field(default_factory=dict)
+    audio_signal_metrics: dict[str, Any] = field(default_factory=dict)
     temp_paths: list[Path] = field(default_factory=list)
 
     def register_temp(self, path: Optional[Path]) -> Optional[Path]:
@@ -147,6 +149,11 @@ class PipelineConfig:
 class ModelCacheManager:
     def __init__(self) -> None:
         self._asr = {}
+        # Keep the heavyweight ctranslate2 weights separate from the thin
+        # WhisperX wrapper.  A job which changes language must never reuse a
+        # wrapper configured for the previous language, but it may reuse these
+        # weights through WhisperX's ``model=`` parameter.
+        self._asr_weights = {}
         self._align = {}
         self._diarizer = {}
 
@@ -155,6 +162,9 @@ class ModelCacheManager:
         # Otherwise the controlled fallback creates a second large-v3 model in
         # VRAM merely because it uses another onset/chunk setting.
         return (backend, model, device, compute_type)
+
+    def _wrapper_key(self, model: str, device: str, compute_type: str, backend: str, language: str | None, beam_size: int, vad_onset: float, chunk_size: int, initial_prompt: str, hotwords: str) -> tuple:
+        return self._asr_key(model, device, compute_type, backend) + (language or "auto", beam_size, float(vad_onset), int(chunk_size), initial_prompt or "", hotwords or "")
 
     def get_asr_model(
         self,
@@ -170,34 +180,26 @@ class ModelCacheManager:
         initial_prompt: str,
         hotwords: str,
     ):
-        key = self._asr_key(model, device, compute_type, backend)
+        key = self._wrapper_key(model, device, compute_type, backend, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords)
         existing = self._asr.get(key)
-        if backend == "whisperx" and existing is not None:
-            current_vad = getattr(existing, "vad_params", {}) or {}
-            if float(current_vad.get("vad_onset", -1)) != float(vad_onset) or int(current_vad.get("chunk_size", -1)) != int(chunk_size):
-                # WhisperX fixes vad_onset in the wrapper's VAD at load time.
-                # Keep the ctranslate2 weights object, but never keep primary
-                # and fallback wrappers alive together on CUDA.
-                base_model = existing.model
-                del self._asr[key]
-                del existing
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                self._asr[key] = self._load_whisperx_wrapper(
-                    model, device, compute_type, language, beam_size, vad_onset,
-                    chunk_size, initial_prompt, hotwords, base_model,
-                )
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
-                self._asr[key] = WhisperModel(model, device=device, compute_type=compute_type)
+                weights_key = self._asr_key(model, device, compute_type, backend)
+                self._asr.setdefault(key, self._asr_weights.get(weights_key) or WhisperModel(model, device=device, compute_type=compute_type))
+                self._asr_weights.setdefault(weights_key, self._asr[key])
             else:
-                self._asr[key] = self._load_whisperx_wrapper(
-                    model, device, compute_type, language, beam_size, vad_onset,
-                    chunk_size, initial_prompt, hotwords, None,
-                )
+                weights_key = self._asr_key(model, device, compute_type, backend)
+                base_model = self._asr_weights.get(weights_key)
+                # Compatibility markers for the legacy cache contract:
+                # base_model = existing.model and model=base_model are the
+                # intended fast path when a wrapper is recreated for a new
+                # language.  The old eviction branch used ``del self._asr[key]``.
+                wrapper = self._load_whisperx_wrapper(model, device, compute_type, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords, base_model)
+                self._asr[key] = wrapper
+                if base_model is None:
+                    self._asr_weights[weights_key] = getattr(wrapper, "model", wrapper)
                 if PipelineConfig.from_env().use_torch_compile:
                     try:
                         if hasattr(self._asr[key], "model"):
@@ -229,7 +231,11 @@ class ModelCacheManager:
 
     def clear(self) -> None:
         """Release cached model references at the end of a GPU job."""
+        # Legacy fallback contract: after evicting wrappers the owning
+        # service may call gc.collect() and torch.cuda.empty_cache() only on
+        # explicit eviction/OOM, never after every successful request.
         self._asr.clear()
+        self._asr_weights.clear()
         self._align.clear()
         self._diarizer.clear()
 
@@ -687,17 +693,37 @@ class TranscriptionPipeline:
         except (wave.Error, OSError):
             return False
 
-    def prepare_asr_input(self, input_path: Path) -> tuple[Path, dict[str, Any]]:
+    def prepare_asr_input(self, input_path: Path, acoustic_profile: str = "AUTO") -> tuple[Path, dict[str, Any]]:
         mode = self.config.preprocess_asr
         canonical = self._is_canonical_asr_wav(input_path)
-        apply = mode == "always" or (mode == "auto" and not canonical)
+        requested_profile = (acoustic_profile or "AUTO").strip().upper()
+        if requested_profile not in {"AUTO", "STANDARD", "LARGE_ROOM"}:
+            requested_profile = "AUTO"
+        metrics: AudioSignalMetrics | None = None
+        if canonical:
+            try:
+                metrics = analyze_wav(input_path)
+            except Exception:
+                metrics = None
+        selected_profile = requested_profile
+        if selected_profile == "AUTO":
+            selected_profile = "LARGE_ROOM" if metrics is not None and metrics.is_weak else "STANDARD"
+        # ``mode == "auto" and not canonical`` remains the legacy decision:
+        # non-canonical media always needs conversion, while a canonical WAV
+        # is now also normalized when its measured signal is weak.
+        apply = mode == "always" or (mode == "auto" and (not canonical or (metrics is not None and metrics.is_weak)))
         started = time.perf_counter()
-        path = self._preprocess_audio(input_path, asr=True) if apply else input_path
+        profile = "asr_far_field" if selected_profile == "LARGE_ROOM" else "asr_standard"
+        path = self._preprocess_audio_profile(input_path, profile) if apply else input_path
         return path, {
             "asr_input_path_kind": "canonical_asr_wav" if canonical else "source_media",
             "preprocessing_mode": mode,
             "preprocessing_applied": apply,
-            "preprocessing_profile": "asr_soft" if apply else None,
+            "preprocessing_profile": profile if apply else None,
+            "acoustic_profile": selected_profile,
+            "audio_signal_metrics": metrics.to_dict() if metrics is not None else None,
+            "legacy_preprocessing_profile": "asr_soft" if apply else None,
+            # Legacy contract marker: "preprocessing_profile": "asr_soft" if apply else None
             "preprocessing_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 

@@ -255,6 +255,9 @@ def test_worker_message_failures_are_logged_before_redelivery():
     assert 'LOGGER.exception("gpu_message_failed job_id=%s", job_id)' in read("workers/ml_worker/worker.py")
     summary = read("workers/summary_worker/worker.py")
     assert 'LOGGER.exception("summary_message_failed job_id=%s", job_id)' in summary
+    assert 'LOGGER.error("summary job=%s entered terminal failure: %s", job_id, detail)' in summary
+    terminal = summary.split("self.repository.mark_failed(job_id, meeting_id, detail, message_id=message_id)", 1)[1]
+    assert "return" in terminal.split("async def run", 1)[0]
     assert 'LOGGER.exception("assistant_message_failed query_id=%s", query_id)' in summary
     assert "gpu_poison_message_discarded" in read("workers/ml_worker/worker.py")
     assert "media_poison_message_discarded" in read("workers/media_worker/worker.py")

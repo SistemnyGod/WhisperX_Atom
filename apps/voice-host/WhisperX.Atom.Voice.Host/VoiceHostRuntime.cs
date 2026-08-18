@@ -137,6 +137,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audio.AudioAvailable += OnAudioAvailable;
         _audio.CaptureError += OnCaptureError;
         _speech.Error += OnSpeechError;
+        _logger?.LogInformation(
+            "Voice response engine initialized. Mode={Mode}, Voice={Voice}, Culture={Culture}",
+            _speech.UsesPreRecordedResponses ? "PRERECORDED" : "WINDOWS_TTS",
+            _speech.VoiceName,
+            _speech.VoiceCulture);
 
         var root = AppContext.BaseDirectory;
         var configuredModelPath = Environment.GetEnvironmentVariable("ATOM_VOSK_MODEL");
@@ -245,6 +250,18 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 QuietMode = quiet.GetBoolean();
             var sensitivity = ReadString(payload, "sensitivity");
             if (!string.IsNullOrWhiteSpace(sensitivity)) SetSensitivity(sensitivity);
+            var voiceName = ReadString(payload, "voiceName");
+            var voiceRate = ReadNullableInt(payload, "voiceRate");
+            var voiceVolume = ReadNullableInt(payload, "voiceVolume");
+            if (!_speech.ConfigureVoice(voiceName, voiceRate, voiceVolume))
+            {
+                _lastErrorCode = "VOICE_RUSSIAN_VOICE_UNAVAILABLE";
+                // Never report a healthy listening host when the configured
+                // response voice is unavailable.  Continuing here used to
+                // make CONFIGURE succeed while the first command silently
+                // had no safe Russian TTS response.
+                return new VoiceHostResponse(false, Snapshot, _lastErrorCode);
+            }
 
             var normalized = string.IsNullOrWhiteSpace(requestedDevice) ? _microphoneDeviceId : requestedDevice.Trim();
             if (!string.Equals(normalized, _microphoneDeviceId, StringComparison.OrdinalIgnoreCase) || !_audio.IsRunning)
@@ -809,14 +826,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 _logger?.LogWarning("VOICE_COMMAND event could not be persisted. TraceId={TraceId}", traceId);
             var response = command.Intent switch
             {
-                VoiceIntent.StartRecording => await SendRecorderAsync("START", new { }, cancellationToken, traceId, commandId),
-                VoiceIntent.PauseRecording => await SendRecorderAsync("PAUSE", new { }, cancellationToken, traceId, commandId),
-                VoiceIntent.ResumeRecording => await SendRecorderAsync("RESUME", new { }, cancellationToken, traceId, commandId),
-                VoiceIntent.StopRecording => await SendRecorderAsync("STOP", new { }, cancellationToken, traceId, commandId),
-                VoiceIntent.AddMarker => await SendRecorderAsync("MARKER", new { label = command.Parameter }, cancellationToken, traceId, commandId),
-                VoiceIntent.MarkDecision => await SendRecorderAsync("DECISION", new { label = command.Parameter }, cancellationToken, traceId, commandId),
-                VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId),
-                VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId),
+                VoiceIntent.StartRecording => await SendRecorderAsync("START", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.PauseRecording => await SendRecorderAsync("PAUSE", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.ResumeRecording => await SendRecorderAsync("RESUME", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.StopRecording => await SendRecorderAsync("STOP", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.AddMarker => await SendRecorderAsync("MARKER", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.MarkDecision => await SendRecorderAsync("DECISION", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.HistoryQuestion when !HistoryQuestionsEnabled => new VoiceResponse("Свободный диалог пока недоступен.", true, false, CommandId: commandId, TraceId: traceId),
                 VoiceIntent.HistoryQuestion => await AskHistoryAsync(command.Parameter ?? command.Text, cancellationToken),
                 _ => new VoiceResponse("Команда не распознана", true, false)
@@ -876,7 +893,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
     }
 
-    private async Task<VoiceResponse> SendRecorderAsync(string command, object payload, CancellationToken cancellationToken, string? traceId = null, string? commandId = null)
+    private async Task<VoiceResponse> SendRecorderAsync(string command, object payload, CancellationToken cancellationToken, string? traceId = null, string? commandId = null, double confidence = 1.0)
     {
         var started = Stopwatch.GetTimestamp();
         if (_desktopBroker is not null
@@ -893,7 +910,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 "DECISION" => VoiceIntent.MarkDecision,
                 _ => VoiceIntent.MarkActionItem
             };
-            var broker = await _desktopBroker.ExecuteAsync(intent.ToString(), _pendingRecognizedText ?? command, 1.0, false, cancellationToken, traceId, commandId);
+            var broker = await _desktopBroker.ExecuteAsync(intent.ToString(), _pendingRecognizedText ?? command, Math.Clamp(confidence, 0d, 1d), false, cancellationToken, traceId, commandId);
             _lastTraceId = broker.TraceId ?? traceId ?? _lastTraceId;
             _recorderAckLatencyMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             if (!broker.Ok)
@@ -949,6 +966,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_MODEL_MISSING" => "Не найдена модель распознавания голоса.",
         "VOICE_MODEL_INTEGRITY_FAILED" => "Модель распознавания повреждена.",
         "VOICE_NATIVE_RUNTIME_UNAVAILABLE" => "Не доступен native runtime Vosk.",
+        "VOICE_RUSSIAN_VOICE_UNAVAILABLE" => "Не найден установленный русский голос Windows (например, Microsoft Irina).",
         "VOICE_MICROPHONE_UNAVAILABLE" => "Микрофон недоступен или запрещён Windows.",
         "VOICE_HOST_OWNER_MISMATCH" => "Voice Host запущен от другого пользователя Windows.",
         "VOICE_HOST_PROCESS_UNINSPECTABLE" => "Не удалось проверить владельца или путь Voice Host.",
@@ -1150,6 +1168,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     }
 
     private static string? ReadString(JsonElement payload, string name) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    private static int? ReadNullableInt(JsonElement payload, string name) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.TryGetInt32(out var parsed) ? parsed : null;
     private static bool ReadBool(JsonElement payload, string name, bool fallback) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : fallback;
 
     public async ValueTask DisposeAsync()

@@ -203,7 +203,10 @@ public sealed class VoiceHostController : IAsyncDisposable
                 microphoneDeviceId = microphoneId,
                 enabled = settings.VoiceAlwaysListening,
                 quietMode = settings.VoiceQuietMode,
-                sensitivity = settings.VoiceSensitivity
+                sensitivity = settings.VoiceSensitivity,
+                voiceName = settings.VoiceName,
+                voiceRate = settings.VoiceRate,
+                voiceVolume = settings.VoiceVolume
             }, cancellationToken).ConfigureAwait(false);
             if (!configured.Ok)
             {
@@ -266,7 +269,7 @@ public sealed class VoiceHostController : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
     }
 
-    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default)
+    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90)
     {
         if (!enabled && (_process is null || _process.HasExited))
         {
@@ -286,7 +289,10 @@ public sealed class VoiceHostController : IAsyncDisposable
                 microphoneDeviceId,
                 enabled,
                 quietMode,
-                sensitivity
+                sensitivity,
+                voiceName,
+                voiceRate,
+                voiceVolume
             }, cancellationToken).ConfigureAwait(false);
             if (!response.Ok)
             {

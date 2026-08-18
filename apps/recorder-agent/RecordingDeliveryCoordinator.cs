@@ -42,6 +42,7 @@ public sealed class RecordingDeliveryCoordinator(
 
     private async Task<FinalizationResult> FinalizeLocalCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
+        await spool.RefreshSessionTotalSamplesAsync(localSessionId, cancellationToken).ConfigureAwait(false);
         var info = await spool.GetSessionInfoAsync(localSessionId, cancellationToken);
         if (info is null)
             return new FinalizationResult(false, "LOCAL_FINALIZE", "LOCAL_SESSION_NOT_FOUND", false);
@@ -121,11 +122,28 @@ public sealed class RecordingDeliveryCoordinator(
 
     private async Task<FinalizationResult> RunCoreAsync(string localSessionId, CancellationToken cancellationToken)
     {
+        await spool.RefreshSessionTotalSamplesAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        var current = await spool.GetSessionInfoAsync(localSessionId, cancellationToken).ConfigureAwait(false);
+        if (current is null)
+            return new FinalizationResult(false, "DELIVERY", "LOCAL_SESSION_NOT_FOUND", false);
+
+        var now = DateTimeOffset.UtcNow;
+        var archiveDue = string.IsNullOrWhiteSpace(current.ArchivePath)
+            && (current.ArchiveNextRetryAtUtc is null || current.ArchiveNextRetryAtUtc <= now);
+        var deliveryDue = !string.Equals(current.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase)
+            && current.DeliveryState is not ("CONFIRMED" or "COMPLETED")
+            && (current.NextRetryAtUtc is null || current.NextRetryAtUtc <= now);
+
         // Archive and delivery share the session single-flight lock but run
-        // independently. Retention still enforces the archive+server purge
-        // barrier, so parallel execution cannot remove chunks prematurely.
-        var archiveTask = RunArchiveIsolatedAsync(localSessionId, cancellationToken);
-        var deliveryTask = RunDeliveryIsolatedAsync(localSessionId, cancellationToken);
+        // independently when each subsystem is due. Their retry clocks are
+        // separate: a delayed server retry must not be restarted merely because
+        // local FLAC/archive work is still pending.
+        var archiveTask = archiveDue
+            ? RunArchiveIsolatedAsync(localSessionId, cancellationToken)
+            : Task.FromResult((State: current.ArchivePath is null ? "PENDING" : "READY", ArchivePath: current.ArchivePath));
+        var deliveryTask = deliveryDue
+            ? RunDeliveryIsolatedAsync(localSessionId, cancellationToken)
+            : Task.FromResult(new FinalizationResult(true, "DELIVERY_NOT_DUE", null, true, DeliveryState: current.DeliveryState));
         await Task.WhenAll(archiveTask, deliveryTask).ConfigureAwait(false);
         var archiveResult = await archiveTask.ConfigureAwait(false);
         var deliveryResult = await deliveryTask.ConfigureAwait(false);
@@ -188,11 +206,19 @@ public sealed class RecordingDeliveryCoordinator(
             var chunks = await spool.GetArchiveChunksAsync(localSessionId, cancellationToken);
             if (raw.Pending > 0 || chunks.Count == 0)
             {
+                var archiveRetryCount = (previous?.ArchiveRetryCount ?? 0) + 1;
+                var archiveRetryAt = DateTimeOffset.UtcNow.Add(GetRetryDelay(archiveRetryCount));
+                await spool.SetArchiveErrorAsync(
+                    localSessionId,
+                    raw.Pending > 0 ? "ENCODING_PENDING" : "LOCAL_ARCHIVE_PENDING",
+                    raw.Pending > 0 ? "Raw PCM is durable; FLAC encoding is pending." : "FLAC chunks are not ready yet.",
+                    archiveRetryCount,
+                    archiveRetryAt,
+                    cancellationToken).ConfigureAwait(false);
                 await spool.SetFinalizationStateAsync(localSessionId,
                     localFinalizeState: "LOCAL_READY",
                     errorCode: raw.Pending > 0 ? "ENCODING_PENDING" : "LOCAL_ARCHIVE_PENDING",
                     errorDetail: raw.Pending > 0 ? "Raw PCM is durable; FLAC encoding is pending." : "FLAC chunks are not ready yet.",
-                    nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
                     preserveError: true,
                     cancellationToken: cancellationToken);
                 return ("LOCAL_READY", previous?.ArchivePath);
@@ -202,8 +228,6 @@ public sealed class RecordingDeliveryCoordinator(
             await spool.SetFinalizationStateAsync(localSessionId,
                 localFinalizeState: "LOCAL_READY",
                 archivePath: archivePath,
-                retryCount: 0,
-                nextRetryAtUtc: null,
                 preserveError: true,
                 cancellationToken: cancellationToken);
             return ("LOCAL_READY", archivePath);
@@ -220,9 +244,16 @@ public sealed class RecordingDeliveryCoordinator(
                     localFinalizeState: "LOCAL_READY",
                     errorCode: "ENCODING_PENDING",
                     errorDetail: "FLAC chunks are still being encoded",
-                    nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
                     preserveError: true,
                     cancellationToken: cancellationToken);
+                var archiveRetryCount = (previous?.ArchiveRetryCount ?? 0) + 1;
+                await spool.SetArchiveErrorAsync(
+                    localSessionId,
+                    "ENCODING_PENDING",
+                    "FLAC chunks are still being encoded",
+                    archiveRetryCount,
+                    DateTimeOffset.UtcNow.Add(GetRetryDelay(archiveRetryCount)),
+                    cancellationToken).ConfigureAwait(false);
                 return ("LOCAL_READY", previous?.ArchivePath);
             }
             var code = ClassifyLocalArchiveError(ex);

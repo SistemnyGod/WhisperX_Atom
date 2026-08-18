@@ -72,23 +72,30 @@ internal static class FlacEncoder
                 || streams.GetArrayLength() == 0) return false;
             var stream = streams[0];
             if (!stream.TryGetProperty("codec_name", out var codec)
+                || codec.ValueKind != JsonValueKind.String
                 || !string.Equals(codec.GetString(), "flac", StringComparison.OrdinalIgnoreCase)) return false;
             if (!TryReadInt(stream, "sample_rate", out var rate) || rate != expected.SampleRate) return false;
             if (!TryReadInt(stream, "channels", out var channels) || channels != expected.Channels) return false;
             if (stream.TryGetProperty("bits_per_sample", out var bits)
-                && bits.ValueKind != JsonValueKind.Null
-                && bits.TryGetInt32(out var bitsPerSample)
-                && bitsPerSample > 0
-                && bitsPerSample != expected.BitsPerSample) return false;
+                && bits.ValueKind != JsonValueKind.Null)
+            {
+                // ffprobe versions differ here: some emit a JSON number and
+                // others a quoted number. A present but malformed value is
+                // not a reason to accept a possibly corrupt FLAC.
+                if (!TryReadIntValue(bits, out var bitsPerSample)) return false;
+                if (bitsPerSample > 0 && bitsPerSample != expected.BitsPerSample) return false;
+            }
 
             var expectedDuration = expected.SampleCount > 0
                 ? expected.SampleCount / (double)expected.SampleRate
                 : 0d;
             if (stream.TryGetProperty("nb_samples", out var samples)
-                && samples.ValueKind != JsonValueKind.Null
-                && long.TryParse(samples.ToString(), out var decodedSamples)
-                && expected.SampleCount > 0
-                && Math.Abs(decodedSamples - expected.SampleCount) > Math.Max(1, expected.SampleRate / 100)) return false;
+                && samples.ValueKind != JsonValueKind.Null)
+            {
+                if (!TryReadLongValue(samples, out var decodedSamples)) return false;
+                if (expected.SampleCount > 0
+                    && Math.Abs(decodedSamples - expected.SampleCount) > Math.Max(1, expected.SampleRate / 100)) return false;
+            }
             var durationText = stream.TryGetProperty("duration", out var streamDuration)
                 ? streamDuration.ToString()
                 : document.RootElement.TryGetProperty("format", out var format)
@@ -109,7 +116,25 @@ internal static class FlacEncoder
     {
         value = 0;
         return element.TryGetProperty(property, out var candidate)
-            && (candidate.TryGetInt32(out value) || int.TryParse(candidate.ToString(), out value));
+            && TryReadIntValue(candidate, out value);
+    }
+
+    private static bool TryReadIntValue(JsonElement value, out int result)
+    {
+        result = 0;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out result)) return true;
+        return value.ValueKind == JsonValueKind.String
+            && int.TryParse(value.GetString(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out result);
+    }
+
+    private static bool TryReadLongValue(JsonElement value, out long result)
+    {
+        result = 0;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out result)) return true;
+        return value.ValueKind == JsonValueKind.String
+            && long.TryParse(value.GetString(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out result);
     }
 
     private static async Task<bool> DecodeFullyAsync(string path, CancellationToken cancellationToken)

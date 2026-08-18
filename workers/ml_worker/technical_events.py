@@ -57,7 +57,10 @@ def build_technical_intervals(
             if start is not None:
                 intervals.append((start, max(start, at), "TECHNICAL"))
         elif event == "VOICE_COMMAND":
-            intervals.append((at, at, "TECHNICAL"))
+            # Keep the command as a timeline marker, but do not turn a
+            # zero-length point into an interval that hides an entire ASR
+            # segment containing the command.
+            continue
     intervals.extend((start, start + max_open_ms, "TECHNICAL") for start in open_by_id.values())
     intervals.extend((start, start + max_open_ms, "TECHNICAL") for start in anonymous_starts)
     return intervals
@@ -71,6 +74,8 @@ def segment_technical_flags(
     start = max(0, int(start_ms))
     end = max(start, int(end_ms))
     for interval_start, interval_end, kind in intervals:
+        if interval_end <= interval_start:
+            continue
         if start <= interval_end and end >= interval_start:
             return kind, True
     return "SPEECH", False

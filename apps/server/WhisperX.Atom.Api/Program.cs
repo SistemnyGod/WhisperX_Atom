@@ -1043,7 +1043,7 @@ app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest r
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var correlationId = request.PipelineCorrelationId ?? context.Request.Headers["X-Correlation-Id"].ToString();
-    var result = await store.CreateRecordingSessionWithResultAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId);
+    var result = await store.CreateRecordingSessionWithResultAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId, request.AcousticProfile);
     if (result.Session is null)
     {
         var status = result.ErrorCode switch
@@ -1538,7 +1538,7 @@ public record AgentLinkLocalRequest(Guid InstallationId, Guid? AgentId, string N
 public record AgentBootstrapRequest(Guid InstallationId, Guid? AgentId, string? Name, string? Version, JsonDocument? Capabilities);
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
-public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null);
+public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null, string? AcousticProfile = "AUTO");
 public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
@@ -1817,6 +1817,9 @@ public sealed class Database(IConfiguration configuration)
             WHERE session.agent_id=agent.id
               AND session.state='RECORDING'
               AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+              AND (session.local_session_id IS NULL
+                   OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
+                      <> session.local_session_id::text)
             """, connection, transaction))
         {
             await sessions.ExecuteNonQueryAsync(cancellationToken);
@@ -2529,9 +2532,9 @@ public sealed class Database(IConfiguration configuration)
             "SUMMARIZE" => new NpgsqlCommand(
                 "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'llm.summarize',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'transcript_id',t.id,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN LATERAL (SELECT id FROM transcripts WHERE meeting_id=j.meeting_id ORDER BY version DESC LIMIT 1) t ON true WHERE j.id=@id", connection, tx),
             "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" or "TRANSCRIBE_ASR" or "TRANSCRIPT_ENRICH" => new NpgsqlCommand(
-                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type,'language','ru','acousticProfile',COALESCE((SELECT acoustic_profile FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1),'AUTO'),'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
             _ => new NpgsqlCommand(
-                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type,'language','ru','acousticProfile',COALESCE((SELECT acoustic_profile FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1),'AUTO'),'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
         };
         await using (publish)
         {

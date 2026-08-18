@@ -25,6 +25,7 @@ public sealed partial class MainWindow : Window
     private long _globalRecordingMediaTimeMs;
     private DateTimeOffset _globalRecordingSampleAtUtc;
     private bool _globalRecordingPaused;
+    private string? _lastNotificationText;
 
     public MainWindow(FrontendServices services)
     {
@@ -404,6 +405,28 @@ public sealed partial class MainWindow : Window
         {
             SystemStatusIndicator.Fill = brush;
         }
+
+        // Keep health polling quiet while still surfacing actionable changes
+        // in one consistent, non-blocking notification area.
+        if (string.Equals(text, "Проверка системы", StringComparison.OrdinalIgnoreCase)) return;
+        if (string.Equals(_lastNotificationText, text, StringComparison.Ordinal)) return;
+        _lastNotificationText = text;
+        GlobalNotificationBar.Title = brushKey switch
+        {
+            "DangerBrush" => "Требуется внимание",
+            "WarningBrush" => "Проверка состояния",
+            "SuccessBrush" => "Система готова",
+            _ => "Состояние системы"
+        };
+        GlobalNotificationBar.Severity = brushKey switch
+        {
+            "DangerBrush" => InfoBarSeverity.Error,
+            "WarningBrush" => InfoBarSeverity.Warning,
+            "SuccessBrush" => InfoBarSeverity.Success,
+            _ => InfoBarSeverity.Informational
+        };
+        GlobalNotificationBar.Message = text;
+        GlobalNotificationBar.IsOpen = true;
     }
 
     private void SetRuntimeStatus(bool backendAvailable, bool authenticated, bool recorderAvailable, bool processingReady, AgentIpcHealth? recorderHealth = null)

@@ -1,8 +1,13 @@
 using System.ComponentModel;
+using System.Text;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using Windows.Storage;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
+using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
 using WhisperX_Atom_Desktop.ViewModels;
 
@@ -80,6 +85,7 @@ public sealed partial class TranscriptsPage : Page
     private void ClearSearchButton_Click(object sender, RoutedEventArgs e)
     {
         SearchBox.Text = string.Empty;
+        StatusFilterCombo.SelectedIndex = 0;
         SearchBox.Focus(FocusState.Programmatic);
     }
 
@@ -92,6 +98,20 @@ public sealed partial class TranscriptsPage : Page
     private void SegmentSearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_viewModel is not null) _viewModel.SegmentSearchText = SegmentSearchBox.Text;
+        UpdateDetails();
+    }
+
+    private void StatusFilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is not null && StatusFilterCombo.SelectedItem is ComboBoxItem item)
+            _viewModel.StatusFilter = item.Tag?.ToString() ?? "ALL";
+        UpdateState();
+    }
+
+    private void HideTechnicalEventsCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null)
+            _viewModel.HideTechnicalEvents = HideTechnicalEventsCheckBox.IsChecked == true;
         UpdateDetails();
     }
 
@@ -133,6 +153,85 @@ public sealed partial class TranscriptsPage : Page
         App.MainWindow.NavigateTo("meetings", new MeetingNavigationTarget(meetingId, segment.Id, segment.StartMs));
     }
 
+    private async void ExportTranscriptTextButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(srt: false);
+
+    private async void ExportTranscriptSrtButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(srt: true);
+
+    private async Task ExportTranscriptAsync(bool srt)
+    {
+        var selectedItem = _viewModel?.SelectedItem;
+        var transcript = selectedItem?.Transcript;
+        if (transcript is null || transcript.Segments.Count == 0)
+        {
+            WarningInfoBar.Message = "Выберите встречу с готовыми сегментами стенограммы.";
+            WarningInfoBar.IsOpen = true;
+            return;
+        }
+
+        try
+        {
+            var title = SanitizeFileName(selectedItem?.MeetingTitle ?? "transcript");
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SuggestedFileName = title + (srt ? ".srt" : ".txt")
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            picker.FileTypeChoices.Add(srt ? "Субтитры SubRip" : "Текстовая стенограмма", new List<string> { srt ? ".srt" : ".txt" });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+            var content = srt ? BuildSrt(transcript.Segments) : BuildText(selectedItem?.MeetingTitle, transcript.Segments);
+            await FileIO.WriteTextAsync(file, content, Windows.Storage.Streams.UnicodeEncoding.Utf8);
+            WarningInfoBar.IsOpen = false;
+        }
+        catch (Exception ex)
+        {
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось сохранить стенограмму.");
+            ErrorInfoBar.IsOpen = true;
+        }
+    }
+
+    private static string BuildText(string? title, IEnumerable<DesktopTranscriptSegment> segments)
+    {
+        var builder = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(title)) builder.AppendLine(title.Trim()).AppendLine();
+        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
+            builder.Append('[').Append(segment.TimeLabel).Append("] ").Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
+        }
+        return builder.ToString();
+    }
+
+    private static string BuildSrt(IEnumerable<DesktopTranscriptSegment> segments)
+    {
+        var builder = new StringBuilder();
+        var index = 1;
+        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
+            builder.AppendLine(index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            builder.Append(FormatSrtTime(segment.StartMs)).Append(" --> ").AppendLine(FormatSrtTime(segment.EndMs));
+            builder.Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
+            builder.AppendLine();
+            index++;
+        }
+        return builder.ToString();
+    }
+
+    private static string FormatSrtTime(long milliseconds)
+    {
+        var time = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+        return $"{(int)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00},{time.Milliseconds:000}";
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sanitized = new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(sanitized) ? "transcript" : sanitized;
+    }
+
     private void CancelDetailLoad()
     {
         _detailCts?.Cancel();
@@ -151,6 +250,7 @@ public sealed partial class TranscriptsPage : Page
         var hasError = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
         EmptyTitle.Text = hasError ? "Не удалось загрузить стенограммы" : "Стенограмм нет";
         var hasSearchNoResults = _viewModel.HasSearchNoResults;
+        var hasFilterNoResults = _viewModel.HasFilterNoResults;
         if (hasError)
         {
             EmptyTitle.Text = "Не удалось загрузить стенограммы";
@@ -161,6 +261,11 @@ public sealed partial class TranscriptsPage : Page
             EmptyTitle.Text = "Ничего не найдено";
             EmptyDescription.Text = $"По запросу «{_viewModel.SearchText.Trim()}» совпадений нет.";
         }
+        else if (hasFilterNoResults)
+        {
+            EmptyTitle.Text = "Нет встреч в этом фильтре";
+            EmptyDescription.Text = "Выберите другой статус или сбросьте фильтр.";
+        }
         else
         {
             EmptyTitle.Text = "Стенограмм нет";
@@ -168,7 +273,7 @@ public sealed partial class TranscriptsPage : Page
         }
         EmptyRetryButton.Visibility = hasError ? Visibility.Visible : Visibility.Collapsed;
         EmptyRetryButton.IsEnabled = !_viewModel.IsLoading;
-        EmptyClearSearchButton.Visibility = hasSearchNoResults ? Visibility.Visible : Visibility.Collapsed;
+        EmptyClearSearchButton.Visibility = hasSearchNoResults || hasFilterNoResults ? Visibility.Visible : Visibility.Collapsed;
         EmptyClearSearchButton.IsEnabled = !_viewModel.IsLoading;
         ErrorInfoBar.Message = _viewModel.ErrorText;
         ErrorInfoBar.IsOpen = hasError;

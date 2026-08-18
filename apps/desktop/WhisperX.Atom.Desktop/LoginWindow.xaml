@@ -4,56 +4,146 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="WhisperX Atom — Вход">
-    <Grid Background="{StaticResource AppBackgroundBrush}" Padding="32">
-        <Border MaxWidth="560" Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource CardStyle}">
-            <StackPanel Spacing="16">
-                <StackPanel Orientation="Horizontal" Spacing="12">
-                    <Border Width="44" Height="44" CornerRadius="12" Background="{StaticResource AccentBrush}" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE720;" Foreground="White" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <StackPanel VerticalAlignment="Center" Spacing="2">
-                        <TextBlock Text="WhisperX Atom" Style="{StaticResource PageTitleStyle}" FontSize="26" />
-                        <TextBlock Text="Рабочее пространство совещаний" Style="{StaticResource AuthHintStyle}" />
-                    </StackPanel>
-                </StackPanel>
-                <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,12">
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="Вход в рабочее пространство" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="Подключитесь к LAN-серверу, чтобы просматривать встречи и синхронизировать локальные записи." Style="{StaticResource AuthHintStyle}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </Border>
+    <Grid x:Name="LoginRoot" Background="#050D1D">
+        <Grid.Resources>
+            <SolidColorBrush x:Key="LoginCardBrush" Color="#E60B1527" />
+            <SolidColorBrush x:Key="LoginBorderBrush" Color="#4D6A82AA" />
+            <SolidColorBrush x:Key="LoginTextBrush" Color="#F4F7FF" />
+            <SolidColorBrush x:Key="LoginMutedBrush" Color="#AAB9D0" />
+            <SolidColorBrush x:Key="LoginInputBrush" Color="#A6111F35" />
+            <SolidColorBrush x:Key="LoginInputBorderBrush" Color="#526A82A5" />
+            <SolidColorBrush x:Key="LoginInfoBrush" Color="#331E4D78" />
+            <SolidColorBrush x:Key="LoginDangerBrush" Color="#FFFF8692" />
+            <SolidColorBrush x:Key="LoginDangerSurfaceBrush" Color="#663D1726" />
+            <SolidColorBrush x:Key="LoginDangerBorderBrush" Color="#99A84D63" />
+            <SolidColorBrush x:Key="LoginSuccessBrush" Color="#FF55D897" />
+            <SolidColorBrush x:Key="LoginNeutralBrush" Color="#FF94A7C2" />
 
-                <StackPanel Spacing="7">
-                    <TextBlock Text="Сервер" Style="{StaticResource AuthLabelStyle}" />
-                    <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
-                        <StackPanel Orientation="Horizontal" Spacing="7">
-                            <Ellipse Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
-                            <TextBlock x:Name="ApiOriginText" Text="Настроенный адрес" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+            <Style x:Key="LoginLabelStyle" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource LoginTextBrush}" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+            </Style>
+            <Style x:Key="LoginHintStyle" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{StaticResource LoginMutedBrush}" />
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="TextWrapping" Value="Wrap" />
+            </Style>
+            <Style x:Key="LoginInputStyle" TargetType="TextBox">
+                <Setter Property="Background" Value="{StaticResource LoginInputBrush}" />
+                <Setter Property="Foreground" Value="{StaticResource LoginTextBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource LoginInputBorderBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="9" />
+                <Setter Property="Padding" Value="14,10" />
+                <Setter Property="MinHeight" Value="46" />
+                <Setter Property="FontSize" Value="15" />
+            </Style>
+            <Style x:Key="LoginPasswordStyle" TargetType="PasswordBox">
+                <Setter Property="Background" Value="{StaticResource LoginInputBrush}" />
+                <Setter Property="Foreground" Value="{StaticResource LoginTextBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource LoginInputBorderBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="9" />
+                <Setter Property="Padding" Value="14,10" />
+                <Setter Property="MinHeight" Value="46" />
+                <Setter Property="FontSize" Value="15" />
+            </Style>
+            <Style x:Key="LoginCheckBoxStyle" TargetType="CheckBox">
+                <Setter Property="Foreground" Value="{StaticResource LoginMutedBrush}" />
+                <Setter Property="FontSize" Value="13" />
+            </Style>
+        </Grid.Resources>
+
+        <Image Source="Assets/LoginBackground.png" Stretch="UniformToFill" Opacity="0.92" />
+        <Rectangle Fill="#78050D1F" />
+        <Rectangle Fill="#26030A18" />
+
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+            <Grid Padding="28">
+                <Border
+                    MaxWidth="548"
+                    Padding="38,34,38,28"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{StaticResource LoginCardBrush}"
+                    BorderBrush="{StaticResource LoginBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="20">
+                    <StackPanel Spacing="18">
+                        <StackPanel HorizontalAlignment="Center" Spacing="9">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="10">
+                                <Border Width="38" Height="38" CornerRadius="11" Background="#FF1967F2">
+                                    <FontIcon Glyph="&#xE720;" Foreground="White" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock Text="WhisperX Atom" Foreground="{StaticResource LoginTextBrush}" FontSize="28" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="Добро пожаловать!" Foreground="{StaticResource LoginTextBrush}" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <TextBlock Text="Войдите, чтобы продолжить работу с совещаниями" Style="{StaticResource LoginHintStyle}" HorizontalAlignment="Center" />
+                            <TextBlock x:Name="ServerOriginLabel" Text="LAN-сервер · проверяется" Style="{StaticResource LoginHintStyle}" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" />
                         </StackPanel>
-                    </Border>
-                    <TextBox x:Name="ApiUrlBox" IsReadOnly="True" Style="{StaticResource InputStyle}" AutomationProperties.Name="Адрес сервера" />
-                </StackPanel>
-                <StackPanel Spacing="7">
-                    <TextBlock Text="Логин" Style="{StaticResource AuthLabelStyle}" />
-                    <TextBox x:Name="UsernameBox" Text="admin" Style="{StaticResource InputStyle}" AutomationProperties.Name="Логин" KeyDown="CredentialBox_KeyDown" />
-                    <TextBlock Text="Пароль" Style="{StaticResource AuthLabelStyle}" Margin="0,5,0,0" />
-                    <PasswordBox x:Name="PasswordBox" PlaceholderText="Введите пароль" Style="{StaticResource PasswordInputStyle}" AutomationProperties.Name="Пароль" KeyDown="CredentialBox_KeyDown" />
-                </StackPanel>
-                <Button x:Name="LoginButton" Content="Войти в рабочее пространство" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" HorizontalAlignment="Stretch" AutomationProperties.Name="Войти в LAN-сервер" />
-                <ProgressRing x:Name="BusyRing" IsActive="False" IsIndeterminate="True" HorizontalAlignment="Center" Width="24" Height="24" />
-                <Border x:Name="StatusSurface" Style="{StaticResource AuthStatusBorderStyle}" Visibility="Collapsed">
-                    <StackPanel Orientation="Horizontal" Spacing="9">
-                        <FontIcon x:Name="StatusIcon" Glyph="&#xE783;" FontSize="16" VerticalAlignment="Top" />
-                        <TextBlock x:Name="StatusText" TextWrapping="Wrap" VerticalAlignment="Center" />
+
+                        <StackPanel Spacing="7">
+                            <TextBlock Text="Логин или e-mail" Style="{StaticResource LoginLabelStyle}" />
+                            <TextBox x:Name="UsernameBox" Text="admin" PlaceholderText="Введите логин" Style="{StaticResource LoginInputStyle}" AutomationProperties.Name="Логин" KeyDown="CredentialBox_KeyDown" />
+                        </StackPanel>
+
+                        <StackPanel Spacing="7">
+                            <TextBlock Text="Пароль" Style="{StaticResource LoginLabelStyle}" />
+                            <Grid>
+                                <PasswordBox x:Name="PasswordBox" PlaceholderText="Введите пароль" Style="{StaticResource LoginPasswordStyle}" AutomationProperties.Name="Пароль" KeyDown="CredentialBox_KeyDown" Padding="14,10,48,10" />
+                                <TextBox x:Name="PasswordTextBox" PlaceholderText="Введите пароль" Style="{StaticResource LoginInputStyle}" AutomationProperties.Name="Пароль" KeyDown="CredentialBox_KeyDown" Padding="14,10,48,10" Visibility="Collapsed" />
+                                <Button x:Name="ShowPasswordButton" Width="38" Height="38" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,5,0" Background="Transparent" BorderBrush="Transparent" Foreground="{StaticResource LoginMutedBrush}" Click="TogglePasswordVisibility_Click" AutomationProperties.Name="Показать пароль">
+                                    <FontIcon x:Name="PasswordVisibilityIcon" Glyph="&#xE7B3;" FontSize="16" />
+                                </Button>
+                            </Grid>
+                        </StackPanel>
+
+                        <CheckBox x:Name="RememberLoginCheckBox" Content="Запомнить логин на этом компьютере" IsChecked="True" Style="{StaticResource LoginCheckBoxStyle}" />
+
+                        <Button x:Name="LoginButton" Content="Войти" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" HorizontalAlignment="Stretch" MinHeight="52" FontSize="16" AutomationProperties.Name="Войти в LAN-сервер" />
+                        <Button x:Name="CheckConnectionButton" Content="Проверить соединение" Style="{StaticResource SecondaryButtonStyle}" Click="CheckConnectionButton_Click" HorizontalAlignment="Stretch" AutomationProperties.Name="Проверить соединение с LAN-сервером" />
+                        <ProgressRing x:Name="BusyRing" IsActive="False" IsIndeterminate="True" HorizontalAlignment="Center" Width="24" Height="24" />
+
+                        <Border x:Name="StatusSurface" Background="{StaticResource LoginInfoBrush}" BorderBrush="{StaticResource LoginBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12,10" Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="9">
+                                <FontIcon x:Name="StatusIcon" Glyph="&#xE73E;" Foreground="{StaticResource LoginSuccessBrush}" FontSize="16" VerticalAlignment="Top" />
+                                <TextBlock x:Name="StatusText" Foreground="{StaticResource LoginTextBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+
+                        <Grid Margin="0,2,0,0" ColumnDefinitions="*,*,*,*" ColumnSpacing="8">
+                            <StackPanel Grid.Column="0" Spacing="5">
+                                <Ellipse x:Name="LanStatusDot" Width="8" Height="8" Fill="{StaticResource LoginNeutralBrush}" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="LanStatusText" Text="LAN-сервер проверяется" Style="{StaticResource LoginHintStyle}" FontSize="11" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="5">
+                                <Ellipse x:Name="RecorderStatusDot" Width="8" Height="8" Fill="{StaticResource LoginNeutralBrush}" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="RecorderStatusText" Text="Recorder проверяется" Style="{StaticResource LoginHintStyle}" FontSize="11" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Spacing="5">
+                                <Ellipse x:Name="WhisperStatusDot" Width="8" Height="8" Fill="{StaticResource LoginNeutralBrush}" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="WhisperStatusText" Text="WhisperX проверяется" Style="{StaticResource LoginHintStyle}" FontSize="11" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="3" Spacing="5">
+                                <Ellipse x:Name="VoiceStatusDot" Width="8" Height="8" Fill="{StaticResource LoginNeutralBrush}" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="VoiceStatusText" Text="Мифодий выключен" Style="{StaticResource LoginHintStyle}" FontSize="11" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Spacing="3">
+                            <TextBlock Text="Локальная запись" Foreground="{StaticResource LoginTextBrush}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" />
+                            <TextBlock Text="Сохраняется на этом компьютере. Сервер нужен для доставки и обработки." Style="{StaticResource LoginHintStyle}" FontSize="12" HorizontalAlignment="Center" TextAlignment="Center" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
-                <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="Локальная запись" Style="{StaticResource AuthLabelStyle}" />
-                        <TextBlock Text="После входа запись сначала сохраняется на этом компьютере. Временная недоступность сервера не удаляет аудио — доставка продолжится автоматически." Style="{StaticResource AuthHintStyle}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
-        </Border>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- Kept collapsed for compatibility: the configured origin is intentionally not exposed on the login form. -->
+        <StackPanel Visibility="Collapsed">
+            <TextBlock x:Name="ApiOriginText" Text="Настроенный адрес" />
+            <TextBox x:Name="ApiUrlBox" IsReadOnly="True" AutomationProperties.Name="Адрес сервера" />
+        </StackPanel>
     </Grid>
 </Window>

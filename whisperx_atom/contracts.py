@@ -22,6 +22,12 @@ class ProcessingRequest:
     # SHA-256 of the canonical ASR asset persisted in V1. Enrichment must
     # reproduce and verify this value before reusing the transcript.
     source_audio_hash: str | None = None
+    # Acoustic profile is metadata/selection only.  AUTO lets the worker use
+    # measured signal metrics to select STANDARD or LARGE_ROOM.
+    acoustic_profile: str = "AUTO"
+    # TTS technical intervals are sample-derived server markers.  They are
+    # applied only to the derived ASR input, never to the canonical recording.
+    technical_intervals: tuple[tuple[int, int, str], ...] = ()
 
 
 @dataclass

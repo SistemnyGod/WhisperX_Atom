@@ -285,7 +285,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("id", commandId); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("status", status); command.Parameters.AddWithValue("result", result.RootElement.GetRawText()); return await command.ExecuteNonQueryAsync() > 0;
     }
 
-    public async Task<RecordingSessionCreateResult> CreateRecordingSessionWithResultAsync(Guid? meetingId, Guid? agentId, Guid? ownerUserId, string? title = null, DateTimeOffset? startedAt = null, string? pipelineCorrelationId = null, string? localSessionId = null)
+    public async Task<RecordingSessionCreateResult> CreateRecordingSessionWithResultAsync(Guid? meetingId, Guid? agentId, Guid? ownerUserId, string? title = null, DateTimeOffset? startedAt = null, string? pipelineCorrelationId = null, string? localSessionId = null, string? acousticProfile = "AUTO")
     {
         await using var connection = await OpenAsync();
         await using var transaction = await connection.BeginTransactionAsync();
@@ -369,7 +369,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             meeting.Parameters.AddWithValue("title", resolvedTitle);
             await meeting.ExecuteNonQueryAsync();
         }
-        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,owner_user_id,state,started_at,pipeline_correlation_id,local_session_id) VALUES(@id,@meeting,@agent,@owner,'RECORDING',COALESCE(@started,now()),@correlation,@local) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
+        await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,owner_user_id,state,started_at,pipeline_correlation_id,local_session_id,acoustic_profile) VALUES(@id,@meeting,@agent,@owner,'RECORDING',COALESCE(@started,now()),@correlation,@local,@acoustic) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
         command.Parameters.AddWithValue("id", Guid.NewGuid());
         command.Parameters.AddWithValue("meeting", resolvedMeetingId);
         command.Parameters.AddWithValue("agent", authenticatedAgent);
@@ -377,6 +377,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value);
         command.Parameters.AddWithValue("correlation", (object?)pipelineCorrelationId ?? DBNull.Value);
         command.Parameters.AddWithValue("local", (object?)localSessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("acoustic", NormalizeAcousticProfile(acousticProfile));
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return new RecordingSessionCreateResult(null, "SERVER_STORAGE_ERROR", true);
         var result = ReadSession(reader);
@@ -682,10 +683,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         existingOutbox.Parameters.AddWithValue("job", jobId.ToString());
         if (!(bool)(await existingOutbox.ExecuteScalarAsync())!)
         {
+            var acousticProfile = await ReadAcousticProfileAsync(connection, tx, sessionId);
             var payload = JsonSerializer.Serialize(new
             {
                 message_id = Guid.NewGuid(), job_id = jobId, meeting_id = meetingId, media_asset_id = assetId,
-                stage = "INGEST", attempt = 0, storage_key = storageKey, source_type = "recorder_session", session_id = sessionId, correlation_id = await GetPipelineCorrelationIdAsync(connection, tx, sessionId)
+                stage = "INGEST", attempt = 0, storage_key = storageKey, source_type = "recorder_session", session_id = sessionId, language = "ru", acousticProfile, correlation_id = await GetPipelineCorrelationIdAsync(connection, tx, sessionId)
             });
             await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'media.ingest',@payload::jsonb)", connection, tx);
             outbox.Parameters.AddWithValue("id", Guid.NewGuid());
@@ -1066,7 +1068,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var pendingOutbox = await ScalarLongAsync("SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL");
         var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
         var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");
-        var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions WHERE state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND created_at < now()-interval '5 minutes'");
+        // A long-running recording is not stale merely because its row is
+        // older than five minutes. The current-user Host advertises the
+        // active local session in its heartbeat; only sessions without that
+        // confirmation are surfaced as interrupted.
+        var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions s LEFT JOIN recorder_agents a ON a.id=s.agent_id WHERE s.state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND s.created_at < now()-interval '5 minutes' AND (s.local_session_id IS NULL OR a.id IS NULL OR COALESCE(a.capabilities->'deviceHealth'->>'activeSessionId','') <> s.local_session_id::text)");
         return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
     }
 
@@ -1330,6 +1336,18 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     private static string Hash(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     private static AgentRow ReadAgent(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetGuid(5));
     private static RecordingSessionRow ReadSession(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.IsDBNull(4)?null:r.GetDateTime(4),r.IsDBNull(5)?null:r.GetDateTime(5),r.FieldCount > 6 && !r.IsDBNull(6) ? r.GetString(6) : null);
+    private static string NormalizeAcousticProfile(string? value)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? "AUTO" : value.Trim().ToUpperInvariant();
+        return normalized is "STANDARD" or "LARGE_ROOM" ? normalized : "AUTO";
+    }
+
+    private static async Task<string> ReadAcousticProfileAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid sessionId)
+    {
+        await using var command = new NpgsqlCommand("SELECT acoustic_profile FROM recording_sessions WHERE id=@session", connection, transaction);
+        command.Parameters.AddWithValue("session", sessionId);
+        return NormalizeAcousticProfile(await command.ExecuteScalarAsync() as string);
+    }
 
     private static async Task<string?> GetPipelineCorrelationIdAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid sessionId)
     {

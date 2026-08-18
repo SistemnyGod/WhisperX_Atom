@@ -122,14 +122,19 @@ class SummaryRepository:
                     (socket.gethostname(), message_id),
                 )
 
-    def mark_failed(self, job_id: str, meeting_id: str, error: str) -> None:
+    def mark_failed(self, job_id: str, meeting_id: str, error: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
-            connection.execute(
-                "UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,error_message=%s,error_code='SUMMARY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-                (error, job_id),
-            )
-            # The transcript remains usable even when the optional summary failed.
-            connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+            with connection.transaction():
+                connection.execute(
+                    "UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,error_message=%s,error_code='SUMMARY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    (error, job_id),
+                )
+                # The transcript remains usable even when the optional summary failed.
+                connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND status <> 'CANCELLED'", (meeting_id,))
+                # Terminal jobs must not leave a live inbox lease behind. This
+                # avoids one pointless NAK/redelivery and bounds inbox growth.
+                if message_id:
+                    connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
 
     def schedule_retry(self, job_id: str, error: str, error_code: str, message_id: str | None = None, max_attempts: int = 3) -> int | None:
         """Atomically make a transient job retryable and release its inbox claim.
@@ -400,6 +405,7 @@ class SummaryWorker:
         current = self.repository.job_state(job_id)
         if current in {"READY", "FAILED", "CANCELLED"}:
             LOGGER.info("skip terminal summary job=%s status=%s", job_id, current)
+            self.repository.release_message(message_id)
             return
         LOGGER.info("summary job=%s correlation_id=%s meeting_id=%s", job_id, correlation_id, meeting_id)
         self.repository.update_job(job_id, "RUNNING", "PREPARING_CONTEXT", 5)
@@ -442,6 +448,7 @@ class SummaryWorker:
             persisted = await asyncio.to_thread(self.repository.persist, job_id, meeting_id, transcript_id, result, self.model_alias)
             if not persisted:
                 LOGGER.info("summary job=%s result discarded because the meeting was cancelled or deleted", job_id)
+                await asyncio.to_thread(self.repository.release_message, message_id)
         except Exception as exc:
             detail = type(exc).__name__ + ": " + str(exc)
             if is_retryable_summary_error(exc):
@@ -450,8 +457,14 @@ class SummaryWorker:
                 )
                 if scheduled_attempt is not None:
                     raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
-            self.repository.mark_failed(job_id, meeting_id, detail)
-            raise
+            # The failure is terminal and has been durably persisted. Ack the
+            # current NATS delivery instead of NAK'ing it: a terminal summary
+            # must not make JetStream redeliver the same payload just to learn
+            # that the job is already FAILED. mark_failed also removes the
+            # inbox lease in the same transaction.
+            self.repository.mark_failed(job_id, meeting_id, detail, message_id=message_id)
+            LOGGER.error("summary job=%s entered terminal failure: %s", job_id, detail)
+            return
 
 
 async def run() -> None:

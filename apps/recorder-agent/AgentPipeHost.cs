@@ -197,8 +197,9 @@ public sealed class AgentPipeHost(
                     // a server meeting and without a cached owner. The server
                     // resolves the linked user when the spool is later bound.
                     var title = ReadString(request.Payload, "title");
+                    var acousticProfile = ReadAcousticProfile(request.Payload);
                     string sessionId;
-                    try { sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly); }
+                    try { sessionId = await recorder.StartAsync(meetingId, title, cancellationToken, ownerUserId, localOnly, acousticProfile); }
                     catch (Exception exception) { return Error(MapStartError(exception)); }
                     Guid? boundMeetingId = null;
                     try { boundMeetingId = await spool.GetMeetingIdAsync(sessionId, cancellationToken); }
@@ -499,12 +500,16 @@ public sealed class AgentPipeHost(
         // DeliveryState is persisted truth. Do not infer CONFIRMED from a
         // successful request: server media assembly may still be pending.
         var delivery = string.IsNullOrWhiteSpace(info.DeliveryState) ? "NOT_STARTED" : info.DeliveryState;
-        var errorCode = _finalizationErrors.TryGetValue(sessionId, out var finalizationError) ? finalizationError : info.ErrorCode;
+        var errorCode = _finalizationErrors.TryGetValue(sessionId, out var finalizationError)
+            ? finalizationError
+            : rawBacklog.LastErrorCode ?? info.ErrorCode;
         var error = errorCode is null ? null : SafeErrorText(errorCode);
         var encodingState = rawBacklog.TerminalFailed > 0
             ? "TERMINAL_FAILED"
             : rawBacklog.Pending > 0
-            ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
+             ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0
+                 ? (string.IsNullOrWhiteSpace(rawBacklog.LastErrorCode) ? "WAITING_FOR_ENCODER" : "ENCODE_FAILED")
+                 : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
         var archiveState = info.LocalFinalizeState == "LOCAL_FAILED"
             ? "FAILED"
@@ -526,7 +531,7 @@ public sealed class AgentPipeHost(
             RawTerminalFailedCount: rawBacklog.TerminalFailed);
     }
 
-    private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED" or "RAW_RECOVERY_PENDING" or "LOCAL_ENCODER_UNAVAILABLE";
+    private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED" or "RAW_RECOVERY_PENDING" or "LOCAL_ENCODER_UNAVAILABLE" or "ENCODER_FAILED" or "FLAC_VALIDATION_FAILED" or "FFMPEG_ENCODE_FAILED" or "ENCODER_TIMEOUT";
 
     private static string SafeErrorText(string code) => code switch
     {
@@ -534,6 +539,8 @@ public sealed class AgentPipeHost(
         "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Запись остановлена, исходные данные сохранены насколько это возможно.",
         "RAW_DURABILITY_FAILED" => "Не удалось подтвердить сохранение исходного PCM. Запись не считается сохранённой; проверьте локальное хранилище.",
         "ENCODER_FAILED" => "Не удалось закодировать аудиочанк. Запись остановлена, локальные данные сохранены для восстановления.",
+        "ENCODER_RETRY_EXHAUSTED" => "Кодировщик несколько раз не смог обработать аудиочанк. Исходный PCM сохранён; проверьте FFmpeg и журнал Recorder.",
+        "FLAC_VALIDATION_FAILED" or "FFMPEG_ENCODE_FAILED" or "ENCODER_TIMEOUT" => "Кодирование аудиочанка временно не завершилось. Исходный PCM сохранён, повторная попытка будет выполнена автоматически.",
         "LOCAL_ENCODING_FAILED" or "LOCAL_ARCHIVE_FAILED" => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
         "LOCAL_CHUNK_MISSING" or "LOCAL_CHUNK_INVALID" => "Локальные аудиочанки неполные или повреждены. Исходные файлы сохранены для диагностики.",
         "SERVER_UNAVAILABLE" or "CHUNK_UPLOAD_FAILED" => "Запись сохранена локально. Сервер пока не подтвердил получение. Повторная отправка выполняется автоматически.",
@@ -542,7 +549,7 @@ public sealed class AgentPipeHost(
         "RAW_RECOVERY_PENDING" => "Локальный PCM-файл не закрыт. Agent восстановит его автоматически.",
         "RAW_DURABILITY_FAILED" or "RAW_FINALIZER_BACKLOG_EXCEEDED" => "Не удалось подтвердить закрытие локального PCM. Исходные данные оставлены для recovery.",
         "NO_AUDIO_CAPTURED" or "AUDIO_CAPTURE_START_FAILED" => "Не удалось подтвердить сохранённый аудиопоток. Запись не считается сохранённой.",
-        "REQUIRES_MANUAL_REPAIR" or "RAW_SOURCE_MISSING" or "RAW_SOURCE_EMPTY" or "RAW_TIMELINE_INVALID" or "RAW_CHECKSUM_MISMATCH" or "UNSUPPORTED_AUDIO_FORMAT" => "Исходный PCM повреждён или отсутствует. Требуется ручное восстановление.",
+        "REQUIRES_MANUAL_REPAIR" or "RAW_SOURCE_MISSING" or "RAW_SOURCE_EMPTY" or "RAW_TIMELINE_INVALID" or "RAW_CHECKSUM_MISMATCH" or "UNSUPPORTED_AUDIO_FORMAT" => "Кодировщик не смог обработать исходный PCM. Требуется проверка FFmpeg или ручное восстановление.",
         "recording_timeline_inconsistent" => "Сервер отклонил временную шкалу записи. Исходные части сохранены для диагностики.",
         "chunk_checksum_mismatch" => "Сервер отклонил повреждённую часть записи. Исходные файлы сохранены для диагностики.",
         "AGENT_AUTH_REJECTED" => "Сервер отклонил авторизацию Agent. Переподключите Agent в настройках.",
@@ -678,6 +685,12 @@ public sealed class AgentPipeHost(
     private static string? ReadString(JsonElement payload, string name) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
+
+    private static string ReadAcousticProfile(JsonElement payload)
+    {
+        var value = ReadString(payload, "acousticProfile")?.Trim().ToUpperInvariant();
+        return value is "STANDARD" or "LARGE_ROOM" ? value : "AUTO";
+    }
 
     private static bool HasProperty(JsonElement payload, string name) =>
         payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out _);

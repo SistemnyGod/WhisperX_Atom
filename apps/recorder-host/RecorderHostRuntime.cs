@@ -963,7 +963,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 root,
                 null,
                 _engine.DeviceCatalog.Devices.Select(ToIpcDevice).ToArray(),
-                Array.Empty<AgentIpcAudioDevice>()), cancellationToken).ConfigureAwait(false);
+                Array.Empty<AgentIpcAudioDevice>(),
+                _sessionId), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1034,7 +1035,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var encodingState = rawBacklog.TerminalFailed > 0
             ? "TERMINAL_FAILED"
             : rawBacklog.Pending > 0
-            ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0 ? "WAITING_FOR_ENCODER" : "ENCODING"
+            ? rawBacklog.Failed > 0 && rawBacklog.Encoding == 0 && rawBacklog.Ready == 0
+                ? (string.IsNullOrWhiteSpace(rawBacklog.LastErrorCode) ? "WAITING_FOR_ENCODER" : "ENCODE_FAILED")
+                : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
         var archiveState = info?.LocalFinalizeState == "LOCAL_FAILED"
             || !string.IsNullOrWhiteSpace(info?.ArchiveErrorCode)
@@ -1054,7 +1057,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             await _spool.GetServerSessionIdAsync(sessionId, cancellationToken).ConfigureAwait(false),
             info?.LocalFinalizeState ?? "PENDING",
             info?.ArchivePath,
-            info?.ErrorCode,
+            rawBacklog.LastErrorCode ?? info?.ErrorCode,
             info?.LastErrorRetryable ?? true,
             info?.NextRetryAtUtc,
             info?.MediaAssetId,

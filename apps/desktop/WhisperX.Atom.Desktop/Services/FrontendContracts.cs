@@ -31,7 +31,7 @@ public interface IRecorderService
     IAsyncEnumerable<AgentIpcResponse> SubscribeAudioTelemetryAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default, string acousticProfile = "AUTO");
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> AddMarkerAsync(string eventType = "MARKER", CancellationToken cancellationToken = default);
@@ -41,7 +41,7 @@ public interface IRecorderService
     Task<AgentIpcResponse> UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetAudioDevicesAsync(string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> SetRecordingProfileAsync(string recordingProfile, CancellationToken cancellationToken = default);
-    Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default);
+    Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default, int durationSeconds = 3);
     Task<AgentIpcResponse> SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default);
 }
 

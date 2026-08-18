@@ -37,6 +37,7 @@ public sealed partial class SettingsPage : Page
         _services = (FrontendServices)e.Parameter;
         ViewModel = new SettingsViewModel(_services);
         DataContext = ViewModel;
+        UpdateVoiceStatusVisual();
         UpdateStatus();
         _ = RefreshRuntimeDiagnosticsAsync();
         _voiceRefreshCts?.Cancel();
@@ -77,6 +78,7 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.RefreshVoiceDiagnosticsAsync();
+        UpdateVoiceStatusVisual();
     }
 
     private async Task RefreshVoiceTelemetryAsync(CancellationToken cancellationToken)
@@ -87,7 +89,11 @@ public sealed partial class SettingsPage : Page
             await new WhisperX.Atom.Desktop.VoiceHostClient().SubscribeTelemetryAsync(packet =>
             {
                 if (ViewModel is not null)
-                    DispatcherQueue.TryEnqueue(() => ViewModel.ApplyVoiceTelemetry(packet));
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        ViewModel.ApplyVoiceTelemetry(packet);
+                        UpdateVoiceStatusVisual();
+                    });
                 return Task.CompletedTask;
             }, cancellationToken);
         }
@@ -147,6 +153,7 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.TestVoiceSpeechAsync("Мифодий, начни запись");
+        UpdateVoiceStatusVisual();
         UpdateStatus();
     }
 
@@ -154,6 +161,7 @@ public sealed partial class SettingsPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.TestVoiceTtsAsync();
+        UpdateVoiceStatusVisual();
         UpdateStatus();
     }
 
@@ -161,6 +169,31 @@ public sealed partial class SettingsPage : Page
     {
         await RefreshVoiceDiagnosticsAsync();
         UpdateStatus();
+    }
+
+    private void UpdateVoiceStatusVisual()
+    {
+        if (ViewModel is null) return;
+        var status = ViewModel.VoiceStatus ?? string.Empty;
+        var errorCode = ViewModel.VoiceErrorCode ?? string.Empty;
+        var failed = status.Contains("ошиб", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("недоступ", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("нет heartbeat", StringComparison.OrdinalIgnoreCase)
+            || errorCode.StartsWith("VOICE_", StringComparison.OrdinalIgnoreCase)
+            || errorCode.Contains("MISMATCH", StringComparison.OrdinalIgnoreCase);
+        var ready = status.Contains("LISTENING", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("слушает", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("готов", StringComparison.OrdinalIgnoreCase);
+        var brushKey = failed ? "DangerBrush" : ready ? "SuccessBrush" : "WarningBrush";
+        var surfaceKey = failed ? "DangerSurfaceBrush" : ready ? "SurfaceGreenBrush" : "SurfaceOrangeBrush";
+        if (Application.Current.Resources[brushKey] is Brush brush)
+        {
+            MifodiyStatusDot.Fill = brush;
+            MifodiyStatusText.Foreground = brush;
+            MifodiyStatusBadge.BorderBrush = brush;
+        }
+        if (Application.Current.Resources[surfaceKey] is Brush surface)
+            MifodiyStatusBadge.Background = surface;
     }
 
     private void OpenRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");

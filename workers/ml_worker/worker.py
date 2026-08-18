@@ -142,16 +142,20 @@ class GpuWorker:
                 if not input_transcript or not input_transcript.get("segments"):
                     raise RuntimeError("TRANSCRIPT_INPUT_NOT_FOUND")
             source_quality = (input_transcript or {}).get("quality_metadata") or {}
+            normalized_language = str(message.get("language") or source_quality.get("language") or "ru").strip() or "ru"
+            technical_intervals = tuple(await asyncio.to_thread(self._repository.technical_intervals, str(message["meeting_id"]))) if asr_only_job else ()
             request = ProcessingRequest(
                 job_id=job_id,
                 media_path=resolve_storage_path(str(message["storage_key"])),
-                language=message.get("language", "ru"),
+                language=normalized_language,
                 profile=request_profile,
                 min_speakers=int(message.get("min_speakers", 1)),
                 max_speakers=int(message.get("max_speakers", 12)),
                 input_transcript=input_transcript,
                 source_storage_key=str(message.get("storage_key") or "") or None,
                 source_audio_hash=str(source_quality.get("asr_audio_hash") or "") or None,
+                acoustic_profile=str(message.get("acousticProfile") or message.get("acoustic_profile") or "AUTO").upper(),
+                technical_intervals=technical_intervals,
             )
 
             def progress(stage: str, value: int) -> None:

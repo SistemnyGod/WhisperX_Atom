@@ -33,6 +33,7 @@ public sealed partial class MeetingsPage : Page
     private int _searchMatchIndex = -1;
     private bool _suppressSegmentSeek;
     private bool _transcriptPlaybackSubscribed;
+    private bool _hideTechnicalEvents = true;
 
     public MeetingsPage()
     {
@@ -474,6 +475,22 @@ public sealed partial class MeetingsPage : Page
     private async void DownloadAudioButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: DesktopMedia media } || _workspace is null || _pageCts is null) return;
+        await DownloadAudioAsync(media);
+    }
+
+    private async void DownloadPrimaryAudioButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace?.Media.FirstOrDefault() is not { } media)
+        {
+            ShowError("Аудио пока недоступно: архив ещё не готов.");
+            return;
+        }
+        await DownloadAudioAsync(media);
+    }
+
+    private async Task DownloadAudioAsync(DesktopMedia media)
+    {
+        if (_workspace is null || _pageCts is null) return;
         var extension = Path.GetExtension(media.OriginalName);
         if (string.IsNullOrWhiteSpace(extension)) extension = ".flac";
         var baseName = SanitizeFileName(Path.GetFileNameWithoutExtension(media.OriginalName));
@@ -504,6 +521,12 @@ public sealed partial class MeetingsPage : Page
 
     private void TranscriptSearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        ApplyTranscriptFilter();
+    }
+
+    private void HideTechnicalEventsCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        _hideTechnicalEvents = HideTechnicalEventsCheckBox.IsChecked == true;
         ApplyTranscriptFilter();
     }
 
@@ -602,6 +625,11 @@ public sealed partial class MeetingsPage : Page
     {
         if (_workspace is null) return;
         UpdateEmptyStates();
+    }
+
+    private void OpenSummaryTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        WorkspaceTabs.SelectedIndex = 2;
     }
 
     private void MeetingsPage_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -729,6 +757,7 @@ public sealed partial class MeetingsPage : Page
     {
         if (_workspace is null) return;
         OverviewEmptyText.Visibility = _workspace.Jobs.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        TranscriptJobsEmptyText.Visibility = _workspace.Jobs.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         SpeakersEmptyText.Visibility = _workspace.Speakers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DecisionsEmptyText.Visibility = _workspace.Decisions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TasksEmptyText.Visibility = _workspace.Tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -740,12 +769,12 @@ public sealed partial class MeetingsPage : Page
     {
         if (_workspace is null) return;
         var query = TranscriptSearchBox.Text.Trim();
-        IReadOnlyList<DesktopTranscriptSegment> visible = string.IsNullOrWhiteSpace(query)
-            ? _workspace.TranscriptSegments
-            : _workspace.TranscriptSegments
-                .Where(segment => segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase)
-                    || (segment.Speaker?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
-                .ToList();
+        IReadOnlyList<DesktopTranscriptSegment> visible = _workspace.TranscriptSegments
+            .Where(segment => !_hideTechnicalEvents || (!segment.IsHidden && !string.Equals(segment.SegmentKind, "TECHNICAL", StringComparison.OrdinalIgnoreCase)))
+            .Where(segment => string.IsNullOrWhiteSpace(query)
+                || segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || (segment.Speaker?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
+            .ToList();
         TranscriptList.ItemsSource = visible;
         _searchMatches = visible;
         _searchMatchIndex = visible.Count == 0 ? -1 : Math.Clamp(_searchMatchIndex, 0, visible.Count - 1);

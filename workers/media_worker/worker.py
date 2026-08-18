@@ -121,6 +121,8 @@ async def run() -> None:
                         "sha256": derivatives.sha256,
                         "duration_ms": derivatives.duration_ms,
                         "audio_quality": derivatives.quality_report,
+                        "language": str(payload.get("language") or "ru"),
+                        "acousticProfile": str(payload.get("acousticProfile") or payload.get("acoustic_profile") or "AUTO").upper(),
                     })
                     await asyncio.to_thread(mark_ready_for_asr_and_enqueue, job_id, next_message)
                     # The media-stage inbox row is only a delivery lease. It

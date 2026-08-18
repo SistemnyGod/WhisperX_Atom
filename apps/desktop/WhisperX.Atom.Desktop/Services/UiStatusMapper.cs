@@ -41,6 +41,7 @@ public static class UiStatusMapper
             ["ALIGNING"] = new("ALIGNING", "Выравнивание", UiStatusKind.Processing),
             ["DIARIZING"] = new("DIARIZING", "Диаризация", UiStatusKind.Processing),
             ["SUMMARIZING"] = new("SUMMARIZING", "Стенограмма готова · формируется саммари", UiStatusKind.Processing),
+            ["SUMMARY_NOT_READY"] = new("SUMMARY_NOT_READY", "Саммари ещё не готово", UiStatusKind.Warning),
             ["TRANSCRIPT_READY"] = new("TRANSCRIPT_READY", "Стенограмма готова", UiStatusKind.Success),
             ["READY"] = new("READY", "Готово", UiStatusKind.Success),
             ["PARTIAL_READY"] = new("PARTIAL_READY", "Готово с предупреждениями", UiStatusKind.Warning),

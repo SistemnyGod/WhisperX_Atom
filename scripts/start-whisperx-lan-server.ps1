@@ -143,7 +143,10 @@ SET state='AWAITING_AGENT_RECONNECT'
 FROM recorder_agents AS agent
 WHERE session.agent_id=agent.id
   AND session.state='RECORDING'
-  AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes';
+  AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+  AND (session.local_session_id IS NULL
+       OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
+          <> session.local_session_id::text);
 
 UPDATE recording_sessions
 SET state='ADMIN_REVIEW'

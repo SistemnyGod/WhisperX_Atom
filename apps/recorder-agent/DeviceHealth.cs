@@ -14,7 +14,8 @@ public sealed record DeviceHealthSnapshot(
     [property: JsonPropertyName("dataRoot")] string DataRoot,
     [property: JsonPropertyName("error")] string? Error,
     IReadOnlyList<AgentIpcAudioDevice>? CaptureDevices = null,
-    IReadOnlyList<AgentIpcAudioDevice>? RenderDevices = null)
+    IReadOnlyList<AgentIpcAudioDevice>? RenderDevices = null,
+    [property: JsonPropertyName("activeSessionId")] string? ActiveSessionId = null)
 {
     public static DeviceHealthSnapshot Collect(string dataRoot, AgentStorageSettings? storage = null)
     {

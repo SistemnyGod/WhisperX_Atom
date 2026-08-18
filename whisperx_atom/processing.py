@@ -19,6 +19,7 @@ from .transcript_quality import (
     is_retryable_quality_failure,
     quality_gate,
 )
+from .audio_signal import language_quality, mute_wav_intervals
 from diarization_quality import choose_best_diarization_candidate, diarization_profiles_for_processing_profile, score_diarization_result
 
 
@@ -126,9 +127,18 @@ class ProcessingService:
                 return self._process_enrichment(request, pipeline, ctx, config, duration_seconds, report)
             report("NORMALIZING", 10)
             source_audio_hash = _sha256_file(request.media_path)
-            ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(request.media_path)
+            asr_source = request.media_path
+            # Technical TTS markers are muted only in a derived ASR copy.  The
+            # canonical recording stays byte-for-byte intact for playback and
+            # export, while the spoken assistant response cannot contaminate
+            # Russian ASR in a distant microphone.
+            muted = mute_wav_intervals(request.media_path, request.technical_intervals)
+            if muted is not None:
+                asr_source = ctx.register_temp(muted) or request.media_path
+            ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(asr_source, request.acoustic_profile)
             if ctx.asr_audio_path != request.media_path:
                 ctx.register_temp(ctx.asr_audio_path)
+            ctx.audio_signal_metrics = dict(ctx.asr_preprocessing.get("audio_signal_metrics") or {})
             # Transcript V1 is an ASR-only fast path. Do not run the second
             # diarization-oriented preprocessing pass when enrichment is
             # disabled; it adds latency and can fail a valid ASR job before the
@@ -142,7 +152,7 @@ class ProcessingService:
             # outcome, not an ASR failure. Detect it before loading/running the
             # model so silent recordings cannot be reported as a generic
             # TRANSCRIPT_EMPTY (and do not spend GPU time on an empty decode).
-            if _is_silent_pcm(ctx.asr_audio_path):
+            if _is_unusable_audio(ctx.asr_audio_path, ctx.audio_signal_metrics):
                 report("TRANSCRIBING", 30)
                 no_speech = _build_no_speech_result(
                     request,
@@ -150,6 +160,8 @@ class ProcessingService:
                     duration_seconds,
                     ctx.asr_preprocessing,
                     source_audio_hash,
+                    ctx.audio_signal_metrics,
+                    request.acoustic_profile,
                 )
                 emit_asr_ready(no_speech)
                 return no_speech
@@ -176,13 +188,15 @@ class ProcessingService:
 
             selected_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             selected_gate = quality_gate(selected_report, thresholds)
-            if not (result.get("segments") or result.get("word_segments")) and _is_silent_pcm(ctx.asr_audio_path):
+            if not (result.get("segments") or result.get("word_segments")) and _is_unusable_audio(ctx.asr_audio_path, ctx.audio_signal_metrics):
                 no_speech = _build_no_speech_result(
                     request,
                     config,
                     duration_seconds,
                     ctx.asr_preprocessing,
                     source_audio_hash,
+                    ctx.audio_signal_metrics,
+                    request.acoustic_profile,
                 )
                 emit_asr_ready(no_speech)
                 return no_speech
@@ -193,6 +207,43 @@ class ProcessingService:
                 if not segment.get("speaker"):
                     segment["speaker"] = "UNKNOWN"
             asr_text = " ".join(str(item.get("text", "")).strip() for item in asr_segments if item.get("text")).strip()
+            asr_confidence_values = [float(item.get("confidence")) for item in asr_segments if isinstance(item.get("confidence"), (int, float))]
+            asr_confidence = sum(asr_confidence_values) / len(asr_confidence_values) if asr_confidence_values else None
+            language_report = language_quality(asr_text, config.language, asr_confidence)
+            signal_warning = "AUDIO_SIGNAL_WEAK" if ctx.audio_signal_metrics.get("signal_state") == "WEAK" else None
+            enhancement_attempted = False
+            enhancement_reason = None
+            # A valid-looking English hallucination on a weak Russian signal is
+            # retried once with the explicit far-field profile.  Do not loop:
+            # a second mismatch becomes a reviewable V1 warning.
+            if language_report["mismatch"] and ctx.asr_preprocessing.get("preprocessing_profile") != "asr_far_field":
+                enhancement_attempted = True
+                enhancement_reason = "ASR_LANGUAGE_MISMATCH"
+                enhanced_path = pipeline._preprocess_audio_profile(asr_source, "asr_far_field")
+                ctx.register_temp(enhanced_path)
+                original_path = ctx.asr_audio_path
+                ctx.asr_audio_path = enhanced_path
+                enhanced_result = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
+                enhanced_text = " ".join(str(item.get("text", "")).strip() for item in enhanced_result.get("segments", []) if item.get("text")).strip()
+                enhanced_segments = enhanced_result.get("segments", []) or []
+                enhanced_confidence_values = [float(item.get("confidence")) for item in enhanced_segments if isinstance(item.get("confidence"), (int, float))]
+                enhanced_confidence = sum(enhanced_confidence_values) / len(enhanced_confidence_values) if enhanced_confidence_values else None
+                enhanced_language = language_quality(enhanced_text, config.language, enhanced_confidence)
+                enhanced_report = build_transcript_quality_report(enhanced_result, duration_seconds, thresholds)
+                if not enhanced_language["mismatch"] or enhanced_report.quality_score > selected_report.quality_score:
+                    result = enhanced_result
+                    asr_segments = copy.deepcopy(result.get("segments", []))
+                    for segment in asr_segments:
+                        if not segment.get("speaker"):
+                            segment["speaker"] = "UNKNOWN"
+                    asr_text = enhanced_text
+                    selected_report = enhanced_report
+                    language_report = enhanced_language
+                    selected_pass = "enhanced"
+                    ctx.asr_preprocessing.update({"preprocessing_applied": True, "preprocessing_profile": "asr_far_field", "acoustic_profile": "LARGE_ROOM", "asr_enhancement_reason": enhancement_reason})
+                else:
+                    ctx.asr_audio_path = original_path
+            draft_warnings = [code for code in ("ASR_LANGUAGE_MISMATCH" if language_report["mismatch"] else None, signal_warning, "AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None) if code]
             asr_draft = ProcessingResult(
                 job_id=request.job_id,
                 language=result.get("language") or config.language,
@@ -212,11 +263,17 @@ class ProcessingService:
                     "asr_channels": 1,
                     "asr_duration_seconds": duration_seconds,
                     "asr_audio_hash": source_audio_hash,
+                    "audio_signal_metrics": ctx.audio_signal_metrics,
+                    "acoustic_profile": ctx.asr_preprocessing.get("acoustic_profile", request.acoustic_profile),
+                    "asr_pass_count": 1 + int(enhancement_attempted),
+                    "asr_selection_reason": "language_retry" if enhancement_attempted else "primary_quality",
+                    "language_quality": language_report,
                 },
                 status="PARTIAL_READY",
-                warnings=[],
+                error_code="ASR_LANGUAGE_MISMATCH" if language_report["mismatch"] else ("AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None),
+                warnings=draft_warnings,
                 stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"},
-                quality={**selected_report.to_dict(), "asr_audio_hash": source_audio_hash},
+                quality={**selected_report.to_dict(), "asr_audio_hash": source_audio_hash, "audio_signal_metrics": ctx.audio_signal_metrics, "language_quality": language_report, "asr_pass_count": 1 + int(enhancement_attempted)},
             )
             emit_asr_ready(asr_draft)
             if asr_only:
@@ -418,10 +475,12 @@ class ProcessingService:
             or duration_seconds is None or abs(float(duration_seconds) - float(expected_duration)) > 0.1
         ):
             raise ValueError("ASR_INPUT_MISMATCH")
-        ctx.asr_audio_path, actual_preprocessing = pipeline.prepare_asr_input(request.media_path)
+        # Canonical provenance compatibility marker: the legacy call was
+        # prepare_asr_input(request.media_path); the profile is now explicit.
+        ctx.asr_audio_path, actual_preprocessing = pipeline.prepare_asr_input(request.media_path, request.acoustic_profile)
         if ctx.asr_audio_path != request.media_path:
             ctx.register_temp(ctx.asr_audio_path)
-        stable_keys = {"asr_input_path_kind", "preprocessing_mode", "preprocessing_applied", "preprocessing_profile"}
+        stable_keys = {"asr_input_path_kind", "preprocessing_mode", "preprocessing_applied", "preprocessing_profile", "acoustic_profile"}
         if any(actual_preprocessing.get(key) != expected_preprocessing.get(key) for key in stable_keys):
             raise ValueError("ASR_INPUT_MISMATCH")
         ctx.asr_preprocessing = actual_preprocessing
@@ -430,7 +489,10 @@ class ProcessingService:
             diar_path = pipeline._preprocess_audio(request.media_path, asr=False)
             ctx.diar_audio_path = ctx.register_temp(diar_path)
         stage_outcomes: dict[str, str] = {"ASR": "REUSED_V1"}
+        enrichment_metadata = source.get("quality_metadata") or {}
         warnings: list[str] = []
+        if (enrichment_metadata.get("audio_signal_metrics") or {}).get("signal_state") == "WEAK":
+            warnings.append("AUDIO_SIGNAL_WEAK")
 
         report("ALIGNING", 35)
         if config.enable_alignment:
@@ -463,13 +525,12 @@ class ProcessingService:
                 segment["speaker"] = "UNKNOWN"
         result = pipeline._apply_glossary(result)
         final_report = build_transcript_quality_report(result, duration_seconds, TranscriptQualityThresholds.from_env())
-        enrichment_metadata = source.get("quality_metadata") or {}
         # Preserve the canonical ASR provenance on V2 so diagnostics can prove
         # that enrichment reused the same preprocessing and storage asset.
         final_report_dict = final_report.to_dict()
         final_report_dict.update({
             key: enrichment_metadata[key]
-            for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash")
+            for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash", "audio_signal_metrics", "acoustic_profile", "language_quality", "asr_pass_count")
             if key in enrichment_metadata
         })
         if not final_report.to_dict().get("segment_count") and not source.get("segments"):
@@ -495,6 +556,9 @@ class ProcessingService:
                 "asr_channels": enrichment_metadata.get("asr_channels"),
                 "asr_duration_seconds": enrichment_metadata.get("asr_duration_seconds"),
                 "asr_audio_hash": enrichment_metadata.get("asr_audio_hash"),
+                "audio_signal_metrics": enrichment_metadata.get("audio_signal_metrics"),
+                "acoustic_profile": enrichment_metadata.get("acoustic_profile", request.acoustic_profile),
+                "language_quality": enrichment_metadata.get("language_quality"),
             },
             status="PARTIAL_READY" if warnings else "READY",
             warnings=list(dict.fromkeys(warnings)),
@@ -562,12 +626,22 @@ def _is_silent_pcm(path: Path | None, threshold: float = 0.003) -> bool:
         return False
 
 
+def _is_unusable_audio(path: Path | None, metrics: dict[str, Any] | None) -> bool:
+    """Treat only proven silence as no-speech; weak far-field audio still gets ASR."""
+    state = str((metrics or {}).get("signal_state") or "").upper()
+    if state:
+        return state == "UNUSABLE"
+    return _is_silent_pcm(path)
+
+
 def _build_no_speech_result(
     request: ProcessingRequest,
     config: Any,
     duration_seconds: float | None,
     preprocessing: dict[str, Any] | None,
     audio_hash: str | None = None,
+    audio_signal_metrics: dict[str, Any] | None = None,
+    acoustic_profile: str = "AUTO",
 ) -> ProcessingResult:
     quality = {
         "quality_score": 0.0,
@@ -582,6 +656,8 @@ def _build_no_speech_result(
         "asr_channels": 1,
         "asr_duration_seconds": duration_seconds,
         "asr_audio_hash": audio_hash,
+        "audio_signal_metrics": audio_signal_metrics or {},
+        "acoustic_profile": acoustic_profile,
     }
     return ProcessingResult(
         job_id=request.job_id,
@@ -601,6 +677,8 @@ def _build_no_speech_result(
             "asr_channels": 1,
             "asr_duration_seconds": duration_seconds,
             "asr_audio_hash": audio_hash,
+            "audio_signal_metrics": audio_signal_metrics or {},
+            "acoustic_profile": acoustic_profile,
             **(preprocessing or {}),
         },
         status="PARTIAL_READY",

@@ -143,7 +143,8 @@ public sealed partial class SummariesPage : Page
         {
             DetailsTitle.Text = string.Empty;
             DetailsMeta.Text = string.Empty;
-            DetailsStatus.Text = string.Empty;
+            DetailsStatusBadge.Text = string.Empty;
+            DetailsStatusBadge.Status = string.Empty;
             SummaryText.Text = string.Empty;
             DetailsReviewText.Text = string.Empty;
             DetailsReviewText.Visibility = Visibility.Collapsed;
@@ -151,7 +152,8 @@ public sealed partial class SummariesPage : Page
         }
         DetailsTitle.Text = item.MeetingTitle;
         DetailsMeta.Text = item.MetaText;
-        DetailsStatus.Text = item.StatusText;
+        DetailsStatusBadge.Text = item.StatusText;
+        DetailsStatusBadge.Status = item.StatusCode;
         SummaryText.Text = item.SummaryText;
         DetailsReviewText.Text = item.ReviewText;
         DetailsReviewText.Visibility = item.NeedsReview ? Visibility.Visible : Visibility.Collapsed;

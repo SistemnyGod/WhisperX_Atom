@@ -19,6 +19,7 @@ public sealed class SummaryRegistryItem
     public string MeetingTitle => string.IsNullOrWhiteSpace(Meeting.Title) ? "Без названия" : Meeting.Title;
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm");
     public string StatusText => Summary is null ? "Не готово" : UiStatusMapper.Text(Summary.Status);
+    public string StatusCode => Summary?.Status ?? "SUMMARY_NOT_READY";
     public string MetaText => Summary is null ? "Итог ещё не создан" : $"Версия {Summary.Version} · {Summary.ModelName}";
     public string SummaryText => FormatSummary(Summary);
     public bool HasSummary => Summary is not null;

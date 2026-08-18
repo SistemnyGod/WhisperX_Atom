@@ -48,6 +48,8 @@ public sealed partial class RecordingPage : Page
         if (e.PropertyName is nameof(RecordingViewModel.RecordingProfile)) SyncRecordingProfile();
         if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)
             or nameof(RecordingViewModel.WarningMessage) or nameof(RecordingViewModel.HasWarning)) UpdateError();
+        if (e.PropertyName is nameof(RecordingViewModel.LocalFinalizeState)
+            or nameof(RecordingViewModel.LocalFinalizeStatusLabel)) UpdateFinalizeOutcomeVisual();
         if (e.PropertyName is nameof(RecordingViewModel.State))
         {
             UpdateStateIndicator();
@@ -85,6 +87,7 @@ public sealed partial class RecordingPage : Page
         UpdateStateIndicator();
         UpdateActionButtons();
         UpdateStateLayout();
+        UpdateFinalizeOutcomeVisual();
     }
 
     private async void CheckDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -106,6 +109,13 @@ public sealed partial class RecordingPage : Page
     {
         if (ViewModel is null) return;
         await ViewModel.TestMicrophoneAsync();
+        UpdateError();
+    }
+
+    private async void RoomAcousticCheckButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.RunRoomAcousticCheckAsync();
         UpdateError();
     }
 
@@ -166,6 +176,13 @@ public sealed partial class RecordingPage : Page
         UpdateError();
     }
 
+    private async void AcousticProfile_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ViewModel is null || AcousticProfileSelector.SelectedValue is not string profile) return;
+        await ViewModel.SetAcousticProfileAsync(profile);
+        UpdateError();
+    }
+
     private async void SelectArchiveButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
@@ -187,11 +204,34 @@ public sealed partial class RecordingPage : Page
 
     private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        // The new recorder card is single-column by design. Only the action
-        // bar changes at the compact breakpoint, so the primary actions remain
-        // visible at 100/125/150% Windows scaling without horizontal overflow.
+        UpdateIdleSetupLayout(e.NewSize.Width < 900);
         RecordingActionsPanel.Orientation = e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal;
         UpdateActionButtons();
+    }
+
+    private void UpdateIdleSetupLayout(bool compact)
+    {
+        IdleSetupGrid.ColumnDefinitions.Clear();
+        IdleSetupGrid.RowDefinitions.Clear();
+        if (compact)
+        {
+            IdleSetupGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            IdleSetupGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            IdleSetupGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(SourceSetupCard, 0);
+            Grid.SetRow(SourceSetupCard, 0);
+            Grid.SetColumn(SignalPreviewCard, 0);
+            Grid.SetRow(SignalPreviewCard, 1);
+            return;
+        }
+
+        IdleSetupGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
+        IdleSetupGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.35, GridUnitType.Star) });
+        IdleSetupGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetColumn(SourceSetupCard, 0);
+        Grid.SetRow(SourceSetupCard, 0);
+        Grid.SetColumn(SignalPreviewCard, 1);
+        Grid.SetRow(SignalPreviewCard, 0);
     }
 
     private void UpdateStateLayout()
@@ -248,5 +288,31 @@ public sealed partial class RecordingPage : Page
         ToolTipService.SetToolTip(PauseResumeButton, ViewModel.State == RecordingState.Paused
             ? "Продолжить локальную запись"
             : "Приостановить локальную запись");
+    }
+
+    private void UpdateFinalizeOutcomeVisual()
+    {
+        if (ViewModel is null) return;
+        var state = ViewModel.LocalFinalizeState?.ToUpperInvariant() ?? string.Empty;
+        var brushKey = state switch
+        {
+            "LOCAL_READY" => "SuccessBrush",
+            "LOCAL_FAILED" => "DangerBrush",
+            _ => "WarningBrush"
+        };
+        var surfaceKey = state switch
+        {
+            "LOCAL_READY" => "SurfaceGreenBrush",
+            "LOCAL_FAILED" => "DangerSurfaceBrush",
+            _ => "SurfaceOrangeBrush"
+        };
+        if (Application.Current.Resources[brushKey] is Brush brush)
+        {
+            FinalizeOutcomeIcon.Foreground = brush;
+            FinalizeOutcomeText.Foreground = brush;
+            FinalizeOutcomeSurface.BorderBrush = brush;
+        }
+        if (Application.Current.Resources[surfaceKey] is Brush surface)
+            FinalizeOutcomeSurface.Background = surface;
     }
 }
