@@ -21,7 +21,8 @@ def test_noncanonical_asr_and_diarization_keep_independent_preprocessing():
     pipeline = read("app/transcription_pipeline.py")
     processing = read("whisperx_atom/processing.py")
     assert '"preprocessing_profile": "asr_soft" if apply else None' in pipeline
-    assert 'pipeline._preprocess_audio(request.media_path, asr=False)' in processing
+    assert "self._preprocessing_engine.prepare_diarization_input" in processing
+    assert "class WhisperXPreprocessingEngine" in read("whisperx_atom/preprocessing_engine.py")
     assert 'for suffix in (".asr.wav", ".asr_soft.wav", ".diar.wav", ".diar_soft.wav")' in pipeline
 
 

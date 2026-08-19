@@ -67,8 +67,10 @@ public sealed partial class MainWindow : Window
         SettingsNavItem.Content = "Настройки";
         SystemStatusText.Text = "Система";
         ProfileText.Text = string.IsNullOrWhiteSpace(settings.Username) ? "Локальная сессия" : settings.Username;
+        _services.Updates.StateChanged += Updates_StateChanged;
         Closed += MainWindow_Closed;
         Closed += (_, _) => App.WriteStartupLog("MAIN_WINDOW_CLOSED", null);
+        RenderUpdateNotification();
     }
 
     public void StartBackgroundPolling()
@@ -444,6 +446,30 @@ public sealed partial class MainWindow : Window
         GlobalNotificationBar.IsOpen = true;
     }
 
+    private void Updates_StateChanged()
+    {
+        _uiDispatcherQueue.TryEnqueue(RenderUpdateNotification);
+    }
+
+    private void RenderUpdateNotification()
+    {
+        var update = _services.Updates.Manifest;
+        var state = _services.Updates.State;
+        var visible = update is not null && state is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading;
+        UpdateNotificationBar.IsOpen = visible;
+        if (!visible || update is null) return;
+        UpdateNotificationBar.Message = state == ClientUpdateState.Downloading
+            ? $"Версия {update.Version} загружается · {_services.Updates.DownloadPercent}%"
+            : $"Доступна версия {update.Version}. Установка запускается вручную и не прерывает запись автоматически.";
+        UpdateNotificationBar.Severity = update.Mandatory ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
+    }
+
+    private void OpenUpdatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateNotificationBar.IsOpen = false;
+        NavigateTo("settings");
+    }
+
     private void SetRuntimeStatus(bool backendAvailable, bool authenticated, bool recorderAvailable, bool processingReady, AgentIpcHealth? recorderHealth = null)
     {
         if (!_uiDispatcherQueue.HasThreadAccess)
@@ -534,6 +560,7 @@ public sealed partial class MainWindow : Window
 
     private async void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        _services.Updates.StateChanged -= Updates_StateChanged;
         _globalRecordingTimer?.Stop();
         _statusCts.Cancel();
         _statusCts.Dispose();

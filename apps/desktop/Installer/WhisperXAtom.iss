@@ -28,6 +28,7 @@ Source: "..\..\..\artifacts\desktop\VoiceHost\*"; DestDir: "{app}\VoiceHost"; Fl
 Source: "Install-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Uninstall-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Configure-RecorderHostUser.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\..\artifacts\desktop\build-identity.json"; DestDir: "{app}\Desktop"; Flags: ignoreversion
 ; Extracted to {tmp} and executed by PrepareToInstall before any installed
 ; binaries can be replaced. This is intentionally not copied into {app}.
 Source: "Preflight-Upgrade.ps1"; Flags: dontcopy

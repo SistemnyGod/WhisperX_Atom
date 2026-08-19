@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from whisperx_atom.contracts import ProcessingRequest
-from whisperx_atom.processing import ProcessingService
+from whisperx_atom.core_pipeline import CorePipeline, WhisperXCorePipeline
+from whisperx_atom.domain import require_meeting_id
+from whisperx_atom.storage import LocalMediaStorage
 from workers.gpu_lease import PostgresGpuLease
 from workers.runtime_heartbeat import AsyncHeartbeat
 from .persistence import JobRepository
@@ -40,16 +42,8 @@ RESIDENT_LLM_RETRY_DELAY_SECONDS = max(5, int(os.getenv("GPU_RESIDENT_LLM_RETRY_
 
 def resolve_storage_path(storage_key: str) -> Path:
     """Translate a storage key below `/data` to the worker's local mount."""
-    value = str(storage_key or "").strip()
-    posix_path = PurePosixPath(value.replace("\\", "/"))
-    try:
-        relative = posix_path.relative_to("/data")
-    except ValueError as exc:
-        raise ValueError("invalid_storage_key") from exc
-    if any(part in {"", ".", ".."} for part in relative.parts):
-        raise ValueError("invalid_storage_key")
     host_root = os.getenv("WHISPERX_DATA_HOST", "").strip() if os.name == "nt" else "/data"
-    return Path(host_root).joinpath(*relative.parts)
+    return LocalMediaStorage(host_root).resolve(storage_key)
 
 
 def error_code_for(exc: Exception) -> str:
@@ -97,18 +91,22 @@ def retry_delay_seconds(attempt: int) -> float:
 class GpuWorker:
     def __init__(self, heartbeat: AsyncHeartbeat | None = None) -> None:
         self._semaphore = asyncio.Semaphore(1)
-        self._service = ProcessingService()
+        # All server-side ASR/enrichment requests enter through this facade.
+        # The underlying ProcessingService remains the compatibility
+        # implementation while stages are extracted incrementally.
+        self._pipeline: CorePipeline = WhisperXCorePipeline()
         self._repository = JobRepository()
         self._gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
         self._heartbeat = heartbeat
 
     def close(self) -> None:
-        self._service.close()
+        self._pipeline.close()
         self._repository.close()
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         async with self._semaphore:
             job_id = str(message["job_id"])
+            meeting_id = str(require_meeting_id(message))
             if self._heartbeat:
                 self._heartbeat.set_job(job_id)
                 self._heartbeat.set_state("BUSY")
@@ -143,7 +141,7 @@ class GpuWorker:
                     raise RuntimeError("TRANSCRIPT_INPUT_NOT_FOUND")
             source_quality = (input_transcript or {}).get("quality_metadata") or {}
             normalized_language = str(message.get("language") or source_quality.get("language") or "ru").strip() or "ru"
-            technical_intervals = tuple(await asyncio.to_thread(self._repository.technical_intervals, str(message["meeting_id"]))) if asr_only_job else ()
+            technical_intervals = tuple(await asyncio.to_thread(self._repository.technical_intervals, meeting_id)) if asr_only_job else ()
             request = ProcessingRequest(
                 job_id=job_id,
                 media_path=resolve_storage_path(str(message["storage_key"])),
@@ -178,7 +176,7 @@ class GpuWorker:
                     while True:
                         try:
                             draft_callback = None if enrichment_job else persist_asr_draft
-                            result = await asyncio.to_thread(self._service.process, request, progress, draft_callback)
+                            result = await asyncio.to_thread(self._pipeline.process, request, progress, draft_callback)
                             break
                         except Exception as exc:
                             if error_code_for(exc) != "CUDA_OOM" or oom_attempt >= 1:
@@ -188,15 +186,15 @@ class GpuWorker:
                 LOGGER.info("job=%s released GPU lease", job_id)
                 payload = result.to_dict()
                 payload["correlation_id"] = message.get("correlation_id") or payload.get("correlation_id")
-                payload["meeting_id"] = str(message["meeting_id"])
+                payload["meeting_id"] = meeting_id
                 payload["processing_job_id"] = job_id
                 if asr_only_job:
                     # The callback persisted PARTIAL_READY V1 immediately
                     # after ASR. Closing this job must not create a second
                     # transcript version; enrichment is a separate job.
                     if not draft_holder["id"]:
-                        draft_holder["id"] = self._repository.persist_asr_draft(job_id, str(message["meeting_id"]), payload)
-                    await asyncio.to_thread(self._repository.complete_asr_job, job_id, str(message["meeting_id"]))
+                        draft_holder["id"] = self._repository.persist_asr_draft(job_id, meeting_id, payload)
+                    await asyncio.to_thread(self._repository.complete_asr_job, job_id, meeting_id)
                     payload["transcript_id"] = draft_holder["id"]
                     payload["version_kind"] = "ASR_DRAFT"
                     LOGGER.info("ASR draft ready transcript=%s meeting_id=%s job_id=%s", draft_holder["id"], payload["meeting_id"], job_id)
@@ -208,7 +206,7 @@ class GpuWorker:
                     payload["source_transcript_id"] = message.get("transcript_id") or self._repository.input_transcript_id(job_id)
                     payload["version_kind"] = "ENRICHED"
                 LOGGER.info("transcript result correlation_id=%s meeting_id=%s job_id=%s", payload.get("correlation_id"), payload["meeting_id"], job_id)
-                persisted = await asyncio.to_thread(self._repository.persist_result, job_id, str(message["meeting_id"]), payload)
+                persisted = await asyncio.to_thread(self._repository.persist_result, job_id, meeting_id, payload)
                 if not persisted:
                     LOGGER.info("job=%s result discarded because the meeting was cancelled or deleted", job_id)
                     return None
@@ -292,7 +290,7 @@ async def run() -> None:
     while True:
         # Keep large-v3 resident between jobs, but release it after the
         # configured idle window so another GPU workload can make progress.
-        worker._service.release_idle()
+        worker._pipeline.release_idle()
         for message in await fetch_available(subscription, nats.errors.TimeoutError):
             job_id: str | None = None
             try:
@@ -303,6 +301,12 @@ async def run() -> None:
                 continue
             if not isinstance(payload, dict) or not str(payload.get("job_id", "")).strip():
                 LOGGER.error("gpu_poison_message_discarded reason=job_id_missing")
+                await message.ack()
+                continue
+            try:
+                require_meeting_id(payload)
+            except ValueError:
+                LOGGER.error("gpu_poison_message_discarded reason=meeting_id_missing")
                 await message.ack()
                 continue
             try:

@@ -199,6 +199,20 @@
             Title="Состояние системы"
             AutomationProperties.Name="Уведомление о состоянии системы" />
 
+        <InfoBar
+            x:Name="UpdateNotificationBar"
+            Grid.Row="1"
+            Canvas.ZIndex="31"
+            Margin="0,76,24,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            MaxWidth="460"
+            IsOpen="False"
+            IsClosable="True"
+            Severity="Informational"
+            Title="Обновление приложения"
+            AutomationProperties.Name="Уведомление об обновлении приложения" />
+
         <Border
             x:Name="GlobalRecordingController"
             Grid.Row="1"

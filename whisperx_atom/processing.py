@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import ProcessingRequest, ProcessingResult, ProgressCallback
+from .asr_engine import AsrEngine, WhisperXAsrEngine
+from .alignment_engine import AlignmentEngine, WhisperXAlignmentEngine
+from .diarization_engine import DiarizationEngine, WhisperXDiarizationEngine
+from .preprocessing_engine import PreprocessingEngine, WhisperXPreprocessingEngine
 from .transcript_quality import (
     TranscriptQualityThresholds,
     build_transcript_quality_report,
@@ -31,11 +35,21 @@ class ProcessingService:
 
     IDLE_CACHE_SECONDS = max(60, int(os.getenv("WHISPERX_PIPELINE_IDLE_SECONDS", "900")))
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        asr_engine: AsrEngine | None = None,
+        preprocessing_engine: PreprocessingEngine | None = None,
+        alignment_engine: AlignmentEngine | None = None,
+        diarization_engine: DiarizationEngine | None = None,
+    ) -> None:
         self._pipeline: Any | None = None
         self._pipeline_fingerprint: tuple[Any, ...] | None = None
         self._last_used_monotonic = 0.0
         self._lock = threading.Lock()
+        self._asr_engine = asr_engine or WhisperXAsrEngine()
+        self._preprocessing_engine = preprocessing_engine or WhisperXPreprocessingEngine()
+        self._alignment_engine = alignment_engine or WhisperXAlignmentEngine()
+        self._diarization_engine = diarization_engine or WhisperXDiarizationEngine()
 
     def _get_pipeline(self, config: Any) -> Any:
         fingerprint = (
@@ -135,7 +149,11 @@ class ProcessingService:
             muted = mute_wav_intervals(request.media_path, request.technical_intervals)
             if muted is not None:
                 asr_source = ctx.register_temp(muted) or request.media_path
-            ctx.asr_audio_path, ctx.asr_preprocessing = pipeline.prepare_asr_input(asr_source, request.acoustic_profile)
+            ctx.asr_audio_path, ctx.asr_preprocessing = self._preprocessing_engine.prepare_asr_input(
+                pipeline,
+                asr_source,
+                request.acoustic_profile,
+            )
             if ctx.asr_audio_path != request.media_path:
                 ctx.register_temp(ctx.asr_audio_path)
             ctx.audio_signal_metrics = dict(ctx.asr_preprocessing.get("audio_signal_metrics") or {})
@@ -144,7 +162,9 @@ class ProcessingService:
             # disabled; it adds latency and can fail a valid ASR job before the
             # first transcript is emitted.
             if config.enable_diarization:
-                ctx.diar_audio_path = ctx.register_temp(pipeline._preprocess_audio(request.media_path, asr=False))
+                ctx.diar_audio_path = ctx.register_temp(
+                    self._preprocessing_engine.prepare_diarization_input(pipeline, request.media_path)
+                )
             else:
                 ctx.diar_audio_path = None
 
@@ -169,7 +189,13 @@ class ProcessingService:
                 return no_speech
 
             report("TRANSCRIBING", 30)
-            primary_result: dict[str, Any] = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
+            primary_result = self._asr_engine.transcribe(
+                pipeline,
+                ctx,
+                vad_onset=config.vad_onset,
+                chunk_size=config.chunk_size,
+                beam_size=config.asr_beam_size,
+            )
             primary_report = build_transcript_quality_report(primary_result, duration_seconds, thresholds)
             primary_gate = quality_gate(primary_report, thresholds)
             fallback_report = None
@@ -181,9 +207,13 @@ class ProcessingService:
             if thresholds.fallback_enabled and is_retryable_quality_failure(primary_gate):
                 fallback_attempted = True
                 fallback_reason = ",".join(primary_report.reasons) or "quality_gate_failed"
-                fallback_result = pipeline.run_asr_pass(
-                    ctx, thresholds.fallback_vad_onset, thresholds.fallback_chunk_size, config.asr_beam_size
-                ) or {}
+                fallback_result = self._asr_engine.transcribe(
+                    pipeline,
+                    ctx,
+                    vad_onset=thresholds.fallback_vad_onset,
+                    chunk_size=thresholds.fallback_chunk_size,
+                    beam_size=config.asr_beam_size,
+                )
                 result, selected_pass, primary_report, fallback_report = compare_transcript_quality(
                     primary_result, fallback_result, duration_seconds, thresholds
                 )
@@ -221,11 +251,17 @@ class ProcessingService:
             if language_report["mismatch"] and ctx.asr_preprocessing.get("preprocessing_profile") != "asr_far_field":
                 enhancement_attempted = True
                 enhancement_reason = "ASR_LANGUAGE_MISMATCH"
-                enhanced_path = pipeline._preprocess_audio_profile(asr_source, "asr_far_field")
+                enhanced_path = self._preprocessing_engine.prepare_profile(pipeline, asr_source, "asr_far_field")
                 ctx.register_temp(enhanced_path)
                 original_path = ctx.asr_audio_path
                 ctx.asr_audio_path = enhanced_path
-                enhanced_result = pipeline.run_asr_pass(ctx, config.vad_onset, config.chunk_size, config.asr_beam_size) or {}
+                enhanced_result = self._asr_engine.transcribe(
+                    pipeline,
+                    ctx,
+                    vad_onset=config.vad_onset,
+                    chunk_size=config.chunk_size,
+                    beam_size=config.asr_beam_size,
+                )
                 enhanced_text = " ".join(str(item.get("text", "")).strip() for item in enhanced_result.get("segments", []) if item.get("text")).strip()
                 enhanced_segments = enhanced_result.get("segments", []) or []
                 enhanced_confidence_values = [float(item.get("confidence")) for item in enhanced_segments if isinstance(item.get("confidence"), (int, float))]
@@ -294,7 +330,7 @@ class ProcessingService:
             report("ALIGNING", 55)
             if config.enable_alignment:
                 try:
-                    ctx.aligned_result = pipeline._align_result(ctx, result)
+                    ctx.aligned_result = self._alignment_engine.align(pipeline, ctx, result)
                     aligned = ctx.aligned_result or result
                     aligned_report = build_transcript_quality_report(aligned, duration_seconds, thresholds)
                     if quality_gate(aligned_report, thresholds)["valid"]:
@@ -317,14 +353,24 @@ class ProcessingService:
             if config.enable_diarization:
                 try:
                     candidates: list[dict[str, Any]] = []
-                    primary_diar_result = pipeline._apply_diarization(ctx, copy.deepcopy(result), "diar")
+                    primary_diar_result = self._diarization_engine.diarize(
+                        pipeline,
+                        ctx,
+                        copy.deepcopy(result),
+                        "diar",
+                    )
                     primary_score = score_diarization_result(primary_diar_result.get("segments", []), ctx.diar_segments or [], "diar", config.min_speakers, config.max_speakers)
                     candidates.append({"profile": "diar", "result": primary_diar_result, "score": primary_score, "is_primary": True})
                     retry_score = float(os.getenv("DIARIZATION_QUALITY_RETRY_SCORE", "60"))
                     profiles = diarization_profiles_for_processing_profile(request.profile, "diar")
                     if primary_score.score < retry_score and len(profiles) > 1:
                         alternate_profile = profiles[1]
-                        alternate_result = pipeline._apply_diarization(ctx, copy.deepcopy(result), alternate_profile)
+                        alternate_result = self._diarization_engine.diarize(
+                            pipeline,
+                            ctx,
+                            copy.deepcopy(result),
+                            alternate_profile,
+                        )
                         alternate_score = score_diarization_result(alternate_result.get("segments", []), ctx.diar_segments or [], alternate_profile, config.min_speakers, config.max_speakers)
                         candidates.append({"profile": alternate_profile, "result": alternate_result, "score": alternate_score, "is_primary": False})
                     chosen = choose_best_diarization_candidate(candidates)
@@ -479,7 +525,11 @@ class ProcessingService:
             raise ValueError("ASR_INPUT_MISMATCH")
         # Canonical provenance compatibility marker: the legacy call was
         # prepare_asr_input(request.media_path); the profile is now explicit.
-        ctx.asr_audio_path, actual_preprocessing = pipeline.prepare_asr_input(request.media_path, request.acoustic_profile)
+        ctx.asr_audio_path, actual_preprocessing = self._preprocessing_engine.prepare_asr_input(
+            pipeline,
+            request.media_path,
+            request.acoustic_profile,
+        )
         if ctx.asr_audio_path != request.media_path:
             ctx.register_temp(ctx.asr_audio_path)
         stable_keys = {"asr_input_path_kind", "preprocessing_mode", "preprocessing_applied", "preprocessing_profile", "acoustic_profile"}
@@ -488,7 +538,7 @@ class ProcessingService:
         ctx.asr_preprocessing = actual_preprocessing
         ctx.asr_result = result
         if config.enable_diarization:
-            diar_path = pipeline._preprocess_audio(request.media_path, asr=False)
+            diar_path = self._preprocessing_engine.prepare_diarization_input(pipeline, request.media_path)
             ctx.diar_audio_path = ctx.register_temp(diar_path)
         stage_outcomes: dict[str, str] = {"ASR": "REUSED_V1"}
         enrichment_metadata = source.get("quality_metadata") or {}
@@ -499,7 +549,7 @@ class ProcessingService:
         report("ALIGNING", 35)
         if config.enable_alignment:
             try:
-                aligned = pipeline._align_result(ctx, result)
+                aligned = self._alignment_engine.align(pipeline, ctx, result)
                 result = aligned or result
                 stage_outcomes["ALIGNMENT"] = "SUCCEEDED"
             except Exception:
@@ -512,7 +562,12 @@ class ProcessingService:
         report("DIARIZING", 65)
         if config.enable_diarization:
             try:
-                result = pipeline._apply_diarization(ctx, copy.deepcopy(result), "diar")
+                result = self._diarization_engine.diarize(
+                    pipeline,
+                    ctx,
+                    copy.deepcopy(result),
+                    "diar",
+                )
                 stage_outcomes["DIARIZATION"] = "SUCCEEDED"
             except Exception:
                 LOGGER.warning("enrichment_diarization_failed job_id=%s", request.job_id, exc_info=True)

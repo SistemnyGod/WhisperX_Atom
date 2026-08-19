@@ -57,7 +57,10 @@ sessions/<session>/<track>/<sequence>.flac
    отправка появляются позже. При отключённом сервере запись продолжается локально.
 3. `ATOM_RAW_FINALIZER_QUEUE_CAPACITY` ограничивает in-memory finalizer (2–32,
    default 4). Переполнение оставляет `.pcm.part` для recovery.
-4. Токены и аудио не входят в диагностические архивы; enrollment управляется
+4. `ATOM_RAW_DURABILITY_CHECKPOINT_SECONDS` задаёт период фонового flush/fsync
+   открытого `.pcm.part` (1–60 секунд, default 5). Checkpoint не выполняется в
+   AudioGraph callback и не меняет семантику raw rotation.
+5. Токены и аудио не входят в диагностические архивы; enrollment управляется
    Desktop и DPAPI.
 
 ## Диагностика и фоновые состояния

@@ -31,10 +31,12 @@ $desktopProject = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\Whispe
 $serviceProject = Join-Path $repoRoot "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj"
 $recorderHostProject = Join-Path $repoRoot "apps\recorder-host\WhisperX.Atom.Recorder.Host.csproj"
 $voiceHostProject = Join-Path $repoRoot "apps\voice-host\WhisperX.Atom.Voice.Host\WhisperX.Atom.Voice.Host.csproj"
+$updaterProject = Join-Path $repoRoot "apps\desktop\Updater\WhisperX.Atom.Updater.csproj"
 $desktopOut = Join-Path $output "Desktop"
 $serviceOut = Join-Path $output "Service"
 $recorderHostOut = Join-Path $output "RecorderHost"
 $voiceHostOut = Join-Path $output "VoiceHost"
+$updaterOut = Join-Path $output "Updater"
 $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 
 # WinUI 3 is published as an unpackaged self-contained directory. Keeping the
@@ -45,6 +47,7 @@ $desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--se
 $servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $serviceOut) + $publishRestoreArgs
 $recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
 $voiceHostPublishArgs = @($voiceHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $voiceHostOut) + $publishRestoreArgs
+$updaterPublishArgs = @($updaterProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $updaterOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     & dotnet publish @Arguments
     $exitCode = [int]$LASTEXITCODE
@@ -54,6 +57,8 @@ Invoke-Publish $desktopPublishArgs
 Invoke-Publish $servicePublishArgs
 Invoke-Publish $recorderHostPublishArgs
 Invoke-Publish $voiceHostPublishArgs
+Invoke-Publish $updaterPublishArgs
+Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Destination (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") -Force
 
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output
@@ -99,6 +104,7 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
         @{ name = "RecorderService"; path = (Join-Path $serviceOut "WhisperX.Atom.Recorder.Service.exe") },
         @{ name = "RecorderHost"; path = (Join-Path $recorderHostOut "WhisperX.Atom.Recorder.Host.exe") },
         @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") }
+        @{ name = "Updater"; path = (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") }
     ) | ForEach-Object {
         [ordered]@{ name = $_.name; path = $_.path.Substring($output.Length + 1); sha256 = (Get-FileHash -LiteralPath $_.path -Algorithm SHA256).Hash.ToLowerInvariant() }
     }

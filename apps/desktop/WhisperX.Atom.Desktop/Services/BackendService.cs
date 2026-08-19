@@ -48,7 +48,7 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed, current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed, current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
@@ -115,7 +115,9 @@ public sealed class BackendService : IBackendService
                 currentSettings.MicrophoneDeviceId, currentSettings.SystemAudioDeviceId, SessionExpiresAtUtc,
                 currentSettings.RecordingProfile, currentUser?.Id,
                 currentUser?.Id == currentSettings.OwnerUserId && currentSettings.AgentBootstrapConfirmed,
-                currentSettings.VoiceAlwaysListening, currentSettings.VoiceQuietMode, currentSettings.VoiceSensitivity);
+                currentSettings.VoiceAlwaysListening, currentSettings.VoiceQuietMode, currentSettings.VoiceSensitivity,
+                currentSettings.AcousticProfile, currentSettings.VoiceName, currentSettings.VoiceRate, currentSettings.VoiceVolume, currentSettings.UpdateChannel);
+
             return true;
         }
         catch

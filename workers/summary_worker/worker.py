@@ -14,6 +14,8 @@ from workers.gpu_lease import PostgresGpuLease
 from workers.db_pool import DatabaseConnectionPool
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
+from whisperx_atom.domain import require_meeting_id
+from whisperx_atom.pipeline_contract import validate_stage_name
 from .contracts import (
     MEETING_PROTOCOL_RU,
     PROTOCOL_RU_PROMPT_VERSION,
@@ -104,6 +106,7 @@ class SummaryRepository:
             return str(row[0]) if row and row[0] else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None) -> None:
+        stage = validate_stage_name(stage)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
@@ -396,7 +399,7 @@ class SummaryWorker:
 
     async def handle(self, payload: dict[str, Any]) -> None:
         job_id = str(payload["job_id"])
-        meeting_id = str(payload["meeting_id"])
+        meeting_id = str(require_meeting_id(payload))
         transcript_id = str(payload["transcript_id"]) if payload.get("transcript_id") else None
         message_id = str(payload.get("message_id", ""))
         correlation_id = payload.get("correlation_id") or self.repository.pipeline_correlation(job_id, meeting_id)
@@ -548,6 +551,12 @@ async def run() -> None:
                     continue
                 if not isinstance(payload, dict) or not str(payload.get("job_id", "")).strip():
                     LOGGER.error("summary_poison_message_discarded reason=job_id_missing")
+                    await message.ack()
+                    continue
+                try:
+                    require_meeting_id(payload)
+                except ValueError:
+                    LOGGER.error("summary_poison_message_discarded reason=meeting_id_missing")
                     await message.ack()
                     continue
                 try:

@@ -345,6 +345,7 @@ public sealed class FrontendServices
         RecordingCommands = new RecordingCommandService(recorder);
         VoiceHost = new VoiceHostController(this);
         Diagnostics = new ClientRuntimeDiagnostics(this);
+        Updates = new ClientUpdateService(this);
     }
 
     public IRecorderService Recorder { get; }
@@ -360,6 +361,7 @@ public sealed class FrontendServices
     public RecordingCommandService RecordingCommands { get; }
     public VoiceHostController VoiceHost { get; }
     public ClientRuntimeDiagnostics Diagnostics { get; }
+    public ClientUpdateService Updates { get; }
     public event Action<Guid, Guid?>? AssistantResultAvailable
     {
         add => VoiceHost.AssistantResultAvailable += value;

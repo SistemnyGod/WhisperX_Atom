@@ -6,10 +6,11 @@ import os
 import logging
 import time
 from pathlib import Path
-from pathlib import PurePosixPath
 
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
+from whisperx_atom.domain import require_meeting_id
+from whisperx_atom.storage import LocalMediaStorage
 
 from .media_worker import prepare_media
 from .persistence import claim_message, job_attempt, job_state, mark_ready_for_asr_and_enqueue, record_stage_timing, release_message, reset_media_leases, renew_lease, schedule_media_retry, update_asset, update_job, update_recording_session_state
@@ -19,14 +20,7 @@ from .retry import RETRY_DELAY_SECONDS, classify_media_failure, should_retry
 
 def resolve_media_path(storage_key: str, root: Path) -> Path:
     """Resolve server storage keys without allowing path traversal."""
-    value = str(storage_key or "").strip().replace("\\", "/")
-    try:
-        relative = PurePosixPath(value).relative_to("/data")
-    except ValueError as exc:
-        raise ValueError("invalid_storage_key") from exc
-    if any(part in {"", ".", ".."} for part in relative.parts):
-        raise ValueError("invalid_storage_key")
-    return root.joinpath(*relative.parts)
+    return LocalMediaStorage(root).resolve(storage_key)
 
 
 async def run() -> None:
@@ -63,9 +57,14 @@ async def run() -> None:
                 logger.error("media_poison_message_discarded reason=job_id_missing")
                 await message.ack()
                 continue
+            try:
+                meeting_id = str(require_meeting_id(payload))
+            except ValueError:
+                logger.error("media_poison_message_discarded reason=meeting_id_missing")
+                await message.ack()
+                continue
             job_id = str(payload["job_id"])
             correlation_id = payload.get("correlation_id")
-            meeting_id = payload.get("meeting_id")
             logger.info("media_message correlation_id=%s meeting_id=%s job_id=%s", correlation_id, meeting_id, job_id)
             heartbeat.set_job(str(job_id))
             heartbeat.set_state("BUSY")

@@ -1,5 +1,12 @@
 # Модули и зоны ответственности
 
+Расширенное описание lifecycle и границ каждого runtime-модуля находится в
+[module-reference.md](module-reference.md). Поток raw-first записи, состояния
+durability и безопасные точки рефакторинга описаны в
+[recording-module-reference.md](recording-module-reference.md).
+Архитектурный контракт Core Pipeline, state machine jobs и порядок миграции
+описаны в [architecture-incremental.md](architecture-incremental.md).
+
 | Модуль | Расположение | Ответственность |
 | --- | --- | --- |
 | Control API | `apps/server/WhisperX.Atom.Api` | Auth, meetings, uploads, jobs, transcript, speakers, summaries, assistant, agents, audit |
@@ -12,8 +19,8 @@
 | Import Worker | `workers/import_worker` | Inbox watcher и импорт локальных файлов через internal API |
 | Outbox Relay | `workers/outbox_relay` | Доставка durable outbox событий в NATS JetStream |
 | Summary Worker | `workers/summary_worker` | Qwen Summary v2 и grounded Assistant; включается независимо флагами Summary/Assistant |
-| Shared Python package | `whisperx_atom` | Processing contracts и общая transcript-quality логика |
-| Legacy GUI/watch | `app.py`, `app/`, `auto_transcribe_watch.py` | Совместимость, локальные сценарии и regression surface; не расширять как новый pipeline |
+| Shared Python package | `whisperx_atom` | Processing contracts, Core Pipeline facade, ASR/Preprocessing/Alignment/Diarization engine boundaries, state machine jobs, Meeting/Recording/Job/Transcript projections, media storage boundary и общая transcript-quality логика |
+| Legacy GUI/watch | `app.py`, `app/`, `auto_transcribe_watch.py` | Совместимость, локальные сценарии и regression surface; live capture использует `live_runtime.SoundDeviceChunkRecorder` с одним `InputStream`; не расширять как новый server pipeline |
 | Automation | `scripts/` | Runtime launch/stop/doctor, E2E, watchdog, build и acceptance |
 | Tests | `tests/` | Contract, unit, media, recording, assistant и runtime checks |
 

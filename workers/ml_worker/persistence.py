@@ -9,6 +9,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from workers.db_pool import DatabaseConnectionPool
 from diarization_quality import normalize_speaker_label
+from whisperx_atom.pipeline_contract import validate_stage_name
 from .technical_events import build_technical_intervals, segment_technical_flags
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
@@ -151,6 +152,9 @@ class JobRepository:
             return int(row[0]) if row else None
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
+        # Keep the persisted spelling backwards compatible, but reject a
+        # stage that is not part of the shared pipeline contract.
+        stage = validate_stage_name(stage)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",

@@ -38,7 +38,10 @@ public sealed partial class LoginWindow : Window
         if (!string.IsNullOrWhiteSpace(initialMessage)) SetStatus(initialMessage, isError: true);
         var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
         if (File.Exists(iconPath)) AppWindow.SetIcon(iconPath);
+        _services.Updates.StateChanged += UpdateService_StateChanged;
+        Closed += (_, _) => _services.Updates.StateChanged -= UpdateService_StateChanged;
         ConfigureInitialWindow();
+        RenderUpdateNotice();
     }
 
     private async void LoginButton_Click(object sender, RoutedEventArgs e)
@@ -77,6 +80,10 @@ public sealed partial class LoginWindow : Window
 
             SetPill(LanStatusDot, LanStatusText, "LAN-сервер доступен", "LoginSuccessBrush");
             SetPill(WhisperStatusDot, WhisperStatusText, "WhisperX проверяется", "LoginNeutralBrush");
+            // The pre-auth check is anonymous; run a second check after the
+            // session is established so a package published while the login
+            // window was open is surfaced immediately without delaying login.
+            _ = _services.Updates.CheckAsync();
             if (RememberLoginCheckBox.IsChecked == true)
             {
                 _services.Settings.Save(_services.Settings.Load() with { Username = username });
@@ -207,6 +214,30 @@ public sealed partial class LoginWindow : Window
             e.Handled = true;
             LoginButton_Click(LoginButton, new RoutedEventArgs());
         }
+    }
+
+    private void UpdateService_StateChanged()
+    {
+        LoginRoot.DispatcherQueue.TryEnqueue(RenderUpdateNotice);
+    }
+
+    private void RenderUpdateNotice()
+    {
+        var update = _services.Updates.Manifest;
+        var visible = update is not null && _services.Updates.State is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading;
+        LoginUpdateNotice.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (!visible || update is null) return;
+        LoginUpdateText.Text = _services.Updates.State == ClientUpdateState.Downloading
+            ? $"Скачивание версии {update.Version} · {_services.Updates.DownloadPercent}%"
+            : $"Доступна версия {update.Version}";
+        LoginUpdateDownloadButton.Content = _services.Updates.State == ClientUpdateState.Downloading ? "Скачивание…" : "Скачать";
+        LoginUpdateDownloadButton.IsEnabled = _services.Updates.State != ClientUpdateState.Downloading;
+    }
+
+    private async void LoginUpdateDownloadButton_Click(object sender, RoutedEventArgs e)
+    {
+        await _services.Updates.DownloadAsync();
+        RenderUpdateNotice();
     }
 
     private void CredentialBox_TextChanged(object sender, TextChangedEventArgs e) => ClearCredentialValidation();

@@ -141,6 +141,19 @@ def test_realtime_capture_handoff_does_not_hash_or_persist_on_callback():
     assert "ProcessDiscoveredChunksAsync" in writer
 
 
+def test_raw_writer_has_periodic_durable_checkpoint_outside_capture_callback():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    writer = coordinator.split("internal sealed class PcmFlacChunkWriter", 1)[1]
+    append = writer.split("public void Append", 1)[1].split("public void FlushCurrentChunk", 1)[0]
+    process = writer.split("private async Task ProcessQueueAsync", 1)[1].split("private async Task ProcessDiscoveredChunksAsync", 1)[0]
+    assert 'ATOM_RAW_DURABILITY_CHECKPOINT_SECONDS' in writer
+    assert 'ReadDurabilityCheckpointInterval' in writer
+    assert 'CheckpointOpenRawIfDueAsync' in process
+    assert 'Flush(flushToDisk: true)' in writer
+    assert 'Flush(flushToDisk: true)' not in append
+    assert 'Math.Clamp(seconds, 1d, 60d)' in writer
+
+
 def test_disk_backed_overflow_is_bounded_and_restart_recoverable():
     coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
     recovery = read("apps/recorder-agent/RawChunkRecovery.cs")

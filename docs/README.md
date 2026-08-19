@@ -8,6 +8,7 @@
 | --- | --- |
 | [Обзор приложения](application-overview.md) | Что делает продукт и какие пользовательские сценарии поддержаны |
 | [Текущая архитектура](architecture-current.md) | Границы процессов, размещение компонентов и источники истины |
+| [Архитектурная эволюция](architecture-incremental.md) | Core Pipeline, state machine jobs, GPU lease и безопасные этапы рефакторинга |
 | [Модули](modules.md) | Ответственность API, Desktop, Agent, workers и legacy-кода |
 | [Технологический стек](technology-stack.md) | Языки, фреймворки, ML и инфраструктура |
 | [Потоки данных](data-flow.md) | Файл, запись, чанки, media pipeline, WhisperX и transcript |

@@ -52,8 +52,10 @@ class ServerFirstContractTests(unittest.TestCase):
 
     def test_gpu_worker_rejects_storage_paths_outside_data_mount(self):
         worker = Path("workers/ml_worker/worker.py").read_text(encoding="utf-8")
-        self.assertIn('raise ValueError("invalid_storage_key")', worker)
-        self.assertIn('relative = posix_path.relative_to("/data")', worker)
+        storage = Path("whisperx_atom/storage.py").read_text(encoding="utf-8")
+        self.assertIn("LocalMediaStorage", worker)
+        self.assertIn('raise ValueError("invalid_storage_key")', storage)
+        self.assertIn('PurePosixPath(value).relative_to(self.namespace)', storage)
     def test_media_paths_are_independent_of_job_json(self):
         path = Path("staging") / "job.part"
         self.assertEqual(path.parent, Path("staging"))
@@ -119,7 +121,7 @@ class ServerFirstContractTests(unittest.TestCase):
         self.assertIn('query.Length > 200', api)
         self.assertIn("Math.Clamp(limit ?? 50, 1, 200)", api)
         self.assertIn("m.owner_id=@owner", store)
-        self.assertIn("websearch_to_tsquery('simple',@query)", store)
+        self.assertIn("websearch_to_tsquery('russian',@query)", store)
 
     def test_gpu_e2e_script_has_separate_terminal_contract(self):
         script = Path("scripts/e2e-gpu.ps1").read_text(encoding="utf-8")

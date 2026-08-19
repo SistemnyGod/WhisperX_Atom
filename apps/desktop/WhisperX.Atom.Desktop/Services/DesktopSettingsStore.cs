@@ -21,6 +21,11 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.AgentBootstrapConfirmed,
             settings.VoiceAlwaysListening,
             settings.VoiceQuietMode,
-            settings.VoiceSensitivity);
+            settings.VoiceSensitivity,
+            settings.AcousticProfile,
+            settings.VoiceName,
+            settings.VoiceRate,
+            settings.VoiceVolume,
+            settings.UpdateChannel);
     }
 }

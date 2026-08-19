@@ -571,7 +571,8 @@ public sealed class SpoolStore
             ORDER BY r.track_id,r.sequence
             """;
         command.Parameters.AddWithValue("$session", sessionId);
-        var chunks = new List<LocalDurabilityChunk>();
+        var chunks = new List<RecordingTimelineChunk>();
+        var seenChunkKeys = new HashSet<(string TrackId, int Sequence)>();
         var recoverable = orphanPart;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -588,6 +589,7 @@ public sealed class SpoolStore
             var sequence = reader.GetInt32(9);
             var trackType = reader.GetString(10);
             var encoding = reader.GetString(11);
+            seenChunkKeys.Add((trackId, sequence));
             var encodedPath = reader.IsDBNull(12) ? null : reader.GetString(12);
             var encodedStatus = reader.IsDBNull(13) ? null : reader.GetString(13);
             var encodedSize = reader.IsDBNull(14) ? (long?)null : reader.GetInt64(14);
@@ -618,8 +620,7 @@ public sealed class SpoolStore
             if (File.Exists(partPath) && new FileInfo(partPath).Length > 0)
                 recoverable = true;
 
-            var encodedDurable = string.Equals(status, "READY", StringComparison.OrdinalIgnoreCase)
-                && IsUsableFlac(
+            var encodedDurable = IsUsableFlac(
                     string.IsNullOrWhiteSpace(encodedPath) ? outputPath : encodedPath,
                     sampleRate,
                     channels,
@@ -629,9 +630,9 @@ public sealed class SpoolStore
                     encodedSize,
                     encodedSha);
 
-            chunks.Add(new LocalDurabilityChunk(
+            chunks.Add(new RecordingTimelineChunk(
                 trackId, sequence, trackType, encoding, startSample, sampleCount,
-                sampleRate, channels, bits, rawDurable, encodedDurable,
+                sampleRate, channels, bits, rawDurable || encodedDurable,
                 reader.IsDBNull(16) ? null : reader.GetString(16),
                 reader.IsDBNull(17) ? null : reader.GetInt32(17),
                 reader.IsDBNull(18) ? null : reader.GetInt32(18),
@@ -639,10 +640,71 @@ public sealed class SpoolStore
                 reader.IsDBNull(20) ? null : reader.GetInt32(20)));
         }
 
+        // Raw rows are intentionally purged after a verified FLAC reaches the
+        // archive/delivery boundary.  Keep those encoded chunks in the local
+        // durability view even after the raw metadata row is gone; otherwise a
+        // delayed delivery retry could incorrectly turn a valid session into
+        // NO_AUDIO_CAPTURED.
+        await using (var encoded = connection.CreateCommand())
+        {
+            encoded.CommandText = """
+                SELECT c.track_id,c.sequence,c.local_path,c.status,c.start_sample,c.sample_count,
+                       c.sample_rate,c.channels,c.track_type,c.size_bytes,c.sha256,
+                       t.track_type,t.sample_rate,t.channels,t.encoding,t.bits_per_sample
+                FROM recording_chunks c
+                LEFT JOIN recording_track_info t ON t.track_id=c.track_id
+                WHERE c.session_id=$session
+                ORDER BY c.track_id,c.sequence
+                """;
+            encoded.Parameters.AddWithValue("$session", sessionId);
+            await using var encodedReader = await encoded.ExecuteReaderAsync(cancellationToken);
+            while (await encodedReader.ReadAsync(cancellationToken))
+            {
+                var trackId = encodedReader.GetString(0);
+                var sequence = encodedReader.GetInt32(1);
+                if (!seenChunkKeys.Add((trackId, sequence)))
+                    continue;
+
+                var sampleRate = encodedReader.GetInt32(6);
+                var channels = Math.Max(1, encodedReader.GetInt32(7));
+                var trackType = encodedReader.GetString(8);
+                var encodingName = encodedReader.IsDBNull(14) ? "IeeeFloat" : encodedReader.GetString(14);
+                var bits = encodedReader.IsDBNull(15) ? 0 : Math.Max(0, encodedReader.GetInt32(15));
+                var encodedPath = encodedReader.GetString(2);
+                var encodedStatus = encodedReader.GetString(3);
+                var encodedDurable = IsUsableFlac(
+                    encodedPath,
+                    sampleRate,
+                    channels,
+                    bits,
+                    encodedReader.GetInt64(5),
+                    encodedStatus,
+                    encodedReader.GetInt64(9),
+                    encodedReader.IsDBNull(10) ? null : encodedReader.GetString(10));
+
+                chunks.Add(new RecordingTimelineChunk(
+                    trackId,
+                    sequence,
+                    trackType,
+                    encodingName,
+                    encodedReader.GetInt64(4),
+                    encodedReader.GetInt64(5),
+                    sampleRate,
+                    channels,
+                    bits,
+                    encodedDurable,
+                    encodedReader.IsDBNull(11) ? null : encodedReader.GetString(11),
+                    encodedReader.IsDBNull(12) ? null : encodedReader.GetInt32(12),
+                    encodedReader.IsDBNull(13) ? null : encodedReader.GetInt32(13),
+                    encodedReader.IsDBNull(14) ? null : encodedReader.GetString(14),
+                    encodedReader.IsDBNull(15) ? null : encodedReader.GetInt32(15)));
+            }
+        }
+
         if (recoverable)
             return new LocalDurabilityOutcome("RECOVERY_PENDING", false, true, chunks.Count(c => c.IsDurable), "RAW_RECOVERY_PENDING");
 
-        var validationError = ValidateSessionTimeline(chunks);
+        var validationError = RecordingTimelineValidator.Validate(chunks);
         if (validationError is not null)
             return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, validationError);
 
@@ -650,58 +712,6 @@ public sealed class SpoolStore
         if (durable > 0)
             return new LocalDurabilityOutcome("LOCAL_READY", true, false, durable);
         return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, "NO_AUDIO_CAPTURED");
-    }
-
-    private sealed record LocalDurabilityChunk(
-        string TrackId,
-        int Sequence,
-        string TrackType,
-        string Encoding,
-        long StartSample,
-        long SampleCount,
-        int SampleRate,
-        int Channels,
-        int BitsPerSample,
-        bool RawDurable,
-        bool EncodedDurable,
-        string? ExpectedTrackType,
-        int? ExpectedSampleRate,
-        int? ExpectedChannels,
-        string? ExpectedEncoding,
-        int? ExpectedBitsPerSample)
-    {
-        public bool IsDurable => RawDurable || EncodedDurable;
-    }
-
-    private static string? ValidateSessionTimeline(IReadOnlyList<LocalDurabilityChunk> chunks)
-    {
-        if (chunks.Count == 0) return null;
-        foreach (var group in chunks.GroupBy(c => c.TrackId, StringComparer.Ordinal))
-        {
-            var ordered = group.OrderBy(c => c.Sequence).ToArray();
-            var first = ordered[0];
-            if (first.Sequence != 0) return "SESSION_TIMELINE_GAP";
-            long expectedStart = first.StartSample;
-            var sampleRate = first.ExpectedSampleRate ?? first.SampleRate;
-            var channels = first.ExpectedChannels ?? first.Channels;
-            var bits = first.ExpectedBitsPerSample ?? first.BitsPerSample;
-            var encoding = first.ExpectedEncoding ?? first.Encoding;
-            var trackType = first.ExpectedTrackType ?? first.TrackType;
-            for (var index = 0; index < ordered.Length; index++)
-            {
-                var chunk = ordered[index];
-                if (chunk.Sequence != index) return "SESSION_TIMELINE_GAP";
-                if (chunk.SampleCount <= 0 || chunk.StartSample != expectedStart)
-                    return chunk.StartSample < expectedStart ? "SESSION_TIMELINE_OVERLAP" : "SESSION_TIMELINE_GAP";
-                if (chunk.SampleRate != sampleRate || chunk.Channels != channels || chunk.BitsPerSample != bits
-                    || !string.Equals(chunk.Encoding, encoding, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(chunk.TrackType, trackType, StringComparison.OrdinalIgnoreCase))
-                    return "SESSION_TRACK_FORMAT_MISMATCH";
-                if (!chunk.IsDurable) return "SESSION_CHUNK_NOT_DURABLE";
-                expectedStart = checked(chunk.StartSample + chunk.SampleCount);
-            }
-        }
-        return null;
     }
 
     private async Task<bool> ReconcileExactSessionOrphansAsync(string sessionId, CancellationToken cancellationToken)
@@ -763,7 +773,18 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT MAX(start_sample + sample_count), MAX(sample_rate) FROM recording_raw_chunks WHERE session_id=$session AND status NOT IN ('DISCARDED','ENCODE_TERMINAL_FAILED') AND sample_count>0";
+        command.CommandText = """
+            SELECT MAX(end_sample), MAX(sample_rate)
+            FROM (
+                SELECT start_sample + sample_count AS end_sample, sample_rate
+                FROM recording_raw_chunks
+                WHERE session_id=$session AND status NOT IN ('DISCARDED','ENCODE_TERMINAL_FAILED') AND sample_count>0
+                UNION ALL
+                SELECT start_sample + sample_count AS end_sample, sample_rate
+                FROM recording_chunks
+                WHERE session_id=$session AND status IN ('READY','UPLOADING','CONFIRMED') AND sample_count>0
+            ) durable_timeline
+            """;
         command.Parameters.AddWithValue("$session", sessionId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1)) return null;
@@ -788,6 +809,7 @@ public sealed class SpoolStore
             if (!info.Exists || info.Length < 64) return false;
             if (encodedStatus is not null
                 && !string.Equals(encodedStatus, "READY", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(encodedStatus, "UPLOADING", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(encodedStatus, "CONFIRMED", StringComparison.OrdinalIgnoreCase)) return false;
             if (encodedSize is long expectedSize && expectedSize != info.Length) return false;
             if (!string.IsNullOrWhiteSpace(encodedSha)
@@ -839,7 +861,7 @@ public sealed class SpoolStore
             if (!foundStreamInfo || stream.Position >= stream.Length
                 || actualRate != expectedSampleRate
                 || actualChannels != expectedChannels
-                || actualBits != expectedBits
+                || (expectedBits > 0 && actualBits != expectedBits)
                 || actualSamples <= 0
                 || expectedSamples <= 0) return false;
             var tolerance = Math.Max(1, expectedSampleRate / 100);

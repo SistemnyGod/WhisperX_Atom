@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -810,6 +811,12 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
     private readonly SemaphoreSlim _workSignal = new(0);
     private readonly int _queueCapacity;
     private readonly Task _finalizerTask;
+    private static readonly TimeSpan DiscoveryScanInterval = TimeSpan.FromSeconds(1);
+    private long _lastDiscoveryScanTimestamp;
+    private readonly TimeSpan _durabilityCheckpointInterval;
+    private long _lastDurabilityCheckpointTimestamp;
+    private long _durabilityCheckpointCount;
+    private long _durabilityCheckpointFailures;
     private FileStream? _raw;
     private string? _rawPath;
     private string? _rawPartPath;
@@ -827,6 +834,10 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         }
     }
 
+    public long DurabilityCheckpointCount => Interlocked.Read(ref _durabilityCheckpointCount);
+
+    public long DurabilityCheckpointFailures => Interlocked.Read(ref _durabilityCheckpointFailures);
+
     public PcmFlacChunkWriter(string sessionId, string trackId, string trackType, WaveFormat format, SpoolStore spool, string root, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, ILogger logger, long startSample)
     {
         _sessionId = sessionId;
@@ -839,6 +850,7 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         _logger = logger;
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _startSample = Math.Max(0, startSample);
+        _durabilityCheckpointInterval = ReadDurabilityCheckpointInterval();
         _queueCapacity = ReadQueueCapacity();
         _rawFinalizerMetrics.Configure(_queueCapacity);
         _pending = Channel.CreateBounded<PendingRawChunk>(new BoundedChannelOptions(_queueCapacity)
@@ -861,6 +873,14 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         // Historical stress harnesses used Math.Clamp(value, 1, 64). The
         // production raw-finalizer range is narrower (2..32) by design.
         return int.TryParse(configured, out var value) ? Math.Clamp(value, 2, 32) : 4;
+    }
+
+    private static TimeSpan ReadDurabilityCheckpointInterval()
+    {
+        var configured = Environment.GetEnvironmentVariable("ATOM_RAW_DURABILITY_CHECKPOINT_SECONDS");
+        if (!double.TryParse(configured, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+            seconds = 5d;
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 1d, 60d));
     }
 
     public void Append(ReadOnlySpan<byte> pcm)
@@ -946,8 +966,14 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
             while (_pending.Reader.TryRead(out var chunk))
             {
                 try { await ProcessChunkAsync(chunk); }
-                finally { _rawFinalizerMetrics.Dequeue(); }
+                finally
+                {
+                    _rawFinalizerMetrics.Dequeue();
+                    await CheckpointOpenRawIfDueAsync().ConfigureAwait(false);
+                }
             }
+
+            await CheckpointOpenRawIfDueAsync().ConfigureAwait(false);
 
             // A closed .pcm with no SQLite row is the durable overflow queue.
             // Scanning here also covers a process that stopped after closing a
@@ -959,8 +985,55 @@ internal sealed class PcmFlacChunkWriter : IAsyncDisposable
         }
     }
 
+    private async Task CheckpointOpenRawIfDueAsync()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var previous = Volatile.Read(ref _lastDurabilityCheckpointTimestamp);
+        if (previous != 0
+            && (now - previous) < (long)(_durabilityCheckpointInterval.TotalSeconds * Stopwatch.Frequency))
+            return;
+
+        FileStream raw;
+        lock (_gate)
+        {
+            if (_disposed || _raw is null || _sampleCount <= 0) return;
+            raw = _raw;
+        }
+
+        Volatile.Write(ref _lastDurabilityCheckpointTimestamp, now);
+        try
+        {
+            // Snapshot the stream under _gate, then flush outside the gate so
+            // the capture writer never waits on fsync. FileStream serializes
+            // its own operations; a close race is treated as a harmless late
+            // checkpoint because QueueCurrentChunk performs the final flush.
+            await Task.Run(() => raw.Flush(flushToDisk: true)).ConfigureAwait(false);
+            Interlocked.Increment(ref _durabilityCheckpointCount);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The chunk was rotated while this checkpoint was in flight.
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Increment(ref _durabilityCheckpointFailures);
+            _logger.LogWarning(ex, "Raw durability checkpoint failed. Session={SessionId}, Track={TrackId}", _sessionId, _trackId);
+        }
+    }
+
     private async Task ProcessDiscoveredChunksAsync()
     {
+        // The closed PCM file is a disk-backed overflow queue.  Do not walk a
+        // growing two-hour session directory on every 250 ms wake-up: the
+        // bounded in-memory channel already covers the hot path, while a
+        // one-second scan still gives crash/overflow recovery a predictable
+        // upper bound without adding work to the capture callback.
+        var now = Stopwatch.GetTimestamp();
+        var previous = Volatile.Read(ref _lastDiscoveryScanTimestamp);
+        if (previous != 0 && (now - previous) < (long)(DiscoveryScanInterval.TotalSeconds * Stopwatch.Frequency))
+            return;
+        Volatile.Write(ref _lastDiscoveryScanTimestamp, now);
+
         var directory = Path.Combine(_root, "recordings", _sessionId, _trackId);
         if (!Directory.Exists(directory)) return;
 

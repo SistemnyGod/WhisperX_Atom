@@ -53,6 +53,9 @@ public partial class App : Application
                 new WhisperX_Atom_Desktop.Services.BackendService(settings),
                 settingsStore);
             _services.LoggedOut += HandleLoggedOut;
+            // Update checks are anonymous and intentionally start before auth.
+            // A LAN outage must never block login or local-first recording.
+            _services.Updates.StartMonitoring();
 
             // AudioGraph runs in the current-user Recorder Host. Make its
             // lifecycle independent of login/server reachability so an already

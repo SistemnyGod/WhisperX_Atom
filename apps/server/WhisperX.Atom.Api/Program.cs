@@ -65,7 +65,8 @@ builder.Services.AddRateLimiter(options =>
             path.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase) ? "refresh" :
             path.StartsWith("/api/v1/agents/enroll", StringComparison.OrdinalIgnoreCase) ? "enrollment" :
             path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) ? "summary-rebuild" :
-            path.StartsWith("/api/assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" : null;
+            path.StartsWith("/api/assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" :
+            path.StartsWith("/api/client-updates", StringComparison.OrdinalIgnoreCase) ? "client-updates" : null;
         if (route is null) return RateLimitPartition.GetNoLimiter("unlimited");
         var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var limit = route is "login" or "refresh" or "enrollment" ? 20 : 30;
@@ -262,6 +263,7 @@ app.Use(async (context, next) =>
     if (context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
         context.Request.Path.StartsWithSegments("/api/system/version") ||
+        context.Request.Path.StartsWithSegments("/api/client-updates") ||
         context.Request.Path.StartsWithSegments("/api/auth/login") ||
         context.Request.Path.StartsWithSegments("/api/auth/refresh") ||
         context.Request.Path.StartsWithSegments("/api/auth/logout") ||
@@ -354,6 +356,85 @@ app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(n
     minRecorderVersion = configuration["WHISPERX_MIN_RECORDER_VERSION"] ?? "0.1.0",
     serverTimeUtc = DateTimeOffset.UtcNow
 }));
+
+// Client update metadata and packages are intentionally anonymous.  A client
+// may need to update before it can authenticate, while SHA256 and
+// Authenticode validation remain mandatory on the Desktop side.  The update
+// root is a read-only bind mount in release Compose and is never shared with
+// media, spool or credentials.
+app.MapGet("/api/client-updates/latest", (HttpRequest request, IConfiguration configuration) =>
+{
+    var root = GetClientUpdateRoot(configuration);
+    var manifestPath = Path.Combine(root, "client-update.json");
+    if (!File.Exists(manifestPath)) return Results.NoContent();
+
+    try
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var manifest = document.RootElement;
+        if (manifest.ValueKind != JsonValueKind.Object
+            || !string.Equals(manifest.TryGetString("product"), "WhisperX Atom", StringComparison.Ordinal))
+            return Results.NoContent();
+
+        var requestedChannel = request.Query["channel"].ToString();
+        var channel = manifest.TryGetString("channel") ?? "stable";
+        if (!string.IsNullOrWhiteSpace(requestedChannel)
+            && !string.Equals(requestedChannel, channel, StringComparison.OrdinalIgnoreCase))
+            return Results.NoContent();
+
+        var currentVersion = request.Query["currentVersion"].ToString();
+        var currentBuild = request.Query["currentBuildIdentity"].ToString();
+        var manifestVersion = manifest.TryGetString("version");
+        var manifestBuild = manifest.TryGetString("buildIdentity");
+        if (!IsClientUpdateCandidate(channel, currentVersion, currentBuild, manifestVersion, manifestBuild))
+            return Results.NoContent();
+
+        if (!manifest.TryGetProperty("package", out var package)
+            || package.ValueKind != JsonValueKind.Object
+            || !IsSha256(package.TryGetString("packageId"))
+            || !IsSha256(package.TryGetString("sha256"))
+            || !string.Equals(package.TryGetString("packageId"), package.TryGetString("sha256"), StringComparison.OrdinalIgnoreCase))
+            return Results.NoContent();
+
+        var packageId = package.TryGetString("packageId")!;
+        var packageFile = Path.Combine(root, "packages", packageId + ".exe");
+        if (!File.Exists(packageFile)) return Results.NoContent();
+        return Results.Json(manifest.Clone(), statusCode: StatusCodes.Status200OK);
+    }
+    catch (JsonException) { return Results.NoContent(); }
+    catch (IOException) { return Results.NoContent(); }
+});
+
+app.MapGet("/api/client-updates/packages/{packageId}", (string packageId, HttpResponse response, IConfiguration configuration) =>
+{
+    if (!IsSha256(packageId)) return Results.NotFound();
+    var root = GetClientUpdateRoot(configuration);
+    var manifestPath = Path.Combine(root, "client-update.json");
+    if (!File.Exists(manifestPath)) return Results.NotFound();
+
+    try
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var manifest = document.RootElement;
+        if (!manifest.TryGetProperty("package", out var package)
+            || !string.Equals(package.TryGetString("packageId"), packageId, StringComparison.OrdinalIgnoreCase))
+            return Results.NotFound();
+        var fileName = package.TryGetString("fileName");
+        if (string.IsNullOrWhiteSpace(fileName) || !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+            return Results.NotFound();
+
+        var path = Path.Combine(root, "packages", packageId + ".exe");
+        if (!File.Exists(path)) return Results.NotFound();
+        var etag = $"\"{packageId.ToLowerInvariant()}\"";
+        response.Headers.ETag = etag;
+        response.Headers.CacheControl = "no-cache";
+        if (string.Equals(response.HttpContext.Request.Headers.IfNoneMatch.ToString(), etag, StringComparison.Ordinal))
+            return Results.StatusCode(StatusCodes.Status304NotModified);
+        return Results.File(path, "application/vnd.microsoft.portable-executable", fileName, enableRangeProcessing: true);
+    }
+    catch (JsonException) { return Results.NotFound(); }
+    catch (IOException) { return Results.NotFound(); }
+});
 
 app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration, IHttpClientFactory httpClientFactory) =>
 {
@@ -969,6 +1050,45 @@ static long? JsonLong(JsonElement value, params string[] path)
     if (!obj.HasValue) return null;
     if (obj.Value.ValueKind == JsonValueKind.Number && obj.Value.TryGetInt64(out var number)) return number;
     return obj.Value.ValueKind == JsonValueKind.String && long.TryParse(obj.Value.GetString(), out number) ? number : null;
+}
+
+static string GetClientUpdateRoot(IConfiguration configuration)
+{
+    var configured = configuration["CLIENT_UPDATE_ROOT"];
+    return Path.GetFullPath(string.IsNullOrWhiteSpace(configured) ? "/updates" : configured);
+}
+
+static bool IsSha256(string? value)
+    => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+
+static bool IsClientUpdateCandidate(string channel, string? currentVersion, string? currentBuildIdentity, string? candidateVersion, string? candidateBuildIdentity)
+{
+    if (string.IsNullOrWhiteSpace(candidateVersion) || string.IsNullOrWhiteSpace(candidateBuildIdentity)) return false;
+    if (candidateBuildIdentity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+        || candidateBuildIdentity.Contains("dirty", StringComparison.OrdinalIgnoreCase)) return false;
+
+    static bool TrySemanticVersion(string? value, out Version version)
+    {
+        var normalized = (value ?? "0.0.0").Trim();
+        var separator = normalized.IndexOfAny(['+', '-']);
+        if (separator >= 0) normalized = normalized[..separator];
+        if (Version.TryParse(normalized, out var parsed))
+        {
+            version = parsed;
+            return true;
+        }
+        version = new Version(0, 0);
+        return false;
+    }
+
+    if (!TrySemanticVersion(candidateVersion, out var candidate)
+        || !TrySemanticVersion(currentVersion, out var current)) return false;
+
+    var comparison = candidate.CompareTo(current);
+    if (comparison > 0) return true;
+    return comparison == 0
+        && string.Equals(channel, "pilot", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(currentBuildIdentity, candidateBuildIdentity, StringComparison.Ordinal);
 }
 
 app.MapPost("/api/v1/agents/enroll", async (AgentEnrollRequest request, HttpRequest http, UnifiedProductStore store) =>
@@ -1667,6 +1787,16 @@ app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
 });
 
 app.Run();
+
+internal static class ClientUpdateJsonExtensions
+{
+    public static string? TryGetString(this JsonElement value, string property)
+        => value.ValueKind == JsonValueKind.Object
+            && value.TryGetProperty(property, out var element)
+            && element.ValueKind == JsonValueKind.String
+            ? element.GetString()
+            : null;
+}
 
 public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
 public record AgentLinkLocalRequest(Guid InstallationId, Guid? AgentId, string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);

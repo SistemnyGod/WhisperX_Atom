@@ -5,6 +5,7 @@ import os
 import socket
 
 import psycopg
+from whisperx_atom.pipeline_contract import validate_stage_name
 
 # The historical contract used the literal predicate job.type='TRANSCRIBE';
 # the production query below intentionally includes the additive
@@ -110,6 +111,9 @@ def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
 
 
 def update_job(job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
+    # Validate at the persistence boundary while retaining historical stage
+    # spellings consumed by existing Desktop/API clients.
+    stage = validate_stage_name(stage)
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
             "UPDATE jobs SET status=%s,stage=%s,progress=%s,error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",

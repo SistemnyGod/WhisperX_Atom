@@ -74,7 +74,9 @@ public sealed record DesktopAgent(Guid Id, string Name, Guid? RoomId, string Sta
     public string EffectiveStatusText => UiStatusMapper.Text(EffectiveStatus);
 }
 public sealed record DesktopSystemStatus(bool Ready, bool Postgres, long FreeBytes, long TotalBytes, DateTimeOffset CheckedAt);
-public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc);
+public sealed record DesktopSystemVersion(string Product, int ApiVersion, string ReleaseVersion, string MinDesktopVersion, string MinRecorderVersion, DateTimeOffset ServerTimeUtc, string BuildIdentity = "");
+public sealed record ClientUpdatePackage(string PackageId, string FileName, long SizeBytes, string Sha256, bool AuthenticodeRequired, string DownloadUrl);
+public sealed record ClientUpdateManifest(int SchemaVersion, string Product, string Channel, string Version, string BuildIdentity, string Commit, DateTimeOffset PublishedAtUtc, bool Mandatory, int ApiVersion, string MinServerVersion, IReadOnlyList<string> ReleaseNotes, ClientUpdatePackage Package, string? SignatureStatus = null);
 public sealed record DesktopProcessingReadiness(bool Ready, JsonElement Components, JsonElement? Queue, DateTimeOffset? CheckedAt);
 public sealed record DesktopMedia(string Id, string MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
 public sealed record DesktopImportProgress(string Stage, long UploadedBytes, long TotalBytes, string? MeetingId = null, string? Message = null)

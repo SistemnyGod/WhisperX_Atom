@@ -71,5 +71,15 @@ fallback. ML-бизнес-логика остаётся в API/worker.
   временной ошибке API или encoder.
 - `artifacts/runtime/state.json` — диагностический снимок, не бизнес-состояние.
 
+## Архитектурный контракт обработки
+
+Серверный ML-код вызывается через единый фасад
+[`WhisperXCorePipeline`](../whisperx_atom/core_pipeline.py), а допустимые стадии
+проверяются общим контрактом [`pipeline_contract.py`](../whisperx_atom/pipeline_contract.py).
+Это совместимый слой над текущим `ProcessingService`: он не меняет IPC/API или
+формат существующих stages, но не позволяет worker-модулям напрямую расширять
+legacy pipeline несогласованными состояниями. Подробная схема перехода описана
+в [architecture-incremental.md](architecture-incremental.md).
+
 Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для совместимости, но не
 образуют второй поддерживаемый server pipeline.

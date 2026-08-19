@@ -4,6 +4,11 @@ x-media-volumes: &media-volumes
   - ${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data
   - ${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox
   - ${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive
+x-api-volumes: &api-volumes
+  - ${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data
+  - ${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox
+  - ${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive
+  - ${WHISPERX_UPDATES_HOST:-C:/ProgramData/WhisperXAtom/Server/Updates}:/updates:ro
 
 services:
   postgres:
@@ -81,6 +86,7 @@ services:
       VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
       WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
       WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      CLIENT_UPDATE_ROOT: /updates
       ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
       AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
       COOKIE_SECURE: "false"
@@ -90,7 +96,7 @@ services:
     ports:
       # Development API is intentionally reachable only by the local Desktop.
       - "127.0.0.1:8080:8080"
-    volumes: *media-volumes
+    volumes: *api-volumes
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]
       interval: 10s

@@ -38,6 +38,10 @@ public sealed partial class SettingsPage : Page
         _services = (FrontendServices)e.Parameter;
         ViewModel = new SettingsViewModel(_services);
         DataContext = ViewModel;
+        _services.Updates.StateChanged += Updates_StateChanged;
+        UpdateChannelComboBox.SelectedValue = _services.Settings.Load().UpdateChannel;
+        CurrentBuildIdentityText.Text = _services.Updates.CurrentBuildIdentity;
+        RenderUpdateState();
         UpdateVoiceStatusVisual();
         UpdateStatus();
         _ = RefreshRuntimeDiagnosticsAsync();
@@ -51,11 +55,116 @@ public sealed partial class SettingsPage : Page
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        if (_services is not null) _services.Updates.StateChanged -= Updates_StateChanged;
         _voiceRefreshCts?.Cancel();
         _voiceRefreshCts?.Dispose();
         _voiceRefreshCts = null;
         _voiceBarsTimer?.Stop();
         base.OnNavigatedFrom(e);
+    }
+
+    private void Updates_StateChanged() => DispatcherQueue.TryEnqueue(RenderUpdateState);
+
+    private void RenderUpdateState()
+    {
+        if (_services is null) return;
+        var updates = _services.Updates;
+        var manifest = updates.Manifest;
+        UpdateStateText.Text = updates.State switch
+        {
+            ClientUpdateState.Checking => "Проверяется…",
+            ClientUpdateState.UpToDate => "Установлена последняя версия",
+            ClientUpdateState.Available => "Доступно обновление",
+            ClientUpdateState.Downloading => $"Скачивание · {updates.DownloadPercent}%",
+            ClientUpdateState.ReadyToInstall => "Готово к установке",
+            ClientUpdateState.BlockedRecording => "Заблокировано активной записью",
+            ClientUpdateState.Incompatible => "Несовместимое обновление",
+            ClientUpdateState.Installing => "Установка запущена…",
+            ClientUpdateState.Deferred => "Отложено",
+            ClientUpdateState.Failed => "Ошибка обновления",
+            _ => "Проверка не выполнялась"
+        };
+        AvailableUpdatePanel.Visibility = manifest is null || updates.State is ClientUpdateState.UpToDate or ClientUpdateState.Idle
+            ? Visibility.Collapsed : Visibility.Visible;
+        if (manifest is null) return;
+        AvailableUpdateText.Text = $"Доступна версия {manifest.Version}";
+        AvailableUpdateIdentityText.Text = manifest.BuildIdentity;
+        ToolTipService.SetToolTip(AvailableUpdateIdentityText, manifest.BuildIdentity);
+        UpdateReleaseNotesText.Text = manifest.ReleaseNotes is { Count: > 0 } ? string.Join(" · ", manifest.ReleaseNotes) : "Описание изменений не опубликовано.";
+        var pilotUnsigned = string.Equals(manifest.Channel, "pilot", StringComparison.OrdinalIgnoreCase) && !manifest.Package.AuthenticodeRequired;
+        UpdateWarningText.Text = pilotUnsigned ? "Локальная тестовая сборка не имеет цифровой подписи. SHA256 проверяется; установка потребует подтверждения администратора." : string.Empty;
+        UpdateWarningText.Visibility = pilotUnsigned ? Visibility.Visible : Visibility.Collapsed;
+        UpdateProgressBar.Visibility = updates.State == ClientUpdateState.Downloading ? Visibility.Visible : Visibility.Collapsed;
+        UpdateProgressBar.Value = updates.DownloadPercent;
+        UpdateProgressRing.IsActive = updates.State == ClientUpdateState.Downloading;
+        DownloadUpdateButton.IsEnabled = updates.State is ClientUpdateState.Available or ClientUpdateState.Failed;
+        CancelUpdateButton.Visibility = updates.State == ClientUpdateState.Downloading ? Visibility.Visible : Visibility.Collapsed;
+        InstallUpdateButton.IsEnabled = updates.State == ClientUpdateState.ReadyToInstall;
+        DeferUpdateButton.Visibility = manifest.Mandatory ? Visibility.Collapsed : Visibility.Visible;
+        UpdateErrorText.Text = updates.ErrorCode ?? string.Empty;
+        UpdateErrorText.Visibility = string.IsNullOrWhiteSpace(updates.ErrorCode) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void CheckUpdatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_services is null) return;
+        await _services.Updates.CheckAsync();
+        RenderUpdateState();
+    }
+
+    private async void DownloadUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_services is null) return;
+        var progress = new Progress<int>(value =>
+        {
+            UpdateProgressBar.Value = value;
+            UpdateStateText.Text = $"Скачивание · {value}%";
+        });
+        await _services.Updates.DownloadAsync(progress);
+        RenderUpdateState();
+    }
+
+    private void CancelUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        _services?.Updates.CancelDownload();
+    }
+
+    private async void InstallUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_services is null) return;
+        var manifest = _services.Updates.Manifest;
+        var unsignedPilot = manifest is not null
+            && string.Equals(manifest.Channel, "pilot", StringComparison.OrdinalIgnoreCase)
+            && !manifest.Package.AuthenticodeRequired;
+        var allowUnsignedPilot = false;
+        if (unsignedPilot)
+        {
+            var confirmation = new ContentDialog
+            {
+                Title = "Установить локальный pilot?",
+                Content = "Локальная тестовая сборка не имеет цифровой подписи. SHA256 и build identity будут проверены, после чего Windows запросит подтверждение администратора.",
+                PrimaryButtonText = "Установить",
+                CloseButtonText = "Отмена",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = Content.XamlRoot
+            };
+            allowUnsignedPilot = await confirmation.ShowAsync() == ContentDialogResult.Primary;
+            if (!allowUnsignedPilot) return;
+        }
+        await _services.Updates.InstallAsync(allowUnsignedPilot);
+        RenderUpdateState();
+    }
+
+    private void DeferUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        _services?.Updates.Defer();
+        RenderUpdateState();
+    }
+
+    private void UpdateChannelComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_services is null || UpdateChannelComboBox.SelectedValue is not string channel) return;
+        _services.Settings.Save(_services.Settings.Load() with { UpdateChannel = channel });
     }
 
     private async Task RefreshVoiceLoopAsync(CancellationToken cancellationToken)

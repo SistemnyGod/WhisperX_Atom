@@ -43,6 +43,10 @@ if ($previousSetup -and (Test-Path -LiteralPath $previousSetup)) { Remove-Item -
 $identityPath = Join-Path $repoRoot "artifacts\\desktop\\build-identity.json"
 if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { throw "DESKTOP_IDENTITY_MANIFEST_MISSING" }
 $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+$buildIdentity = [string]$identity.buildIdentity
+if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
+    throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
+}
 $signature = Get-AuthenticodeSignature -LiteralPath $setup
 $signatureStatus = [string]$signature.Status
 $releaseStatus = if ($signatureStatus -eq "Valid") { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_PILOT_BUILD" }
@@ -52,6 +56,10 @@ $serverArchive = Join-Path $repoRoot "artifacts\\WhisperXAtom-Server.zip"
 $serverBundleManifestPath = Join-Path $repoRoot "artifacts\\server-bundle\\release-manifest.json"
 $serverBundle = if (Test-Path -LiteralPath $serverBundleManifestPath -PathType Leaf) {
     $serverManifest = Get-Content -LiteralPath $serverBundleManifestPath -Raw | ConvertFrom-Json
+    $serverIdentity = [string]$serverManifest.buildIdentity
+    if (-not [string]::IsNullOrWhiteSpace($serverIdentity) -and $serverIdentity -ne $buildIdentity) {
+        throw "INSTALLER_RUNTIME_IDENTITY_MISMATCH: desktop=$buildIdentity server=$serverIdentity"
+    }
     [ordered]@{
         directory = "artifacts/server-bundle"
         archive = if (Test-Path -LiteralPath $serverArchive -PathType Leaf) { [ordered]@{ path = "artifacts/WhisperXAtom-Server.zip"; sha256 = (Get-FileHash -LiteralPath $serverArchive -Algorithm SHA256).Hash.ToLowerInvariant() } } else { $null }
@@ -63,7 +71,7 @@ $serverBundle = if (Test-Path -LiteralPath $serverBundleManifestPath -PathType L
     schemaVersion = 1
     product = "WhisperX Atom"
     version = "1.0.1"
-    buildIdentity = [string]$identity.buildIdentity
+    buildIdentity = $buildIdentity
     commit = [string]$identity.commit
     status = $releaseStatus
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")

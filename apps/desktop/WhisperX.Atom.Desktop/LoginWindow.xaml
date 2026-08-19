@@ -83,6 +83,12 @@
                             <TextBlock Text="Добро пожаловать!" Foreground="{StaticResource LoginTextBrush}" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center" />
                             <TextBlock Text="Войдите, чтобы продолжить работу с совещаниями" Style="{StaticResource LoginHintStyle}" HorizontalAlignment="Center" />
                             <TextBlock x:Name="ServerOriginLabel" Text="LAN-сервер · проверяется" Style="{StaticResource LoginHintStyle}" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="440" TextTrimming="CharacterEllipsis" />
+                            <Border x:Name="LoginUpdateNotice" Visibility="Collapsed" Background="#33206BD9" BorderBrush="#665B9BFF" BorderThickness="1" CornerRadius="8" Padding="10,7" MaxWidth="440" MinHeight="40">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock x:Name="LoginUpdateText" Text="Доступна новая версия" Foreground="{StaticResource LoginTextBrush}" TextWrapping="Wrap" MaxLines="2" />
+                                    <Button Grid.Column="1" x:Name="LoginUpdateDownloadButton" Content="Скачать" Click="LoginUpdateDownloadButton_Click" MinHeight="32" Padding="12,4" />
+                                </Grid>
+                            </Border>
                         </StackPanel>
 
                         <StackPanel Spacing="7">

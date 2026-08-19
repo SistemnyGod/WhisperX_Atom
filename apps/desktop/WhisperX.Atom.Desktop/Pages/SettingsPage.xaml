@@ -31,6 +31,52 @@
                     <Button Grid.Column="1" Content="Открыть запись" Style="{StaticResource SecondaryButtonStyle}" Click="OpenRecordingButton_Click" AutomationProperties.Name="Открыть настройки записи" />
                 </Grid>
             </Border>
+            <Border x:Name="UpdatesCard" Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                        <StackPanel Spacing="3">
+                            <TextBlock Text="Обновления приложения" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Проверка выполняется через LAN-сервер. Установка запускается только вручную и не меняет Docker-сервер." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock x:Name="UpdateStateText" Grid.Column="1" Text="Проверка не выполнялась" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="12">
+                        <StackPanel Spacing="3">
+                            <TextBlock Text="Текущая сборка" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock x:Name="CurrentBuildIdentityText" Text="—" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="Текущая build identity" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <TextBlock Text="Канал" Style="{StaticResource CaptionStyle}" />
+                            <ComboBox x:Name="UpdateChannelComboBox" SelectedValuePath="Tag" SelectionChanged="UpdateChannelComboBox_SelectionChanged" MinWidth="170" AutomationProperties.Name="Канал обновлений">
+                                <ComboBoxItem Content="Стабильный" Tag="stable" />
+                                <ComboBoxItem Content="Локальный pilot" Tag="pilot" />
+                            </ComboBox>
+                        </StackPanel>
+                        <Button x:Name="CheckUpdatesButton" Grid.Column="2" Content="Проверить" Style="{StaticResource SecondaryButtonStyle}" Click="CheckUpdatesButton_Click" VerticalAlignment="Bottom" />
+                    </Grid>
+                    <Border x:Name="AvailableUpdatePanel" Visibility="Collapsed" Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                        <StackPanel Spacing="7">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Spacing="2">
+                                    <TextBlock x:Name="AvailableUpdateText" Text="Доступна новая версия" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="AvailableUpdateIdentityText" Text="—" FontFamily="Consolas" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="Build identity обновления" />
+                                </StackPanel>
+                                <ProgressRing x:Name="UpdateProgressRing" Grid.Column="1" Width="22" Height="22" IsActive="False" />
+                            </Grid>
+                            <TextBlock x:Name="UpdateReleaseNotesText" Text="" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" MaxHeight="64" />
+                            <TextBlock x:Name="UpdateWarningText" Text="" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                            <ProgressBar x:Name="UpdateProgressBar" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed" Height="6" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="DownloadUpdateButton" Content="Скачать" Style="{StaticResource PrimaryButtonStyle}" Click="DownloadUpdateButton_Click" />
+                                <Button x:Name="CancelUpdateButton" Content="Отменить" Style="{StaticResource SecondaryButtonStyle}" Click="CancelUpdateButton_Click" Visibility="Collapsed" />
+                                <Button x:Name="InstallUpdateButton" Content="Установить" Style="{StaticResource PrimaryButtonStyle}" Click="InstallUpdateButton_Click" IsEnabled="False" />
+                                <Button x:Name="DeferUpdateButton" Content="Напомнить позже" Style="{StaticResource SecondaryButtonStyle}" Click="DeferUpdateButton_Click" />
+                            </StackPanel>
+                            <TextBlock x:Name="UpdateErrorText" Text="" Foreground="{StaticResource DangerBrush}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Visibility="Collapsed" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
             <Grid x:Name="SettingsLayoutGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
                 <Border x:Name="ApiSettingsCard" Style="{StaticResource CardStyle}">
                     <StackPanel Spacing="10">

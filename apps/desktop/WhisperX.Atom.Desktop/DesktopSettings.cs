@@ -21,7 +21,8 @@ public sealed record DesktopSettings(
     string AcousticProfile = "AUTO",
     string VoiceName = "Microsoft Irina",
     int VoiceRate = 0,
-    int VoiceVolume = 90)
+    int VoiceVolume = 90,
+    string UpdateChannel = "stable")
 {
     private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -47,7 +48,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? UnconfiguredApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90, string? updateChannel = null)
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -66,7 +67,8 @@ public sealed record DesktopSettings(
             NormalizeAcousticProfile(acousticProfile),
             string.IsNullOrWhiteSpace(voiceName) ? "Microsoft Irina" : voiceName.Trim(),
             Math.Clamp(voiceRate, -10, 10),
-            Math.Clamp(voiceVolume, 0, 100));
+            Math.Clamp(voiceVolume, 0, 100),
+            NormalizeUpdateChannel(updateChannel));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -111,6 +113,9 @@ public sealed record DesktopSettings(
         var normalized = profile?.Trim().ToUpperInvariant();
         return normalized is "AUTO" or "STANDARD" or "LARGE_ROOM" ? normalized : "AUTO";
     }
+
+    private static string NormalizeUpdateChannel(string? channel)
+        => string.Equals(channel?.Trim(), "pilot", StringComparison.OrdinalIgnoreCase) ? "pilot" : "stable";
 
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 
