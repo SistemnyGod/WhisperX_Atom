@@ -224,7 +224,7 @@ public sealed partial class LoginWindow : Window
     private void RenderUpdateNotice()
     {
         var update = _services.Updates.Manifest;
-        var visible = update is not null && _services.Updates.State is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading;
+        var visible = update is not null && _services.Updates.State is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading or ClientUpdateState.UpdateBlocked;
         LoginUpdateNotice.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (!visible || update is null) return;
         LoginUpdateText.Text = _services.Updates.State == ClientUpdateState.Downloading

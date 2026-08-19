@@ -7,12 +7,13 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
-if ([string]::IsNullOrWhiteSpace($gitCommit)) { throw "Unable to resolve release commit; refusing to publish an unidentified runtime." }
-# A large local test cache can contain ACL-protected temporary directories.
-# Tracked changes are sufficient to gate this development publish (the
-# publish itself is already marked dirty); avoid turning Git's warning stream
-# into a PowerShell terminating error before the actual build starts.
-$dirtyFiles = @(& git -C $repoRoot status --porcelain --untracked-files=no 2>$null)
+if ([string]::IsNullOrWhiteSpace($gitCommit) -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
+    throw "Unable to resolve a full release commit; refusing to publish an unidentified runtime."
+}
+# A clean installed runtime must be reproducible.  Include normal untracked
+# files in the gate: a new source file (or a legacy Python entry point) must
+# never be silently omitted from the commit that produced the binaries.
+$dirtyFiles = @(& git -C $repoRoot status --porcelain --untracked-files=normal 2>$null)
 $dirtyAllowed = $AllowDirty -or ($env:WHISPERX_ALLOW_DIRTY_RELEASE -in @("1", "true", "yes"))
 if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
     throw "Working tree is dirty; commit the release or set WHISPERX_ALLOW_DIRTY_RELEASE only for an explicit development package."
@@ -60,6 +61,17 @@ Invoke-Publish $voiceHostPublishArgs
 Invoke-Publish $updaterPublishArgs
 Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Destination (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") -Force
 
+# The supported Windows runtime is .NET Desktop + AudioGraph Host + Voice
+# Host.  The legacy Python app.py is kept in the repository for compatibility,
+# but must never leak into an installed payload or become a second production
+# entry point.
+$forbiddenPayload = @(Get-ChildItem -LiteralPath $output -Recurse -File -ErrorAction Stop | Where-Object {
+    $_.Name -ieq 'app.py' -or $_.Extension -iin @('.py', '.pyc', '.pyo') -or $_.Name -match '(?i)^python(?:\.exe)?$'
+})
+if ($forbiddenPayload.Count -gt 0) {
+    throw "PRODUCTION_PAYLOAD_CONTAINS_LEGACY_PYTHON: $($forbiddenPayload.FullName -join ', ')"
+}
+
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Configure-RecorderHostUser.ps1") $output
@@ -98,14 +110,20 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
     buildIdentity = $buildIdentity
     commit = $gitCommit
     dirty = $dirtyFiles.Count -gt 0
+    runtimeEntrypoint = "WhisperX.Atom.Desktop.exe"
+    supportedWindowsRuntime = @("Desktop", "AudioGraphRecorderHost", "VoiceHost")
+    legacyService = [ordered]@{ path = "Service\\WhisperX.Atom.Recorder.Service.exe"; supported = $false; mode = "manual-fallback-only" }
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     components = @(
         @{ name = "Desktop"; path = (Join-Path $desktopOut "WhisperX.Atom.Desktop.exe") },
         @{ name = "RecorderService"; path = (Join-Path $serviceOut "WhisperX.Atom.Recorder.Service.exe") },
         @{ name = "RecorderHost"; path = (Join-Path $recorderHostOut "WhisperX.Atom.Recorder.Host.exe") },
-        @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") }
+        @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") },
         @{ name = "Updater"; path = (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") }
     ) | ForEach-Object {
+        if (-not (Test-Path -LiteralPath $_.path -PathType Leaf)) { throw "RELEASE_COMPONENT_MISSING: $($_.name)" }
+        $actualIdentity = [string](Get-Item -LiteralPath $_.path).VersionInfo.ProductVersion
+        if ($actualIdentity -ne $buildIdentity) { throw "RELEASE_COMPONENT_IDENTITY_MISMATCH: $($_.name)=$actualIdentity expected=$buildIdentity" }
         [ordered]@{ name = $_.name; path = $_.path.Substring($output.Length + 1); sha256 = (Get-FileHash -LiteralPath $_.path -Algorithm SHA256).Hash.ToLowerInvariant() }
     }
 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $output "build-identity.json") -Encoding utf8

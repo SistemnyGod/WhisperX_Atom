@@ -18,6 +18,7 @@ public enum ClientUpdateState
     Downloading,
     ReadyToInstall,
     BlockedRecording,
+    UpdateBlocked,
     Incompatible,
     Installing,
     Deferred,
@@ -280,6 +281,14 @@ public sealed class ClientUpdateService : IDisposable
         try
         {
             var response = await _services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            // Health is the safety boundary for an update. A reachable pipe
+            // with no health payload is still an unknown recorder state: the
+            // host may be starting, shutting down, or already capturing.
+            if (!response.IsReachable || response.Health is null)
+            {
+                SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN");
+                return false;
+            }
             var state = response.SessionStatus?.CaptureState
                 ?? (response.Health?.ActiveSessionId is not null ? "RECORDING" : response.State);
             if (state is not null && (state.Equals("STARTING", StringComparison.OrdinalIgnoreCase)
@@ -292,7 +301,14 @@ public sealed class ClientUpdateService : IDisposable
             }
             return true;
         }
-        catch { return true; }
+        catch
+        {
+            // Never install while Recorder liveness is unknown. This is
+            // deliberately fail-closed because an unavailable Health response
+            // cannot distinguish IDLE from an active capture.
+            SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN");
+            return false;
+        }
     }
 
     private string GetStagingDirectory(string identity) => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "Updates", "staging", Sanitize(identity));

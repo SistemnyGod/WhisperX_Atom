@@ -455,10 +455,12 @@ public sealed partial class MainWindow : Window
     {
         var update = _services.Updates.Manifest;
         var state = _services.Updates.State;
-        var visible = update is not null && state is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading;
+        var visible = update is not null && state is ClientUpdateState.Available or ClientUpdateState.ReadyToInstall or ClientUpdateState.Downloading or ClientUpdateState.UpdateBlocked;
         UpdateNotificationBar.IsOpen = visible;
         if (!visible || update is null) return;
-        UpdateNotificationBar.Message = state == ClientUpdateState.Downloading
+        UpdateNotificationBar.Message = state == ClientUpdateState.UpdateBlocked
+            ? "Обновление заблокировано: состояние Recorder неизвестно. Запись не будет прервана автоматически."
+            : state == ClientUpdateState.Downloading
             ? $"Версия {update.Version} загружается · {_services.Updates.DownloadPercent}%"
             : $"Доступна версия {update.Version}. Установка запускается вручную и не прерывает запись автоматически.";
         UpdateNotificationBar.Severity = update.Mandatory ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;

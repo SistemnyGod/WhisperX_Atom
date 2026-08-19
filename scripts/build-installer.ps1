@@ -47,6 +47,10 @@ $buildIdentity = [string]$identity.buildIdentity
 if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
     throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
 }
+$runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
+if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }
+& $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json")
+if ($LASTEXITCODE -ne 0) { throw "CLEAN_RUNTIME_GATE_FAILED" }
 $signature = Get-AuthenticodeSignature -LiteralPath $setup
 $signatureStatus = [string]$signature.Status
 $releaseStatus = if ($signatureStatus -eq "Valid") { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_PILOT_BUILD" }

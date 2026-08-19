@@ -78,6 +78,7 @@ public sealed partial class SettingsPage : Page
             ClientUpdateState.Downloading => $"Скачивание · {updates.DownloadPercent}%",
             ClientUpdateState.ReadyToInstall => "Готово к установке",
             ClientUpdateState.BlockedRecording => "Заблокировано активной записью",
+            ClientUpdateState.UpdateBlocked => "Заблокировано: состояние Recorder неизвестно",
             ClientUpdateState.Incompatible => "Несовместимое обновление",
             ClientUpdateState.Installing => "Установка запущена…",
             ClientUpdateState.Deferred => "Отложено",

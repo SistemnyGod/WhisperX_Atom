@@ -10,6 +10,7 @@
 | [Текущая архитектура](architecture-current.md) | Границы процессов, размещение компонентов и источники истины |
 | [Архитектурная эволюция](architecture-incremental.md) | Core Pipeline, state machine jobs, GPU lease и безопасные этапы рефакторинга |
 | [Модули](modules.md) | Ответственность API, Desktop, Agent, workers и legacy-кода |
+| [Clean installed runtime](clean-installed-runtime.md) | Единая identity Desktop/Recorder/Voice Host и границы production payload |
 | [Технологический стек](technology-stack.md) | Языки, фреймворки, ML и инфраструктура |
 | [Потоки данных](data-flow.md) | Файл, запись, чанки, media pipeline, WhisperX и transcript |
 | [Настройка](configuration.md) | `.env`, порты, каталоги и режимы обработки |

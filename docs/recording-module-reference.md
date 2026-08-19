@@ -188,3 +188,12 @@ READY → UPLOADING → CONFIRMED
 - contract tests `test_recording_*`, `test_offline_recording_recovery_contracts.py`
 - synthetic chunks: contiguous, gap, overlap, mixed format, orphan `.pcm`,
   non-empty `.pcm.part`, purged raw with ready/confirmed FLAC.
+
+Для установленного runtime используется `scripts/e2e-recording.ps1`. По
+умолчанию он выполняет только локальный baseline и пишет JSON без аудио или
+стенограммы. Сценарии `pause-resume`, `server-offline`, `api-crash`,
+`workers-restart`, `desktop-close`, `usb-loss`, `low-disk` и `host-crash`
+включаются параметром `-Scenario`; Docker/процессы можно останавливать только
+с явным `-ExecuteFaults`. Если задан изолированный `-DataRoot`, скрипт не
+подключается к уже работающему production Recorder Host. Отчёт содержит
+только идентификаторы, состояния, counters, коды ошибок и флаги безопасности.
