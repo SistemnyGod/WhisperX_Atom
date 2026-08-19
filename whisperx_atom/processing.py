@@ -16,6 +16,13 @@ from .asr_engine import AsrEngine, WhisperXAsrEngine
 from .alignment_engine import AlignmentEngine, WhisperXAlignmentEngine
 from .diarization_engine import DiarizationEngine, WhisperXDiarizationEngine
 from .preprocessing_engine import PreprocessingEngine, WhisperXPreprocessingEngine
+from .postprocessing_engine import PostprocessingEngine, WhisperXPostprocessingEngine
+from .stage_result import StageResults
+from .checkpoint_store import (
+    NullPipelineCheckpointStore,
+    PipelineCheckpointStore,
+    checkpoint_fingerprint,
+)
 from .transcript_quality import (
     TranscriptQualityThresholds,
     build_transcript_quality_report,
@@ -28,6 +35,37 @@ from diarization_quality import choose_best_diarization_candidate, diarization_p
 
 
 LOGGER = logging.getLogger("whisperx.processing")
+ENRICHMENT_CHECKPOINT_REVISION = "2026-08-19-v1"
+
+
+def _load_checkpoint_safely(
+    store: PipelineCheckpointStore,
+    job_id: str,
+    stage: str,
+    fingerprint: str,
+):
+    try:
+        return store.load(job_id, stage, fingerprint)
+    except Exception:
+        LOGGER.warning("checkpoint_load_failed job_id=%s stage=%s", job_id, stage, exc_info=True)
+        return None
+
+
+def _save_checkpoint_safely(
+    store: PipelineCheckpointStore,
+    job_id: str,
+    stage: str,
+    fingerprint: str,
+    result: dict[str, Any],
+):
+    try:
+        return store.save(job_id, stage, fingerprint, result)
+    except Exception:
+        # A checkpoint only avoids repeated GPU work. Failure to persist this
+        # derived optimization must not downgrade a successfully completed
+        # alignment/diarization stage.
+        LOGGER.warning("checkpoint_save_failed job_id=%s stage=%s", job_id, stage, exc_info=True)
+        return None
 
 
 class ProcessingService:
@@ -41,6 +79,8 @@ class ProcessingService:
         preprocessing_engine: PreprocessingEngine | None = None,
         alignment_engine: AlignmentEngine | None = None,
         diarization_engine: DiarizationEngine | None = None,
+        postprocessing_engine: PostprocessingEngine | None = None,
+        checkpoint_store: PipelineCheckpointStore | None = None,
     ) -> None:
         self._pipeline: Any | None = None
         self._pipeline_fingerprint: tuple[Any, ...] | None = None
@@ -50,6 +90,8 @@ class ProcessingService:
         self._preprocessing_engine = preprocessing_engine or WhisperXPreprocessingEngine()
         self._alignment_engine = alignment_engine or WhisperXAlignmentEngine()
         self._diarization_engine = diarization_engine or WhisperXDiarizationEngine()
+        self._postprocessing_engine = postprocessing_engine or WhisperXPostprocessingEngine()
+        self._checkpoint_store = checkpoint_store or NullPipelineCheckpointStore()
 
     def _get_pipeline(self, config: Any) -> Any:
         fingerprint = (
@@ -310,7 +352,7 @@ class ProcessingService:
                 status="PARTIAL_READY",
                 error_code="ASR_LANGUAGE_MISMATCH" if language_report["mismatch"] else ("AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None),
                 warnings=draft_warnings,
-                stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"},
+                stage_outcomes=StageResults({"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"}),
                 quality={**selected_report.to_dict(), "asr_audio_hash": source_audio_hash, "audio_signal_metrics": ctx.audio_signal_metrics, "language_quality": language_report, "asr_pass_count": 1 + int(enhancement_attempted)},
             )
             emit_asr_ready(asr_draft)
@@ -325,7 +367,7 @@ class ProcessingService:
             # repair span and word-timestamp warnings. Persist final quality
             # reasons below instead of leaking stale pre-alignment warnings.
             warnings: list[str] = []
-            stage_outcomes: dict[str, str] = {"ASR": "SUCCEEDED"}
+            stage_outcomes = StageResults({"ASR": "SUCCEEDED"})
 
             report("ALIGNING", 55)
             if config.enable_alignment:
@@ -401,7 +443,7 @@ class ProcessingService:
                     segment["speaker"] = "UNKNOWN"
 
             report("QUALITY_CHECK", 90)
-            result = pipeline._apply_glossary(result)
+            result = self._postprocessing_engine.postprocess(pipeline, ctx, result)
             final_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             final_gate = quality_gate(final_report, thresholds)
             if not final_gate["valid"]:
@@ -429,7 +471,7 @@ class ProcessingService:
                 "fallback_effective": fallback_attempted,
                 "selected_pass": selected_pass,
                 "thresholds": thresholds.to_dict(),
-                "stage_outcomes": stage_outcomes,
+                "stage_outcomes": stage_outcomes.as_legacy_dict(),
                 "diarization": diarization_quality,
                 "asr_preprocessing": ctx.asr_preprocessing,
             }
@@ -540,39 +582,128 @@ class ProcessingService:
         if config.enable_diarization:
             diar_path = self._preprocessing_engine.prepare_diarization_input(pipeline, request.media_path)
             ctx.diar_audio_path = ctx.register_temp(diar_path)
-        stage_outcomes: dict[str, str] = {"ASR": "REUSED_V1"}
+        stage_outcomes = StageResults({"ASR": "REUSED_V1"})
         enrichment_metadata = source.get("quality_metadata") or {}
         warnings: list[str] = []
         if (enrichment_metadata.get("audio_signal_metrics") or {}).get("signal_state") == "WEAK":
             warnings.append("AUDIO_SIGNAL_WEAK")
 
+        checkpoint_base = checkpoint_fingerprint({
+            "schema": 1,
+            "algorithm_revision": ENRICHMENT_CHECKPOINT_REVISION,
+            "release": os.getenv("WHISPERX_RELEASE_VERSION") or os.getenv("APP_VERSION") or "dev",
+            "source_transcript_id": source.get("transcript_id"),
+            "source_audio_hash": actual_hash,
+            "language": result.get("language") or config.language,
+            "profile": request.profile,
+            "acoustic_profile": request.acoustic_profile,
+            "alignment_enabled": bool(config.enable_alignment),
+            "diarization_enabled": bool(config.enable_diarization),
+            "preprocessing": {key: actual_preprocessing.get(key) for key in sorted(stable_keys)},
+        })
+
         report("ALIGNING", 35)
+        alignment_artifact_hash = checkpoint_fingerprint({"result": result})
         if config.enable_alignment:
-            try:
-                aligned = self._alignment_engine.align(pipeline, ctx, result)
-                result = aligned or result
-                stage_outcomes["ALIGNMENT"] = "SUCCEEDED"
-            except Exception:
-                LOGGER.warning("enrichment_alignment_failed job_id=%s", request.job_id, exc_info=True)
-                warnings.append("ALIGNMENT_FAILED")
-                stage_outcomes["ALIGNMENT"] = "FAILED"
+            alignment_checkpoint = _load_checkpoint_safely(
+                self._checkpoint_store,
+                request.job_id,
+                "ALIGNMENT",
+                checkpoint_base,
+            )
+            if alignment_checkpoint is not None:
+                result = copy.deepcopy(alignment_checkpoint.result)
+                ctx.aligned_result = result
+                alignment_artifact_hash = alignment_checkpoint.artifact_sha256
+                stage_outcomes.set(
+                    "ALIGNMENT",
+                    "SUCCEEDED",
+                    metadata={
+                        "artifact_key": alignment_checkpoint.artifact_key,
+                        "artifact_hash": alignment_checkpoint.artifact_sha256,
+                        "reason": "checkpoint_reused",
+                    },
+                )
+            else:
+                try:
+                    aligned = self._alignment_engine.align(pipeline, ctx, result)
+                    result = aligned or result
+                    ctx.aligned_result = result
+                    checkpoint = _save_checkpoint_safely(
+                        self._checkpoint_store,
+                        request.job_id,
+                        "ALIGNMENT",
+                        checkpoint_base,
+                        result,
+                    )
+                    if checkpoint is not None:
+                        alignment_artifact_hash = checkpoint.artifact_sha256
+                    stage_outcomes.set(
+                        "ALIGNMENT",
+                        "SUCCEEDED",
+                        metadata={
+                            "artifact_key": checkpoint.artifact_key if checkpoint else "",
+                            "artifact_hash": checkpoint.artifact_sha256 if checkpoint else alignment_artifact_hash,
+                        },
+                    )
+                except Exception:
+                    LOGGER.warning("enrichment_alignment_failed job_id=%s", request.job_id, exc_info=True)
+                    warnings.append("ALIGNMENT_FAILED")
+                    stage_outcomes.set("ALIGNMENT", "FAILED", warnings=("ALIGNMENT_FAILED",))
         else:
             stage_outcomes["ALIGNMENT"] = "SKIPPED"
 
         report("DIARIZING", 65)
         if config.enable_diarization:
-            try:
-                result = self._diarization_engine.diarize(
-                    pipeline,
-                    ctx,
-                    copy.deepcopy(result),
-                    "diar",
+            diarization_fingerprint = checkpoint_fingerprint({
+                "base": checkpoint_base,
+                "alignment_artifact_hash": alignment_artifact_hash,
+                "profile": "diar",
+            })
+            diarization_checkpoint = _load_checkpoint_safely(
+                self._checkpoint_store,
+                request.job_id,
+                "DIARIZATION",
+                diarization_fingerprint,
+            )
+            if diarization_checkpoint is not None:
+                result = copy.deepcopy(diarization_checkpoint.result)
+                stage_outcomes.set(
+                    "DIARIZATION",
+                    "SUCCEEDED",
+                    metadata={
+                        "artifact_key": diarization_checkpoint.artifact_key,
+                        "artifact_hash": diarization_checkpoint.artifact_sha256,
+                        "reason": "checkpoint_reused",
+                    },
                 )
-                stage_outcomes["DIARIZATION"] = "SUCCEEDED"
-            except Exception:
-                LOGGER.warning("enrichment_diarization_failed job_id=%s", request.job_id, exc_info=True)
-                warnings.append("DIARIZATION_FAILED")
-                stage_outcomes["DIARIZATION"] = "FAILED"
+            else:
+                try:
+                    result = self._diarization_engine.diarize(
+                        pipeline,
+                        ctx,
+                        copy.deepcopy(result),
+                        "diar",
+                    )
+                    checkpoint = _save_checkpoint_safely(
+                        self._checkpoint_store,
+                        request.job_id,
+                        "DIARIZATION",
+                        diarization_fingerprint,
+                        result,
+                    )
+                    stage_outcomes.set(
+                        "DIARIZATION",
+                        "SUCCEEDED",
+                        metadata={
+                            "artifact_key": checkpoint.artifact_key if checkpoint else "",
+                            "artifact_hash": checkpoint.artifact_sha256 if checkpoint else checkpoint_fingerprint({"result": result}),
+                        },
+                    )
+                except Exception:
+                    LOGGER.warning("enrichment_diarization_failed job_id=%s", request.job_id, exc_info=True)
+                    warnings.append("DIARIZATION_FAILED")
+                    stage_outcomes.set("DIARIZATION", "FAILED", warnings=("DIARIZATION_FAILED",))
         else:
             warnings.append("DIARIZATION_DISABLED")
             stage_outcomes["DIARIZATION"] = "SKIPPED"
@@ -580,7 +711,7 @@ class ProcessingService:
         for segment in result.get("segments", []):
             if not segment.get("speaker"):
                 segment["speaker"] = "UNKNOWN"
-        result = pipeline._apply_glossary(result)
+        result = self._postprocessing_engine.postprocess(pipeline, ctx, result)
         final_report = build_transcript_quality_report(result, duration_seconds, TranscriptQualityThresholds.from_env())
         # Preserve the canonical ASR provenance on V2 so diagnostics can prove
         # that enrichment reused the same preprocessing and storage asset.
@@ -741,7 +872,7 @@ def _build_no_speech_result(
         status="PARTIAL_READY",
         error_code="NO_SPEECH_DETECTED",
         warnings=["NO_SPEECH_DETECTED"],
-        stage_outcomes={"ASR": "SUCCEEDED", "ALIGNMENT": "SKIPPED", "DIARIZATION": "SKIPPED"},
+        stage_outcomes=StageResults({"ASR": "SUCCEEDED", "ALIGNMENT": "SKIPPED", "DIARIZATION": "SKIPPED"}),
         quality=quality,
     )
 

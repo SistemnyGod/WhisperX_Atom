@@ -43,3 +43,16 @@ def test_live_chunks_are_atomic_and_checkpointed_without_exposing_part_files():
     assert "_patchheader" in source
     assert "os.fsync" in source
     assert "AUDIO_INPUT_QUEUE_OVERRUN" in source
+
+
+def test_live_stop_and_stream_failure_drain_use_the_same_chunk_splitter():
+    source = read("live_runtime.py")
+
+    # One call is the normal loop and the other is the final queue drain.
+    assert source.count("write_payload(payload)") == 2
+    assert "frames_to_write = min(frames_available, chunk_frames - current_samples)" in source
+    assert "pending_stream_failure" in source
+    assert source.index("close_chunk()\n            if pending_stream_failure") < source.index(
+        "raise RuntimeError(pending_stream_failure)"
+    )
+    assert 'raise RuntimeError("AUDIO_FRAME_SIZE_MISMATCH")' in source

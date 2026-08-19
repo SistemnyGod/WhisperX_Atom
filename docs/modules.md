@@ -19,7 +19,7 @@ durability и безопасные точки рефакторинга опис�
 | Import Worker | `workers/import_worker` | Inbox watcher и импорт локальных файлов через internal API |
 | Outbox Relay | `workers/outbox_relay` | Доставка durable outbox событий в NATS JetStream |
 | Summary Worker | `workers/summary_worker` | Qwen Summary v2 и grounded Assistant; включается независимо флагами Summary/Assistant |
-| Shared Python package | `whisperx_atom` | Processing contracts, Core Pipeline facade, ASR/Preprocessing/Alignment/Diarization engine boundaries, state machine jobs, Meeting/Recording/Job/Transcript projections, media storage boundary и общая transcript-quality логика |
+| Shared Python package | `whisperx_atom` | Processing contracts, Core Pipeline facade, ASR/Preprocessing/Alignment/Diarization/Postprocessing engine boundaries, typed StageResult, atomic derived-stage checkpoints, bounded GPU scheduler, state machine jobs, Meeting/Recording/Job/Transcript projections, media storage boundary и общая transcript-quality логика |
 | Legacy GUI/watch | `app.py`, `app/`, `auto_transcribe_watch.py` | Совместимость, локальные сценарии и regression surface; live capture использует `live_runtime.SoundDeviceChunkRecorder` с одним `InputStream`; не расширять как новый server pipeline |
 | Automation | `scripts/` | Runtime launch/stop/doctor, E2E, watchdog, build и acceptance |
 | Tests | `tests/` | Contract, unit, media, recording, assistant и runtime checks |

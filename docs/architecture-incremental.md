@@ -59,6 +59,13 @@ WhisperX/FFmpeg-фильтрам через `WhisperXPreprocessingEngine`. Эт�
 прямую зависимость `ProcessingService` от private-методов pipeline. Новый
 preprocessor можно подключить через `CorePipeline` без изменения worker/API.
 
+Финальная очистка результата вынесена в такой же
+[`PostprocessingEngine`](../whisperx_atom/postprocessing_engine.py). Сейчас
+`WhisperXPostprocessingEngine` делегирует существующую glossary-нормализацию,
+но `ProcessingService` больше не вызывает private-метод pipeline напрямую.
+Это оставляет postprocessing заменяемым и позволяет тестировать его без
+загрузки WhisperX/torch.
+
 Alignment и diarization имеют такие же независимые границы в
 [`AlignmentEngine`](../whisperx_atom/alignment_engine.py) и
 [`DiarizationEngine`](../whisperx_atom/diarization_engine.py). Адаптеры
@@ -96,13 +103,28 @@ jobs: `ASR_READY` завершает ASR-job, но разрешает следу
 - Повтор обработки идёт с последнего сохранённого результата: V1 не создаётся
   повторно, enrichment не мутирует V1, summary имеет idempotency-проверку.
 
+Дорогие стадии enrichment дополнительно используют
+[`PipelineCheckpointStore`](../whisperx_atom/checkpoint_store.py). Alignment и
+diarization сохраняют производный JSON-артефакт атомарно через
+`.part → fsync → rename`. Артефакт принимается только при совпадении job,
+стадии, SHA256 и provenance fingerprint исходной V1/canonical audio. Повреждение
+или несовпадение приводит к детерминированному повтору стадии, а не к падению
+job. Checkpoint не является источником истины, не заменяет PostgreSQL job/V1/V2
+и может быть безопасно удалён и пересоздан. При изменении алгоритма необходимо
+поднять `ENRICHMENT_CHECKPOINT_REVISION`.
+
 ## Один хозяин GPU
 
-GPU Worker использует локальный `asyncio.Semaphore(1)` и межпроцессный
+GPU Worker использует локальный [`GpuScheduler`](../whisperx_atom/gpu_scheduler.py)
+и межпроцессный
 PostgreSQL advisory lease (`whisperx-atom-gpu-0`). Summary/Assistant используют
 тот же lease с более низким приоритетом, поэтому ASR не вытесняется Qwen.
-Resident-модель освобождается после idle timeout. Включение второго GPU-job
-требует отдельного измерения VRAM и не меняется этим рефакторингом.
+По умолчанию `GPU_CONCURRENCY=1`; значение можно поднять до 2–4 только после
+измерения VRAM и явного `GPU_PIPELINE_PARALLEL=true`. Одного изменения
+`GPU_CONCURRENCY` недостаточно: текущий resident pipeline не считается
+потокобезопасным. Scheduler ограничивает конкуренцию внутри процесса, а
+PostgreSQL lease сохраняет защиту между несколькими worker-процессами.
+Resident-модель освобождается после idle timeout.
 
 ## Meeting-centric модель
 
@@ -135,11 +157,14 @@ Qwen не входят в доменные объекты.
 
 1. **Контракты (выполнено):** общий Core Pipeline, state machine, проверки
    stage и документация границ.
-2. **Извлечение стадий (первый слой выполнен):** ASR, preprocessing, alignment
-   и diarization вынесены за независимые контракты с совместимыми адаптерами и
-   dependency injection в `CorePipeline`. Следующий срез — postprocessing и
-   единый stage-result объект; каждый этап остаётся за текущим проверенным
-   runtime до завершения contract tests.
+2. **Извлечение стадий (первый слой выполнен):** ASR, preprocessing, alignment,
+   diarization и postprocessing вынесены за независимые контракты с
+   совместимыми адаптерами и dependency injection в `CorePipeline`.
+   [`StageResult`](../whisperx_atom/stage_result.py) типизирует исход каждой
+   стадии, а наружу сохраняет прежний `stage_outcomes` mapping. Durable
+   checkpoints alignment/diarization уже подключены к enrichment без изменения
+   API/БД; следующий срез — retention этих производных артефактов и перенос
+   остальных дорогих стадий только после contract/runtime tests.
 3. **Доменная модель (первый срез выполнен):** типизированные
    Meeting/Recording/Job/Transcript projections поверх существующих таблиц,
    без переименования IPC/API.

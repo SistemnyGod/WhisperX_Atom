@@ -13,6 +13,8 @@ from whisperx_atom.core_pipeline import CorePipeline, WhisperXCorePipeline
 from whisperx_atom.domain import require_meeting_id
 from whisperx_atom.storage import LocalMediaStorage
 from workers.gpu_lease import PostgresGpuLease
+from whisperx_atom.gpu_scheduler import GpuScheduler
+from whisperx_atom.checkpoint_store import checkpoint_store_from_env
 from workers.runtime_heartbeat import AsyncHeartbeat
 from .persistence import JobRepository
 
@@ -90,11 +92,13 @@ def retry_delay_seconds(attempt: int) -> float:
 
 class GpuWorker:
     def __init__(self, heartbeat: AsyncHeartbeat | None = None) -> None:
-        self._semaphore = asyncio.Semaphore(1)
+        self._scheduler = GpuScheduler()
         # All server-side ASR/enrichment requests enter through this facade.
         # The underlying ProcessingService remains the compatibility
         # implementation while stages are extracted incrementally.
-        self._pipeline: CorePipeline = WhisperXCorePipeline()
+        self._pipeline: CorePipeline = WhisperXCorePipeline(
+            checkpoint_store=checkpoint_store_from_env(),
+        )
         self._repository = JobRepository()
         self._gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
         self._heartbeat = heartbeat
@@ -104,7 +108,7 @@ class GpuWorker:
         self._repository.close()
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
-        async with self._semaphore:
+        async with self._scheduler.slot():
             job_id = str(message["job_id"])
             meeting_id = str(require_meeting_id(message))
             if self._heartbeat:

@@ -32,6 +32,14 @@ FFmpeg, HTTP или тяжёлые операции: он только норм�
 bounded очередь. `RecorderHostRuntime` владеет IPC v6, lifecycle Host и
 передачей команд в Core.
 
+Перед записью каждого кадра `AudioFrameContinuityValidator` проверяет исходный
+sample cursor, размер payload и неизменность формата. Gap, overlap или
+повреждённый кадр никогда не склеиваются молча: capture останавливается,
+сессия переводится в локальную recovery/finalization и сохраняет точный код
+`AUDIO_FRAME_*`. Ошибки AudioGraph и durable writer проходят через единый
+failure handler; повторный сигнал той же ошибки подавляется сравнением
+активного writer/session.
+
 Изменять безопасно: формат внутреннего кадра и размер очереди при наличии
 метрик и тестов. Нельзя менять IPC v6 или запускать сеть/кодировщик из callback.
 
@@ -170,6 +178,8 @@ READY → UPLOADING → CONFIRMED
    допустим только для диагностики latency и heartbeat.
 8. Не менять IPC v6 и семантику `LOCAL_READY`, `RECOVERY_PENDING`,
    `LOCAL_FAILED`, `CONFIRMED` без отдельного contract review.
+9. Проверять непрерывность входных AudioFrame до append; session-level
+   timeline validator после STOP является второй, а не единственной защитой.
 
 ## Проверки после изменений
 

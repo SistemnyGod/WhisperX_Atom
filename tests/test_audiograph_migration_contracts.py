@@ -109,7 +109,7 @@ def test_desktop_local_first_start_and_profile_migration_are_explicit():
     host = read("apps/recorder-host/RecorderHostRuntime.cs")
 
     assert "bool localOnly = false" in contracts
-    assert "new { title, meetingId, ownerUserId, localOnly }" in pipe
+    assert "new { title, meetingId, ownerUserId, localOnly, acousticProfile }" in pipe
     assert "_services.RecordingCommands.StartAsync(title, ownerUserId)" in view_model
     command_service = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecordingCommandService.cs")
     assert "localOnly: false" in command_service
@@ -385,11 +385,13 @@ def test_recorder_host_health_exposes_identity_for_desktop_bootstrap():
     assert "LastHeartbeatAtUtc: _api.LastHeartbeatAtUtc" in host
 
 
-def test_desktop_does_not_open_a_recording_shell_without_a_recorder_host():
+def test_desktop_opens_repairable_shell_when_recorder_host_is_unavailable():
     login = read("apps/desktop/WhisperX.Atom.Desktop/LoginWindow.xaml.cs")
     app = read("apps/desktop/WhisperX.Atom.Desktop/App.xaml.cs")
-    assert "if (!bootstrap.RecorderAvailable)" in login
+    assert "await _authenticated(bootstrap)" in login
+    assert "Settings can recover it" in login
     assert "if (!bootstrap.RecorderAvailable)" in app
+    assert "ShowMainWindow();" in app.split("if (!bootstrap.RecorderAvailable)", 1)[1]
 
 
 def test_summary_rebuild_returns_a_full_job_for_terminal_tracking():

@@ -345,7 +345,36 @@ class SoundDeviceChunkRecorder:
             sequence += 1
             on_chunk_ready(ready_path, ready_start, ready_count)
 
+        def write_payload(payload: bytes) -> None:
+            """Append one callback block without crossing a chunk boundary.
+
+            The normal capture loop and the final queue drain must use exactly
+            the same splitter.  Otherwise a callback block received just before
+            STOP can make the last WAV larger than ``chunk_frames`` and its
+            metadata no longer describes the intended processing window.
+            """
+            nonlocal current_samples, recorded_samples, last_checkpoint
+            if len(payload) % bytes_per_frame:
+                raise RuntimeError("AUDIO_FRAME_SIZE_MISMATCH")
+            offset = 0
+            while offset < len(payload):
+                if writer is None:
+                    open_chunk()
+                frames_available = (len(payload) - offset) // bytes_per_frame
+                frames_to_write = min(frames_available, chunk_frames - current_samples)
+                byte_count = frames_to_write * bytes_per_frame
+                writer.writeframes(payload[offset : offset + byte_count])
+                current_samples += frames_to_write
+                recorded_samples += frames_to_write
+                offset += byte_count
+                if time.monotonic() - last_checkpoint >= checkpoint_seconds:
+                    checkpoint()
+                    last_checkpoint = time.monotonic()
+                if current_samples >= chunk_frames:
+                    close_chunk()
+
         deadline = None if duration_seconds is None else time.monotonic() + max(0.1, float(duration_seconds))
+        pending_stream_failure: str | None = None
         try:
             stream = sd.InputStream(
                 samplerate=self.sample_rate,
@@ -358,30 +387,14 @@ class SoundDeviceChunkRecorder:
                 if deadline is not None and time.monotonic() >= deadline:
                     break
                 if stream_failed.is_set():
-                    raise RuntimeError(stream_error[-1] if stream_error else "AUDIO_INPUT_STREAM_FAILED")
+                    pending_stream_failure = stream_error[-1] if stream_error else "AUDIO_INPUT_STREAM_FAILED"
+                    break
                 try:
                     payload = blocks.get(timeout=0.1)
                 except queue.Empty:
                     continue
-                usable = len(payload) - (len(payload) % bytes_per_frame)
-                if usable <= 0:
-                    continue
-                offset = 0
-                while offset < usable:
-                    if writer is None:
-                        open_chunk()
-                    frames_available = (usable - offset) // bytes_per_frame
-                    frames_to_write = min(frames_available, chunk_frames - current_samples)
-                    byte_count = frames_to_write * bytes_per_frame
-                    writer.writeframes(payload[offset : offset + byte_count])
-                    current_samples += frames_to_write
-                    recorded_samples += frames_to_write
-                    offset += byte_count
-                    if time.monotonic() - last_checkpoint >= checkpoint_seconds:
-                        checkpoint()
-                        last_checkpoint = time.monotonic()
-                    if current_samples >= chunk_frames:
-                        close_chunk()
+                if payload:
+                    write_payload(payload)
             # Stop the stream before draining the queue; callbacks are no
             # longer allowed to enqueue frames after this point.
             if stream is not None:
@@ -391,18 +404,11 @@ class SoundDeviceChunkRecorder:
                     payload = blocks.get_nowait()
                 except queue.Empty:
                     break
-                usable = len(payload) - (len(payload) % bytes_per_frame)
-                if usable <= 0:
-                    continue
-                if writer is None:
-                    open_chunk()
-                writer.writeframes(payload[:usable])
-                frames = usable // bytes_per_frame
-                current_samples += frames
-                recorded_samples += frames
-                if current_samples >= chunk_frames:
-                    close_chunk()
+                if payload:
+                    write_payload(payload)
             close_chunk()
+            if pending_stream_failure is not None:
+                raise RuntimeError(pending_stream_failure)
             return recorded_samples
         finally:
             if stream is not None:

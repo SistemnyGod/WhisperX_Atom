@@ -10,8 +10,12 @@ namespace WhisperX.Atom.Recorder;
 /// </summary>
 public sealed class AudioFrameDurableConsumer
 {
+    private readonly AudioFrameContinuityValidator _continuity;
     private readonly TaskCompletionSource<bool> _firstDurableWrite =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public AudioFrameDurableConsumer(AudioFrameContinuityValidator? continuity = null)
+        => _continuity = continuity ?? new AudioFrameContinuityValidator();
 
     public Task FirstDurableWrite => _firstDurableWrite.Task;
 
@@ -26,6 +30,10 @@ public sealed class AudioFrameDurableConsumer
             {
                 try
                 {
+                    // Validate the source timeline before bytes are appended.
+                    // The writer must never make missing/duplicated capture
+                    // frames look contiguous by silently concatenating them.
+                    _continuity.ValidateAndAdvance(frame);
                     await durableWrite(frame).ConfigureAwait(false);
                     _firstDurableWrite.TrySetResult(true);
                 }

@@ -44,6 +44,15 @@ Inno Setup payload и pre/post-install PowerShell. Копирует только
 
 Подробный контракт см. в [recording-module-reference.md](recording-module-reference.md).
 
+Входной тракт использует один поток Windows AudioGraph.
+`AudioGraphCaptureEngine` владеет callback и sample-clock,
+`AudioFrameContinuityValidator` до durable writer отклоняет gaps, overlaps,
+смену формата и несовпадение размера PCM, а `AudioGraphSessionWriter` сохраняет
+raw PCM без FFmpeg, SQLite-запросов и сети внутри callback. Ошибки capture и
+writer сходятся в один идемпотентный путь восстановления Recorder Host, который
+определяет `LOCAL_READY`, `RECOVERY_PENDING` или `LOCAL_FAILED` по фактически
+сохранённым данным.
+
 ### `apps/recorder-agent`
 
 Recorder Core и host-specific orchestration: AudioGraph/WASAPI adapters,
@@ -64,10 +73,14 @@ Legacy Windows Service host. Оставлен для совместимости 
 
 Совместимый локальный Tk-сценарий, не используемый установленным Desktop
 Recorder Host. `SoundDeviceChunkRecorder` открывает один callback-based
-`sounddevice.InputStream` на сессию, пишет bounded blocks на диск в `.part`,
-периодически обновляет WAV header/`fsync` и публикует готовые файлы через
-атомарное переименование. Ротация файлов служит только очереди ASR; media
-offset вычисляется по sample count и не включает паузу. Ошибка overrun или
+`InputStream` на всю сессию. Обычная запись и финальный drain используют один
+chunk splitter: принятые перед STOP или ошибкой stream блоки сначала атомарно
+дописываются, а затем публикуется ошибка. Невыровненный PCM отклоняется явно и
+никогда не усекается молча.
+Bounded blocks пишутся на диск в `.part`; WAV header и durable `fsync`
+периодически обновляются, а готовые файлы публикуются атомарным
+переименованием. Ротация файлов служит только очереди ASR; media offset
+вычисляется по sample count и не включает паузу. Ошибка overrun или
 потеря stream переводится в явный failure, а не скрывается как пустая
 стенограмма. Этот путь сохраняется для regression compatibility и не должен
 получать новые server/API обязанности.
@@ -114,7 +127,17 @@ Summary запускается после качественного V2; `NEEDS_
 
 Общие Python-контракты обработки: анализ сигнала, language/quality metadata,
 `AsrEngine`, `PreprocessingEngine`, `AlignmentEngine`, `DiarizationEngine`,
-canonical provenance и маленькие чистые функции, пригодные для unit-тестов.
+`PostprocessingEngine`, `StageResult`, `GpuScheduler`, canonical provenance и маленькие
+чистые функции, пригодные для unit-тестов. `GpuScheduler` ограничивает
+конкуренцию GPU внутри процесса; межпроцессная эксклюзивность остаётся в
+PostgreSQL lease. `PostprocessingEngine` отделяет нормализацию/glossary от
+legacy WhisperX pipeline и не меняет содержимое исходного аудио.
+`StageResult` хранит только имя стадии, статус, безопасные diagnostic metadata
+и предупреждения; текст стенограммы, аудио и credentials в него не входят.
+`PipelineCheckpointStore` атомарно сохраняет только производные результаты
+alignment/diarization под media root и повторно использует их при совпадении
+provenance fingerprint. PostgreSQL job остаётся источником истины; повреждённый
+checkpoint игнорируется и пересчитывается, а canonical audio/V1 не изменяются.
 Подмодуль `domain/` содержит identifier-only проекции графа
 `Meeting → Recording → ProcessingJob → Transcript`; он не импортирует БД,
 WhisperX, аудио или секреты. `storage.py` является единой границей разрешения

@@ -38,6 +38,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private volatile string? _initializationError;
     private volatile bool _recoveryInProgress;
     private volatile string _recoveryState = "NOT_STARTED";
+    private volatile string? _lastCaptureFailureCode;
     private DateTimeOffset _lastOrphanScanAtUtc = DateTimeOffset.MinValue;
 
     public RecorderHostRuntime(
@@ -64,7 +65,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _encoderRuntimeState = encoderRuntimeState;
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _logger = logger;
-        _engine.CaptureFailed += (_, failure) => _logger.LogWarning("AudioGraph failure {ErrorCode}: {Detail}", failure.ErrorCode, failure.Detail);
+        _engine.CaptureFailed += OnCaptureFailed;
     }
 
     public AudioGraphCaptureEngine Engine => _engine;
@@ -213,7 +214,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             FreeBytes: drive?.IsReady == true ? drive.AvailableFreeSpace : 0,
             TotalBytes: drive?.IsReady == true ? drive.TotalSize : 0,
             Error: _initializationError
-                ?? (systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null),
+                ?? (systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null)
+                ?? _lastCaptureFailureCode,
             ArchiveRoot: archiveRoot,
             CaptureDevices: devices,
             RenderDevices: Array.Empty<AgentIpcAudioDevice>(),
@@ -274,11 +276,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             EncoderLastErrorCode: encoder.LastErrorCode,
             EncoderQueueDepth: encoder.QueueDepth);
         return new AgentIpcResponse(
-            _initializationError is null && !systemAudioDeferred,
+            _initializationError is null && !systemAudioDeferred && _lastCaptureFailureCode is null,
             _engine.State.ToString(),
             _sessionId,
             _initializationError
-                ?? (systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null),
+                ?? (systemAudioDeferred ? "AUDIO_SYSTEM_AUDIO_DEFERRED" : null)
+                ?? _lastCaptureFailureCode,
             health,
             MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs);
     }
@@ -406,6 +409,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             if (_sessionId is not null) return Error("RECORDING_ALREADY_ACTIVE");
             if (_hostRuntimeLease is null)
                 throw new InvalidOperationException("RECORDER_HOST_NOT_INITIALIZED");
+            _lastCaptureFailureCode = null;
             var sessionId = Guid.NewGuid().ToString("N");
             var selectionMode = string.IsNullOrWhiteSpace(_storage.MicrophoneDeviceId)
                 ? AudioSelectionMode.Default
@@ -439,6 +443,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             await _spool.AddEventAsync(sessionId, "RECORDING_REQUESTED", cancellationToken: cancellationToken).ConfigureAwait(false);
 
             var writer = new AudioGraphSessionWriter(sessionId, trackId, _spool, _storage, _engine, _encoderWake, _rawFinalizerMetrics, _logger);
+            writer.CaptureFailed += OnCaptureFailed;
             _writer = writer;
             _sessionId = sessionId;
             await writer.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -584,6 +589,58 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             clearNextRetry: durability.State != "RECOVERY_PENDING",
             preserveError: false,
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private void OnCaptureFailed(object? sender, AudioCaptureFailureEventArgs failure)
+    {
+        _logger.LogWarning("Recorder capture pipeline failure {ErrorCode}: {Detail}", failure.ErrorCode, failure.Detail);
+        var writer = sender as AudioGraphSessionWriter ?? _writer;
+        var sessionId = _sessionId;
+        if (writer is null || string.IsNullOrWhiteSpace(sessionId)) return;
+        _ = HandleCaptureFailureAsync(writer, sessionId, failure);
+    }
+
+    private async Task HandleCaptureFailureAsync(
+        AudioGraphSessionWriter expectedWriter,
+        string sessionId,
+        AudioCaptureFailureEventArgs failure)
+    {
+        var acquired = false;
+        try
+        {
+            await _audioOperationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            acquired = true;
+            // Engine and writer may report the same failure. The first handler
+            // owns shutdown; subsequent reports must not mutate a newer
+            // session or repeat finalization.
+            if (!ReferenceEquals(_writer, expectedWriter)
+                || !string.Equals(_sessionId, sessionId, StringComparison.Ordinal))
+                return;
+
+            _lastCaptureFailureCode = failure.ErrorCode;
+            var exception = new InvalidOperationException(
+                string.IsNullOrWhiteSpace(failure.Detail)
+                    ? failure.ErrorCode
+                    : $"{failure.ErrorCode}:{failure.Detail}");
+            try { await StopCoreAsync(CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception stopException)
+            {
+                _logger.LogWarning(stopException, "Recorder capture failure shutdown was incomplete. Session={SessionId}", sessionId);
+            }
+            await PersistFailedLocalLifecycleAsync(sessionId, exception, failure.ErrorCode).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Host shutdown already owns the lifecycle.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Recorder could not persist capture pipeline failure. Session={SessionId}", sessionId);
+        }
+        finally
+        {
+            if (acquired) _audioOperationGate.Release();
+        }
     }
 
     public async Task<AgentIpcResponse> ProbeAsync(string? deviceId, CancellationToken cancellationToken, int durationMs = 3000)
@@ -1095,6 +1152,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             await _audioOperationGate.WaitAsync().ConfigureAwait(false);
             acquired = true;
             if (_sessionId is not null) await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            _engine.CaptureFailed -= OnCaptureFailed;
             await _engine.DisposeAsync().ConfigureAwait(false);
             _api.Dispose();
         }
@@ -1111,13 +1169,15 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
     private async Task StopCoreAsync(CancellationToken cancellationToken)
     {
+        var writer = _writer;
         try
         {
             await _engine.StopAsync(cancellationToken).ConfigureAwait(false);
-            if (_writer is not null) await _writer.StopAsync(cancellationToken).ConfigureAwait(false);
+            if (writer is not null) await writer.StopAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
+            if (writer is not null) writer.CaptureFailed -= OnCaptureFailed;
             _writer = null;
             _sessionId = null;
         }
@@ -1231,6 +1291,8 @@ internal sealed class AudioGraphSessionWriter
 
     public Task FirstDurableBytes => _consumer?.FirstDurableWrite ?? _notStarted.Task;
 
+    public event EventHandler<AudioCaptureFailureEventArgs>? CaptureFailed;
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _consumer = new AudioFrameDurableConsumer();
@@ -1313,6 +1375,8 @@ internal sealed class AudioGraphSessionWriter
         {
             _logger.LogError(ex, "AudioGraph local writer failed. Session={SessionId}", _sessionId);
             _rawFinalizeQueue.Writer.TryComplete(ex);
+            var errorCode = AudioGraphErrorMapper.Map(ex);
+            CaptureFailed?.Invoke(this, new AudioCaptureFailureEventArgs(errorCode, ex.Message, false, DateTimeOffset.UtcNow));
             try { await _engine.StopAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
             throw;
         }

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .stage_result import StageResults, ensure_stage_results
+
 
 @dataclass(frozen=True)
 class ProcessingRequest:
@@ -41,8 +43,11 @@ class ProcessingResult:
     status: str = "READY"
     error_code: str | None = None
     warnings: list[str] = field(default_factory=list)
-    stage_outcomes: dict[str, str] = field(default_factory=dict)
+    stage_outcomes: StageResults | dict[str, str] = field(default_factory=StageResults)
     quality: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.stage_outcomes = ensure_stage_results(self.stage_outcomes)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,7 +60,9 @@ class ProcessingResult:
             "status": self.status,
             "error_code": self.error_code,
             "warnings": self.warnings,
-            "stage_outcomes": self.stage_outcomes,
+            # Keep the established API/worker payload unchanged. Detailed
+            # StageResult metadata remains an internal diagnostic boundary.
+            "stage_outcomes": self.stage_outcomes.as_legacy_dict(),
             "quality": self.quality,
         }
 

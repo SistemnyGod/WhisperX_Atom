@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import shutil
+import uuid
 
 import pytest
 
@@ -9,7 +12,14 @@ from whisperx_atom.asr_engine import WhisperXAsrEngine
 from whisperx_atom.core_pipeline import WhisperXCorePipeline
 from whisperx_atom.diarization_engine import WhisperXDiarizationEngine
 from whisperx_atom.preprocessing_engine import WhisperXPreprocessingEngine
+from whisperx_atom.postprocessing_engine import WhisperXPostprocessingEngine
+from whisperx_atom.gpu_scheduler import GpuScheduler
+from whisperx_atom.stage_result import StageResult, StageResultStatus, StageResults
+from whisperx_atom.contracts import ProcessingRequest, ProcessingResult
+from whisperx_atom.checkpoint_store import LocalPipelineCheckpointStore
 from whisperx_atom.processing import ProcessingService
+from whisperx_atom.storage import LocalMediaStorage
+from whisperx_atom.domain import JobId, MeetingId, ProcessingJobRef, require_meeting_id
 from whisperx_atom.pipeline_contract import (
     PipelineJob,
     PipelineStage,
@@ -21,8 +31,18 @@ from whisperx_atom.pipeline_contract import (
     require_transition,
     validate_stage_name,
 )
-from whisperx_atom.storage import LocalMediaStorage
-from whisperx_atom.domain import JobId, MeetingId, ProcessingJobRef, require_meeting_id
+
+
+@pytest.fixture
+def workspace_tmp_path():
+    """Writable temporary root independent of the Windows profile TEMP ACL."""
+
+    directory = Path.cwd() / "tests" / "_pipeline_test_artifacts" / uuid.uuid4().hex
+    directory.mkdir(parents=True, exist_ok=False)
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def test_historical_stage_aliases_map_to_domain_values_without_rewriting_storage():
@@ -141,6 +161,204 @@ def test_processing_service_accepts_alignment_and_diarization_engines():
         assert service._diarization_engine is diarization
     finally:
         service.close()
+
+
+def test_processing_service_accepts_an_injected_postprocessing_engine():
+    class FakePostprocessingEngine:
+        def postprocess(self, pipeline, context, result):
+            return {**result, "postprocessed": True}
+
+    fake = FakePostprocessingEngine()
+    service = ProcessingService(postprocessing_engine=fake)
+    try:
+        assert service._postprocessing_engine is fake
+    finally:
+        service.close()
+
+
+def test_whisperx_postprocessing_adapter_preserves_legacy_glossary_shape():
+    class LegacyPipeline:
+        def _apply_glossary(self, result):
+            return {**result, "glossary": True}
+
+    source = {"segments": [{"text": "готово"}]}
+    assert WhisperXPostprocessingEngine().postprocess(LegacyPipeline(), object(), source)["glossary"] is True
+
+
+def test_gpu_scheduler_clamps_concurrency_and_releases_slots():
+    scheduler = GpuScheduler(concurrency=99)
+    assert scheduler.concurrency == 4
+    assert scheduler.available_slots == 4
+
+    async def exercise():
+        async with scheduler.slot():
+            assert scheduler.available_slots == 3
+        assert scheduler.available_slots == 4
+
+    import asyncio
+
+    asyncio.run(exercise())
+
+
+def test_stage_results_are_typed_but_keep_the_legacy_payload_shape():
+    outcomes = StageResults({"ASR": "REUSED_V1", "ALIGNMENT": "SUCCEEDED"})
+    reused = outcomes.result_for("asr")
+    assert reused is not None
+    assert reused.status is StageResultStatus.REUSED
+    assert outcomes.as_legacy_dict() == {"ASR": "REUSED_V1", "ALIGNMENT": "SUCCEEDED"}
+
+    result = ProcessingResult(
+        job_id="job-1",
+        language="ru",
+        text="готово",
+        segments=[],
+        word_segments=[],
+        metadata={},
+        stage_outcomes=outcomes,
+    )
+    assert result.to_dict()["stage_outcomes"] == {"ASR": "REUSED_V1", "ALIGNMENT": "SUCCEEDED"}
+
+
+def test_stage_result_rejects_unknown_status_and_drops_payload_metadata():
+    with pytest.raises(ValueError, match="STAGE_RESULT_STATUS_UNKNOWN"):
+        StageResult.from_values("ASR", "MAYBE")
+    result = StageResult.from_values(
+        "ASR",
+        "SUCCEEDED",
+        metadata={"duration_ms": 1200, "text": "секрет", "token": "секрет"},
+    )
+    assert result.metadata == {"duration_ms": 1200}
+
+
+def test_local_checkpoint_store_is_atomic_scoped_and_validates_provenance(workspace_tmp_path):
+    tmp_path = workspace_tmp_path
+    store = LocalPipelineCheckpointStore(tmp_path)
+    result = {"language": "ru", "segments": [{"start": 0.0, "end": 1.0, "text": "готово"}]}
+    saved = store.save("job-1", "ALIGNMENT", "fingerprint-1", result)
+    assert saved.artifact_key == "/data/processing-checkpoints/job-1/ALIGNMENT.json"
+    assert not (tmp_path / "processing-checkpoints" / "job-1" / "ALIGNMENT.json.part").exists()
+    loaded = store.load("job-1", "ALIGNMENT", "fingerprint-1")
+    assert loaded is not None
+    assert loaded.result == result
+    assert loaded.artifact_sha256 == saved.artifact_sha256
+    assert store.load("job-1", "ALIGNMENT", "different-source") is None
+    with pytest.raises(ValueError, match="CHECKPOINT_JOB_ID_INVALID"):
+        store.save("../job", "ALIGNMENT", "fingerprint-1", result)
+
+
+def test_enrichment_reuses_alignment_and_diarization_checkpoints(workspace_tmp_path):
+    tmp_path = workspace_tmp_path
+    media = tmp_path / "canonical.wav"
+    media.write_bytes(b"canonical-audio")
+    audio_hash = hashlib.sha256(media.read_bytes()).hexdigest()
+    preprocessing = {
+        "asr_input_path_kind": "canonical",
+        "preprocessing_mode": "auto",
+        "preprocessing_applied": False,
+        "preprocessing_profile": None,
+        "acoustic_profile": "AUTO",
+    }
+    source = {
+        "transcript_id": "transcript-1",
+        "language": "ru",
+        "segments": [{"start": 0.0, "end": 0.8, "text": "проверка", "speaker": "UNKNOWN"}],
+        "word_segments": [],
+        "quality_metadata": {
+            "asr_storage_key": "/data/canonical.wav",
+            "asr_audio_hash": audio_hash,
+            "asr_sample_rate": 16000,
+            "asr_channels": 1,
+            "asr_duration_seconds": 1.0,
+            "asr_preprocessing": preprocessing,
+        },
+    }
+
+    class Config:
+        language = "ru"
+        enable_alignment = True
+        enable_diarization = True
+        asr_model = "large-v3"
+        asr_backend = "faster-whisper"
+        device = "cpu"
+        compute_type = "int8"
+
+    class Context:
+        asr_audio_path = None
+        asr_preprocessing = {}
+        asr_result = None
+        diar_audio_path = None
+        aligned_result = None
+
+        def register_temp(self, path):
+            return path
+
+    class Preprocessor:
+        def prepare_asr_input(self, pipeline, input_path, acoustic_profile="AUTO"):
+            return input_path, dict(preprocessing)
+
+        def prepare_diarization_input(self, pipeline, input_path):
+            return input_path
+
+        def prepare_profile(self, pipeline, input_path, profile):
+            return input_path
+
+    class Alignment:
+        def __init__(self):
+            self.calls = 0
+
+        def align(self, pipeline, context, result):
+            self.calls += 1
+            return {**result, "aligned": True}
+
+    class Diarization:
+        def __init__(self):
+            self.calls = 0
+
+        def diarize(self, pipeline, context, result, profile="diar"):
+            self.calls += 1
+            updated = {**result, "diarized": True}
+            updated["segments"] = [{**item, "speaker": "SPEAKER_00"} for item in result["segments"]]
+            return updated
+
+    class Postprocessor:
+        def postprocess(self, pipeline, context, result):
+            return result
+
+    request = ProcessingRequest(
+        job_id="job-1",
+        media_path=media,
+        profile="enrich",
+        input_transcript=source,
+        source_storage_key="/data/canonical.wav",
+        source_audio_hash=audio_hash,
+    )
+    store = LocalPipelineCheckpointStore(tmp_path / "checkpoints")
+    first_alignment, first_diarization = Alignment(), Diarization()
+    first = ProcessingService(
+        preprocessing_engine=Preprocessor(),
+        alignment_engine=first_alignment,
+        diarization_engine=first_diarization,
+        postprocessing_engine=Postprocessor(),
+        checkpoint_store=store,
+    )
+    first_result = first._process_enrichment(request, object(), Context(), Config(), 1.0, lambda *_: None)
+    assert first_alignment.calls == 1
+    assert first_diarization.calls == 1
+    assert first_result.segments[0]["speaker"] == "SPEAKER_00"
+
+    second_alignment, second_diarization = Alignment(), Diarization()
+    second = ProcessingService(
+        preprocessing_engine=Preprocessor(),
+        alignment_engine=second_alignment,
+        diarization_engine=second_diarization,
+        postprocessing_engine=Postprocessor(),
+        checkpoint_store=store,
+    )
+    second_result = second._process_enrichment(request, object(), Context(), Config(), 1.0, lambda *_: None)
+    assert second_alignment.calls == 0
+    assert second_diarization.calls == 0
+    assert second_result.segments == first_result.segments
+    assert second_result.stage_outcomes.result_for("ALIGNMENT").metadata["reason"] == "checkpoint_reused"
 
 
 def test_core_pipeline_can_inject_asr_engine_without_touching_worker_contract():

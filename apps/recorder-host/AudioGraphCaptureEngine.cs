@@ -964,6 +964,17 @@ internal static class AudioGraphErrorMapper
             return "AUDIO_BUFFER_INTEROP_FAILED";
         if (message.Contains("AUDIO_BUFFER_FORMAT_MISMATCH", StringComparison.OrdinalIgnoreCase))
             return "AUDIO_BUFFER_FORMAT_MISMATCH";
+        if (message.Contains("AUDIO_FRAME_GAP", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_FRAME_GAP";
+        if (message.Contains("AUDIO_FRAME_OVERLAP", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_FRAME_OVERLAP";
+        if (message.Contains("AUDIO_FRAME_FORMAT_MISMATCH", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("AUDIO_FRAME_FORMAT_INVALID", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_FRAME_FORMAT_MISMATCH";
+        if (message.Contains("AUDIO_FRAME_SIZE_MISMATCH", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("AUDIO_FRAME_RANGE_OVERFLOW", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("AUDIO_FRAME_INVALID", StringComparison.OrdinalIgnoreCase))
+            return "AUDIO_FRAME_SIZE_MISMATCH";
         if (exception is COMException comException && unchecked((uint)comException.HResult) == 0x80070005u)
             return "AUDIO_DEVICE_ACCESS_DENIED";
         if (message.Contains("AUDIO_INPUT_NODE_CREATE_FAILED", StringComparison.OrdinalIgnoreCase)

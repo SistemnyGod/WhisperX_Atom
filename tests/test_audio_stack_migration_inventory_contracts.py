@@ -39,6 +39,27 @@ def test_core_frame_consumer_and_host_writer_preserve_first_durable_boundary():
     assert "final partial chunk is durable" in writer
 
 
+def test_audio_frame_continuity_is_validated_before_durable_append():
+    validator = read("apps/recorder-agent/AudioFrameContinuityValidator.cs")
+    consumer = read("apps/recorder-agent/AudioFrameDurableConsumer.cs")
+    host = read("apps/recorder-host/RecorderHostRuntime.cs")
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+
+    for code in (
+        "AUDIO_FRAME_GAP",
+        "AUDIO_FRAME_OVERLAP",
+        "AUDIO_FRAME_FORMAT_MISMATCH",
+        "AUDIO_FRAME_SIZE_MISMATCH",
+    ):
+        assert code in validator
+        assert code in engine
+    assert consumer.index("_continuity.ValidateAndAdvance(frame)") < consumer.index("await durableWrite(frame)")
+    assert "writer.CaptureFailed += OnCaptureFailed" in host
+    assert "_engine.CaptureFailed += OnCaptureFailed" in host
+    assert "ReferenceEquals(_writer, expectedWriter)" in host
+    assert "PersistFailedLocalLifecycleAsync(sessionId, exception, failure.ErrorCode)" in host
+
+
 def test_config_v2_and_exact_device_reselection_are_explicit():
     config = read("apps/recorder-agent/AudioConfigurationV2.cs")
     storage = read("apps/recorder-agent/AgentStorageSettings.cs")
