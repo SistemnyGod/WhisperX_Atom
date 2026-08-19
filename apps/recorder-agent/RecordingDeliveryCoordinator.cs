@@ -57,27 +57,30 @@ public sealed class RecordingDeliveryCoordinator(
                     localSessionId,
                     localFinalizeState: "RECOVERY_PENDING",
                     deliveryState: "PENDING_SERVER",
-                    errorCode: "RAW_RECOVERY_PENDING",
+                    errorCode: durability.ErrorCode ?? "RAW_RECOVERY_PENDING",
                     errorDetail: "A non-empty PCM part is waiting for recovery.",
                     nextRetryAtUtc: DateTimeOffset.UtcNow.AddSeconds(5),
                     clearError: false,
                     preserveError: false,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
-                return new FinalizationResult(false, "RECOVERY_PENDING", "RAW_RECOVERY_PENDING", true, DeliveryState: "PENDING_SERVER");
+                return new FinalizationResult(false, "RECOVERY_PENDING", durability.ErrorCode ?? "RAW_RECOVERY_PENDING", true, DeliveryState: "PENDING_SERVER");
             }
 
             await spool.SetSessionStateAsync(localSessionId, "FAILED", cancellationToken).ConfigureAwait(false);
+            var durabilityError = durability.ErrorCode ?? "NO_AUDIO_CAPTURED";
             await spool.SetFinalizationStateAsync(
                 localSessionId,
                 localFinalizeState: "LOCAL_FAILED",
                 deliveryState: "NOT_REQUESTED",
-                errorCode: "NO_AUDIO_CAPTURED",
-                errorDetail: "No durable PCM or validated FLAC was found for the session.",
+                errorCode: durabilityError,
+                errorDetail: durabilityError == "NO_AUDIO_CAPTURED"
+                    ? "No durable PCM or validated FLAC was found for the session."
+                    : $"Local session durability validation failed: {durabilityError}.",
                 clearNextRetry: true,
                 clearError: false,
                 preserveError: false,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            return new FinalizationResult(false, "LOCAL_FAILED", "NO_AUDIO_CAPTURED", false, DeliveryState: "NOT_REQUESTED");
+            return new FinalizationResult(false, "LOCAL_FAILED", durabilityError, false, DeliveryState: "NOT_REQUESTED");
         }
 
         var rawBacklog = await spool.GetRawChunkBacklogAsync(localSessionId, cancellationToken).ConfigureAwait(false);

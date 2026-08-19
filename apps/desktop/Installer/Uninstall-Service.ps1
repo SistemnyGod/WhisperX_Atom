@@ -7,3 +7,6 @@ if ($null -ne $existing) {
 }
 
 [Environment]::SetEnvironmentVariable("ATOM_AGENT_ALLOWED_SID", $null, "Machine")
+[Environment]::SetEnvironmentVariable("ATOM_AGENT_FFMPEG_PATH", $null, "Machine")
+[Environment]::SetEnvironmentVariable("ATOM_AGENT_FFPROBE_PATH", $null, "Machine")
+[Environment]::SetEnvironmentVariable("WHISPERX_RECORDER_HOST_EXE", $null, "Machine")

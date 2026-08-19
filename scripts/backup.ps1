@@ -7,7 +7,8 @@ param(
     [string]$PostgresContainer = "",
     [string]$Database = "",
     [string]$User = "",
-    [string]$RuntimeManifestPath = "artifacts\release\runtime-manifest.json"
+    [string]$RuntimeManifestPath = "artifacts\release\runtime-manifest.json",
+    [string]$MigrationRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,8 @@ function Get-EnvValue([string]$Name, [string]$Default) {
     return $value
 }
 function Get-SchemaVersion {
-    $migration = Get-ChildItem -LiteralPath (Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations") -Filter "*.sql" -File |
+    $root = if ($MigrationRoot) { [IO.Path]::GetFullPath($MigrationRoot) } else { Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations" }
+    $migration = Get-ChildItem -LiteralPath $root -Filter "*.sql" -File |
         Sort-Object Name | Select-Object -Last 1
     if ($null -eq $migration) { throw "SCHEMA_MIGRATION_NOT_FOUND" }
     return [IO.Path]::GetFileNameWithoutExtension($migration.Name)

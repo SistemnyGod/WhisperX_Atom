@@ -9,14 +9,15 @@ param(
     [string]$PostgresService = "postgres",
     [string]$PostgresContainer = "",
     [string]$Database = "",
-    [string]$User = ""
+    [string]$User = "",
+    [string]$MigrationRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $repo = Split-Path -Parent $PSScriptRoot; Set-Location $repo
 function Get-EnvValue([string]$Name, [string]$Default) { $value = [Environment]::GetEnvironmentVariable($Name); if ([string]::IsNullOrWhiteSpace($value)) { return $Default }; return $value }
-function Get-SchemaVersion { $file = Get-ChildItem -LiteralPath (Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations") -Filter "*.sql" -File | Sort-Object Name | Select-Object -Last 1; if ($null -eq $file) { throw "SCHEMA_MIGRATION_NOT_FOUND" }; return [IO.Path]::GetFileNameWithoutExtension($file.Name) }
+function Get-SchemaVersion { $root = if ($MigrationRoot) { [IO.Path]::GetFullPath($MigrationRoot) } else { Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations" }; $file = Get-ChildItem -LiteralPath $root -Filter "*.sql" -File | Sort-Object Name | Select-Object -Last 1; if ($null -eq $file) { throw "SCHEMA_MIGRATION_NOT_FOUND" }; return [IO.Path]::GetFileNameWithoutExtension($file.Name) }
 function Assert-ContainedPath([string]$Root, [string]$RelativePath) { if ([string]::IsNullOrWhiteSpace($RelativePath) -or [IO.Path]::IsPathRooted($RelativePath)) { throw "BACKUP_UNSAFE_PATH" }; $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar; $candidate = [IO.Path]::GetFullPath((Join-Path $Root $RelativePath)); if (-not $candidate.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) { throw "BACKUP_PATH_ESCAPE" }; return $candidate }
 function Invoke-PsqlScalar([string]$Sql, [string]$DbUser, [string]$DbName) { if ($PostgresContainer) { & docker exec $PostgresContainer psql -U $DbUser -d $DbName -tAc $Sql } else { & docker compose -f $ComposeFile exec -T $PostgresService psql -U $DbUser -d $DbName -tAc $Sql } }
 function Invoke-PgRestore([string]$DumpPath, [string]$DbUser, [string]$DbName) { if ($PostgresContainer) { $inside = "/tmp/whisperx-restore-" + [Guid]::NewGuid().ToString("N") + ".dump"; try { & docker cp $DumpPath "${PostgresContainer}:$inside"; if ($LASTEXITCODE -ne 0) { throw "PG_RESTORE_STAGE_FAILED" }; $output = & docker exec $PostgresContainer pg_restore --clean --if-exists --no-owner -U $DbUser -d $DbName $inside 2>&1; if ($LASTEXITCODE -ne 0) { throw ("PG_RESTORE_FAILED: " + ($output -join " ")) } } finally { & docker exec $PostgresContainer rm -f $inside 2>$null | Out-Null }; return }; $psi = [Diagnostics.ProcessStartInfo]::new(); $psi.FileName = "docker.exe"; $arguments = @("compose", "-f", $ComposeFile, "exec", "-T", $PostgresService, "pg_restore", "--clean", "--if-exists", "--no-owner", "-U", $DbUser, "-d", $DbName); $psi.Arguments = ($arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join ' '; $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardError = $true; $process = [Diagnostics.Process]::new(); $process.StartInfo = $psi; if (-not $process.Start()) { throw "PG_RESTORE_START_FAILED" }; $input = [IO.File]::OpenRead($DumpPath); try { $input.CopyTo($process.StandardInput.BaseStream) } finally { $input.Dispose(); $process.StandardInput.Close() }; $stderr = $process.StandardError.ReadToEnd(); $process.WaitForExit(); if ($process.ExitCode -ne 0) { throw ("PG_RESTORE_FAILED: " + $stderr.Trim()) } }

@@ -15,6 +15,10 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 UninstallDisplayName={#AppName}
+MinVersion=10.0.17763
+CloseApplications=yes
+CloseApplicationsFilter=WhisperX.Atom.*.exe
+RestartApplications=no
 
 [Files]
 Source: "..\..\..\artifacts\desktop\Desktop\*"; DestDir: "{app}\Desktop"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -24,6 +28,9 @@ Source: "..\..\..\artifacts\desktop\VoiceHost\*"; DestDir: "{app}\VoiceHost"; Fl
 Source: "Install-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Uninstall-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Configure-RecorderHostUser.ps1"; DestDir: "{app}"; Flags: ignoreversion
+; Extracted to {tmp} and executed by PrepareToInstall before any installed
+; binaries can be replaced. This is intentionally not copied into {app}.
+Source: "Preflight-Upgrade.ps1"; Flags: dontcopy
 
 
 [Icons]
@@ -32,6 +39,22 @@ Name: "{commondesktop}\WhisperX Atom"; Filename: "{app}\Desktop\WhisperX.Atom.De
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"
+
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ScriptPath, Params: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  ExtractTemporaryFile('Preflight-Upgrade.ps1');
+  ScriptPath := ExpandConstant('{tmp}\Preflight-Upgrade.ps1');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -InstalledRoot "' + ExpandConstant('{app}') + '"';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := 'INSTALL_PREFLIGHT_FAILED_TO_START'
+  else if ResultCode <> 0 then
+    Result := 'INSTALL_PREFLIGHT_REJECTED_' + IntToStr(ResultCode);
+end;
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -RecorderHostDirectory ""{app}\RecorderHost"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated

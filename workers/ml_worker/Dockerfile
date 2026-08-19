@@ -1,5 +1,8 @@
 ARG GPU_BASE_IMAGE=pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 FROM ${GPU_BASE_IMAGE}
+ARG WHISPERX_RELEASE_VERSION=dev
+ARG WHISPERX_BUILD_IDENTITY=dev
+ARG WHISPERX_REVISION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv
 COPY workers/ml_worker/requirements.gpu.txt /srv/ml-requirements.txt
@@ -17,5 +20,10 @@ COPY app /srv/app
 COPY diarization_quality.py glossary_utils.py local_io.py media_binaries.py processing_runtime.py transcription_quality.py hotwords.txt /srv/
 COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
 COPY workers/ml_worker/healthcheck.py /srv/workers/ml_worker/healthcheck.py
+LABEL org.opencontainers.image.title="WhisperX Atom GPU Worker" \
+      org.opencontainers.image.version="$WHISPERX_RELEASE_VERSION" \
+      org.opencontainers.image.revision="$WHISPERX_REVISION" \
+      io.whisperx.atom.build-identity="$WHISPERX_BUILD_IDENTITY" \
+      org.opencontainers.image.source="WhisperX Atom"
 ENV PYTHONPATH=/srv
 CMD ["python", "-m", "workers.ml_worker.worker"]

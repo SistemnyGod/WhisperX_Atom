@@ -141,6 +141,14 @@ app.Use(async (context, next) =>
 var db = app.Services.GetRequiredService<Database>();
 var unified = app.Services.GetRequiredService<UnifiedProductStore>();
 await db.InitializeAsync();
+// Release orchestration can run additive migrations as an isolated one-shot
+// container before replacing the API. This path deliberately performs no
+// HTTP serving and therefore cannot expose a half-started runtime.
+if (string.Equals(builder.Configuration["WHISPERX_MIGRATION_ONLY"], "true", StringComparison.OrdinalIgnoreCase))
+{
+    app.Logger.LogInformation("WHISPERX_MIGRATION_ONLY completed with build identity {BuildIdentity}", builder.Configuration["WHISPERX_BUILD_IDENTITY"] ?? builder.Configuration["WHISPERX_RELEASE_VERSION"] ?? "dev");
+    return;
+}
 
 async Task IssueAuthCookiesAsync(HttpContext http, IConfiguration configuration, UserRow user)
 {
@@ -341,6 +349,7 @@ app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(n
     product = "WhisperX Atom",
     apiVersion = 1,
     releaseVersion = configuration["WHISPERX_RELEASE_VERSION"] ?? "dev",
+    buildIdentity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev",
     minDesktopVersion = configuration["WHISPERX_MIN_DESKTOP_VERSION"] ?? "0.1.0",
     minRecorderVersion = configuration["WHISPERX_MIN_RECORDER_VERSION"] ?? "0.1.0",
     serverTimeUtc = DateTimeOffset.UtcNow
@@ -349,6 +358,12 @@ app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(n
 app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration, IHttpClientFactory httpClientFactory) =>
 {
     var checkedAt = DateTimeOffset.UtcNow;
+    var expectedBuildIdentity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev";
+    var releaseIdentityValid = !string.IsNullOrWhiteSpace(expectedBuildIdentity)
+        && !expectedBuildIdentity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+        && !expectedBuildIdentity.Contains("dirty", StringComparison.OrdinalIgnoreCase)
+        && expectedBuildIdentity.Contains('+', StringComparison.Ordinal)
+        && expectedBuildIdentity[(expectedBuildIdentity.IndexOf('+') + 1)..].Length >= 40;
     var mediaRoot = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
     // Match /health/ready: a bind mount may be created lazily by Docker, so a
     // Directory.Exists-only check can report a false storage outage. Probe the
@@ -414,7 +429,11 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         var age = now.UtcDateTime - worker.LastSeenAt.ToUniversalTime();
         return age >= TimeSpan.Zero && age <= TimeSpan.FromSeconds(60);
     }
+    static bool IsIdentityMatch(WorkerRuntimeRow worker, string expected)
+        => string.Equals(expected, "dev", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(worker.Version, expected, StringComparison.Ordinal);
     var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    var identityMismatch = false;
     foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker" })
     {
         if (!fresh.TryGetValue(name, out var item) || !IsFreshWorker(item, checkedAt))
@@ -422,7 +441,9 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             workerReady[name] = new { status = "UNAVAILABLE", lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
             continue;
         }
-        workerReady[name] = new { status = item.Status, lastSeenAt = item.LastSeenAt, version = item.Version, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = item.LastErrorCode };
+        var matches = IsIdentityMatch(item, expectedBuildIdentity);
+        identityMismatch |= !matches;
+        workerReady[name] = new { status = matches ? item.Status : "IDENTITY_MISMATCH", lastSeenAt = item.LastSeenAt, version = item.Version, expectedBuildIdentity, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = matches ? item.LastErrorCode : "WORKER_BUILD_IDENTITY_MISMATCH" };
     }
 
     var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker)
@@ -436,7 +457,8 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     var requiredWorkersReady = new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" }.All(name =>
         fresh.TryGetValue(name, out var worker) &&
         IsFreshWorker(worker, checkedAt) &&
-        IsActiveWorker(worker));
+        IsActiveWorker(worker) &&
+        IsIdentityMatch(worker, expectedBuildIdentity));
     var qwenEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     object qwen;
     if (!qwenEnabled)
@@ -450,6 +472,10 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     else if (!fresh.TryGetValue("summary-worker", out var summaryWorker) || !IsFreshWorker(summaryWorker, checkedAt))
     {
         qwen = new { status = "DEGRADED", reason = "summary_worker_stale" };
+    }
+    else if (!IsIdentityMatch(summaryWorker, expectedBuildIdentity))
+    {
+        qwen = new { status = "DEGRADED", reason = "summary_worker_identity_mismatch" };
     }
     else
     {
@@ -478,11 +504,14 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
             ? "BUSY"
             : "READY";
-    var ready = postgres && nats && storage && requiredWorkersReady && cuda;
+    var ready = postgres && nats && storage && requiredWorkersReady && cuda && !identityMismatch;
 
     return Results.Ok(new
     {
         ready,
+        buildIdentity = expectedBuildIdentity,
+        releaseIdentityValid,
+        identityMismatch,
         checkedAt,
         components = new
         {

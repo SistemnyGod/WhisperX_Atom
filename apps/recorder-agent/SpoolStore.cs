@@ -138,6 +138,7 @@ public sealed class SpoolStore
 {
     private const int UploadStaleAfterSeconds = 300;
     private readonly string _connectionString;
+    private readonly string _dataRoot;
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -153,6 +154,7 @@ public sealed class SpoolStore
     public SpoolStore(string root)
     {
         Directory.CreateDirectory(root);
+        _dataRoot = Path.GetFullPath(root);
         _connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "agent.db"), Mode = SqliteOpenMode.ReadWriteCreate }.ToString();
     }
 
@@ -548,13 +550,29 @@ public sealed class SpoolStore
     /// </summary>
     public async Task<LocalDurabilityOutcome> GetLocalDurabilityAsync(string sessionId, CancellationToken cancellationToken = default)
     {
+        // A closed PCM can exist for a short interval between the atomic file
+        // rename and the SQLite promotion. Reconcile only this session before
+        // classifying durability; the global orphan scanner remains the
+        // periodic safety net for old sessions.
+        var orphanPart = await ReconcileExactSessionOrphansAsync(sessionId, cancellationToken).ConfigureAwait(false);
+
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT r.raw_path,r.output_path,r.status,r.start_sample,r.sample_count,r.sample_rate,r.channels,r.bits_per_sample,c.local_path,c.status,c.size_bytes,c.sha256 FROM recording_raw_chunks r LEFT JOIN recording_chunks c ON c.id=r.id WHERE r.session_id=$session AND r.status<>'DISCARDED' ORDER BY r.sequence";
+        command.CommandText = """
+            SELECT r.raw_path,r.output_path,r.status,r.start_sample,r.sample_count,r.sample_rate,r.channels,
+                   r.bits_per_sample,r.track_id,r.sequence,r.track_type,r.encoding,
+                   c.local_path,c.status,c.size_bytes,c.sha256,
+                   t.track_type,t.sample_rate,t.channels,t.encoding,t.bits_per_sample
+            FROM recording_raw_chunks r
+            LEFT JOIN recording_chunks c ON c.id=r.id
+            LEFT JOIN recording_track_info t ON t.track_id=r.track_id
+            WHERE r.session_id=$session AND r.status<>'DISCARDED'
+            ORDER BY r.track_id,r.sequence
+            """;
         command.Parameters.AddWithValue("$session", sessionId);
-        var durable = 0;
-        var recoverable = false;
+        var chunks = new List<LocalDurabilityChunk>();
+        var recoverable = orphanPart;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -566,12 +584,17 @@ public sealed class SpoolStore
             var sampleRate = reader.GetInt32(5);
             var channels = Math.Max(1, reader.GetInt32(6));
             var bits = Math.Max(8, reader.GetInt32(7));
-            var encodedPath = reader.IsDBNull(8) ? null : reader.GetString(8);
-            var encodedStatus = reader.IsDBNull(9) ? null : reader.GetString(9);
-            var encodedSize = reader.IsDBNull(10) ? (long?)null : reader.GetInt64(10);
-            var encodedSha = reader.IsDBNull(11) ? null : reader.GetString(11);
+            var trackId = reader.GetString(8);
+            var sequence = reader.GetInt32(9);
+            var trackType = reader.GetString(10);
+            var encoding = reader.GetString(11);
+            var encodedPath = reader.IsDBNull(12) ? null : reader.GetString(12);
+            var encodedStatus = reader.IsDBNull(13) ? null : reader.GetString(13);
+            var encodedSize = reader.IsDBNull(14) ? (long?)null : reader.GetInt64(14);
+            var encodedSha = reader.IsDBNull(15) ? null : reader.GetString(15);
             var blockAlign = Math.Max(1, channels * (bits / 8));
             var expectedBytes = sampleCount > 0 ? sampleCount * blockAlign : 0;
+            var rawDurable = false;
 
             if (File.Exists(rawPath))
             {
@@ -581,8 +604,7 @@ public sealed class SpoolStore
                 // so malformed legacy rows do not qualify as audio.
                 if (startSample >= 0 && sampleCount > 0 && sampleRate > 0 && size > 0 && size % blockAlign == 0 && size == expectedBytes)
                 {
-                    durable++;
-                    continue;
+                    rawDurable = true;
                 }
                 // A crash can happen after the stream was closed/renamed but
                 // before SQLite was promoted from WRITING.  The raw bytes are
@@ -596,7 +618,7 @@ public sealed class SpoolStore
             if (File.Exists(partPath) && new FileInfo(partPath).Length > 0)
                 recoverable = true;
 
-            if (string.Equals(status, "READY", StringComparison.OrdinalIgnoreCase)
+            var encodedDurable = string.Equals(status, "READY", StringComparison.OrdinalIgnoreCase)
                 && IsUsableFlac(
                     string.IsNullOrWhiteSpace(encodedPath) ? outputPath : encodedPath,
                     sampleRate,
@@ -605,15 +627,129 @@ public sealed class SpoolStore
                     sampleCount,
                     encodedStatus,
                     encodedSize,
-                    encodedSha))
-                durable++;
+                    encodedSha);
+
+            chunks.Add(new LocalDurabilityChunk(
+                trackId, sequence, trackType, encoding, startSample, sampleCount,
+                sampleRate, channels, bits, rawDurable, encodedDurable,
+                reader.IsDBNull(16) ? null : reader.GetString(16),
+                reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                reader.IsDBNull(18) ? null : reader.GetInt32(18),
+                reader.IsDBNull(19) ? null : reader.GetString(19),
+                reader.IsDBNull(20) ? null : reader.GetInt32(20)));
         }
 
         if (recoverable)
-            return new LocalDurabilityOutcome("RECOVERY_PENDING", false, true, durable, "RAW_RECOVERY_PENDING");
+            return new LocalDurabilityOutcome("RECOVERY_PENDING", false, true, chunks.Count(c => c.IsDurable), "RAW_RECOVERY_PENDING");
+
+        var validationError = ValidateSessionTimeline(chunks);
+        if (validationError is not null)
+            return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, validationError);
+
+        var durable = chunks.Count(c => c.IsDurable);
         if (durable > 0)
             return new LocalDurabilityOutcome("LOCAL_READY", true, false, durable);
         return new LocalDurabilityOutcome("LOCAL_FAILED", false, false, 0, "NO_AUDIO_CAPTURED");
+    }
+
+    private sealed record LocalDurabilityChunk(
+        string TrackId,
+        int Sequence,
+        string TrackType,
+        string Encoding,
+        long StartSample,
+        long SampleCount,
+        int SampleRate,
+        int Channels,
+        int BitsPerSample,
+        bool RawDurable,
+        bool EncodedDurable,
+        string? ExpectedTrackType,
+        int? ExpectedSampleRate,
+        int? ExpectedChannels,
+        string? ExpectedEncoding,
+        int? ExpectedBitsPerSample)
+    {
+        public bool IsDurable => RawDurable || EncodedDurable;
+    }
+
+    private static string? ValidateSessionTimeline(IReadOnlyList<LocalDurabilityChunk> chunks)
+    {
+        if (chunks.Count == 0) return null;
+        foreach (var group in chunks.GroupBy(c => c.TrackId, StringComparer.Ordinal))
+        {
+            var ordered = group.OrderBy(c => c.Sequence).ToArray();
+            var first = ordered[0];
+            if (first.Sequence != 0) return "SESSION_TIMELINE_GAP";
+            long expectedStart = first.StartSample;
+            var sampleRate = first.ExpectedSampleRate ?? first.SampleRate;
+            var channels = first.ExpectedChannels ?? first.Channels;
+            var bits = first.ExpectedBitsPerSample ?? first.BitsPerSample;
+            var encoding = first.ExpectedEncoding ?? first.Encoding;
+            var trackType = first.ExpectedTrackType ?? first.TrackType;
+            for (var index = 0; index < ordered.Length; index++)
+            {
+                var chunk = ordered[index];
+                if (chunk.Sequence != index) return "SESSION_TIMELINE_GAP";
+                if (chunk.SampleCount <= 0 || chunk.StartSample != expectedStart)
+                    return chunk.StartSample < expectedStart ? "SESSION_TIMELINE_OVERLAP" : "SESSION_TIMELINE_GAP";
+                if (chunk.SampleRate != sampleRate || chunk.Channels != channels || chunk.BitsPerSample != bits
+                    || !string.Equals(chunk.Encoding, encoding, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(chunk.TrackType, trackType, StringComparison.OrdinalIgnoreCase))
+                    return "SESSION_TRACK_FORMAT_MISMATCH";
+                if (!chunk.IsDurable) return "SESSION_CHUNK_NOT_DURABLE";
+                expectedStart = checked(chunk.StartSample + chunk.SampleCount);
+            }
+        }
+        return null;
+    }
+
+    private async Task<bool> ReconcileExactSessionOrphansAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        var sessionRoot = Path.Combine(_dataRoot, "recordings", sessionId);
+        if (!Directory.Exists(sessionRoot)) return false;
+        var hasRecoverablePart = false;
+        string[] trackDirectories;
+        try { trackDirectories = Directory.GetDirectories(sessionRoot); }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+
+        foreach (var directory in trackDirectories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var trackId = Path.GetFileName(directory);
+            var track = await GetTrackInfoAsync(trackId, cancellationToken).ConfigureAwait(false);
+            if (track is null) continue;
+            string[] files;
+            try { files = Directory.GetFiles(directory, "*.pcm", SearchOption.TopDirectoryOnly); }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            if (Directory.EnumerateFiles(directory, "*.pcm.part", SearchOption.TopDirectoryOnly)
+                .Any(path => { try { return new FileInfo(path).Length > 0; } catch { return false; } }))
+                hasRecoverablePart = true;
+            foreach (var rawPath in files)
+            {
+                if (!RawChunkFileName.TryParse(rawPath, out var sequence, out var startSample, out var sampleCount)) continue;
+                if (await RawChunkExistsAsync(sessionId, trackId, sequence, cancellationToken).ConfigureAwait(false)) continue;
+                var info = new FileInfo(rawPath);
+                var blockAlign = Math.Max(1, track.Channels * Math.Max(1, track.BitsPerSample / 8));
+                if (sampleCount <= 0 || info.Length != checked(sampleCount * blockAlign)) continue;
+                var output = Path.Combine(directory, $"{sequence:D8}.flac");
+                var candidate = new RawRecordingChunk(
+                    Guid.NewGuid().ToString("N"), sessionId, trackId, sequence, rawPath, output,
+                    startSample, sampleCount, track.SampleRate, track.Channels, track.TrackType,
+                    track.Encoding, track.BitsPerSample, "WRITING", 0, null, null,
+                    track.SourceEncoding, track.SourceSubFormat, track.ValidBitsPerSample);
+                try
+                {
+                    RegisterRawChunk(candidate);
+                    await PromoteRawChunkReadyAsync(candidate, rawPath, sampleCount, info.Length,
+                        ComputeSha256(rawPath), cancellationToken).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException ex) when (ex.Message == "RAW_CHUNK_ROW_MISSING") { }
+            }
+        }
+        return hasRecoverablePart;
     }
 
     /// <summary>

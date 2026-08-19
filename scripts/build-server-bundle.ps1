@@ -1,0 +1,143 @@
+[CmdletBinding()]
+param(
+    [string]$OutputRoot = "artifacts/server-bundle",
+    [string]$ArchivePath = "artifacts/WhisperXAtom-Server.zip",
+    [string]$EnvFile = ".env.lan",
+    [switch]$IncludeLlm,
+    [switch]$SkipBuild
+)
+
+$ErrorActionPreference = "Stop"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $repo
+
+function Invoke-Git([string[]]$Arguments) {
+    $value = & git @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "GIT_FAILED: $($Arguments -join ' ')" }
+    return ($value | Out-String).Trim()
+}
+
+$status = @(git status --porcelain --untracked-files=all)
+if ($status.Count -gt 0) {
+    throw "RELEASE_REQUIRES_CLEAN_COMMIT: $($status.Count) changed paths"
+}
+$commit = Invoke-Git @('rev-parse','HEAD')
+$short = Invoke-Git @('rev-parse','--short=12','HEAD')
+$identity = "1.0.1+$commit"
+$tag = "1.0.1-$short"
+if ($identity -match 'dirty|dev' -or $tag -match 'dirty|dev') { throw "RELEASE_IDENTITY_INVALID: $identity" }
+if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) { throw "ENV_FILE_NOT_FOUND: $EnvFile" }
+$autoSummarySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^AUTO_SUMMARY_ENABLED=' } | Select-Object -First 1
+if ($autoSummarySetting -and ($autoSummarySetting -replace '^AUTO_SUMMARY_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
+$assistantSetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_ENABLED=' } | Select-Object -First 1
+if ($assistantSetting -and ($assistantSetting -replace '^ASSISTANT_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
+
+docker version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "DOCKER_ENGINE_UNAVAILABLE" }
+docker compose version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "DOCKER_COMPOSE_UNAVAILABLE" }
+
+$env:WHISPERX_RELEASE_TAG = $tag
+$env:WHISPERX_RELEASE_VERSION = $identity
+$env:WHISPERX_BUILD_IDENTITY = $identity
+$env:WHISPERX_REVISION = $commit
+$env:APP_VERSION = $identity
+$compose = @('--project-name','whisperx-atom','--env-file',(Join-Path $repo $EnvFile),'-f',(Join-Path $repo 'compose.dev.yml'),'-f',(Join-Path $repo 'compose.lan.yml'))
+$profiles = @('--profile','core','--profile','gpu','--profile','lan')
+if ($IncludeLlm) { $profiles += @('--profile','llm') }
+
+if (-not $SkipBuild) {
+    & docker compose @compose @profiles build --pull=false
+    if ($LASTEXITCODE -ne 0) { throw "RELEASE_IMAGE_BUILD_FAILED" }
+}
+
+$appServices = @('api','outbox-relay','import-worker','media-worker','gpu-worker')
+if ($IncludeLlm) { $appServices += 'summary-worker' }
+$imageRecords = [ordered]@{}
+foreach ($service in $appServices) {
+    $image = "whisperx-atom-$($service):$tag"
+    $inspect = docker image inspect $image --format '{{.Id}}'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($inspect | Out-String))) { throw "RELEASE_IMAGE_MISSING: $image" }
+    $labels = docker image inspect $image --format '{{index .Config.Labels "io.whisperx.atom.build-identity"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.version"}}'
+    if ($LASTEXITCODE -ne 0) { throw "RELEASE_IMAGE_LABELS_MISSING: $image" }
+    $labelParts = (($labels | Out-String).Trim()).Split('|')
+    if ($labelParts.Count -lt 3 -or $labelParts[0] -ne $identity -or $labelParts[1] -ne $commit -or $labelParts[2] -ne $identity) { throw "RELEASE_IMAGE_LABELS_MISMATCH: $image" }
+    $imageRecords[$service] = [ordered]@{ reference = $image; imageId = ($inspect | Out-String).Trim(); buildIdentity = $labelParts[0]; revision = $labelParts[1] }
+}
+$configuredImages = @(& docker compose @compose @profiles config --images | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+if ($LASTEXITCODE -ne 0 -or $configuredImages.Count -eq 0) { throw "RELEASE_COMPOSE_IMAGE_LIST_FAILED" }
+$infrastructure = [ordered]@{}
+foreach ($image in $configuredImages) {
+    $inspect = docker image inspect $image --format '{{.Id}}'
+    if ($LASTEXITCODE -ne 0) { throw "RELEASE_INFRA_IMAGE_MISSING: $image" }
+    if ($image -match ':(dev|latest)(@|$)') { throw "RELEASE_INFRA_IMAGE_UNPINNED: $image" }
+    $infrastructure[$image] = [ordered]@{ reference = $image; imageId = ($inspect | Out-String).Trim() }
+}
+
+$finalRoot = [IO.Path]::GetFullPath((Join-Path $repo $OutputRoot))
+$stage = "$finalRoot.staging.$tag.$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'compose.dev.yml') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $repo 'compose.lan.yml') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $repo 'compose.release.yml') -Destination $stage
+foreach ($example in @('.env.example','.env.lan.example')) {
+    if (Test-Path -LiteralPath (Join-Path $repo $example)) { Copy-Item -LiteralPath (Join-Path $repo $example) -Destination $stage }
+}
+$caddySource = Join-Path $repo 'infrastructure\caddy'
+if (Test-Path -LiteralPath $caddySource -PathType Container) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage 'infrastructure\caddy') | Out-Null
+    Get-ChildItem -LiteralPath $caddySource -File | Where-Object { $_.Name -in @('Caddyfile','Caddyfile.lan') } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage "infrastructure\caddy\$($_.Name)")
+    }
+}
+foreach ($script in @('start-server-bundle.ps1','stop-server-bundle.ps1','doctor-server-bundle.ps1','install-server-startup-task.ps1','prune-stale-worker-heartbeats.ps1','backup.ps1','restore.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $repo "scripts\$script") -Destination $stage
+}
+if (Test-Path -LiteralPath (Join-Path $repo 'migrations')) {
+    Copy-Item -LiteralPath (Join-Path $repo 'migrations') -Destination (Join-Path $stage 'migrations') -Recurse
+} elseif (Test-Path -LiteralPath (Join-Path $repo 'apps\server\WhisperX.Atom.Api\Migrations')) {
+    Copy-Item -LiteralPath (Join-Path $repo 'apps\server\WhisperX.Atom.Api\Migrations') -Destination (Join-Path $stage 'migrations') -Recurse
+}
+if (Test-Path -LiteralPath (Join-Path $repo 'artifacts\model-manifests')) { Copy-Item -LiteralPath (Join-Path $repo 'artifacts\model-manifests') -Destination (Join-Path $stage 'model-manifests') -Recurse }
+
+$migrationSource = if (Test-Path -LiteralPath (Join-Path $repo 'migrations')) { Join-Path $repo 'migrations' } else { Join-Path $repo 'apps\server\WhisperX.Atom.Api\Migrations' }
+$migrationManifest = @()
+if (Test-Path -LiteralPath $migrationSource -PathType Container) {
+    $migrationManifest = @(Get-ChildItem -LiteralPath $migrationSource -Filter '*.sql' -File | Sort-Object Name | ForEach-Object {
+        [ordered]@{ name = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    })
+}
+
+$allImages = @($imageRecords.Values | ForEach-Object { $_.reference }) + @($infrastructure.Values | ForEach-Object { $_.reference })
+& docker save $allImages -o (Join-Path $stage 'docker-images.tar')
+if ($LASTEXITCODE -ne 0) { throw "RELEASE_DOCKER_SAVE_FAILED" }
+$dockerTarHash = (Get-FileHash -LiteralPath (Join-Path $stage 'docker-images.tar') -Algorithm SHA256).Hash.ToLowerInvariant()
+
+$manifest = [ordered]@{
+    schemaVersion = 1
+    product = 'WhisperX Atom'
+    version = '1.0.1'
+    commit = $commit
+    buildIdentity = $identity
+    releaseTag = $tag
+    generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    images = $imageRecords
+    infrastructureImages = $infrastructure
+    migrations = $migrationManifest
+    dockerImages = [ordered]@{ path = 'docker-images.tar'; sha256 = $dockerTarHash }
+    compose = @('compose.dev.yml','compose.lan.yml','compose.release.yml')
+    volumesPolicy = 'preserve'
+    secretsPolicy = 'external-env-only'
+}
+$manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding utf8
+([ordered]@{ algorithm = 'SHA256'; path = 'docker-images.tar'; hash = $dockerTarHash } | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $stage 'docker-images.sha256.json') -Encoding utf8
+if (Test-Path -LiteralPath $finalRoot) { Remove-Item -LiteralPath $finalRoot -Recurse -Force }
+Move-Item -LiteralPath $stage -Destination $finalRoot
+$archive = [IO.Path]::GetFullPath((Join-Path $repo $ArchivePath))
+$archiveParent = Split-Path -Parent $archive
+New-Item -ItemType Directory -Force -Path $archiveParent | Out-Null
+Compress-Archive -Path (Join-Path $finalRoot '*') -DestinationPath $archive -CompressionLevel Optimal -Force
+if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "RELEASE_SERVER_ARCHIVE_MISSING" }
+Write-Host "SERVER_BUNDLE_READY=$finalRoot"
+Write-Host "SERVER_BUNDLE_ARCHIVE=$archive"
+Write-Host "BUILD_IDENTITY=$identity"

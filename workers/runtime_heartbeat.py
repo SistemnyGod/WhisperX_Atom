@@ -45,7 +45,13 @@ def write_heartbeat(
     """Publish a best-effort worker heartbeat without affecting the worker loop."""
     if psycopg is None:
         return
-    version = os.getenv("APP_VERSION", os.getenv("WHISPERX_VERSION", "dev"))
+    # Release orchestration provides one immutable identity to every worker.
+    # Keep APP_VERSION as a backwards-compatible fallback for development,
+    # but never silently downgrade an explicitly supplied build identity.
+    version = os.getenv(
+        "WHISPERX_BUILD_IDENTITY",
+        os.getenv("APP_VERSION", os.getenv("WHISPERX_VERSION", "dev")),
+    )
     payload = json.dumps(capabilities or {}, ensure_ascii=False)
     try:
         with psycopg.connect(_conninfo(), connect_timeout=3) as connection:

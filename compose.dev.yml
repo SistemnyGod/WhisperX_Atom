@@ -59,8 +59,13 @@ services:
 
   api:
     profiles: ["core", "gpu"]
+    image: whisperx-atom-api:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: ./apps/server/WhisperX.Atom.Api
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       # This file is development-only. Production uses compose.prod.yml.
@@ -75,6 +80,7 @@ services:
       AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET}
       VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
       WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
       ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
       AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
       COOKIE_SECURE: "false"
@@ -93,9 +99,14 @@ services:
 
   outbox-relay:
     profiles: ["core", "gpu"]
+    image: whisperx-atom-outbox-relay:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: .
       dockerfile: workers/outbox_relay/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
@@ -106,6 +117,7 @@ services:
       WORKER_NAME: outbox-relay
       WORKER_INSTANCE_ID: outbox-relay
       APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
     depends_on:
       api:
         condition: service_healthy
@@ -122,9 +134,14 @@ services:
 
   import-worker:
     profiles: ["core", "gpu"]
+    image: whisperx-atom-import-worker:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: .
       dockerfile: workers/import_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       API_URL: http://api:8080
@@ -142,6 +159,7 @@ services:
       WORKER_NAME: import-worker
       WORKER_INSTANCE_ID: import-worker
       APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
     depends_on:
       api:
         condition: service_healthy
@@ -155,9 +173,14 @@ services:
 
   media-worker:
     profiles: ["core", "gpu"]
+    image: whisperx-atom-media-worker:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: .
       dockerfile: workers/media_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
@@ -169,6 +192,7 @@ services:
       WORKER_NAME: media-worker
       WORKER_INSTANCE_ID: media-worker
       APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
     depends_on:
       postgres:
         condition: service_healthy
@@ -184,9 +208,14 @@ services:
 
   gpu-worker:
     profiles: ["gpu"]
+    image: whisperx-atom-gpu-worker:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: .
       dockerfile: workers/ml_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       NATS_URL: nats://nats:4222
@@ -205,6 +234,7 @@ services:
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
       WORKER_INSTANCE_ID: ${GPU_WORKER_INSTANCE_ID:-gpu-worker}
       APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
       # pyannote 3.3.2 checkpoints are trusted local/HF artifacts and require the pre-2.6 torch.load behavior.
       # Do not share the GPU with the manually started diagnostic LLM server.
       GPU_ENFORCE_NO_RESIDENT_LLM: "true"
@@ -296,9 +326,14 @@ services:
       retries: 3
       start_period: 30s
     profiles: ["llm"]
+    image: whisperx-atom-summary-worker:${WHISPERX_RELEASE_TAG:-dev}
     build:
       context: .
       dockerfile: workers/summary_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
     restart: unless-stopped
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
@@ -317,6 +352,7 @@ services:
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
       WORKER_INSTANCE_ID: summary-worker
       APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
       ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
     volumes:
       - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro

@@ -20,14 +20,11 @@ if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
 $dirtySuffix = if ($dirtyFiles.Count -gt 0) { "-dirty" } else { "" }
 $buildIdentity = "1.0.1+$gitCommit$dirtySuffix"
 Write-Host "Publishing build identity $buildIdentity"
-$output = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
-if ([string]::IsNullOrWhiteSpace($output) -or $output -eq $repoRoot -or $output.Length -lt ($repoRoot.Length + 8)) {
-    throw "Refusing unsafe output path: $output"
+$finalOutput = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
+if ([string]::IsNullOrWhiteSpace($finalOutput) -or $finalOutput -eq $repoRoot -or $finalOutput.Length -lt ($repoRoot.Length + 8)) {
+    throw "Refusing unsafe output path: $finalOutput"
 }
-
-if (Test-Path -LiteralPath $output) {
-    Remove-Item -LiteralPath $output -Recurse -Force
-}
+$output = "$finalOutput.staging.$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 $desktopProject = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\WhisperX.Atom.Desktop.csproj"
@@ -61,6 +58,7 @@ Invoke-Publish $voiceHostPublishArgs
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Install-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Uninstall-Service.ps1") $output
 Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Configure-RecorderHostUser.ps1") $output
+Copy-Item (Join-Path $repoRoot "apps\desktop\Installer\Preflight-Upgrade.ps1") $output
 
 # FFmpeg is an explicit installer input. Do not silently pick an arbitrary
 # executable from the build host PATH; release packaging must be reproducible.
@@ -88,5 +86,37 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
     }
     Copy-Item -LiteralPath $ffmpegManifest -Destination (Join-Path $target "ffmpeg-manifest.json") -Force
 }
-Write-Host "Desktop package published to $output"
+[ordered]@{
+    schemaVersion = 1
+    product = "WhisperX Atom"
+    version = "1.0.1"
+    buildIdentity = $buildIdentity
+    commit = $gitCommit
+    dirty = $dirtyFiles.Count -gt 0
+    generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+    components = @(
+        @{ name = "Desktop"; path = (Join-Path $desktopOut "WhisperX.Atom.Desktop.exe") },
+        @{ name = "RecorderService"; path = (Join-Path $serviceOut "WhisperX.Atom.Recorder.Service.exe") },
+        @{ name = "RecorderHost"; path = (Join-Path $recorderHostOut "WhisperX.Atom.Recorder.Host.exe") },
+        @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") }
+    ) | ForEach-Object {
+        [ordered]@{ name = $_.name; path = $_.path.Substring($output.Length + 1); sha256 = (Get-FileHash -LiteralPath $_.path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $output "build-identity.json") -Encoding utf8
+try {
+    $previous = $null
+    if (Test-Path -LiteralPath $finalOutput) {
+        $previous = "$finalOutput.previous.$([Guid]::NewGuid().ToString('N'))"
+        Move-Item -LiteralPath $finalOutput -Destination $previous
+    }
+    Move-Item -LiteralPath $output -Destination $finalOutput
+    if ($previous -and (Test-Path -LiteralPath $previous)) { Remove-Item -LiteralPath $previous -Recurse -Force }
+} catch {
+    if (-not (Test-Path -LiteralPath $finalOutput) -and $previous -and (Test-Path -LiteralPath $previous)) {
+        Move-Item -LiteralPath $previous -Destination $finalOutput
+    }
+    if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Recurse -Force }
+    throw
+}
+Write-Host "Desktop package published to $finalOutput"
 Write-Host "Next: compile apps\desktop\Installer\WhisperXAtom.iss with Inno Setup."

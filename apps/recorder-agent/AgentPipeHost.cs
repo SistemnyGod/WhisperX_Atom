@@ -329,7 +329,7 @@ public sealed class AgentPipeHost(
             {
                 "LOCAL_READY" => stage == "LOCAL_FINALIZATION" ? "RAW_DURABILITY_FAILED" : "LOCAL_ARCHIVE_FAILED",
                 "RECOVERY_PENDING" => "RAW_RECOVERY_PENDING",
-                _ => stage == "LOCAL_FINALIZATION" ? "RAW_DURABILITY_FAILED" : "NO_AUDIO_CAPTURED"
+                _ => durability.ErrorCode ?? (stage == "LOCAL_FINALIZATION" ? "RAW_DURABILITY_FAILED" : "NO_AUDIO_CAPTURED")
             };
             var detail = durability.State == "RECOVERY_PENDING"
                 ? "A non-empty PCM part remains and will be recovered on the next startup/reconciliation pass."

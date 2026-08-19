@@ -312,13 +312,25 @@ $machineConfigPart = "$machineConfigPath.part"
 Set-Content -LiteralPath $machineConfigPart -Value $machineConfig -Encoding utf8
 Move-Item -LiteralPath $machineConfigPart -Destination $machineConfigPath -Force
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$priorStartMode = "demand"
+$priorWasRunning = $false
 if ($null -ne $existing) {
-    if ($existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue }
-    sc.exe delete $serviceName | Out-Null
-    Start-Sleep -Seconds 1
+    $priorWasRunning = $existing.Status -eq "Running"
+    $serviceCim = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+    if ($serviceCim -and $serviceCim.StartMode -in @("Auto", "Manual", "Disabled")) {
+        $priorStartMode = switch ($serviceCim.StartMode) { "Auto" { "auto" } "Disabled" { "disabled" } default { "demand" } }
+    }
+    if ($existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force -ErrorAction Stop }
+    # Reconfigure in place. Deleting/recreating the service loses recovery
+    # policy and creates a window where a rollback cannot restore the old
+    # command line.
+    & sc.exe config $serviceName "binPath=$serviceCommandLine" "DisplayName=$displayName" "start=$priorStartMode" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "RECORDER_SERVICE_RECONFIGURE_FAILED: $LASTEXITCODE" }
+} else {
+    New-Service -Name $serviceName -DisplayName $displayName -Description "Legacy fallback for WhisperX Atom recording" -BinaryPathName $serviceCommandLine -StartupType Manual | Out-Null
+    & sc.exe config $serviceName "start=demand" | Out-Null
 }
-New-Service -Name $serviceName -DisplayName $displayName -Description "Legacy fallback for WhisperX Atom recording" -BinaryPathName $serviceCommandLine -StartupType Manual | Out-Null
-sc.exe config $serviceName start= demand | Out-Null
-sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
-Write-Host "Installed $displayName in Manual/Stopped fallback mode"
+& sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
+if ($priorWasRunning) { Start-Service -Name $serviceName -ErrorAction Stop }
+Write-Host "Installed $displayName without replacing service identity (start=$priorStartMode, wasRunning=$priorWasRunning)"
 Write-Host "RECORDER_RUNTIME_DEFAULT=AUDIOGRAPH"
