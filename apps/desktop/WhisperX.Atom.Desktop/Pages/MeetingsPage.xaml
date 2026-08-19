@@ -17,7 +17,7 @@
             </controls:PageHeader.Actions>
         </controls:PageHeader>
 
-        <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="*,380" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
+        <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="*,420" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
             <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="16">
                 <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" RowSpacing="12">
                     <Grid ColumnDefinitions="*,Auto">
@@ -55,7 +55,7 @@
                         <ListView x:Name="MeetingsList" ItemsSource="{Binding FilteredMeetings}" SelectionMode="Single" SelectionChanged="MeetingsList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="12,9" MinHeight="46">
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="12,9" MinHeight="{StaticResource TableRowHeight}">
                                         <Grid ColumnDefinitions="100,*,150" ColumnSpacing="10">
                                             <TextBlock Text="{Binding CreatedAtText}" Style="{StaticResource TableCellStyle}" Foreground="{StaticResource MutedTextBrush}" />
                                             <StackPanel Grid.Column="1" Spacing="2">
@@ -84,17 +84,18 @@
 
             <Border x:Name="WorkspaceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid RowDefinitions="Auto,Auto,*">
-                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto" ColumnSpacing="16">
                         <StackPanel Spacing="3">
                             <TextBlock x:Name="WorkspaceEyebrow" Text="ВЫБРАННОЕ СОВЕЩАНИЕ" Style="{StaticResource EyebrowStyle}" />
                             <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                             <TextBlock x:Name="WorkspaceMeta" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                             <controls:StatusBadge x:Name="WorkspaceStatusBadge" Text="Ожидает выбора встречи" Status="" HorizontalAlignment="Left" Margin="0,4,0,0" />
                         </StackPanel>
-                        <Button x:Name="OpenWorkspaceButton" Grid.Column="1" Content="Открыть совещание" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" />
-                        <Button x:Name="RefreshWorkspaceButton" Grid.Column="2" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
-                        <Button x:Name="RetryButton" Grid.Column="3" Content="Повторить обработку" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
-                        <Button x:Name="WorkspaceMoreButton" Grid.Column="4" Content="⋯" Style="{StaticResource IconButtonStyle}" IsEnabled="False" AutomationProperties.Name="Дополнительные действия совещания" ToolTipService.ToolTip="Отменить, экспортировать или удалить">
+                        <StackPanel x:Name="WorkspaceActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                            <Button x:Name="OpenWorkspaceButton" Content="Открыть совещание" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" />
+                            <Button x:Name="RefreshWorkspaceButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
+                            <Button x:Name="RetryButton" Content="Повторить обработку" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
+                            <Button x:Name="WorkspaceMoreButton" Content="⋯" Style="{StaticResource IconButtonStyle}" IsEnabled="False" AutomationProperties.Name="Дополнительные действия совещания" ToolTipService.ToolTip="Отменить, экспортировать или удалить">
                             <Button.Flyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem x:Name="RefreshWorkspaceMenuItem" Text="Обновить" Click="RefreshWorkspaceButton_Click" />
@@ -106,7 +107,8 @@
                                     <MenuFlyoutItem x:Name="DeleteMeetingMenuItem" Text="Удалить совещание" Click="DeleteMeetingButton_Click" />
                                 </MenuFlyout>
                             </Button.Flyout>
-                        </Button>
+                            </Button>
+                        </StackPanel>
                         <!-- Retained for code-behind and accessibility compatibility; destructive actions stay in the overflow menu. -->
                         <Button x:Name="CancelProcessingButton" Grid.Column="5" Visibility="Collapsed" Content="Отменить обработку" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="CancelProcessingButton_Click" />
                         <Button x:Name="DeleteMeetingButton" Grid.Column="6" Visibility="Collapsed" Content="Удалить" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="DeleteMeetingButton_Click" />
@@ -178,30 +180,41 @@
 
                                 <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <Grid Padding="20" RowDefinitions="Auto,*" RowSpacing="12">
-                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                                        <Grid x:Name="TranscriptHeaderGrid" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">
                                             <StackPanel Spacing="2">
                                                 <TextBlock Text="Стенограмма встречи" Style="{StaticResource SectionTitleStyle}" />
                                                 <TextBlock x:Name="TranscriptMetaText" Text="Стенограмма ещё не готова" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                 <TextBlock x:Name="TranscriptQualityText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                 <TextBlock x:Name="TranscriptWarningText" Foreground="{StaticResource WarningBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                             </StackPanel>
-                                            <Button Grid.Column="1" Content="Скачать TXT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptTextButton_Click" />
-                                            <Button Grid.Column="2" Content="Скачать SRT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptSrtButton_Click" />
-                                            <Button Grid.Column="3" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="ReprocessTranscriptButton_Click" />
-                                            <Button Grid.Column="4" Content="Скачать аудио" Style="{StaticResource SecondaryButtonStyle}" Click="DownloadPrimaryAudioButton_Click" />
+                                            <Button x:Name="TranscriptReprocessButton" Grid.Column="1" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="ReprocessTranscriptButton_Click" />
+                                            <Button x:Name="TranscriptExportButton" Grid.Column="2" Content="Экспорт" Style="{StaticResource SecondaryButtonStyle}" AutomationProperties.Name="Экспортировать материалы совещания">
+                                                <Button.Flyout>
+                                                    <MenuFlyout>
+                                                        <MenuFlyoutItem Text="Скачать стенограмму TXT" Click="ExportTranscriptTextButton_Click" />
+                                                        <MenuFlyoutItem Text="Скачать субтитры SRT" Click="ExportTranscriptSrtButton_Click" />
+                                                        <MenuFlyoutSeparator />
+                                                        <MenuFlyoutItem Text="Скачать аудио" Click="DownloadPrimaryAudioButton_Click" />
+                                                    </MenuFlyout>
+                                                </Button.Flyout>
+                                            </Button>
                                         </Grid>
-                                        <Grid Grid.Row="1" ColumnDefinitions="*,300" ColumnSpacing="16">
+                                        <Grid x:Name="TranscriptWorkspaceGrid" Grid.Row="1" ColumnDefinitions="*,300" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="12">
                                             <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
                                                 <MediaPlayerElement x:Name="TranscriptPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
-                                                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
-                                                    <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" Width="260" />
-                                                    <Button Content="Пред." Style="{StaticResource SecondaryButtonStyle}" Click="PreviousTranscriptMatchButton_Click" />
-                                                    <Button Content="След." Style="{StaticResource SecondaryButtonStyle}" Click="NextTranscriptMatchButton_Click" />
-                                                    <TextBlock x:Name="TranscriptSearchStatus" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                                    <CheckBox x:Name="HideTechnicalEventsCheckBox" Content="Скрывать технические события" IsChecked="True" Checked="HideTechnicalEventsCheckBox_Changed" Unchecked="HideTechnicalEventsCheckBox_Changed" VerticalAlignment="Center" />
-                                                    <CheckBox x:Name="TranscriptAutoScrollCheckBox" Content="Автопрокрутка" IsChecked="True" VerticalAlignment="Center" />
-                                                    <Button x:Name="EditSegmentButton" Content="Изменить сегмент" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="EditSegmentButton_Click" />
-                                                </StackPanel>
+                                                <Grid x:Name="TranscriptToolbar" Grid.Row="1" RowDefinitions="Auto,Auto" RowSpacing="8">
+                                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+                                                        <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
+                                                        <Button Grid.Column="1" Content="Пред." Style="{StaticResource SecondaryButtonStyle}" Click="PreviousTranscriptMatchButton_Click" />
+                                                        <Button Grid.Column="2" Content="След." Style="{StaticResource SecondaryButtonStyle}" Click="NextTranscriptMatchButton_Click" />
+                                                        <TextBlock x:Name="TranscriptSearchStatus" Grid.Column="3" MinWidth="88" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </Grid>
+                                                    <StackPanel x:Name="TranscriptOptionsPanel" Grid.Row="1" Orientation="Horizontal" Spacing="14">
+                                                        <CheckBox x:Name="HideTechnicalEventsCheckBox" Content="Скрывать технические события" IsChecked="True" Checked="HideTechnicalEventsCheckBox_Changed" Unchecked="HideTechnicalEventsCheckBox_Changed" VerticalAlignment="Center" />
+                                                        <CheckBox x:Name="TranscriptAutoScrollCheckBox" Content="Автопрокрутка" IsChecked="True" VerticalAlignment="Center" />
+                                                        <Button x:Name="EditSegmentButton" Content="Изменить сегмент" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="EditSegmentButton_Click" />
+                                                    </StackPanel>
+                                                </Grid>
                                                 <Grid Grid.Row="2">
                                                     <ListView x:Name="TranscriptList" ItemsSource="{Binding TranscriptSegments}" SelectionMode="Single" SelectionChanged="TranscriptList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                                         <ListView.ItemTemplate>
@@ -211,7 +224,7 @@
                                                                         <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                                         <StackPanel Grid.Column="1" Spacing="4">
                                                                             <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
-                                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" MaxWidth="880" HorizontalAlignment="Left" LineHeight="22" />
                                                                         </StackPanel>
                                                                     </Grid>
                                                                 </Border>
@@ -225,7 +238,7 @@
                                                     </StackPanel>
                                                 </Grid>
                                             </Grid>
-                                            <Border Grid.Column="1" Background="{StaticResource SurfaceBlueBrush}" Padding="14" CornerRadius="10">
+                                            <Border x:Name="TranscriptStatusPanel" Grid.Column="1" Background="{StaticResource SurfaceBlueBrush}" Padding="14" CornerRadius="10">
                                                 <StackPanel Spacing="8">
                                                     <TextBlock Text="Состояние обработки" Style="{StaticResource SectionTitleStyle}" />
                                                     <ListView ItemsSource="{Binding Jobs}" SelectionMode="None" BorderThickness="0" MaxHeight="210">
@@ -289,7 +302,7 @@
                                                 <Button Grid.Column="1" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildSummaryButton_Click" />
                                             </Grid>
                                             <TextBlock x:Name="SummaryText" Text="Саммари пока не готово." TextWrapping="Wrap" LineHeight="22" />
-                                            <Grid ColumnDefinitions="*,*" ColumnSpacing="12" Margin="0,8,0,0">
+                                            <Grid x:Name="ProtocolCardsGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="12" RowSpacing="12" Margin="0,8,0,0">
                                                 <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
                                                     <StackPanel Spacing="6">
                                                         <TextBlock Text="Решения" Style="{StaticResource SectionTitleStyle}" />

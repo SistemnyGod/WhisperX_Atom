@@ -16,6 +16,8 @@ public sealed partial class RecordingPage : Page
     private FrontendServices? _services;
     public RecordingViewModel? ViewModel { get; private set; }
     private bool _updatingSelections;
+    private PageLayoutMode? _lastLayoutMode;
+    private bool? _lastActionCompact;
 
     public RecordingPage()
     {
@@ -204,8 +206,13 @@ public sealed partial class RecordingPage : Page
 
     private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+        var actionCompact = e.NewSize.Width < 760;
+        if (_lastLayoutMode == mode && _lastActionCompact == actionCompact) return;
+        _lastLayoutMode = mode;
+        _lastActionCompact = actionCompact;
         UpdateIdleSetupLayout(e.NewSize.Width < 900);
-        RecordingActionsPanel.Orientation = e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal;
+        RecordingActionsPanel.Orientation = actionCompact ? Orientation.Vertical : Orientation.Horizontal;
         UpdateActionButtons();
     }
 

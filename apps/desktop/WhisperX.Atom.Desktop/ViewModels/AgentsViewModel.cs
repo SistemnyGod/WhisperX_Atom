@@ -24,11 +24,13 @@ public sealed class AgentsViewModel : ObservableObject
     private string _summaryStatus = "Воркер саммари: проверка…";
     private string _errorText = string.Empty;
     private string _warningText = string.Empty;
+    private string _searchText = string.Empty;
     private DesktopAgent? _selectedAgent;
 
     public AgentsViewModel(FrontendServices services) => _services = services;
 
     public ObservableCollection<DesktopAgent> Agents { get; } = [];
+    public ObservableCollection<DesktopAgent> FilteredAgents { get; } = [];
 
     public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
     public bool ApiAvailable { get => _apiAvailable; private set => SetProperty(ref _apiAvailable, value); }
@@ -45,6 +47,15 @@ public sealed class AgentsViewModel : ObservableObject
     public string SummaryStatus { get => _summaryStatus; private set => SetProperty(ref _summaryStatus, value); }
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
     public string WarningText { get => _warningText; private set => SetProperty(ref _warningText, value); }
+    public string SearchText
+    {
+        get => _searchText;
+        set
+        {
+            if (!SetProperty(ref _searchText, value)) return;
+            ApplyFilter();
+        }
+    }
 
     public DesktopAgent? SelectedAgent
     {
@@ -57,6 +68,7 @@ public sealed class AgentsViewModel : ObservableObject
     }
 
     public bool HasAgents => Agents.Count > 0;
+    public bool HasVisibleAgents => FilteredAgents.Count > 0;
     public bool HasSelection => SelectedAgent is not null;
     public string AgentCountText => Agents.Count.ToString();
     public string OnlineCountText => Agents.Count(agent => agent.IsActive).ToString();
@@ -125,6 +137,7 @@ public sealed class AgentsViewModel : ObservableObject
             var agents = await _services.Backend.GetAgentsAsync(cancellationToken);
             Agents.Clear();
             foreach (var agent in agents.OrderBy(item => item.Name)) Agents.Add(agent);
+            ApplyFilter();
             SelectedAgent = null;
             ApiStatus = $"API подключён · агентов: {Agents.Count}";
             try
@@ -179,13 +192,31 @@ public sealed class AgentsViewModel : ObservableObject
     private void ClearAgents()
     {
         Agents.Clear();
+        FilteredAgents.Clear();
         SelectedAgent = null;
         NotifyCollectionStateChanged();
+    }
+
+    private void ApplyFilter()
+    {
+        var query = SearchText.Trim();
+        FilteredAgents.Clear();
+        foreach (var agent in Agents.Where(agent =>
+                     string.IsNullOrWhiteSpace(query)
+                     || agent.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+                     || agent.EffectiveStatusText.Contains(query, StringComparison.OrdinalIgnoreCase)
+                     || agent.RoomText.Contains(query, StringComparison.OrdinalIgnoreCase))
+                 .OrderBy(agent => agent.Name))
+            FilteredAgents.Add(agent);
+
+        if (SelectedAgent is not null && !FilteredAgents.Contains(SelectedAgent)) SelectedAgent = null;
+        OnPropertyChanged(nameof(HasVisibleAgents));
     }
 
     private void NotifyCollectionStateChanged()
     {
         OnPropertyChanged(nameof(HasAgents));
+        OnPropertyChanged(nameof(HasVisibleAgents));
         OnPropertyChanged(nameof(AgentCountText));
         OnPropertyChanged(nameof(OnlineCountText));
         OnPropertyChanged(nameof(UnavailableCountText));

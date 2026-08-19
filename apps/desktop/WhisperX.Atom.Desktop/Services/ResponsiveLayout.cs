@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using System.Runtime.CompilerServices;
 
 namespace WhisperX_Atom_Desktop.Services;
 
@@ -12,6 +13,18 @@ internal enum PageLayoutMode
 
 internal static class ResponsiveLayout
 {
+    private sealed class LayoutCache
+    {
+        public PageLayoutMode? Mode { get; set; }
+        public int CardCount { get; set; } = -1;
+        public bool AllowStandard { get; set; }
+    }
+
+    // SizeChanged fires continuously while a window is resized. Keep the last
+    // breakpoint per grid so an in-breakpoint resize only changes available
+    // space and never tears down/rebuilds the visual tree.
+    private static readonly ConditionalWeakTable<Grid, LayoutCache> Cache = new();
+
     public static PageLayoutMode GetMode(double width) => width < 920
         ? PageLayoutMode.Compact
         : width < 1200
@@ -20,7 +33,7 @@ internal static class ResponsiveLayout
 
     public static bool IsWide(double width) => GetMode(width) == PageLayoutMode.Wide;
 
-    public static void SetTwoColumn(Grid? grid, FrameworkElement? first, FrameworkElement? second, double secondColumnWidth, double width)
+    public static void SetTwoColumn(Grid? grid, FrameworkElement? first, FrameworkElement? second, double secondColumnWidth, double width, bool allowStandard = false)
     {
         // SizeChanged can fire while a freshly navigated XAML tree is still
         // materialising. A transient null must not take down the Desktop.
@@ -30,7 +43,10 @@ internal static class ResponsiveLayout
         while (grid.RowDefinitions.Count < 2)
             grid.RowDefinitions.Add(new RowDefinition());
 
-        var wide = IsWide(width);
+        var mode = GetMode(width);
+        var cache = Cache.GetOrCreateValue(grid);
+        if (cache.Mode == mode && cache.AllowStandard == allowStandard) return;
+        var wide = mode == PageLayoutMode.Wide || allowStandard && mode == PageLayoutMode.Standard;
         grid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
         grid.ColumnDefinitions[1].Width = wide ? new GridLength(secondColumnWidth) : new GridLength(0);
         grid.RowDefinitions[0].Height = wide ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
@@ -39,6 +55,8 @@ internal static class ResponsiveLayout
         Grid.SetRow(first, 0);
         Grid.SetColumn(second, wide ? 1 : 0);
         Grid.SetRow(second, wide ? 0 : 1);
+        cache.Mode = mode;
+        cache.AllowStandard = allowStandard;
     }
 
     public static void SetCardColumns(Grid? grid, IReadOnlyList<FrameworkElement?> cards, double width, int wideMaxColumns = int.MaxValue)
@@ -46,6 +64,9 @@ internal static class ResponsiveLayout
         if (grid is null || cards is null || cards.Count == 0) return;
         var validCards = cards.Where(card => card is not null).ToArray();
         if (validCards.Length == 0) return;
+        var mode = GetMode(width);
+        var cache = Cache.GetOrCreateValue(grid);
+        if (cache.Mode == mode && cache.CardCount == validCards.Length) return;
         var columns = GetMode(width) switch
         {
             PageLayoutMode.Compact => 1,
@@ -62,5 +83,7 @@ internal static class ResponsiveLayout
             Grid.SetColumn(validCards[index], index % columns);
             Grid.SetRow(validCards[index], index / columns);
         }
+        cache.Mode = mode;
+        cache.CardCount = validCards.Length;
     }
 }

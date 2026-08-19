@@ -92,9 +92,9 @@
         <Setter Property="Foreground" Value="White" />
         <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="Padding" Value="18,10" />
-        <Setter Property="MinHeight" Value="40" />
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="Padding" Value="18,11" />
+        <Setter Property="MinHeight" Value="44" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
@@ -110,7 +110,7 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="CornerRadius" Value="10" />
         <Setter Property="Padding" Value="16,9" />
         <Setter Property="MinHeight" Value="40" />
         <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -127,7 +127,7 @@
         <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource DangerBorderBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="CornerRadius" Value="10" />
         <Setter Property="Padding" Value="16,9" />
         <Setter Property="MinHeight" Value="40" />
         <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -163,8 +163,8 @@
     </Style>
     <Style x:Key="ToolbarButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}">
         <Setter Property="FontSize" Value="{StaticResource ToolbarTextSize}" />
-        <Setter Property="Padding" Value="12,7" />
-        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Padding" Value="14,8" />
+        <Setter Property="MinHeight" Value="38" />
     </Style>
     <Style x:Key="IconButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
         <Setter Property="Width" Value="36" />
@@ -229,17 +229,31 @@
         <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
         <Setter Property="MinHeight" Value="40" />
         <Setter Property="Padding" Value="12,8" />
+        <Setter Property="IsClosable" Value="False" />
     </Style>
     <Style x:Key="CardStyle" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="CornerRadius" Value="10" />
         <Setter Property="Padding" Value="16" />
     </Style>
     <Style x:Key="InspectorPanelStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
         <Setter Property="Padding" Value="18" />
         <Setter Property="MinWidth" Value="{StaticResource InspectorWidth}" />
+    </Style>
+    <Style x:Key="PanelHeaderStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource SectionTitleSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+    <Style x:Key="InlineNoticeStyle" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource InfoSurfaceBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12,10" />
     </Style>
     <Style x:Key="TableHeaderStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="{StaticResource CaptionTextSize}" />

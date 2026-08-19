@@ -16,6 +16,7 @@ public sealed partial class SettingsPage : Page
     private FrontendServices? _services;
     private CancellationTokenSource? _voiceRefreshCts;
     private DispatcherQueueTimer? _voiceBarsTimer;
+    private PageLayoutMode? _lastLayoutMode;
     private readonly List<Border> _voiceBars = [];
     private readonly Brush _voiceWaitingBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray);
     private readonly Brush _voiceSpeechBrush = new SolidColorBrush(Microsoft.UI.Colors.MediumSeaGreen);
@@ -450,17 +451,47 @@ public sealed partial class SettingsPage : Page
         ApplyResponsiveLayout(e.NewSize.Width);
     }
 
+    private void ScrollToConnectionButton_Click(object sender, RoutedEventArgs e) => ScrollToSection(ApiSettingsCard);
+
+    private void ScrollToMifodiyButton_Click(object sender, RoutedEventArgs e)
+    {
+        MifodiySectionExpander.IsExpanded = true;
+        ScrollToSection(MifodiySectionExpander);
+    }
+
+    private void ScrollToArchiveButton_Click(object sender, RoutedEventArgs e) => ScrollToSection(ArchiveSectionCard);
+
+    private void ScrollToDiagnosticsButton_Click(object sender, RoutedEventArgs e)
+    {
+        RecorderDiagnosticsExpander.IsExpanded = true;
+        MifodiySectionExpander.IsExpanded = true;
+        MifodiyTechnicalDiagnosticsExpander.IsExpanded = true;
+        ScrollToSection(RecorderDiagnosticsExpander);
+    }
+
+    private static void ScrollToSection(FrameworkElement section) => section.StartBringIntoView(new BringIntoViewOptions
+    {
+        AnimationDesired = false,
+        VerticalAlignmentRatio = 0
+    });
+
     private void ApplyResponsiveLayout(double width)
     {
-        ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 420, width);
+        var mode = ResponsiveLayout.GetMode(width);
+        if (_lastLayoutMode == mode) return;
+        _lastLayoutMode = mode;
+        ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 380, width, allowStandard: true);
         ResponsiveLayout.SetCardColumns(MifodiyPrimaryGrid, new FrameworkElement?[] { MifodiySignalCard, MifodiyControlsCard }, width, 2);
-        ApiActionsPanel.Orientation = ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact
+        ApiActionsPanel.Orientation = mode == PageLayoutMode.Compact
             ? Orientation.Vertical
             : Orientation.Horizontal;
-        MifodiyTestActionsPanel.Orientation = ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact
+        MifodiyTestActionsPanel.Orientation = mode == PageLayoutMode.Compact
             ? Orientation.Vertical
             : Orientation.Horizontal;
-        ConfigureArchiveLayout(ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact);
+        SettingsSectionActionsPanel.Orientation = mode == PageLayoutMode.Compact
+            ? Orientation.Vertical
+            : Orientation.Horizontal;
+        ConfigureArchiveLayout(mode == PageLayoutMode.Compact);
     }
 
     private void ConfigureArchiveLayout(bool compact)

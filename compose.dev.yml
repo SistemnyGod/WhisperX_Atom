@@ -74,6 +74,9 @@ services:
       IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
       AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET}
       VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
+      WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
+      AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
       COOKIE_SECURE: "false"
     depends_on:
       postgres:
@@ -102,6 +105,7 @@ services:
       # runtime_healthcheck after a Docker restart.
       WORKER_NAME: outbox-relay
       WORKER_INSTANCE_ID: outbox-relay
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
     depends_on:
       api:
         condition: service_healthy
@@ -137,6 +141,7 @@ services:
       # older image while the healthcheck contract is already updated.
       WORKER_NAME: import-worker
       WORKER_INSTANCE_ID: import-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
     depends_on:
       api:
         condition: service_healthy
@@ -163,6 +168,7 @@ services:
       NATS_URL: nats://nats:4222
       WORKER_NAME: media-worker
       WORKER_INSTANCE_ID: media-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
     depends_on:
       postgres:
         condition: service_healthy
@@ -310,6 +316,7 @@ services:
       GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
       GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
       WORKER_INSTANCE_ID: summary-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
       ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
     volumes:
       - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro

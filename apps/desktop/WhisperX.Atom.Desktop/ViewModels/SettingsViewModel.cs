@@ -47,6 +47,10 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceExpectedBuild = "—";
     private string _voiceObservedBuild = "—";
     private string _voiceDiagnosticsDetail = "—";
+    private string _voiceEffectiveVoice = "—";
+    private bool _voiceFallbackUsed;
+    private string _voiceSpeechQueue = "Очередь речи: 0";
+    private string _voiceAssistantDelivery = "Доставка ответов: —";
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
     public ObservableCollection<string> VoiceOptions { get; } = new();
@@ -103,6 +107,11 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceName { get => _voiceName; set { if (SetProperty(ref _voiceName, value)) _ = ApplyVoiceSettingsAsync(); } }
     public int VoiceRate { get => _voiceRate; set { var valueToSet = Math.Clamp(value, -10, 10); if (SetProperty(ref _voiceRate, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
+    public string VoiceEffectiveVoice { get => _voiceEffectiveVoice; private set { if (SetProperty(ref _voiceEffectiveVoice, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
+    public bool VoiceFallbackUsed { get => _voiceFallbackUsed; private set { if (SetProperty(ref _voiceFallbackUsed, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
+    public string VoiceSpeechQueue { get => _voiceSpeechQueue; private set => SetProperty(ref _voiceSpeechQueue, value); }
+    public string VoiceAssistantDelivery { get => _voiceAssistantDelivery; private set => SetProperty(ref _voiceAssistantDelivery, value); }
+    public string VoiceVoiceStatus => VoiceFallbackUsed ? $"Используется fallback: {VoiceEffectiveVoice}" : $"Используется: {VoiceEffectiveVoice}";
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public string VoiceStatusLabel => ToVoiceStatusLabel(VoiceStatus);
     public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
@@ -168,6 +177,7 @@ public sealed class SettingsViewModel : ObservableObject
     {
         try
         {
+            RefreshAssistantDeliveryDiagnostics();
             var client = new WhisperX.Atom.Desktop.VoiceHostClient();
             var response = await client.GetStatusAsync().ConfigureAwait(true);
             if (VoiceOptions.Count == 0)
@@ -182,6 +192,9 @@ public sealed class SettingsViewModel : ObservableObject
             }
             if (response is null)
             {
+                VoiceEffectiveVoice = "—";
+                VoiceFallbackUsed = false;
+                VoiceSpeechQueue = "Очередь речи: —";
                 var controllerError = _services.VoiceHost.LastErrorCode;
                 ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                     controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}",
@@ -199,6 +212,7 @@ public sealed class SettingsViewModel : ObservableObject
                     "—",
                     "—",
                     _services.VoiceHost.LastErrorDetail ?? "—"));
+                RefreshAssistantDeliveryDiagnostics();
                 return;
             }
             var heartbeat = response.HeartbeatAtUtc ?? response.UpdatedAt;
@@ -221,6 +235,11 @@ public sealed class SettingsViewModel : ObservableObject
                 response.LastTraceId ?? "—",
                 response.LastCommandId ?? "—",
                 response.MicrophoneErrorDetail ?? _services.VoiceHost.LastErrorDetail ?? "—"));
+            VoiceEffectiveVoice = string.IsNullOrWhiteSpace(response.EffectiveVoiceName)
+                ? "—"
+                : $"{response.EffectiveVoiceName} ({response.EffectiveVoiceCulture ?? "ru-RU"})";
+            VoiceFallbackUsed = response.VoiceFallbackUsed;
+            VoiceSpeechQueue = $"Очередь речи: {response.SpeechQueueDepth} · отброшено: {response.SpeechQueueDrops}";
             var restartCount = _services.VoiceHost.RestartCount;
             if (_voiceRestartCountCache != restartCount)
             {
@@ -238,6 +257,9 @@ public sealed class SettingsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            VoiceEffectiveVoice = "—";
+            VoiceFallbackUsed = false;
+            VoiceSpeechQueue = "Очередь речи: —";
             var errorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
             ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                 $"Voice Host: {errorCode}",
@@ -255,7 +277,17 @@ public sealed class SettingsViewModel : ObservableObject
                 "—",
                 "—",
                 _services.VoiceHost.LastErrorDetail ?? ex.Message));
+            RefreshAssistantDeliveryDiagnostics();
         }
+    }
+
+    private void RefreshAssistantDeliveryDiagnostics()
+    {
+        var metrics = _services.AssistantDelivery.GetMetrics();
+        VoiceAssistantDelivery =
+            $"Ответы: pending {metrics.Pending} · приняты {metrics.Accepted} · доставлены {metrics.Delivered} · " +
+            $"отменены {metrics.Cancelled} · ambiguous {metrics.Ambiguous} · истекли {metrics.Expired} · " +
+            $"дубли подавлены {metrics.DuplicateSuppressed} · сбои {metrics.Failed}";
     }
 
     public void ApplyVoiceTelemetry(WhisperX.Atom.Desktop.VoiceTelemetryPacket packet)

@@ -16,6 +16,7 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Атом, кто отвечает за ремонт?").Intent == VoiceIntent.HistoryQuestion, "question intent");
         Assert(parser.Parse("Мифодий, покажи решения по ремонту").Intent == VoiceIntent.HistoryQuestion, "spoken meeting question without punctuation");
         Assert(parser.Parse("Мефодий, расскажи что решили").Intent == VoiceIntent.HistoryQuestion, "spoken meeting question alias");
+        Assert(parser.Parse("Мифодий, остановись").Intent == VoiceIntent.StopSpeaking, "stop speech intent");
 
         var commands = new (string Text, VoiceIntent Intent)[]
         {

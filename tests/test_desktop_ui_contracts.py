@@ -28,7 +28,8 @@ def test_recording_controls_explain_local_first_flow_and_adapt_to_compact_widths
     assert 'Text="Управление записью"' in recording
     assert 'ToolTipService.ToolTip="Запустить локальную запись"' in recording
     assert 'Text="ПОЗЖЕ"' in recording
-    assert 'e.NewSize.Width < 760 ? Orientation.Vertical : Orientation.Horizontal' in codebehind
+    assert 'var actionCompact = e.NewSize.Width < 760' in codebehind
+    assert 'RecordingActionsPanel.Orientation = actionCompact ? Orientation.Vertical : Orientation.Horizontal' in codebehind
     assert 'локальную запись' in codebehind
 
 
@@ -70,6 +71,29 @@ def test_home_dashboard_does_not_advertise_recording_when_recorder_is_unavailabl
     assert 'MicrophoneSignalState is "READY_NO_SIGNAL" or "CLIPPING"' in codebehind
 
 
+def test_home_recording_console_reflows_without_fixed_audio_meter_width():
+    page = (DESKTOP / "Pages" / "HomePage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "HomePage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="HeroIdentityRow"' in page
+    assert 'x:Name="HeroCommandRow"' in page
+    assert 'AudioLevelMeter Label="Уровень сигнала"' in page
+    assert 'AudioLevelMeter Label="Уровень сигнала" Level="{Binding MicrophoneLevel}" DbText="{Binding MicrophoneDbLabel}" Width=' not in page
+    assert 'HeroCommandRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal' in codebehind
+    assert 'HomeNotices.Width = Math.Min(380' in codebehind
+
+
+def test_assistant_uses_single_pane_compact_navigation_and_sources_view():
+    page = (DESKTOP / "Pages" / "AssistantPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "AssistantPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="BackToChatsButton"' in page
+    assert 'x:Name="ShowEvidenceButton"' in page
+    assert 'x:Name="BackFromEvidenceButton"' in page
+    assert 'x:Name="QuestionComposer"' in page
+    assert 'ResponsiveLayout.GetMode(width)' in codebehind
+    assert 'ConversationCard.Visibility = Visibility.Collapsed' in codebehind
+    assert 'QuestionComposer.ColumnDefinitions[1].Width = compact' in codebehind
+
+
 def test_transcripts_distinguish_empty_registry_from_empty_search_and_keep_selection_visible_while_loading():
     page = (DESKTOP / "Pages" / "TranscriptsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "TranscriptsPage.xaml.cs").read_text(encoding="utf-8")
@@ -81,6 +105,23 @@ def test_transcripts_distinguish_empty_registry_from_empty_search_and_keep_selec
     assert '_viewModel.SelectedItem = item;' in codebehind
     assert 'CancellationTokenSource? _detailCts' in codebehind
     assert 'CancelDetailLoad();' in codebehind
+
+
+def test_transcript_reader_prioritizes_readability_navigation_and_compact_export():
+    page = (DESKTOP / "Pages" / "TranscriptsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "TranscriptsPage.xaml.cs").read_text(encoding="utf-8")
+    view_model = (DESKTOP / "ViewModels" / "TranscriptsViewModel.cs").read_text(encoding="utf-8")
+
+    assert 'ColumnDefinitions="1.25*,520"' in page
+    assert 'x:Name="PreviousSegmentButton"' in page
+    assert 'x:Name="NextSegmentButton"' in page
+    assert '<MenuFlyoutItem Text="Скачать TXT"' in page
+    assert '<MenuFlyoutItem Text="Скачать SRT"' in page
+    assert 'ColumnDefinitions="72,*"' in page
+    assert 'SelectAdjacentSegment(-1)' in codebehind
+    assert 'SelectAdjacentSegment(1)' in codebehind
+    assert 'SegmentsList.ScrollIntoView' in codebehind
+    assert 'SelectedSegment = null;' in view_model
 
 
 def test_meetings_filter_state_explains_zero_results_and_offers_one_click_reset():
@@ -127,7 +168,7 @@ def test_statuses_are_localized_without_replacing_server_codes():
     assert 'SelectedValuePath="Tag"' in tasks
     assert 'Content="На проверке" Tag="NEEDS_REVIEW"' in tasks
     assert 'Text="Недоступны:"' in agents
-    assert 'HasAgents || _viewModel.IsLoading' in codebehind
+    assert 'HasVisibleAgents || _viewModel.IsLoading' in codebehind
 
 
 def test_authenticated_user_can_reach_settings_when_recorder_is_down():
@@ -288,6 +329,19 @@ def test_meeting_workspace_uses_overflow_actions_and_protocol_tab():
     assert 'WorkspaceMoreButton.IsEnabled' in codebehind
 
 
+def test_meeting_transcript_prioritizes_reading_and_reflows_processing_rail():
+    page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="TranscriptWorkspaceGrid"' in page
+    assert 'x:Name="TranscriptStatusPanel"' in page
+    assert 'x:Name="TranscriptToolbar"' in page
+    assert 'Content="Экспорт"' in page
+    assert 'MenuFlyoutItem Text="Скачать стенограмму TXT"' in page
+    assert 'MaxWidth="880"' in page
+    assert 'ApplyMeetingContentLayout' in codebehind
+    assert 'var stackTranscriptRail = width < 1240' in codebehind
+
+
 def test_meeting_decisions_and_tasks_use_human_status_labels():
     page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
     client = (DESKTOP / "ServerApiClient.cs").read_text(encoding="utf-8")
@@ -323,3 +377,91 @@ def test_api_timeouts_become_recoverable_offline_states_and_transcript_warning_i
     assert 'DesktopApiException { ErrorCode: "backend_timeout" }' in mapper
     assert 'ContainsWarning(warnings, "NO_SPEECH_DETECTED")' in transcripts
     assert 'Текст доступен для чтения и экспорта.' in transcripts
+
+
+def test_summary_details_render_protocol_as_readable_sections_with_text_fallback():
+    page = (DESKTOP / "Pages" / "SummariesPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SummariesPage.xaml.cs").read_text(encoding="utf-8")
+
+    assert 'x:Name="StructuredSummaryPanel"' in page
+    assert 'x:Name="SummaryQuestionsItems"' in page
+    assert 'Text="Вопросы и решения"' in page
+    assert 'x:Name="SummaryTasksItems"' in page
+    assert 'Text="Задачи и сроки"' in page
+    assert 'x:Name="SummaryFallbackPanel"' in page
+    assert 'Text="Краткий итог"' in page
+    assert "MeetingProtocolParser.Parse(item.Summary?.Content)" in codebehind
+    assert "protocol.IsProtocol && protocol.IsValid" in codebehind
+
+
+def test_summary_compact_mode_uses_master_detail_and_scoped_warning_notice():
+    page = (DESKTOP / "Pages" / "SummariesPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SummariesPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="BackToSummaryListButton"' in page
+    assert 'x:Name="DetailsNotice"' in page
+    assert 'x:Name="WarningInfoBar"' not in page
+    assert 'MinWidth="0"' in page
+    assert 'ApplySummaryLayout' in codebehind
+    assert 'ListCard.Visibility = compact && hasSelection' in codebehind
+
+
+def test_task_registry_uses_compact_filter_card_and_readable_columns():
+    page = (DESKTOP / "Pages" / "TasksPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "TasksPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="FiltersGrid"' in page
+    assert 'Text="Задача и совещание"' in page
+    assert 'Text="Статус и ответственный"' in page
+    assert 'AutomationProperties.Name="Поиск поручений"' in page
+    assert 'DetailsCard.Visibility = _layoutMode == PageLayoutMode.Wide || item is not null' in codebehind
+
+
+def test_speaker_registry_keeps_technical_keys_in_stable_inspector():
+    page = (DESKTOP / "Pages" / "SpeakersPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SpeakersPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'AutomationProperties.Name="Поиск спикеров"' in page
+    assert 'ToolTipService.ToolTip="{Binding StableKey}"' in page
+    assert 'x:Name="DetailsKey" TextTrimming="CharacterEllipsis"' in page
+    assert 'DetailsCard.Visibility = _layoutMode == PageLayoutMode.Wide || item is not null' in codebehind
+
+
+def test_system_status_registry_filters_connections_and_scopes_identifiers_to_inspector():
+    page = (DESKTOP / "Pages" / "AgentsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "AgentsPage.xaml.cs").read_text(encoding="utf-8")
+    viewmodel = (DESKTOP / "ViewModels" / "AgentsViewModel.cs").read_text(encoding="utf-8")
+    assert 'Title="Состояние системы"' in page
+    assert 'x:Name="AgentSearchBox"' in page
+    assert 'ItemsSource="{Binding FilteredAgents}"' in page
+    assert 'x:Name="DetailsInstallationId"' in page
+    assert 'x:Name="DetailsHeartbeatAge"' in page
+    assert 'public ObservableCollection<DesktopAgent> FilteredAgents' in viewmodel
+    assert 'private void ApplyFilter()' in viewmodel
+    assert 'var columns = mode == PageLayoutMode.Compact ? 1 : mode == PageLayoutMode.Standard ? 2 : 4;' in codebehind
+
+
+def test_settings_offer_section_navigation_without_changing_runtime_contracts():
+    page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'x:Name="SettingsSectionActionsPanel"' in page
+    assert 'Content="Подключение"' in page
+    assert 'Content="Мифодий"' in page
+    assert 'Content="Запись и архив"' in page
+    assert 'x:Name="RecorderDiagnosticsExpander"' in page
+    assert 'x:Name="MifodiyTechnicalDiagnosticsExpander"' in page
+    assert 'StartBringIntoView(new BringIntoViewOptions' in codebehind
+    assert 'SettingsSectionActionsPanel.Orientation' in codebehind
+
+
+def test_sources_prioritize_human_device_names_over_endpoint_identifiers():
+    page = (DESKTOP / "Pages" / "SourcesPage.xaml").read_text(encoding="utf-8")
+    assert 'Text="Доступный источник микрофона"' in page
+    assert 'Text="Доступный источник системного звука"' in page
+    assert 'Text="{Binding Id}"' not in page
+    assert 'ColumnDefinitions="1.6*,130,180"' in page
+    assert 'ToolTipService.ToolTip="{Binding DisplayName}"' in page
+
+
+def test_login_keeps_dark_form_controls_legible_and_keyboard_accessible():
+    page = (DESKTOP / "LoginWindow.xaml").read_text(encoding="utf-8")
+    assert 'Property="PlaceholderForeground"' in page
+    assert 'Foreground="{StaticResource LoginTextBrush}" AutomationProperties.Name="Запомнить логин на этом компьютере"' in page
+    assert 'KeyDown="CredentialBox_KeyDown"' in page

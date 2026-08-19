@@ -14,6 +14,8 @@ public sealed partial class AgentsPage : Page
     private AgentsViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
     private bool _updatingLayout;
+    private PageLayoutMode _layoutMode = PageLayoutMode.Wide;
+    private bool _layoutInitialized;
 
     public AgentsPage()
     {
@@ -80,6 +82,12 @@ public sealed partial class AgentsPage : Page
         UpdateDetails();
     }
 
+    private void AgentSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_viewModel is not null) _viewModel.SearchText = AgentSearchBox.Text;
+        UpdateState();
+    }
+
     private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
 
     private void UpdateState()
@@ -87,12 +95,17 @@ public sealed partial class AgentsPage : Page
         if (_viewModel is null) return;
         LoadingRing.IsActive = _viewModel.IsLoading;
         RefreshButton.IsEnabled = !_viewModel.IsLoading;
-        AgentsList.Visibility = _viewModel.HasAgents ? Visibility.Visible : Visibility.Collapsed;
-        AgentsEmptyState.Visibility = _viewModel.HasAgents || _viewModel.IsLoading ? Visibility.Collapsed : Visibility.Visible;
-        EmptyTitle.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText) ? "Не удалось загрузить реестр" : "Зарегистрированных агентов нет";
+        AgentsList.Visibility = _viewModel.HasVisibleAgents ? Visibility.Visible : Visibility.Collapsed;
+        AgentsEmptyState.Visibility = _viewModel.HasVisibleAgents || _viewModel.IsLoading ? Visibility.Collapsed : Visibility.Visible;
+        var searchActive = !string.IsNullOrWhiteSpace(AgentSearchBox.Text);
+        EmptyTitle.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText)
+            ? "Не удалось загрузить реестр"
+            : searchActive ? "Подключения не найдены" : "Зарегистрированных агентов нет";
         EmptyDescription.Text = !string.IsNullOrWhiteSpace(_viewModel.ErrorText)
             ? _viewModel.ErrorText
-            : "Войдите в API или зарегистрируйте Recorder Agent в настройках.";
+            : searchActive
+                ? "Измените поисковый запрос, чтобы увидеть другие подключения."
+                : "Войдите в API или зарегистрируйте Recorder Agent в настройках.";
         ErrorInfoBar.Message = _viewModel.ErrorText;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.ErrorText);
         WarningInfoBar.Message = _viewModel.WarningText;
@@ -107,20 +120,26 @@ public sealed partial class AgentsPage : Page
         var agent = _viewModel.SelectedAgent;
         AgentDetails.Visibility = agent is null ? Visibility.Collapsed : Visibility.Visible;
         DetailsEmptyText.Visibility = agent is null ? Visibility.Visible : Visibility.Collapsed;
+        DetailsCard.Visibility = _layoutMode == PageLayoutMode.Wide || agent is not null ? Visibility.Visible : Visibility.Collapsed;
         if (agent is null) return;
         DetailsName.Text = string.IsNullOrWhiteSpace(agent.Name) ? "Без имени" : agent.Name;
         DetailsStatus.Text = agent.EffectiveStatusText;
         DetailsLastSeen.Text = agent.LastSeenText;
         DetailsRoom.Text = agent.RoomText;
+        DetailsInstallationId.Text = agent.InstallationId?.ToString() ?? "Не указан";
+        DetailsHeartbeatAge.Text = agent.HeartbeatAgeSeconds is int seconds ? $"{seconds} сек." : "Нет данных";
     }
 
     private void AgentsPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_updatingLayout) return;
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+        if (_layoutInitialized && _layoutMode == mode) return;
         _updatingLayout = true;
         try
         {
-            var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+            _layoutMode = mode;
+            _layoutInitialized = true;
             ActionsPanel.Orientation = mode == PageLayoutMode.Compact ? Orientation.Vertical : Orientation.Horizontal;
             var compact = mode != PageLayoutMode.Wide;
             WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
@@ -135,7 +154,7 @@ public sealed partial class AgentsPage : Page
             SummaryGrid.ColumnDefinitions.Clear();
             SummaryGrid.RowDefinitions.Clear();
             var cards = SummaryGrid.Children.OfType<FrameworkElement>().ToArray();
-            var columns = mode == PageLayoutMode.Compact ? 1 : mode == PageLayoutMode.Standard ? 2 : 3;
+            var columns = mode == PageLayoutMode.Compact ? 1 : mode == PageLayoutMode.Standard ? 2 : 4;
             for (var i = 0; i < columns; i++) SummaryGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             for (var i = 0; i < (int)Math.Ceiling(cards.Length / (double)columns); i++) SummaryGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             for (var i = 0; i < cards.Length; i++)
@@ -143,6 +162,7 @@ public sealed partial class AgentsPage : Page
                 Grid.SetColumn(cards[i], i % columns);
                 Grid.SetRow(cards[i], i / columns);
             }
+            UpdateDetails();
         }
         finally { _updatingLayout = false; }
     }

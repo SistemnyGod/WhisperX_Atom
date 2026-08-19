@@ -65,6 +65,7 @@ public sealed class SummariesViewModel : ObservableObject
     private string _warningText = string.Empty;
     private string _statusText = string.Empty;
     private SummaryRegistryItem? _selectedItem;
+    private CancellationTokenSource? _filterDebounce;
 
     public SummariesViewModel(FrontendServices services) => _services = services;
 
@@ -74,7 +75,7 @@ public sealed class SummariesViewModel : ObservableObject
     public string SearchText
     {
         get => _searchText;
-        set { if (SetProperty(ref _searchText, value)) ApplyFilter(); }
+        set { if (SetProperty(ref _searchText, value)) ScheduleFilter(); }
     }
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
     public string WarningText { get => _warningText; private set => SetProperty(ref _warningText, value); }
@@ -124,43 +125,20 @@ public sealed class SummariesViewModel : ObservableObject
             catch (OperationCanceledException) { throw; }
             catch { }
 
-            var meetings = await LoadAllMeetingsAsync(cancellationToken);
-            var loaded = new List<SummaryRegistryItem>();
-            var failures = 0;
-            using var gate = new SemaphoreSlim(4, 4);
-            var work = meetings.Select(async meeting =>
-            {
-                DesktopSummary? summary = null;
-                if (!Guid.TryParse(meeting.Id, out var meetingId))
-                {
-                    Interlocked.Increment(ref failures);
-                }
-                else
-                {
-                    await gate.WaitAsync(cancellationToken);
-                    try { summary = await _services.Backend.GetSummaryAsync(meetingId, cancellationToken); }
-                    catch (OperationCanceledException) { throw; }
-                    catch { Interlocked.Increment(ref failures); }
-                    finally { gate.Release(); }
-                }
-                lock (loaded) loaded.Add(new SummaryRegistryItem(meeting, summary));
-            });
-            await Task.WhenAll(work);
-
-            _allItems.AddRange(loaded.OrderByDescending(item => item.Meeting.CreatedAt));
-            ApplyFilter();
-            StatusText = _allItems.Count == 0
+            var page = await _services.Backend.GetSummaryRegistryPageAsync(1, 100, SearchText, cancellationToken: cancellationToken);
+            _allItems.AddRange(page.Items.Select(item => new SummaryRegistryItem(item.Meeting, item.Summary))
+                .OrderByDescending(item => item.Meeting.CreatedAt));
+            ApplyFilterNow();
+            StatusText = page.TotalCount == 0
                 ? "Встреч пока нет."
-                : $"Загружено встреч: {_allItems.Count}; саммари готовы: {_allItems.Count(item => item.HasSummary)}.";
-            if (failures > 0)
-                WarningText = $"Не удалось загрузить саммари для встреч: {failures}. Доступные данные сохранены.";
+                : $"Показано встреч: {_allItems.Count} из {page.TotalCount}; саммари готовы: {_allItems.Count(item => item.HasSummary)}.";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             ErrorText = SafeError(ex, "Не удалось загрузить саммари.");
             _allItems.Clear();
-            ApplyFilter();
+            ApplyFilterNow();
         }
         finally { IsLoading = false; }
     }
@@ -197,7 +175,7 @@ public sealed class SummariesViewModel : ObservableObject
             var summary = await _services.Backend.GetSummaryAsync(parsedMeetingId, cancellationToken);
             item.ReplaceSummary(summary);
             OnPropertyChanged(nameof(SelectedItem));
-            ApplyFilter();
+            ApplyFilterNow();
             StatusText = summary is null ? "Запрос принят, саммари ещё не готово." : "Саммари обновлено.";
             return true;
         }
@@ -214,31 +192,46 @@ public sealed class SummariesViewModel : ObservableObject
         }
     }
 
-    private async Task<IReadOnlyList<DesktopMeeting>> LoadAllMeetingsAsync(CancellationToken cancellationToken)
+    private void ScheduleFilter()
     {
-        const int pageSize = 200;
-        var result = new List<DesktopMeeting>();
-        var offset = 0;
-        while (true)
+        _filterDebounce?.Cancel();
+        _filterDebounce?.Dispose();
+        var cts = _filterDebounce = new CancellationTokenSource();
+        _ = ApplyFilterDebouncedAsync(cts.Token);
+    }
+
+    private async Task ApplyFilterDebouncedAsync(CancellationToken cancellationToken)
+    {
+        try
         {
-            var page = await _services.Backend.GetMeetingsPageAsync(pageSize, offset, cancellationToken);
-            result.AddRange(page);
-            if (page.Count < pageSize) return result;
-            offset += page.Count;
+            await Task.Delay(250, cancellationToken);
+            ApplyFilterNow();
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            if (_filterDebounce is { } current && current.Token == cancellationToken)
+            {
+                _filterDebounce = null;
+                current.Dispose();
+            }
         }
     }
 
-    private void ApplyFilter()
+    private void ApplyFilterNow()
     {
         var query = SearchText.Trim();
-        FilteredItems.Clear();
-        foreach (var item in _allItems.Where(item =>
+        var visible = _allItems.Where(item =>
                      string.IsNullOrWhiteSpace(query)
                      || item.MeetingTitle.Contains(query, StringComparison.OrdinalIgnoreCase)
                      || (item.Meeting.Description?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false)
                      || item.SummaryText.Contains(query, StringComparison.OrdinalIgnoreCase))
-                 .OrderByDescending(item => item.Meeting.CreatedAt))
-            FilteredItems.Add(item);
+                 .OrderByDescending(item => item.Meeting.CreatedAt).ToList();
+        if (!FilteredItems.SequenceEqual(visible))
+        {
+            FilteredItems.Clear();
+            foreach (var item in visible) FilteredItems.Add(item);
+        }
         if (SelectedItem is not null && !FilteredItems.Contains(SelectedItem)) SelectedItem = null;
         OnPropertyChanged(nameof(HasItems));
     }

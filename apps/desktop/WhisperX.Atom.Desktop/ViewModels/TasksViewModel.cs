@@ -54,6 +54,7 @@ public sealed class TasksViewModel : ObservableObject
     private string _editResponsible = string.Empty;
     private DateTimeOffset? _editDeadline;
     private string _editStatus = "OPEN";
+    private CancellationTokenSource? _filterDebounce;
 
     public TasksViewModel(FrontendServices services) => _services = services;
 
@@ -75,31 +76,31 @@ public sealed class TasksViewModel : ObservableObject
     public string SearchText
     {
         get => _searchText;
-        set { if (SetProperty(ref _searchText, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _searchText, value)) ScheduleFilter(); }
     }
 
     public string StatusFilter
     {
         get => _statusFilter;
-        set { if (SetProperty(ref _statusFilter, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _statusFilter, value)) ScheduleFilter(); }
     }
 
     public string DeadlineFilter
     {
         get => _deadlineFilter;
-        set { if (SetProperty(ref _deadlineFilter, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _deadlineFilter, value)) ScheduleFilter(); }
     }
 
     public string MeetingFilterId
     {
         get => _meetingFilterId;
-        set { if (SetProperty(ref _meetingFilterId, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _meetingFilterId, value)) ScheduleFilter(); }
     }
 
     public string ResponsibleFilter
     {
         get => _responsibleFilter;
-        set { if (SetProperty(ref _responsibleFilter, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _responsibleFilter, value)) ScheduleFilter(); }
     }
 
     public string ErrorText
@@ -185,49 +186,24 @@ public sealed class TasksViewModel : ObservableObject
                 return;
             }
 
-            var meetings = await LoadAllMeetingsAsync(cancellationToken);
-            foreach (var meeting in meetings) Meetings.Add(meeting);
-
-            var loaded = new List<(DesktopMeeting Meeting, IReadOnlyList<DesktopTask> Tasks)>();
-            var failures = 0;
-            using var gate = new SemaphoreSlim(4, 4);
-            var work = meetings.Select(async meeting =>
+            var page = await _services.Backend.GetActionItemRegistryPageAsync(1, 100, SearchText, cancellationToken: cancellationToken);
+            foreach (var group in page.Items)
             {
-                if (!Guid.TryParse(meeting.Id, out var meetingId))
-                {
-                    Interlocked.Increment(ref failures);
-                    return;
-                }
+                _allItems.Add(new TaskRegistryItem(group.Meeting, group.Item));
+                if (!Meetings.Any(item => item.Id == group.Meeting.Id)) Meetings.Add(group.Meeting);
+            }
 
-                await gate.WaitAsync(cancellationToken);
-                try
-                {
-                    var tasks = await _services.Backend.GetTasksAsync(meetingId, cancellationToken);
-                    lock (loaded) loaded.Add((meeting, tasks));
-                }
-                catch (OperationCanceledException) { throw; }
-                catch { Interlocked.Increment(ref failures); }
-                finally { gate.Release(); }
-            });
-            await Task.WhenAll(work);
-
-            foreach (var group in loaded)
-                foreach (var task in group.Tasks)
-                    _allItems.Add(new TaskRegistryItem(group.Meeting, task));
-
-            ApplyFilters();
-            StatusText = _allItems.Count == 0
+            ApplyFiltersNow();
+            StatusText = page.TotalCount == 0
                 ? "Поручений пока нет."
-                : $"Загружено поручений: {_allItems.Count}";
-            if (failures > 0)
-                WarningText = $"Не удалось загрузить задачи для встреч: {failures}. Доступные данные сохранены.";
+                : $"Показано поручений: {_allItems.Count} из {page.TotalCount}";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             ErrorText = SafeError(ex);
             _allItems.Clear();
-            ApplyFilters();
+            ApplyFiltersNow();
         }
         finally { IsLoading = false; }
     }
@@ -255,7 +231,7 @@ public sealed class TasksViewModel : ObservableObject
             }
 
             SelectedItem.Replace(updated);
-            ApplyFilters();
+            ApplyFiltersNow();
             OnPropertyChanged(nameof(SelectedItem));
             return true;
         }
@@ -268,23 +244,33 @@ public sealed class TasksViewModel : ObservableObject
         finally { IsSaving = false; }
     }
 
-    private async Task<IReadOnlyList<DesktopMeeting>> LoadAllMeetingsAsync(CancellationToken cancellationToken)
+    private void ScheduleFilter()
     {
-        const int pageSize = 200;
-        var meetings = new List<DesktopMeeting>();
-        var offset = 0;
-        while (true)
-        {
-            var page = await _services.Backend.GetMeetingsPageAsync(pageSize, offset, cancellationToken);
-            if (page.Count == 0) break;
-            meetings.AddRange(page);
-            if (page.Count < pageSize) break;
-            offset += page.Count;
-        }
-        return meetings.OrderByDescending(item => item.CreatedAt).ToList();
+        _filterDebounce?.Cancel();
+        _filterDebounce?.Dispose();
+        var cts = _filterDebounce = new CancellationTokenSource();
+        _ = ApplyFiltersDebouncedAsync(cts.Token);
     }
 
-    private void ApplyFilters()
+    private async Task ApplyFiltersDebouncedAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(250, cancellationToken);
+            ApplyFiltersNow();
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            if (_filterDebounce is { } current && current.Token == cancellationToken)
+            {
+                _filterDebounce = null;
+                current.Dispose();
+            }
+        }
+    }
+
+    private void ApplyFiltersNow()
     {
         var query = SearchText.Trim();
         var responsible = ResponsibleFilter.Trim();
@@ -304,8 +290,11 @@ public sealed class TasksViewModel : ObservableObject
             .ThenByDescending(item => item.Meeting.CreatedAt)
             .ToList();
 
-        FilteredItems.Clear();
-        foreach (var item in visible) FilteredItems.Add(item);
+        if (!FilteredItems.SequenceEqual(visible))
+        {
+            FilteredItems.Clear();
+            foreach (var item in visible) FilteredItems.Add(item);
+        }
         OnPropertyChanged(nameof(HasItems));
     }
 

@@ -76,6 +76,9 @@ def segment_technical_flags(
     for interval_start, interval_end, kind in intervals:
         if interval_end <= interval_start:
             continue
-        if start <= interval_end and end >= interval_start:
+        # Touching a boundary is not an overlap.  A speech segment ending
+        # exactly when TTS starts (or starting exactly when it finishes) must
+        # remain visible; only a positive-duration intersection is technical.
+        if start < interval_end and end > interval_start:
             return kind, True
     return "SPEECH", False

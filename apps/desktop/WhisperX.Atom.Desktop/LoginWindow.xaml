@@ -38,6 +38,7 @@
                 <Setter Property="Padding" Value="14,10" />
                 <Setter Property="MinHeight" Value="46" />
                 <Setter Property="FontSize" Value="15" />
+                <Setter Property="PlaceholderForeground" Value="{StaticResource LoginMutedBrush}" />
             </Style>
             <Style x:Key="LoginPasswordStyle" TargetType="PasswordBox">
                 <Setter Property="Background" Value="{StaticResource LoginInputBrush}" />
@@ -62,7 +63,8 @@
         <ScrollViewer x:Name="LoginScrollViewer" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
             <Grid x:Name="LoginContentGrid" Padding="36,28">
                 <Border x:Name="LoginCard"
-                    MaxWidth="548"
+                    MinWidth="480"
+                    MaxWidth="520"
                     Padding="40,34,40,30"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -86,6 +88,7 @@
                         <StackPanel Spacing="7">
                             <TextBlock Text="Логин или e-mail" Style="{StaticResource LoginLabelStyle}" />
                             <TextBox x:Name="UsernameBox" Text="admin" PlaceholderText="Введите логин" Style="{StaticResource LoginInputStyle}" AutomationProperties.Name="Логин" KeyDown="CredentialBox_KeyDown" TextChanged="CredentialBox_TextChanged" />
+                            <TextBlock x:Name="UsernameErrorText" Text="Введите логин" Foreground="{StaticResource LoginDangerBrush}" FontSize="12" Height="16" Opacity="0" />
                         </StackPanel>
 
                         <StackPanel Spacing="7">
@@ -97,9 +100,10 @@
                                     <FontIcon x:Name="PasswordVisibilityIcon" Glyph="&#xE7B3;" FontSize="16" />
                                 </Button>
                             </Grid>
+                            <TextBlock x:Name="PasswordErrorText" Text="Введите пароль" Foreground="{StaticResource LoginDangerBrush}" FontSize="12" Height="16" Opacity="0" />
                         </StackPanel>
 
-                        <CheckBox x:Name="RememberLoginCheckBox" Content="Запомнить логин на этом компьютере" IsChecked="True" Style="{StaticResource LoginCheckBoxStyle}" />
+                        <CheckBox x:Name="RememberLoginCheckBox" Content="Запомнить логин на этом компьютере" IsChecked="True" Style="{StaticResource LoginCheckBoxStyle}" Foreground="{StaticResource LoginTextBrush}" AutomationProperties.Name="Запомнить логин на этом компьютере" />
 
                         <Button x:Name="LoginButton" Style="{StaticResource PrimaryButtonStyle}" Click="LoginButton_Click" HorizontalAlignment="Stretch" MinHeight="52" FontSize="16" AutomationProperties.Name="Войти в LAN-сервер">
                             <Grid>
@@ -109,7 +113,7 @@
                         </Button>
                         <Button x:Name="CheckConnectionButton" Content="Проверить соединение" Style="{StaticResource SecondaryButtonStyle}" Click="CheckConnectionButton_Click" HorizontalAlignment="Stretch" AutomationProperties.Name="Проверить соединение с LAN-сервером" />
 
-                        <Border x:Name="StatusSurface" Background="{StaticResource LoginInfoBrush}" BorderBrush="{StaticResource LoginBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12,10" MinHeight="52" Opacity="0" IsHitTestVisible="False">
+                        <Border x:Name="StatusSurface" Background="{StaticResource LoginInfoBrush}" BorderBrush="{StaticResource LoginBorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12,10" MinHeight="52" Opacity="0" MaxHeight="88" IsHitTestVisible="False">
                             <StackPanel Orientation="Horizontal" Spacing="9">
                                 <FontIcon x:Name="StatusIcon" Glyph="&#xE73E;" Foreground="{StaticResource LoginSuccessBrush}" FontSize="16" VerticalAlignment="Top" />
                                 <TextBlock x:Name="StatusText" Foreground="{StaticResource LoginTextBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />

@@ -7,13 +7,21 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer x:Name="SettingsScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <controls:PageHeader Title="Настройки" Subtitle="Подключение, запись и локальное хранение">
+            <controls:PageHeader Title="Настройки" Subtitle="Подключение, запись, архив и голосовой помощник">
                 <controls:PageHeader.Actions>
                     <Button x:Name="OpenSetupWizardButton" Content="Повторить настройку" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSetupWizardButton_Click" AutomationProperties.Name="Повторить мастер настройки" ToolTipService.ToolTip="Проверить основные компоненты по шагам" />
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
+            <Border Style="{StaticResource CardStyle}" Padding="10">
+                <StackPanel x:Name="SettingsSectionActionsPanel" Orientation="Horizontal" Spacing="6">
+                    <Button Content="Подключение" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToConnectionButton_Click" AutomationProperties.Name="Перейти к настройкам подключения" />
+                    <Button Content="Мифодий" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToMifodiyButton_Click" AutomationProperties.Name="Перейти к настройкам Мифодия" />
+                    <Button Content="Запись и архив" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToArchiveButton_Click" AutomationProperties.Name="Перейти к настройкам записи и архива" />
+                    <Button Content="Диагностика" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToDiagnosticsButton_Click" AutomationProperties.Name="Открыть техническую диагностику" />
+                </StackPanel>
+            </Border>
             <Border x:Name="UserSettingsCard" Style="{StaticResource CardStyle}">
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
                     <StackPanel Spacing="4">
@@ -58,7 +66,7 @@
                                 <ProgressRing Grid.Column="1" Width="22" Height="22" IsActive="{Binding IsBusy}" VerticalAlignment="Center" />
                             </Grid>
                         </Border>
-                        <Expander Header="Техническая диагностика Recorder Host" IsExpanded="False">
+                        <Expander x:Name="RecorderDiagnosticsExpander" Header="Техническая диагностика Recorder Host" IsExpanded="False">
                             <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
                                 <StackPanel Spacing="3">
                                     <TextBlock Text="{Binding RecorderRuntimeState}" FontWeight="SemiBold" />
@@ -81,7 +89,7 @@
                     </StackPanel>
                 </Border>
             </Grid>
-            <Expander Header="Мифодий" IsExpanded="True">
+            <Expander x:Name="MifodiySectionExpander" Header="Мифодий" IsExpanded="True">
                 <Border x:Name="MifodiyDiagnosticsCard" Style="{StaticResource CardStyle}" Padding="20">
                     <StackPanel Spacing="16">
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
@@ -146,6 +154,10 @@
                                     </ComboBox>
                                     <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" />
                                     <ComboBox ItemsSource="{Binding VoiceOptions}" SelectedItem="{Binding VoiceName, Mode=TwoWay}" PlaceholderText="Выберите русский голос" AutomationProperties.Name="Голос ответов Мифодия" />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Height="20">
+                                        <TextBlock Text="{Binding VoiceVoiceStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceVoiceStatus}" />
+                                        <TextBlock Grid.Column="1" Text="{Binding VoiceSpeechQueue}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSpeechQueue}" />
+                                    </Grid>
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
                                         <StackPanel Spacing="2">
                                             <TextBlock Text="Скорость" Style="{StaticResource CaptionStyle}" />
@@ -185,7 +197,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Expander Header="Техническая диагностика Мифодия" IsExpanded="False">
+                        <Expander x:Name="MifodiyTechnicalDiagnosticsExpander" Header="Техническая диагностика Мифодия" IsExpanded="False">
                             <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="{Binding VoiceStatus}" FontWeight="SemiBold" TextWrapping="Wrap" />
@@ -206,6 +218,7 @@
                                     <TextBlock Text="{Binding VoiceLastTraceId}" FontFamily="Consolas" TextWrapping="Wrap" />
                                     <TextBlock Text="Перезапуски" Style="{StaticResource CaptionStyle}" />
                                     <TextBlock Text="{Binding VoiceRestartCount}" />
+                                    <TextBlock Text="{Binding VoiceAssistantDelivery}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                     <TextBlock Text="{Binding VoiceDiagnosticsDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
@@ -213,7 +226,7 @@
                     </StackPanel>
                 </Border>
             </Expander>
-            <Border Style="{StaticResource CardStyle}">
+            <Border x:Name="ArchiveSectionCard" Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="10">
                     <TextBlock Text="Запись и архив" Style="{StaticResource SectionTitleStyle}" />
                     <TextBlock Text="Локальный master-файл сохраняется в архиве независимо от серверной доставки." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />

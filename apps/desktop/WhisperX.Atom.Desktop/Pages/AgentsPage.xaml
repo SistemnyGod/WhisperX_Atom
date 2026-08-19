@@ -9,7 +9,7 @@
     mc:Ignorable="d">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
-            <controls:PageHeader Title="Агенты" Subtitle="Состояние Recorder Agent и зарегистрированные подключения API">
+            <controls:PageHeader Title="Состояние системы" Subtitle="Recorder, WhisperX, Qwen и подключения текущей API-сессии">
                 <controls:PageHeader.Actions>
                 <StackPanel x:Name="ActionsPanel" Orientation="Horizontal" Spacing="8">
                     <Button Content="Открыть настройки" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" />
@@ -18,25 +18,25 @@
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left" />
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left" />
 
-            <Grid x:Name="SummaryGrid" ColumnDefinitions="*,*,*,*" ColumnSpacing="14">
-                <Border Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}">
+            <Grid x:Name="SummaryGrid" ColumnDefinitions="*,*,*,*" ColumnSpacing="14" RowSpacing="14">
+                <Border Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" MinHeight="124">
                     <StackPanel Spacing="6">
                         <TextBlock Text="API" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding ApiStatus}" Style="{StaticResource SectionTitleStyle}" TextWrapping="Wrap" />
                         <TextBlock Text="Данные реестра обновляются через текущую сессию API" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" FontSize="{StaticResource CaptionTextSize}" />
                     </StackPanel>
                 </Border>
-                <Border Grid.Column="1" Style="{StaticResource CardStyle}">
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}" MinHeight="124">
                     <StackPanel Spacing="6">
                         <TextBlock Text="ЗАРЕГИСТРИРОВАННЫЕ АГЕНТЫ" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding AgentCountText}" FontSize="28" FontWeight="SemiBold" />
                         <TextBlock Text="Всего в доступном реестре" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                     </StackPanel>
                 </Border>
-                <Border Grid.Column="2" Style="{StaticResource CardStyle}">
+                <Border Grid.Column="2" Style="{StaticResource CardStyle}" MinHeight="124">
                     <StackPanel Spacing="6">
                         <TextBlock Text="АКТИВНЫЕ" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding OnlineCountText}" FontSize="28" FontWeight="SemiBold" />
@@ -49,7 +49,7 @@
                         <TextBlock Text="По статусу, который вернул API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
-                <Border Grid.Column="3" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceGreenBrush}">
+                <Border Grid.Column="3" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceGreenBrush}" MinHeight="124">
                     <StackPanel Spacing="6">
                         <TextBlock Text="WHISPERX" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="{Binding ProcessingStatus}" Style="{StaticResource SectionTitleStyle}" TextWrapping="Wrap" />
@@ -62,27 +62,28 @@
             <Grid x:Name="WorkspaceGrid" ColumnDefinitions="*,360" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="430">
                 <Border x:Name="AgentsCard" Style="{StaticResource CardStyle}" Padding="0">
                     <StackPanel>
-                        <Grid Padding="20,18" ColumnDefinitions="*,Auto">
+                        <Grid Padding="20,18,20,12" ColumnDefinitions="*,Auto">
                             <StackPanel>
-                                <TextBlock Text="Реестр агентов" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Реестр подключений" Style="{StaticResource SectionTitleStyle}" />
                                 <TextBlock Text="Подключения для текущей сессии API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" />
                             </StackPanel>
                             <ProgressRing Grid.Column="1" x:Name="LoadingRing" Width="22" Height="22" IsActive="False" />
                         </Grid>
+                        <TextBox x:Name="AgentSearchBox" PlaceholderText="Поиск по имени, статусу или комнате" Margin="20,0,20,14" Style="{StaticResource InputStyle}" TextChanged="AgentSearchBox_TextChanged" AutomationProperties.Name="Поиск подключений" />
                         <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.4*,130,170,*">
                             <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <TextBlock Grid.Column="3" Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         </Grid>
-                        <ListView x:Name="AgentsList" ItemsSource="{Binding Agents}" SelectionMode="Single" BorderThickness="0" SelectionChanged="AgentsList_SelectionChanged">
+                        <ListView x:Name="AgentsList" ItemsSource="{Binding FilteredAgents}" SelectionMode="Single" BorderThickness="0" SelectionChanged="AgentsList_SelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid Padding="20,12" ColumnDefinitions="1.4*,130,170,*">
-                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                    <Grid Padding="20,12" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="1.4*,130,170,*">
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Name}" />
                                         <TextBlock Grid.Column="1" Text="{Binding EffectiveStatusText}" Foreground="{StaticResource AccentBrush}" TextTrimming="CharacterEllipsis" />
                                         <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
-                                        <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding RoomText}" />
                                     </Grid>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
@@ -99,7 +100,7 @@
                     <StackPanel Spacing="12">
                         <TextBlock Text="Выбранный агент" Style="{StaticResource SectionTitleStyle}" />
                         <StackPanel x:Name="AgentDetails" Spacing="10">
-                            <TextBlock x:Name="DetailsName" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
+                            <TextBlock x:Name="DetailsName" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsName}" />
                             <Border Style="{StaticResource StatusBadgeStyle}" HorizontalAlignment="Left">
                                 <TextBlock x:Name="DetailsStatus" FontWeight="SemiBold" />
                             </Border>
@@ -109,7 +110,15 @@
                             </StackPanel>
                             <StackPanel Spacing="3">
                                 <TextBlock Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                <TextBlock x:Name="DetailsRoom" TextWrapping="Wrap" />
+                                <TextBlock x:Name="DetailsRoom" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsRoom}" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Installation ID" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsInstallationId" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsInstallationId}" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Возраст heartbeat" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsHeartbeatAge" />
                             </StackPanel>
                             <TextBlock Text="Операции регистрации и подключения выполняются в разделе Настройки. Серверные действия управления агентом в этом этапе не добавляются." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" FontSize="{StaticResource CaptionTextSize}" />
                         </StackPanel>

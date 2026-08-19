@@ -40,6 +40,11 @@
                                         <TextBox Text="{Binding Title, Mode=TwoWay}" Style="{StaticResource InputStyle}" PlaceholderText="Например, Ежедневная оперативка" AutomationProperties.Name="Название совещания" />
                                     </StackPanel>
                                     <controls:DeviceSelector x:Name="MicrophoneSelector" ItemsSource="{Binding Microphones}" DisplayMemberPath="DisplayName" IsSelectionEnabled="{Binding CanSelectDevices}" Label="Микрофон" HelperText="Записывается именно выбранное устройство." SelectionChanged="MicrophoneCombo_SelectionChanged" />
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Text="Профиль помещения" Style="{StaticResource WorkspaceLabelStyle}" />
+                                        <ComboBox x:Name="AcousticProfileSelector" ItemsSource="{Binding AcousticProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding AcousticProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectDevices}" SelectionChanged="AcousticProfile_SelectionChanged" Style="{StaticResource FormComboBoxStyle}" AutomationProperties.Name="Акустический профиль записи" />
+                                        <TextBlock Text="Авто подберёт обработку для дальних участников; оригинальный файл не изменяется." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
                                     <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="7" Padding="10,8">
                                         <StackPanel Orientation="Horizontal" Spacing="8">
                                             <FontIcon Glyph="&#xE8D7;" Foreground="{StaticResource AccentBrush}" FontSize="16" VerticalAlignment="Center" />
@@ -245,9 +250,6 @@
                 <StackPanel Spacing="{StaticResource CardGap}" Padding="0,10,0,0">
                     <TextBlock Text="Профиль записи" Style="{StaticResource WorkspaceLabelStyle}" />
                     <ComboBox x:Name="RecordingProfileSelector" ItemsSource="{Binding RecordingProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding RecordingProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectRecordingProfile}" SelectionChanged="RecordingProfile_SelectionChanged" Style="{StaticResource FormComboBoxStyle}" AutomationProperties.Name="Профиль записи" />
-                    <TextBlock Text="Акустика кабинета" Style="{StaticResource WorkspaceLabelStyle}" />
-                    <ComboBox x:Name="AcousticProfileSelector" ItemsSource="{Binding AcousticProfiles}" DisplayMemberPath="DisplayName" SelectedValuePath="Code" SelectedValue="{Binding AcousticProfile, Mode=OneWay}" IsEnabled="{Binding CanSelectDevices}" SelectionChanged="AcousticProfile_SelectionChanged" Style="{StaticResource FormComboBoxStyle}" AutomationProperties.Name="Акустический профиль" />
-                    <TextBlock Text="Авто выберет усиление для дальнего микрофона; исходная запись не изменяется." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     <TextBlock Text="Для большой комнаты и 8+ участников рекомендуется USB-конференц-микрофон в центре стола. Усиление улучшает распознавание, но не заменяет физический охват микрофона." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
                         <StackPanel Spacing="7">

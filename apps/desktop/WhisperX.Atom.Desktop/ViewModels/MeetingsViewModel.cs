@@ -15,6 +15,7 @@ public sealed class MeetingsViewModel : ObservableObject
     private string _errorText = string.Empty;
     private string _statusText = "";
     private DesktopMeeting? _selectedMeeting;
+    private CancellationTokenSource? _filterDebounce;
 
     public MeetingsViewModel(FrontendServices services) => _services = services;
 
@@ -33,7 +34,7 @@ public sealed class MeetingsViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _searchText, value)) return;
-            ApplyFilter();
+            ScheduleFilter();
         }
     }
 
@@ -43,7 +44,7 @@ public sealed class MeetingsViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _statusFilter, value)) return;
-            ApplyFilter();
+            ScheduleFilter();
         }
     }
 
@@ -80,7 +81,7 @@ public sealed class MeetingsViewModel : ObservableObject
             if (!await _services.Backend.CheckReadyAsync(cancellationToken))
             {
                 _allMeetings.Clear();
-                ApplyFilter();
+                ApplyFilterNow();
                 ErrorText = "API недоступен. Проверьте backend и адрес подключения.";
                 return;
             }
@@ -88,7 +89,7 @@ public sealed class MeetingsViewModel : ObservableObject
             if (!_services.Backend.HasSession)
             {
                 _allMeetings.Clear();
-                ApplyFilter();
+                ApplyFilterNow();
                 StatusText = "Войдите в API, чтобы загрузить совещания.";
                 return;
             }
@@ -96,7 +97,7 @@ public sealed class MeetingsViewModel : ObservableObject
             var meetings = await _services.Backend.GetMeetingsAsync(cancellationToken);
             _allMeetings.Clear();
             _allMeetings.AddRange(meetings.OrderByDescending(meeting => meeting.CreatedAt));
-            ApplyFilter();
+            ApplyFilterNow();
             StatusText = _allMeetings.Count == 0
                 ? "Совещаний пока нет."
                 : $"Загружено совещаний: {_allMeetings.Count}";
@@ -108,7 +109,7 @@ public sealed class MeetingsViewModel : ObservableObject
         catch (Exception ex)
         {
             _allMeetings.Clear();
-            ApplyFilter();
+            ApplyFilterNow();
             StatusText = string.Empty;
             ErrorText = SafeError(ex);
         }
@@ -118,7 +119,37 @@ public sealed class MeetingsViewModel : ObservableObject
         }
     }
 
-    private void ApplyFilter()
+    private void ScheduleFilter()
+    {
+        _filterDebounce?.Cancel();
+        _filterDebounce?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _filterDebounce = cancellation;
+        _ = ApplyFilterDebouncedAsync(cancellation);
+    }
+
+    private async Task ApplyFilterDebouncedAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(250, cancellation.Token);
+            ApplyFilterNow();
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer keystroke superseded this filter operation.
+        }
+        finally
+        {
+            if (ReferenceEquals(_filterDebounce, cancellation))
+            {
+                _filterDebounce = null;
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private void ApplyFilterNow()
     {
         var query = SearchText.Trim();
         var meetings = string.IsNullOrWhiteSpace(query)
@@ -136,8 +167,11 @@ public sealed class MeetingsViewModel : ObservableObject
             _ => meetings
         };
 
-        FilteredMeetings.Clear();
-        foreach (var meeting in meetings) FilteredMeetings.Add(meeting);
+        if (!FilteredMeetings.SequenceEqual(meetings))
+        {
+            FilteredMeetings.Clear();
+            foreach (var meeting in meetings) FilteredMeetings.Add(meeting);
+        }
         OnPropertyChanged(nameof(HasMeetings));
         OnPropertyChanged(nameof(HasFilteredMeetings));
     }

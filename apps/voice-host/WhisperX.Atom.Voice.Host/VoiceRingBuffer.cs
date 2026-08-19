@@ -30,4 +30,13 @@ public sealed class VoiceRingBuffer(int capacityBytes)
             return result;
         }
     }
+
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            _write = 0;
+            _count = 0;
+        }
+    }
 }

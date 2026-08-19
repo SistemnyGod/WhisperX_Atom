@@ -10,7 +10,7 @@
     <Grid Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,*" RowSpacing="{StaticResource PageGap}">
         <controls:PageHeader Title="ИИ-помощник" Subtitle="Постоянные диалоги по готовым стенограммам с подтверждёнными источниками">
             <controls:PageHeader.Actions>
-                <StackPanel Orientation="Horizontal" Spacing="10">
+                <StackPanel x:Name="AssistantHeaderActions" Orientation="Horizontal" Spacing="10">
                     <ComboBox x:Name="ModeBox" Header="Режим" ItemsSource="{Binding Modes}" DisplayMemberPath="Label" Width="190" SelectionChanged="ModeBox_SelectionChanged" />
                     <ComboBox x:Name="ContextBox" Header="Контекст" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" Width="270" SelectionChanged="ContextBox_SelectionChanged" />
                     <Button x:Name="NewChatButton" Content="Новый чат" Style="{StaticResource PrimaryButtonStyle}" Click="NewChatButton_Click" />
@@ -18,7 +18,7 @@
             </controls:PageHeader.Actions>
         </controls:PageHeader>
 
-        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" />
+        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" MaxWidth="920" HorizontalAlignment="Left" />
 
         <Grid x:Name="AssistantShell" Grid.Row="2" ColumnDefinitions="260,*,340" ColumnSpacing="12" SizeChanged="AssistantShell_SizeChanged">
             <Border x:Name="ConversationCard" Style="{StaticResource CardStyle}" Padding="12">
@@ -41,12 +41,16 @@
 
             <Border x:Name="ChatCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="16">
                 <Grid RowDefinitions="Auto,*,Auto,Auto" RowSpacing="12">
-                    <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Spacing="2">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                        <Button x:Name="BackToChatsButton" Visibility="Collapsed" Style="{StaticResource IconButtonStyle}" Click="BackToChatsButton_Click" AutomationProperties.Name="Вернуться к списку чатов">
+                            <SymbolIcon Symbol="Back" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="2">
                             <TextBlock Text="Диалог" Style="{StaticResource SectionTitleStyle}" />
                             <TextBlock x:Name="ContextText" Text="Выберите или создайте чат" Foreground="{StaticResource MutedTextBrush}" />
                         </StackPanel>
-                        <ProgressRing x:Name="LoadingRing" Grid.Column="1" Width="22" Height="22" IsActive="False" />
+                        <Button x:Name="ShowEvidenceButton" Grid.Column="2" Content="Источники" Visibility="Collapsed" Style="{StaticResource CardButtonStyle}" Click="ShowEvidenceButton_Click" />
+                        <ProgressRing x:Name="LoadingRing" Grid.Column="3" Width="22" Height="22" IsActive="False" />
                     </Grid>
                     <ListView x:Name="MessagesList" Grid.Row="1" ItemsSource="{Binding Messages}" SelectionMode="Single" SelectionChanged="MessagesList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListView.ItemTemplate>
@@ -55,13 +59,21 @@
                                     <StackPanel Spacing="4">
                                         <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                         <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding TimingsText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <TextBlock x:Name="ChatEmptyText" Grid.Row="1" Text="Выберите чат и задайте вопрос." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" />
-                    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <StackPanel x:Name="ChatEmptyState" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="430" Spacing="8">
+                        <TextBlock x:Name="ChatEmptyText" Text="Выберите чат и задайте вопрос." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                        <TextBlock Text="Начните с одного из примеров или сформулируйте свой вопрос." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                        <StackPanel x:Name="QuestionSuggestions" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="Что решили?" Style="{StaticResource CardButtonStyle}" Tag="Что решили по этому совещанию?" Click="QuestionSuggestionButton_Click" />
+                            <Button Content="Поручения" Style="{StaticResource CardButtonStyle}" Tag="Какие поручения назначены?" Click="QuestionSuggestionButton_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Grid x:Name="QuestionComposer" Grid.Row="2" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="8">
                         <TextBox x:Name="QuestionBox" Header="Вопрос" PlaceholderText="Задайте вопрос помощнику" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
                         <Button x:Name="AskButton" Grid.Column="1" Content="Спросить" VerticalAlignment="Bottom" Style="{StaticResource PrimaryButtonStyle}" Click="AskButton_Click" />
                     </Grid>
@@ -71,10 +83,15 @@
 
             <Border x:Name="EvidenceCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16">
                 <Grid RowDefinitions="Auto,*" RowSpacing="10">
-                    <StackPanel Spacing="3">
-                        <TextBlock Text="Источники" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="Ответы без подтверждённых источников требуют проверки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                    </StackPanel>
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                        <Button x:Name="BackFromEvidenceButton" Visibility="Collapsed" Style="{StaticResource IconButtonStyle}" Click="BackFromEvidenceButton_Click" AutomationProperties.Name="Вернуться к диалогу">
+                            <SymbolIcon Symbol="Back" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <TextBlock Text="Источники" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Ответы без подтверждённых источников требуют проверки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
                     <ListView x:Name="EvidenceList" Grid.Row="1" ItemsSource="{Binding Evidence}" SelectionMode="None" BorderThickness="0">
                         <ListView.ItemTemplate>
                             <DataTemplate>

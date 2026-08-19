@@ -242,3 +242,103 @@ Validation:
 - native WinUI visual QA — blocked because a fresh native implementation screenshot is unavailable.
 
 final result: blocked
+
+## Registry and system-status refinement — 2026-08-18
+
+Source visual truth:
+
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-e915fa43-3210-4d57-a2f5-58743c53931a.png` — поручения;
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-fcc701a8-7f8e-4f31-9fe8-92351f0ab8eb.png` — спикеры;
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-1cdb56d2-1391-4a5c-b66d-e5eab6d8e922.png` — состояние системы.
+
+Implemented:
+
+- task filters now share one bounded card and reflow through the common compact/standard/wide breakpoints;
+- the task registry has explicit readable columns while meeting and responsible values trim with full-value tooltips;
+- compact task and speaker layouts no longer reserve an empty detail card before a row is selected;
+- speaker identifiers and long meeting names stay on stable lines and expose the full value through tooltips;
+- the system page uses the user-facing title `Состояние системы`, a four-card wide summary row, and a searchable connection registry;
+- installation ID and heartbeat age are scoped to the selected-agent inspector instead of the main table;
+- no server API, Recorder IPC, or Voice Host IPC contract changed.
+
+Automated evidence:
+
+- Desktop Release build passed with 0 warnings/errors;
+- 40 Desktop UI contract tests passed;
+- StaticResource validation passed for 26 XAML files;
+- UTF-8 validation passed for 354 runtime files;
+- scoped `git diff --check` reported no whitespace errors.
+
+Full-view and focused-region comparison remain blocked because a fresh screenshot of the newly compiled native WinUI build is unavailable. The supplied screenshots are valid source references but represent the older installed build.
+
+Remaining verification: capture Tasks, Speakers, and System Status at 1366×768 and 1920×1080 with 100–150% Windows scaling, then compare filter reflow, table density, inspector transitions, and long-value trimming.
+
+final result: blocked
+
+## Meeting reading workspace refinement — 2026-08-18
+
+Source visual truth: `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-3e519f95-c25e-4fb4-9a66-8b2d2a8f5cf6.png` (1674×941, light meeting workspace with transcript-first layout).
+
+Implementation screenshot: unavailable for the freshly compiled native WinUI build. The screenshots supplied in the conversation represent an older installed build and are not valid post-change evidence.
+
+Target viewport: 1366×768 and 1920×1080 at 100–150% Windows scaling. Pixel density normalization cannot be completed without a current native capture. State: opened meeting, transcript tab selected, transcript and processing jobs loaded.
+
+Implemented from the source composition:
+
+- transcript reading remains the dominant column and is limited to a comfortable text measure;
+- export actions are consolidated into one menu while reprocessing remains visible;
+- search/navigation and display options occupy two stable toolbar rows;
+- the processing rail moves below the transcript below 1240 px instead of squeezing text;
+- protocol decision/task cards stack at the compact breakpoint;
+- summary warnings are scoped to the selected result rather than displayed as a duplicate page-wide banner;
+- compact summary navigation uses list → result master/detail behavior.
+
+Full-view comparison: blocked because a current implementation screenshot is unavailable.
+
+Focused-region comparison: blocked for the transcript toolbar, processing rail, summary warning, and compact master/detail transition for the same reason.
+
+Automated evidence:
+
+- Desktop Release build passed with 0 warnings/errors;
+- 37 Desktop UI contract tests passed;
+- StaticResource validation passed for 26 XAML files;
+- UTF-8 validation passed for 354 runtime files;
+- `git diff --check` reported no whitespace errors.
+
+Remaining P2 verification blocker: capture and compare the current native WinUI meeting workspace at the target viewports and scaling factors. No implementation failure was found by the automated gates.
+
+Comparison history: the source showed a transcript-first workspace; the previous implementation exposed four competing header buttons and retained a side rail at notebook widths. This iteration consolidated exports, split the toolbar into stable rows, and introduced a responsive rail. Post-fix visual evidence is still unavailable.
+
+final result: blocked
+
+## Settings, sources, and sign-in refinement — 2026-08-18
+
+Source visual truth:
+
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-e5373963-f031-4724-ad50-379ab168fd4a.png` — dark sign-in screen;
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-e3e8f2c5-ee05-4d92-9dbd-00c8f4ce4350.png` — settings overview;
+- `C:\Users\AI_SER~1\AppData\Local\Temp\codex-clipboard-5f9f3f88-ff57-42d0-b48d-a4d1b1cc46c7.png` — Mifodiy settings.
+
+Implemented:
+
+- the sign-in form explicitly keeps placeholder and remember-login content legible on the dark surface;
+- settings now expose direct navigation to Connection, Mifodiy, Recording and archive, and Diagnostics;
+- diagnostics shortcuts expand the existing Recorder and Mifodiy diagnostic sections without introducing a new runtime contract;
+- the settings section toolbar reflows vertically at the compact breakpoint;
+- source cards use matched minimum heights and reserve stable one-line regions for microphone and archive values;
+- raw endpoint identifiers were removed from the primary microphone/system-audio lists; human device names remain visible with full-name tooltips;
+- the server connection registry was reduced to the three user-facing columns: name, status, and last contact.
+
+Automated evidence:
+
+- Desktop Release build passed with 0 warnings/errors;
+- 43 Desktop UI contract tests passed;
+- StaticResource validation passed for 26 XAML files;
+- UTF-8 validation passed for 354 runtime files;
+- scoped `git diff --check` reported no whitespace errors.
+
+Full-view and focused-region comparison remain blocked because the current compiled native WinUI build has not been captured. The supplied screenshots show the previous installed build and cannot prove the post-change geometry.
+
+Remaining verification: capture sign-in at 720×640 and 1080×760, then Settings and Sources at 1366×768 and 1920×1080 with 100–150% scaling. Compare checkbox/placeholder contrast, section navigation, Mifodiy card stability, device-name trimming, and stacked compact layouts.
+
+final result: blocked

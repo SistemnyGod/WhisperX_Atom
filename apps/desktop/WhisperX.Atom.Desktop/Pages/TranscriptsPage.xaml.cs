@@ -19,6 +19,7 @@ public sealed partial class TranscriptsPage : Page
     private CancellationTokenSource? _pageCts;
     private CancellationTokenSource? _detailCts;
     private bool _updatingLayout;
+    private PageLayoutMode? _lastLayoutMode;
 
     public TranscriptsPage()
     {
@@ -113,6 +114,25 @@ public sealed partial class TranscriptsPage : Page
         if (_viewModel is not null)
             _viewModel.HideTechnicalEvents = HideTechnicalEventsCheckBox.IsChecked == true;
         UpdateDetails();
+    }
+
+    private void PreviousSegmentButton_Click(object sender, RoutedEventArgs e) => SelectAdjacentSegment(-1);
+
+    private void NextSegmentButton_Click(object sender, RoutedEventArgs e) => SelectAdjacentSegment(1);
+
+    private void SelectAdjacentSegment(int direction)
+    {
+        if (_viewModel is null || _viewModel.FilteredSegments.Count == 0) return;
+        var currentIndex = _viewModel.SelectedSegment is null
+            ? -1
+            : _viewModel.FilteredSegments.IndexOf(_viewModel.SelectedSegment);
+        var targetIndex = direction < 0
+            ? currentIndex <= 0 ? _viewModel.FilteredSegments.Count - 1 : currentIndex - 1
+            : currentIndex < 0 || currentIndex >= _viewModel.FilteredSegments.Count - 1 ? 0 : currentIndex + 1;
+        var target = _viewModel.FilteredSegments[targetIndex];
+        SegmentsList.SelectedItem = target;
+        SegmentsList.ScrollIntoView(target, ScrollIntoViewAlignment.Leading);
+        SegmentsList.Focus(FocusState.Programmatic);
     }
 
     private async void TranscriptsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -295,6 +315,9 @@ public sealed partial class TranscriptsPage : Page
             : string.IsNullOrWhiteSpace(_viewModel.SegmentSearchText)
                 ? "Сегменты стенограммы не найдены."
                 : "Сегментов с таким текстом не найдено.";
+        var canNavigateSegments = hasSelection && _viewModel.FilteredSegments.Count > 0;
+        PreviousSegmentButton.IsEnabled = canNavigateSegments;
+        NextSegmentButton.IsEnabled = canNavigateSegments;
         OpenSegmentButton.IsEnabled = _viewModel.HasSegmentSelection;
         SelectedSegmentText.Text = _viewModel.SelectedSegment is { } segment
             ? $"{segment.TimeLabel} · {segment.Speaker ?? "Спикер не определён"}\n{segment.Text}"
@@ -308,10 +331,12 @@ public sealed partial class TranscriptsPage : Page
         try
         {
             var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+            if (_lastLayoutMode == mode) return;
+            _lastLayoutMode = mode;
             ActionsPanel.Orientation = mode == PageLayoutMode.Compact ? Orientation.Vertical : Orientation.Horizontal;
             var compact = mode != PageLayoutMode.Wide;
             WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
-            WorkspaceGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(390);
+            WorkspaceGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(520);
             WorkspaceGrid.RowDefinitions[0].Height = compact ? new GridLength(430) : new GridLength(1, GridUnitType.Star);
             WorkspaceGrid.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
             Grid.SetColumn(ListCard, 0);

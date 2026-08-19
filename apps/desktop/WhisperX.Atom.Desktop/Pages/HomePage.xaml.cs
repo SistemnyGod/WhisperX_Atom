@@ -94,6 +94,11 @@ public sealed partial class HomePage : Page
         if (HomeContentGrid is null || HomeMainColumn is null || HomeRailColumn is null || KpiGrid is null) return;
         ResponsiveLayout.SetTwoColumn(HomeContentGrid, HomeMainColumn, HomeRailColumn, 320, e.NewSize.Width);
         ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement?[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
+        var compact = ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact;
+        HeroIdentityRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
+        HeroIdentityRow.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+        HeroCommandRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
+        HomeNotices.Width = Math.Min(380, Math.Max(260, e.NewSize.Width - 56));
     }
 
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");

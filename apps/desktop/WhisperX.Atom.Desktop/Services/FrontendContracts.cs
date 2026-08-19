@@ -101,6 +101,9 @@ public interface IBackendService : IDisposable
     Task<bool> MergeSpeakersAsync(Guid meetingId, Guid sourceSpeakerId, Guid targetSpeakerId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopMedia>> GetMediaAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopSummary?> GetSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopRegistryPage<DesktopSummaryRegistryRow>> GetSummaryRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default);
+    Task<DesktopRegistryPage<DesktopSpeakerRegistryRow>> GetSpeakerRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default);
+    Task<DesktopRegistryPage<DesktopActionItemRegistryRow>> GetActionItemRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default);
     Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default);
@@ -129,10 +132,24 @@ public sealed record DesktopAssistantConversation(string Id, string Title, strin
         _ => "Совещание"
     };
 }
-public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt)
+public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null)
 {
     public bool IsUser => Role.Equals("USER", StringComparison.OrdinalIgnoreCase);
     public string StatusText => UiStatusMapper.Text(Status);
+    public string TimingsText
+    {
+        get
+        {
+            if (Timings is not JsonElement value || value.ValueKind != JsonValueKind.Object) return string.Empty;
+            var parts = new List<string>();
+            foreach (var property in value.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.Number || !property.Value.TryGetDouble(out var milliseconds)) continue;
+                parts.Add($"{property.Name}: {milliseconds:0} мс");
+            }
+            return string.Join(" · ", parts);
+        }
+    }
 }
 public sealed record DesktopAssistantMessageCreateResult(DesktopAssistantMessage UserMessage, DesktopAssistantMessage AssistantMessage, string QueryId);
 
@@ -158,7 +175,18 @@ public sealed class ActiveMeetingContext
 public sealed class VoiceAssistantConversationStore
 {
     private readonly object _gate = new();
+    private readonly string _path;
+    private readonly Func<DateTimeOffset> _clock;
     private readonly Dictionary<(Guid UserId, string Mode, Guid? MeetingId), (Guid ConversationId, DateTimeOffset ExpiresAt)> _items = new();
+
+    public VoiceAssistantConversationStore(string? root = null, Func<DateTimeOffset>? clock = null)
+    {
+        root ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "Assistant");
+        Directory.CreateDirectory(root);
+        _path = Path.Combine(root, "voice-conversations.json");
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        Load();
+    }
 
     public Guid? Get(Guid userId, string mode, Guid? meetingId)
     {
@@ -174,17 +202,56 @@ public sealed class VoiceAssistantConversationStore
         lock (_gate)
         {
             Prune();
-            _items[(userId, NormalizeMode(mode), meetingId)] = (conversationId, DateTimeOffset.UtcNow.AddMinutes(30));
+            _items[(userId, NormalizeMode(mode), meetingId)] = (conversationId, _clock().AddMinutes(30));
+            PersistLocked();
         }
     }
 
-    public void Clear() { lock (_gate) _items.Clear(); }
+    public void Clear() { lock (_gate) { _items.Clear(); PersistLocked(); } }
 
     private void Prune()
     {
-        foreach (var key in _items.Where(item => item.Value.ExpiresAt <= DateTimeOffset.UtcNow).Select(item => item.Key).ToArray())
+        foreach (var key in _items.Where(item => item.Value.ExpiresAt <= _clock()).Select(item => item.Key).ToArray())
             _items.Remove(key);
     }
+
+    private void Load()
+    {
+        lock (_gate)
+        {
+            try
+            {
+                if (!File.Exists(_path)) return;
+                var persisted = JsonSerializer.Deserialize<Dictionary<string, PersistedConversation>>(File.ReadAllText(_path)) ?? [];
+                foreach (var item in persisted)
+                {
+                    var parts = item.Key.Split('|', 3);
+                    if (parts.Length != 3 || !Guid.TryParse(parts[0], out var userId) || !Guid.TryParse(item.Value.ConversationId, out var conversationId)) continue;
+                    Guid? meetingId = Guid.TryParse(parts[2], out var parsedMeeting) ? parsedMeeting : null;
+                    _items[(userId, parts[1], meetingId)] = (conversationId, item.Value.ExpiresAt);
+                }
+                Prune();
+            }
+            catch { _items.Clear(); }
+        }
+    }
+
+    private void PersistLocked()
+    {
+        try
+        {
+            var persisted = _items.ToDictionary(
+                item => $"{item.Key.UserId:N}|{item.Key.Mode}|{item.Key.MeetingId?.ToString("N") ?? "-"}",
+                item => new PersistedConversation(item.Value.ConversationId.ToString("N"), item.Value.ExpiresAt),
+                StringComparer.Ordinal);
+            var temporary = _path + ".part";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(persisted));
+            File.Move(temporary, _path, true);
+        }
+        catch { /* runtime persistence is best effort; identifiers never contain user content */ }
+    }
+
+    private sealed record PersistedConversation(string ConversationId, DateTimeOffset ExpiresAt);
 
     private static string NormalizeMode(string? mode) => string.Equals(mode, "MEETING_HISTORY", StringComparison.OrdinalIgnoreCase)
         ? "MEETING_MEMORY"
@@ -286,12 +353,18 @@ public sealed class FrontendServices
     public FrontendNavigationState Navigation { get; } = new();
     public ActiveMeetingContext ActiveMeeting { get; } = new();
     public VoiceAssistantConversationStore VoiceAssistantConversations { get; } = new();
+    public AssistantDeliveryStore AssistantDelivery { get; } = new();
     public AgentBootstrapCoordinator AgentBootstrap { get; }
     public ProcessingJobTracker JobTracker { get; }
     public RecorderServiceController RecorderService { get; }
     public RecordingCommandService RecordingCommands { get; }
     public VoiceHostController VoiceHost { get; }
     public ClientRuntimeDiagnostics Diagnostics { get; }
+    public event Action<Guid, Guid?>? AssistantResultAvailable
+    {
+        add => VoiceHost.AssistantResultAvailable += value;
+        remove => VoiceHost.AssistantResultAvailable -= value;
+    }
 
     public async Task<ProductRuntimeSnapshot> GetRuntimeSnapshotAsync(CancellationToken cancellationToken = default)
     {

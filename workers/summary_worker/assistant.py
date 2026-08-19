@@ -70,6 +70,27 @@ _GROUNDING_STOPWORDS = {
     "его", "её", "может", "можно", "нужно", "решили", "говорили", "сказал", "сказали",
 }
 
+_RU_INFLECTION_SUFFIXES = ("иями", "ами", "ями", "ого", "ему", "ому", "ов", "ев", "ам", "ям", "ах", "ях", "ы", "и", "а", "я", "у", "ю", "е", "о")
+
+
+def _grounding_tokens(value: str) -> set[str]:
+    """Normalize harmless Russian inflections without weakening numbers.
+
+    Numeric/date validation remains exact in ``claims_are_semantically_grounded``;
+    this helper is used only for prose tokens and treats ё/е and common case
+    endings consistently.
+    """
+    result: set[str] = set()
+    for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", (value or "").lower()):
+        token = token.replace("ё", "е").strip("-")
+        if token and token not in _GROUNDING_STOPWORDS:
+            for suffix in _RU_INFLECTION_SUFFIXES:
+                if len(token) - len(suffix) >= 4 and token.endswith(suffix):
+                    token = token[: -len(suffix)]
+                    break
+            result.add(token)
+    return result
+
 
 def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str) -> bool:
     """Apply a deterministic second gate to claims before they can be spoken.
@@ -91,11 +112,8 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
             if str(item).removeprefix("SEG-") in valid
         ).lower()
         claim_text = str(claim.get("text", "")).lower()
-        claim_tokens = {
-            token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", claim_text)
-            if token not in _GROUNDING_STOPWORDS and not token.startswith("seg-")
-        }
-        evidence_tokens = set(re.findall(r"[\wА-Яа-яЁё-]{2,}", evidence_text))
+        claim_tokens = {token for token in _grounding_tokens(claim_text) if not token.startswith("seg-")}
+        evidence_tokens = _grounding_tokens(evidence_text)
         if claim_tokens and not (claim_tokens & evidence_tokens):
             return False
         numeric_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", claim_text))
@@ -112,11 +130,8 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
         if str(item).removeprefix("SEG-") in valid
     ).lower()
     for value in (str(result.get("answer", "")), str(result.get("voice_answer", ""))):
-        tokens = {
-            token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", value.lower())
-            if token not in _GROUNDING_STOPWORDS
-        }
-        if tokens and not tokens.issubset(set(re.findall(r"[\wА-Яа-яЁё-]{2,}", covered)) | set(re.findall(r"[\wА-Яа-яЁё-]{2,}", cited))):
+        tokens = _grounding_tokens(value)
+        if tokens and not tokens.issubset(_grounding_tokens(covered) | _grounding_tokens(cited)):
             return False
     return True
 
@@ -296,7 +311,11 @@ class AssistantRepository:
                         (query_id, segment_id, rank, transcript_id, transcript_version, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
                     )
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None) -> None:
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None, expected_meeting_id: str | None = None) -> None:
+        if assistant_mode == "CURRENT_MEETING" and expected_meeting_id:
+            if any(value[0] != expected_meeting_id for value in valid.values()):
+                valid = {}
+                reason = "ASSISTANT_SCOPE_VIOLATION"
         claims = result.get("claims") if isinstance(result.get("claims"), list) else []
         claim_ids = [str(item).removeprefix("SEG-") for claim in claims if isinstance(claim, dict) for item in (claim.get("evidenceIds") or [])]
         evidence_ids = claim_ids or [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
@@ -313,6 +332,12 @@ class AssistantRepository:
             status = "READY"
             grounding_status = "GROUNDED"
             error_code = None
+        elif reason == "ASSISTANT_SCOPE_VIOLATION":
+            status = "GROUNDING_REJECTED"
+            grounding_status = "REJECTED"
+            error_code = "ASSISTANT_SCOPE_VIOLATION"
+            answer = "Не удалось подтвердить принадлежность источников текущему совещанию."
+            voice = "Источники ответа не относятся к текущему совещанию."
         elif reason == "LOW_TRANSCRIPT_QUALITY":
             status = "NEEDS_REVIEW"
             grounding_status = "WARNING"
@@ -405,7 +430,7 @@ class AssistantWorker:
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)
                 if not context:
-                    await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error)
+                    await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
                     return
                 # Persist the prompt snapshot before any model invocation.
                 # A failed Qwen request remains diagnosable and cannot alter
@@ -438,7 +463,7 @@ class AssistantWorker:
                         result = await client.invoke_json(retry_messages, ASSISTANT_SCHEMA)
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
-            await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind)
+                    await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id)
         except Exception as exc:
             self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())
             LOGGER.exception("assistant query failed: %s", query_id)

@@ -142,4 +142,45 @@ internal sealed class VoiceIntentBrokerClient
         }
         catch { return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId); }
     }
+
+    public async Task<VoiceBrokerResponse> PublishAssistantPlaybackFinishedAsync(
+        string queryId,
+        string responseId,
+        string playbackState,
+        bool cancelled,
+        string? commandId,
+        string? traceId,
+        string? localSessionId,
+        CancellationToken cancellationToken)
+    {
+        traceId ??= Guid.NewGuid().ToString("N");
+        try
+        {
+            await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(pipe);
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            var request = new
+            {
+                command = "ASSISTANT_PLAYBACK_FINISHED",
+                queryId,
+                responseId,
+                playbackState,
+                cancelled,
+                commandId,
+                traceId,
+                localSessionId,
+                timestamp = DateTimeOffset.UtcNow
+            };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(line)
+                ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId)
+                : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json)
+                    ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId);
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException)
+        {
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
+        }
+    }
 }

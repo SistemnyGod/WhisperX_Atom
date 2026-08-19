@@ -38,6 +38,7 @@ public sealed class VoiceIntentParser
             var value when Matches(value, "поручение", "отметь поручение", "зафиксируй поручение", "задача") => VoiceIntent.MarkActionItem,
             var value when Matches(value, "статус", "состояние", "что происходит") => VoiceIntent.GetStatus,
             var value when Matches(value, "заверши", "завершить", "останови запись", "стоп") => VoiceIntent.StopRecording,
+            var value when Matches(value, "остановись", "замолчи", "прекрати говорить", "останови ответ") => VoiceIntent.StopSpeaking,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
             _ => IsQuestion(withoutWake) ? VoiceIntent.HistoryQuestion : VoiceIntent.Unknown

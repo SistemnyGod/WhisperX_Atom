@@ -47,10 +47,20 @@ public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int
 public sealed record SummaryEligibility(bool HasTranscript, bool Allowed, string? Reason = null);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
-public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", string? RequestedMode = null, double? RouterConfidence = null, string Source = "DESKTOP", string GroundingStatus = "PENDING", JsonDocument? AnswerMetadata = null, Guid? TranscriptId = null, int? TranscriptVersion = null);
+public sealed record RegistryPage<T>(IReadOnlyList<T> Items, int TotalCount, bool HasMore);
+public sealed record SummaryRegistryRow(MeetingRow Meeting, SummaryRow? Summary);
+public sealed record SpeakerRegistryRow(MeetingRow Meeting, SpeakerRow Speaker);
+public sealed record ActionItemRegistryRow(MeetingRow Meeting, ActionItemRow Item);
+public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", string? RequestedMode = null, double? RouterConfidence = null, string Source = "DESKTOP", string GroundingStatus = "PENDING", JsonDocument? AnswerMetadata = null, Guid? TranscriptId = null, int? TranscriptVersion = null)
+{
+    // Timings are optional metadata produced by the existing Assistant
+    // pipeline. Exposing only this nested object keeps the Desktop contract
+    // additive and avoids a schema migration.
+    public JsonElement? Timings => AnswerMetadata?.RootElement.TryGetProperty("timings", out var timings) == true ? timings.Clone() : null;
+};
 public sealed record AssistantRequestRoute(string ResolvedMode, double Confidence, string? ErrorCode = null, string? Clarification = null);
 public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY");
-public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt);
+public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null);
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, long StaleRecordingSessions, DateTimeOffset CheckedAt);
@@ -861,7 +871,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand("""
             SELECT m.id,m.conversation_id,m.role,m.content,m.status,m.voice_answer,m.evidence,m.error_code,
-                   q.id,m.created_at,m.completed_at
+                   q.id,m.created_at,m.completed_at,q.answer_metadata
             FROM assistant_messages m
             JOIN assistant_conversations c ON c.id=m.conversation_id
             LEFT JOIN assistant_queries q ON q.user_message_id=m.id OR q.assistant_message_id=m.id
@@ -1008,8 +1018,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     private static AssistantConversationRow ReadConversation(NpgsqlDataReader reader) =>
         new(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetGuid(4), reader.GetBoolean(5), reader.GetDateTime(6), reader.GetDateTime(7), reader.GetString(8));
 
-    private static AssistantMessageRow ReadMessage(NpgsqlDataReader reader) =>
-        new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10));
+    private static AssistantMessageRow ReadMessage(NpgsqlDataReader reader)
+    {
+        JsonElement? timings = null;
+        if (!reader.IsDBNull(11))
+        {
+            var metadata = reader.GetFieldValue<JsonDocument>(11);
+            if (metadata.RootElement.TryGetProperty("timings", out var value)) timings = value.Clone();
+        }
+        return new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), timings);
+    }
 
     public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)
     {
@@ -1023,6 +1041,93 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     }    public async Task<SummaryRow?> GetLatestSummaryAsync(Guid meetingId)
     {
         await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT id,meeting_id,transcript_id,version,status,model_name,prompt_version,source_hash,content,created_at FROM summaries WHERE meeting_id=@id ORDER BY version DESC LIMIT 1", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); return !await reader.ReadAsync() ? null : ReadSummary(reader);
+    }
+
+    public async Task<RegistryPage<SummaryRegistryRow>> ListSummaryRegistryPageAsync(int page, int pageSize, string? search, string? status, Guid? meetingId, string? sort, Guid ownerId, bool includeAll)
+    {
+        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 200);
+        var offset = (page - 1) * pageSize;
+        var normalizedSearch = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+        var normalizedStatus = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant();
+        await using var connection = await OpenAsync();
+        const string filter = "(@include_all OR m.owner_id=@owner) AND (@meeting IS NULL OR m.id=@meeting) AND (@search IS NULL OR m.title ILIKE '%' || @search || '%' OR COALESCE(s.content::text,'') ILIKE '%' || @search || '%') AND (@status IS NULL OR COALESCE(s.status,'SUMMARY_NOT_READY')=@status)";
+        await using var count = new NpgsqlCommand($"SELECT COUNT(*) FROM meetings m LEFT JOIN LATERAL (SELECT status,content FROM summaries WHERE meeting_id=m.id ORDER BY version DESC LIMIT 1) s ON true WHERE {filter}", connection);
+        AddRegistryParameters(count, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus);
+        var total = Convert.ToInt32(await count.ExecuteScalarAsync());
+        var order = string.Equals(sort, "oldest", StringComparison.OrdinalIgnoreCase) ? "m.created_at ASC" : "m.created_at DESC";
+        await using var command = new NpgsqlCommand($"""
+            SELECT m.id,m.title,m.description,m.status,m.created_at,
+                   s.id,s.meeting_id,s.transcript_id,s.version,s.status,s.model_name,s.prompt_version,s.source_hash,s.content,s.created_at
+            FROM meetings m
+            LEFT JOIN LATERAL (SELECT id,meeting_id,transcript_id,version,status,model_name,prompt_version,source_hash,content,created_at FROM summaries WHERE meeting_id=m.id ORDER BY version DESC LIMIT 1) s ON true
+            WHERE {filter} ORDER BY {order} LIMIT @limit OFFSET @offset
+            """, connection);
+        AddRegistryParameters(command, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus);
+        command.Parameters.AddWithValue("limit", pageSize); command.Parameters.AddWithValue("offset", offset);
+        var items = new List<SummaryRegistryRow>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var meeting = new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));
+            SummaryRow? summary = null;
+            if (!reader.IsDBNull(5))
+                summary = new SummaryRow(reader.GetGuid(5), reader.GetGuid(6), reader.IsDBNull(7) ? null : reader.GetGuid(7), reader.GetInt32(8), reader.GetString(9), reader.GetString(10), reader.GetString(11), reader.GetString(12), reader.GetFieldValue<JsonDocument>(13), reader.GetDateTime(14));
+            items.Add(new SummaryRegistryRow(meeting, summary));
+        }
+        return new RegistryPage<SummaryRegistryRow>(items, total, offset + items.Count < total);
+    }
+
+    public async Task<RegistryPage<SpeakerRegistryRow>> ListSpeakerRegistryPageAsync(int page, int pageSize, string? search, string? status, Guid? meetingId, string? sort, Guid ownerId, bool includeAll)
+    {
+        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 200); var offset = (page - 1) * pageSize;
+        var normalizedSearch = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+        var normalizedStatus = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant();
+        await using var connection = await OpenAsync();
+        const string filter = "(@include_all OR m.owner_id=@owner) AND (@meeting IS NULL OR m.id=@meeting) AND (@search IS NULL OR ms.display_name ILIKE '%' || @search || '%' OR ms.stable_key ILIKE '%' || @search || '%' OR m.title ILIKE '%' || @search || '%') AND (@status IS NULL OR m.status=@status)";
+        await using var count = new NpgsqlCommand($"SELECT COUNT(*) FROM meeting_speakers ms JOIN meetings m ON m.id=ms.meeting_id WHERE {filter}", connection);
+        AddRegistryParameters(count, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus);
+        var total = Convert.ToInt32(await count.ExecuteScalarAsync());
+        var order = string.Equals(sort, "recent", StringComparison.OrdinalIgnoreCase) ? "m.created_at DESC" : "LOWER(ms.display_name),m.created_at DESC";
+        await using var command = new NpgsqlCommand($"SELECT m.id,m.title,m.description,m.status,m.created_at,ms.id,ms.stable_key,COALESCE(ms.display_name,'') FROM meeting_speakers ms JOIN meetings m ON m.id=ms.meeting_id WHERE {filter} ORDER BY {order} LIMIT @limit OFFSET @offset", connection);
+        AddRegistryParameters(command, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus); command.Parameters.AddWithValue("limit", pageSize); command.Parameters.AddWithValue("offset", offset);
+        var items = new List<SpeakerRegistryRow>(); await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var meeting = new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));
+            items.Add(new SpeakerRegistryRow(meeting, new SpeakerRow(reader.GetGuid(5), reader.GetString(6), reader.GetString(7))));
+        }
+        return new RegistryPage<SpeakerRegistryRow>(items, total, offset + items.Count < total);
+    }
+
+    public async Task<RegistryPage<ActionItemRegistryRow>> ListActionItemRegistryPageAsync(int page, int pageSize, string? search, string? status, Guid? meetingId, string? sort, Guid ownerId, bool includeAll)
+    {
+        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 200); var offset = (page - 1) * pageSize;
+        var normalizedSearch = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+        var normalizedStatus = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant();
+        await using var connection = await OpenAsync();
+        const string filter = "(@include_all OR m.owner_id=@owner) AND (@meeting IS NULL OR m.id=@meeting) AND (@search IS NULL OR a.task ILIKE '%' || @search || '%' OR COALESCE(a.responsible,'') ILIKE '%' || @search || '%' OR m.title ILIKE '%' || @search || '%') AND (@status IS NULL OR a.status=@status)";
+        const string joins = "action_items a JOIN meetings m ON m.id=a.meeting_id";
+        await using var count = new NpgsqlCommand($"SELECT COUNT(*) FROM {joins} WHERE {filter}", connection);
+        AddRegistryParameters(count, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus);
+        var total = Convert.ToInt32(await count.ExecuteScalarAsync());
+        var order = string.Equals(sort, "deadline", StringComparison.OrdinalIgnoreCase) ? "a.deadline NULLS LAST,a.created_at DESC" : "a.created_at DESC";
+        await using var command = new NpgsqlCommand($"SELECT m.id,m.title,m.description,m.status,m.created_at,a.id,a.meeting_id,a.summary_id,a.task,a.responsible,a.deadline,a.status,a.evidence_segment_id,a.created_at FROM {joins} WHERE {filter} ORDER BY {order} LIMIT @limit OFFSET @offset", connection);
+        AddRegistryParameters(command, includeAll, ownerId, meetingId, normalizedSearch, normalizedStatus); command.Parameters.AddWithValue("limit", pageSize); command.Parameters.AddWithValue("offset", offset);
+        var items = new List<ActionItemRegistryRow>(); await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var meeting = new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));
+            items.Add(new ActionItemRegistryRow(meeting, new ActionItemRow(reader.GetGuid(5), reader.GetGuid(6), reader.IsDBNull(7) ? null : reader.GetGuid(7), reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetGuid(12), reader.GetDateTime(13))));
+        }
+        return new RegistryPage<ActionItemRegistryRow>(items, total, offset + items.Count < total);
+    }
+
+    private static void AddRegistryParameters(NpgsqlCommand command, bool includeAll, Guid ownerId, Guid? meetingId, string? search, string? status)
+    {
+        command.Parameters.AddWithValue("include_all", includeAll); command.Parameters.AddWithValue("owner", ownerId);
+        command.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
+        command.Parameters.Add("search", NpgsqlDbType.Text).Value = (object?)search ?? DBNull.Value;
+        command.Parameters.Add("status", NpgsqlDbType.Text).Value = (object?)status ?? DBNull.Value;
     }
 
     public async Task<IReadOnlyList<DecisionRow>> ListDecisionsAsync(Guid meetingId)

@@ -25,7 +25,9 @@ public sealed partial class LoginWindow : Window
 
         var settings = services.Settings.Load();
         ApiUrlBox.Text = services.Backend.ApiUrl;
-        ServerOriginLabel.Text = $"LAN-сервер · {services.Backend.ApiUrl}";
+        // Keep infrastructure details out of the sign-in surface. The exact
+        // endpoint remains available in Settings and diagnostics after login.
+        ServerOriginLabel.Text = "Подключение к рабочему серверу по защищённому каналу";
         UsernameBox.Text = string.IsNullOrWhiteSpace(settings.Username) ? "admin" : settings.Username;
         SetPill(LanStatusDot, LanStatusText, "LAN-сервер проверяется", "LoginNeutralBrush");
         SetPill(RecorderStatusDot, RecorderStatusText, "Recorder проверяется", "LoginNeutralBrush");
@@ -247,6 +249,8 @@ public sealed partial class LoginWindow : Window
         UsernameBox.BorderBrush = LoginBrush(username ? "LoginDangerBrush" : "LoginInputBorderBrush");
         PasswordBox.BorderBrush = LoginBrush(password ? "LoginDangerBrush" : "LoginInputBorderBrush");
         PasswordTextBox.BorderBrush = LoginBrush(password ? "LoginDangerBrush" : "LoginInputBorderBrush");
+        UsernameErrorText.Opacity = username ? 1 : 0;
+        PasswordErrorText.Opacity = password ? 1 : 0;
     }
 
     private void ClearCredentialValidation() => SetCredentialValidation(username: false, password: false);
@@ -257,7 +261,10 @@ public sealed partial class LoginWindow : Window
     {
         try
         {
-            if (AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsResizable = true;
+            if (AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.IsResizable = true;
+            }
             var workArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
             var width = Math.Min(1080, (int)(workArea.Width * 0.90));
             var height = Math.Min(760, (int)(workArea.Height * 0.90));

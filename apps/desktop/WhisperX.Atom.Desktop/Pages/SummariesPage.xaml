@@ -18,13 +18,11 @@
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left">
                 <InfoBar.ActionButton>
                     <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
                 </InfoBar.ActionButton>
             </InfoBar>
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
-
             <Grid x:Name="WorkspaceGrid" ColumnDefinitions="*,430" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="540">
                 <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="0">
                     <StackPanel>
@@ -44,7 +42,7 @@
                         <ListView x:Name="SummariesList" ItemsSource="{Binding FilteredItems}" SelectionMode="Single" BorderThickness="0" SelectionChanged="SummariesList_SelectionChanged">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid Padding="20,12" ColumnDefinitions="1.4*,130,150">
+                                    <Grid Padding="20,12" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="1.4*,130,150">
                                         <StackPanel>
                                             <TextBlock Text="{Binding MeetingTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding MetaText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
@@ -64,16 +62,73 @@
                     </StackPanel>
                 </Border>
 
-                <Border x:Name="DetailsCard" Grid.Column="1" Style="{StaticResource CardStyle}">
+                <Border x:Name="DetailsCard" Grid.Column="1" Style="{StaticResource CardStyle}" MinWidth="0">
                     <StackPanel Spacing="12">
-                        <TextBlock Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" />
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                            <Button x:Name="BackToSummaryListButton" Visibility="Collapsed" Style="{StaticResource IconButtonStyle}" Click="BackToSummaryListButton_Click" AutomationProperties.Name="Вернуться к списку саммари">
+                                <SymbolIcon Symbol="Back" />
+                            </Button>
+                            <TextBlock Grid.Column="1" Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
+                        </Grid>
                         <TextBlock x:Name="DetailsTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
                         <TextBlock x:Name="DetailsMeta" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                         <controls:StatusBadge x:Name="DetailsStatusBadge" HorizontalAlignment="Left" />
-                        <TextBlock x:Name="DetailsReviewText" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                        <Border x:Name="DetailsNotice" Visibility="Collapsed" Background="{StaticResource SurfaceOrangeBrush}" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="10">
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                <SymbolIcon Symbol="Important" Foreground="{StaticResource WarningBrush}" />
+                                <TextBlock x:Name="DetailsReviewText" Grid.Column="1" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+                            </Grid>
+                        </Border>
                         <StackPanel x:Name="SummaryDetails" Spacing="10">
-                            <ScrollViewer MaxHeight="360" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                <TextBlock x:Name="SummaryText" TextWrapping="Wrap" LineHeight="22" />
+                            <ScrollViewer MaxHeight="440" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <Grid>
+                                    <StackPanel x:Name="StructuredSummaryPanel" Spacing="14" Visibility="Collapsed">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Вопросы и решения" Style="{StaticResource SectionTitleStyle}" />
+                                            <ItemsControl x:Name="SummaryQuestionsItems">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,8">
+                                                            <StackPanel Spacing="6">
+                                                                <TextBlock Text="{Binding Topic}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                                <TextBlock Text="{Binding Context}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                                                                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8">
+                                                                    <StackPanel Spacing="3">
+                                                                        <TextBlock Text="Решение" Style="{StaticResource WorkspaceLabelStyle}" />
+                                                                        <TextBlock Text="{Binding Decision}" TextWrapping="Wrap" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <TextBlock x:Name="SummaryQuestionsEmptyText" Text="Решения пока не выделены." Style="{StaticResource CaptionStyle}" Visibility="Collapsed" />
+                                        </StackPanel>
+
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Text="Задачи и сроки" Style="{StaticResource SectionTitleStyle}" />
+                                            <ItemsControl x:Name="SummaryTasksItems">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="2,8">
+                                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                                <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
+                                                                <controls:StatusBadge Grid.Column="1" Text="{Binding DeadlineText}" Status="" VerticalAlignment="Top" />
+                                                            </Grid>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <TextBlock x:Name="SummaryTasksEmptyText" Text="Поручения пока не выделены." Style="{StaticResource CaptionStyle}" Visibility="Collapsed" />
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <StackPanel x:Name="SummaryFallbackPanel" Spacing="6">
+                                        <TextBlock Text="Краткий итог" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock x:Name="SummaryText" TextWrapping="Wrap" LineHeight="22" MaxWidth="720" HorizontalAlignment="Left" />
+                                    </StackPanel>
+                                </Grid>
                             </ScrollViewer>
                             <Button x:Name="RebuildButton" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildButton_Click" HorizontalAlignment="Stretch" />
                             <Button x:Name="OpenMeetingButton" Content="Открыть совещание" Style="{StaticResource CardButtonStyle}" Click="OpenMeetingButton_Click" HorizontalAlignment="Stretch" />

@@ -12,22 +12,24 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private readonly IBackendService _backend;
     private readonly ActiveMeetingContext _activeMeeting;
     private readonly VoiceAssistantConversationStore _voiceConversations;
+    private readonly AssistantDeliveryStore _assistantDelivery;
     private readonly Action<Exception>? _log;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private readonly object _commandCacheGate = new();
     private readonly Dictionary<string, (DateTimeOffset ExpiresAt, BrokerResponse Response)> _commandCache = new(StringComparer.Ordinal);
-    private readonly object _pendingGate = new();
-    private readonly Dictionary<Guid, PendingAssistantResult> _pendingAssistantResults = new();
     private Task? _loop;
     private Task? _assistantDeliveryLoop;
 
-    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, VoiceAssistantConversationStore voiceConversations, Action<Exception>? log = null)
+    public event Action<Guid, Guid?>? AssistantResultAvailable;
+
+    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, VoiceAssistantConversationStore voiceConversations, AssistantDeliveryStore? assistantDelivery = null, Action<Exception>? log = null)
     {
         _commands = commands;
         _backend = backend;
         _activeMeeting = activeMeeting;
         _voiceConversations = voiceConversations;
+        _assistantDelivery = assistantDelivery ?? new AssistantDeliveryStore();
         _log = log;
     }
 
@@ -39,7 +41,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 
     public void ClearAssistantState()
     {
-        lock (_pendingGate) _pendingAssistantResults.Clear();
+        _assistantDelivery.ClearRuntimeEntries();
     }
 
     private async Task RunAsync()
@@ -68,14 +70,37 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private async Task<BrokerResponse> HandleAsync(JsonElement root, CancellationToken cancellationToken)
     {
         if (!root.TryGetProperty("command", out var commandElement)
-            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT" and not "ASSISTANT_QUESTION" and not "ASSISTANT_RESULT"))
+            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT" and not "ASSISTANT_QUESTION" and not "ASSISTANT_RESULT" and not "ASSISTANT_PLAYBACK_FINISHED"))
             return new(false, "VOICE_COMMAND_REJECTED", Detail: "unsupported_command");
+
+        if (string.Equals(commandElement.GetString(), "ASSISTANT_PLAYBACK_FINISHED", StringComparison.OrdinalIgnoreCase))
+        {
+            var playbackQuery = root.TryGetProperty("queryId", out var playbackQueryElement) ? playbackQueryElement.GetString() : null;
+            var playbackState = root.TryGetProperty("playbackState", out var playbackStateElement) ? playbackStateElement.GetString() : null;
+            if (!Guid.TryParse(playbackQuery, out var playbackQueryId))
+                return new(false, "VOICE_COMMAND_REJECTED", Detail: "query_id_invalid");
+            if (string.Equals(playbackState, "PLAYED", StringComparison.OrdinalIgnoreCase)) _assistantDelivery.MarkDelivered(playbackQueryId);
+            else if (string.Equals(playbackState, "CANCELLED", StringComparison.OrdinalIgnoreCase)) _assistantDelivery.MarkCancelled(playbackQueryId);
+            else _assistantDelivery.MarkAmbiguous(playbackQueryId);
+            var delivery = _assistantDelivery.Get(playbackQueryId);
+            AssistantResultAvailable?.Invoke(playbackQueryId, Guid.TryParse(delivery?.ConversationId, out var conversationId) ? conversationId : null);
+            return new(true, RecorderState: "ASSISTANT_PLAYBACK_FINISHED", QueryId: playbackQuery);
+        }
 
         if (string.Equals(commandElement.GetString(), "ASSISTANT_QUESTION", StringComparison.OrdinalIgnoreCase))
         {
             var question = root.TryGetProperty("question", out var questionElement) ? questionElement.GetString() : null;
             var assistantTraceId = root.TryGetProperty("traceId", out var assistantTraceElement) ? assistantTraceElement.GetString() : null;
             var assistantCommandId = root.TryGetProperty("commandId", out var assistantCommandElementId) ? assistantCommandElementId.GetString() : null;
+            if (!string.IsNullOrWhiteSpace(assistantCommandId))
+            {
+                lock (_commandCacheGate)
+                {
+                    var expired = _commandCache.Where(item => item.Value.ExpiresAt <= DateTimeOffset.UtcNow).Select(item => item.Key).ToArray();
+                    foreach (var key in expired) _commandCache.Remove(key);
+                    if (_commandCache.TryGetValue(assistantCommandId, out var cached)) return cached.Response;
+                }
+            }
             var assistantTestMode = root.TryGetProperty("testMode", out var assistantTestElement) && assistantTestElement.ValueKind == JsonValueKind.True;
             if (string.IsNullOrWhiteSpace(question)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "question_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
             if (assistantTestMode)
@@ -116,8 +141,8 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 _voiceConversations.Set(currentUser.Id, accepted.ResolvedMode, Guid.TryParse(accepted.MeetingId, out var acceptedMeeting) ? acceptedMeeting : null, acceptedConversation);
             if (Guid.TryParse(accepted.QueryId, out var queryId))
             {
-                lock (_pendingGate)
-                    _pendingAssistantResults.TryAdd(queryId, new PendingAssistantResult(queryId, assistantCommandId, assistantTraceId, accepted.ResolvedMode, DateTimeOffset.UtcNow.AddHours(24)));
+                if (!_assistantDelivery.TryAdd(queryId, currentUser.Id.ToString(), assistantCommandId, assistantTraceId, accepted.ResolvedMode, accepted.ConversationId))
+                    return new(false, "VOICE_ASSISTANT_QUEUE_FULL", Detail: "assistant_delivery_capacity", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
             var assistantResponse = new BrokerResponse(true, RecorderState: "ASSISTANT_QUEUED", SpokenText: "Вопрос принят, отвечу после обработки", Detail: accepted.ResolvedMode, TraceId: assistantTraceId, CommandId: assistantCommandId, QueryId: accepted.QueryId, AssistantStatus: accepted.Status, ResolvedMode: accepted.ResolvedMode);
             CacheCommand(assistantCommandId, assistantResponse);
@@ -256,15 +281,8 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         {
             try
             {
-                PendingAssistantResult[] pending;
-                lock (_pendingGate)
-                {
-                    var now = DateTimeOffset.UtcNow;
-                    foreach (var expired in _pendingAssistantResults.Where(item => item.Value.ExpiresAt <= now).Select(item => item.Key).ToArray())
-                        _pendingAssistantResults.Remove(expired);
-                    pending = _pendingAssistantResults.Values.ToArray();
-                }
-                foreach (var item in pending)
+                var user = await _backend.GetCurrentUserAsync(_shutdown.Token).ConfigureAwait(false);
+                foreach (var item in _assistantDelivery.GetForUser(user?.Id.ToString()))
                     await TryDeliverAssistantResultAsync(item, _shutdown.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
@@ -274,21 +292,27 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
     }
 
-    private async Task TryDeliverAssistantResultAsync(PendingAssistantResult pending, CancellationToken cancellationToken)
+    private async Task TryDeliverAssistantResultAsync(AssistantDeliveryEntry pending, CancellationToken cancellationToken)
     {
         if (!_backend.HasSession) return;
         var query = await _backend.GetAssistantQueryAsync(pending.QueryId, cancellationToken).ConfigureAwait(false);
         if (query is null) return;
         var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
         if (!terminal) return;
+        AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var resultConversation) ? resultConversation : null);
         var voiceAnswer = !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer)
             ? query.VoiceAnswer ?? query.Answer
-            : AssistantErrorSpeech(query.ErrorCode);
+            : AssistantErrorSpeech(query.ErrorCode ?? query.Status);
         if (string.IsNullOrWhiteSpace(voiceAnswer))
         {
-            lock (_pendingGate) _pendingAssistantResults.Remove(pending.QueryId);
+            _assistantDelivery.MarkCompletedWithoutSpeech(pending.QueryId);
+            AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var noSpeechConversation) ? noSpeechConversation : null);
             return;
         }
+        // Claim before sending. If Desktop terminates after this point, the
+        // ambiguous dispatch is deliberately not replayed after restart.
+        var reconcilingAcceptedPlayback = pending.State == AssistantDeliveryState.Accepted;
+        if (!reconcilingAcceptedPlayback && !_assistantDelivery.TryClaim(pending.QueryId)) return;
         try
         {
             var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SPEAK_ASSISTANT_RESULT", new
@@ -301,11 +325,34 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             }, cancellationToken).ConfigureAwait(false);
             if (response.Ok)
             {
-                lock (_pendingGate) _pendingAssistantResults.Remove(pending.QueryId);
+                // A duplicate queryId is acknowledged by Voice Host without
+                // replaying speech. Its playbackState tells us whether the
+                // original request already finished, was cancelled, or is
+                // still only accepted in the queue.
+                var playbackState = response.Data is JsonElement data
+                    && data.ValueKind == JsonValueKind.Object
+                    && data.TryGetProperty("playbackState", out var state)
+                    ? state.GetString()
+                    : null;
+                switch (playbackState?.ToUpperInvariant())
+                {
+                    case "PLAYED": _assistantDelivery.MarkDelivered(pending.QueryId); break;
+                    case "CANCELLED": _assistantDelivery.MarkCancelled(pending.QueryId); break;
+                    case "FAILED":
+                    case "AMBIGUOUS":
+                    case "RESERVED": _assistantDelivery.MarkAmbiguous(pending.QueryId); break;
+                    default: _assistantDelivery.MarkAccepted(pending.QueryId); break;
+                }
             }
+            else if (response.Error is "VOICE_HOST_BUSY" or "VOICE_ASSISTANT_QUEUE_FULL" or "VOICE_PLAYBACK_LEDGER_UNAVAILABLE")
+                _assistantDelivery.ResetToPending(pending.QueryId);
+            else
+                _assistantDelivery.MarkAmbiguous(pending.QueryId);
         }
-        catch (IOException) { /* Voice Host is temporarily unavailable; retry while the query is fresh. */ }
-        catch (TimeoutException) { }
+        catch (VoiceHostIpcException ex) when (!ex.RequestWritten) { _assistantDelivery.ResetToPending(pending.QueryId); }
+        catch (VoiceHostIpcException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
+        catch (IOException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
+        catch (TimeoutException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
     }
 
     private static string? AssistantErrorSpeech(string? errorCode) => errorCode switch
@@ -334,5 +381,4 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
         string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null, string? QueryId = null, string? AssistantStatus = null, string? ResolvedMode = null);
-    private sealed record PendingAssistantResult(Guid QueryId, string? CommandId, string? TraceId, string? Mode, DateTimeOffset ExpiresAt);
 }

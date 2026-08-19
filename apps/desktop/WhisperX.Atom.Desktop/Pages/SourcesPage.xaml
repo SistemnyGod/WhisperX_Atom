@@ -18,19 +18,19 @@
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left">
                 <InfoBar.ActionButton>
                     <Button Content="Открыть настройки" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения" ToolTipService.ToolTip="Проверить API, Recorder Agent и локальный сервис" />
                 </InfoBar.ActionButton>
             </InfoBar>
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False">
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left">
                 <InfoBar.ActionButton>
                     <Button Content="Повторить проверку" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Повторить проверку источников" />
                 </InfoBar.ActionButton>
             </InfoBar>
 
             <Grid x:Name="StatusGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
-                <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}">
+                <Border x:Name="LocalAgentCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" MinHeight="276">
                     <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="10">
                         <StackPanel>
                             <TextBlock Text="ЛОКАЛЬНЫЙ ИСТОЧНИК" Style="{StaticResource EyebrowStyle}" />
@@ -54,18 +54,18 @@
                                     <TextBlock Text="{Binding PendingUploadsText}" Margin="0,3,0,0" FontWeight="SemiBold" />
                                 </StackPanel>
                             </Grid>
-                            <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding MicrophoneSignal}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding EffectiveMicrophoneLabel}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding EffectiveMicrophoneLabel}" />
+                            <TextBlock Text="{Binding MicrophoneSignal}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MicrophoneSignal}" />
                         </StackPanel>
                         <StackPanel Grid.Row="3" Spacing="3">
                             <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                            <TextBlock Text="{Binding ArchiveRoot}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding ArchiveRoot}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding ArchiveRoot}" />
                             <TextBlock Text="{Binding StorageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         </StackPanel>
                     </Grid>
                 </Border>
 
-                <Border x:Name="BackendCard" Grid.Column="1" Style="{StaticResource CardStyle}">
+                <Border x:Name="BackendCard" Grid.Column="1" Style="{StaticResource CardStyle}" MinHeight="276">
                     <StackPanel Spacing="10">
                         <TextBlock Text="СЕРВЕР" Style="{StaticResource EyebrowStyle}" />
                         <TextBlock Text="Зарегистрированные агенты" Style="{StaticResource SectionTitleStyle}" />
@@ -82,7 +82,7 @@
             </Grid>
 
             <Grid x:Name="DevicesGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="14">
-                <Border x:Name="MicrophoneCard" Style="{StaticResource CardStyle}" Padding="0">
+                <Border x:Name="MicrophoneCard" Style="{StaticResource CardStyle}" Padding="0" MinHeight="318">
                     <StackPanel>
                         <StackPanel Padding="20,18,20,12" Spacing="5">
                             <TextBlock Text="Микрофоны" Style="{StaticResource SectionTitleStyle}" />
@@ -94,10 +94,10 @@
                         <ListView x:Name="MicrophoneList" ItemsSource="{Binding Microphones}" SelectionMode="None" MaxHeight="260" BorderThickness="0">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid Padding="20,10" ColumnDefinitions="*,Auto">
+                                    <Grid Padding="20,10" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="*,Auto">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding DisplayName}" />
+                                            <TextBlock Text="Доступный источник микрофона" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="{Binding StateText}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
                                     </Grid>
@@ -111,7 +111,7 @@
                     </StackPanel>
                 </Border>
 
-                <Border x:Name="SystemAudioCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
+                <Border x:Name="SystemAudioCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0" MinHeight="318">
                     <StackPanel>
                         <StackPanel Padding="20,18,20,12" Spacing="5">
                             <TextBlock Text="Системный звук" Style="{StaticResource SectionTitleStyle}" />
@@ -122,10 +122,10 @@
                         <ListView x:Name="SystemAudioList" ItemsSource="{Binding SystemAudioDevices}" SelectionMode="None" MaxHeight="260" BorderThickness="0">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid Padding="20,10" ColumnDefinitions="*,Auto">
+                                    <Grid Padding="20,10" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="*,Auto">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding Id}" Foreground="{StaticResource MutedTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding DisplayName}" />
+                                            <TextBlock Text="Доступный источник системного звука" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="{Binding StateText}" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
                                     </Grid>
@@ -146,20 +146,18 @@
                         </StackPanel>
                         <Button Grid.Column="1" Content="Настроить подключение" Style="{StaticResource CardButtonStyle}" Click="OpenSettingsButton_Click" />
                     </Grid>
-                    <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.4*,110,150,*">
+                    <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.6*,130,180">
                         <TextBlock Text="Имя" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBlock Grid.Column="1" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                         <TextBlock Grid.Column="2" Text="Последняя связь" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                        <TextBlock Grid.Column="3" Text="Комната" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                     </Grid>
                     <ListView x:Name="AgentsList" ItemsSource="{Binding RegisteredAgents}" SelectionMode="None" BorderThickness="0" MaxHeight="320">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <Grid Padding="20,12" ColumnDefinitions="1.4*,110,150,*">
-                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <Grid Padding="20,12" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="1.6*,130,180">
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Name}" />
                                     <TextBlock Grid.Column="1" Text="{Binding EffectiveStatusText}" Foreground="{StaticResource AccentBrush}" />
                                     <TextBlock Grid.Column="2" Text="{Binding LastSeenText}" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBlock Grid.Column="3" Text="{Binding RoomText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>

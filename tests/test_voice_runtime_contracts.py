@@ -19,6 +19,8 @@ SPOOL = (ROOT / "apps/recorder-agent/SpoolStore.cs").read_text(encoding="utf-8")
 STATE_MACHINE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceStateMachine.cs").read_text(encoding="utf-8")
 BROKER = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs").read_text(encoding="utf-8")
 BROKER_CLIENT = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceIntentBrokerClient.cs").read_text(encoding="utf-8")
+DELIVERY_STORE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/AssistantDeliveryStore.cs").read_text(encoding="utf-8")
+ASSISTANT_PAGE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/AssistantPage.xaml.cs").read_text(encoding="utf-8")
 SETTINGS_PAGE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml.cs").read_text(encoding="utf-8")
 SETTINGS_VM = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs").read_text(encoding="utf-8")
 VOICE_UI_STATES = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/VoiceUiStates.cs").read_text(encoding="utf-8")
@@ -139,6 +141,65 @@ def test_voice_responder_never_uses_legacy_wav_replies():
     assert "ResponseKey" not in SPEECH_RESPONDER
     assert "ATOM_VOICE_USE_PRERECORDED_RESPONSES" not in SPEECH_RESPONDER
     assert '"Microsoft Irina"' in SPEECH_RESPONDER
+
+
+def test_tts_cancellation_has_an_isolated_recognizer_and_playback_result():
+    assert "CancelGrammar" in VOICE_RUNTIME
+    assert '"мифодий прекрати говорить"' in VOICE_RUNTIME
+    assert "ProcessCancelPcmAsync" in VOICE_RUNTIME
+    assert "_cancelRecognizer" in VOICE_RUNTIME
+    assert "if (_speech.IsBusy)" in VOICE_RUNTIME
+    assert "_speech.CancelAll()" in VOICE_RUNTIME
+    assert "SpeechPlaybackState" in SPEECH_RESPONDER
+    assert "TryEnqueueDetailed" in SPEECH_RESPONDER
+    assert "_cancelGeneration" in SPEECH_RESPONDER
+    assert "AnswerStatus" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+
+
+def test_assistant_timing_metadata_is_exposed_without_storing_transcript_locally():
+    api_store = (ROOT / "apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs").read_text(encoding="utf-8")
+    frontend = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/FrontendContracts.cs").read_text(encoding="utf-8")
+    assert "q.answer_metadata" in api_store
+    assert "TimingsText" in frontend
+    assert "voice-delivery.json" in DELIVERY_STORE
+
+
+def test_assistant_delivery_is_durable_idempotent_and_reports_playback_ack():
+    assert "Pending = 0" in DELIVERY_STORE
+    assert "Accepted = 4" in DELIVERY_STORE
+    assert "Cancelled = 5" in DELIVERY_STORE
+    assert "Ambiguous = 6" in DELIVERY_STORE
+    assert "voice-delivery.json" in DELIVERY_STORE
+    assert "File.Move(temporary, _path, true)" in DELIVERY_STORE
+    assert "DuplicateSuppressed" in DELIVERY_STORE
+    assert '"ASSISTANT_PLAYBACK_FINISHED"' in BROKER
+    assert "MarkDelivered" in BROKER
+    assert "MarkAmbiguous" in BROKER
+
+
+def test_tts_cancel_suppresses_normal_recognizer_until_playback_worker_finishes():
+    assert "playbackWasActive" in SPEECH_RESPONDER
+    assert "playbackWasActive ? 1 : 0" in SPEECH_RESPONDER
+    assert '"VOICE_QUIET_MODE"' in SPEECH_RESPONDER
+    assert "Do not create a synthetic technical interval" in VOICE_RUNTIME
+
+
+def test_interrupted_assistant_dispatch_becomes_ambiguous_without_replay():
+    assert "DispatchAmbiguityTimeout" in DELIVERY_STORE
+    assert "Desktop\n                // terminated after claiming" in DELIVERY_STORE
+    assert "entry.State == AssistantDeliveryState.Dispatching" in DELIVERY_STORE
+    assert "State = AssistantDeliveryState.Ambiguous" in DELIVERY_STORE
+    assert "PlaybackReconcileAfter" in DELIVERY_STORE
+    assert "reconcilingAcceptedPlayback" in BROKER
+    assert '"RESERVED"' in VOICE_RUNTIME
+    assert '"VOICE_PLAYBACK_LEDGER_UNAVAILABLE"' in VOICE_RUNTIME
+    assert '"VOICE_PLAYBACK_LEDGER_UNAVAILABLE"' in BROKER
+
+
+def test_assistant_page_refreshes_on_voice_result_without_manual_refresh():
+    assert "AssistantResultAvailable" in ASSISTANT_PAGE
+    assert "RefreshSelectedConversationAsync" in ASSISTANT_PAGE
+    assert "LoadConversationsAsync" in ASSISTANT_PAGE
 
 
 def test_server_builds_bounded_system_response_intervals():

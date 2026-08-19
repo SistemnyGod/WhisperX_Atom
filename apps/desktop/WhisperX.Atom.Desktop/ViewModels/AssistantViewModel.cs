@@ -203,6 +203,20 @@ public sealed class AssistantViewModel : ObservableObject
         StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status) : "Чат готов к вопросу.";
     }
 
+    public async Task RefreshSelectedConversationAsync(CancellationToken cancellationToken = default)
+    {
+        if (SelectedConversation is null) return;
+        var selectedId = SelectedMessage?.Id;
+        var messages = await _services.Backend.GetAssistantMessagesAsync(Guid.Parse(SelectedConversation.Id), cancellationToken);
+        Messages.Clear();
+        foreach (var message in messages) Messages.Add(message);
+        OnPropertyChanged(nameof(HasMessages));
+        SelectedMessage = Messages.FirstOrDefault(item => item.Id == selectedId)
+            ?? Messages.LastOrDefault(item => !item.IsUser)
+            ?? Messages.LastOrDefault();
+        if (Messages.LastOrDefault() is { } last) StatusText = DisplayStatus(last.Status);
+    }
+
     public async Task AskAsync(CancellationToken pageToken, Guid? retryOf = null)
     {
         var question = Question.Trim();

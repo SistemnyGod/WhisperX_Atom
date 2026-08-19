@@ -15,6 +15,8 @@ public sealed partial class TasksPage : Page
     private CancellationTokenSource? _pageCts;
     private bool _updatingEditor;
     private bool _updatingLayout;
+    private PageLayoutMode _layoutMode = PageLayoutMode.Wide;
+    private bool _layoutInitialized;
 
     public TasksPage()
     {
@@ -175,6 +177,7 @@ public sealed partial class TasksPage : Page
             SaveButton.IsEnabled = item is not null && !_viewModel.IsSaving;
             EvidenceButton.Visibility = item?.EvidenceSegmentId is Guid ? Visibility.Visible : Visibility.Collapsed;
             DetailsEmptyText.Visibility = item is null ? Visibility.Visible : Visibility.Collapsed;
+            DetailsCard.Visibility = _layoutMode == PageLayoutMode.Wide || item is not null ? Visibility.Visible : Visibility.Collapsed;
         }
         finally { _updatingEditor = false; }
     }
@@ -206,11 +209,15 @@ public sealed partial class TasksPage : Page
     private void TasksPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_updatingLayout) return;
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+        if (_layoutInitialized && _layoutMode == mode) return;
         _updatingLayout = true;
         try
         {
             ApplyFilterLayout(e.NewSize.Width);
-            var compact = !ResponsiveLayout.IsWide(e.NewSize.Width);
+            _layoutMode = mode;
+            _layoutInitialized = true;
+            var compact = _layoutMode != PageLayoutMode.Wide;
             TasksGrid.ColumnDefinitions[0].Width = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(1, GridUnitType.Star);
             TasksGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(360);
             TasksGrid.RowDefinitions[0].Height = compact ? new GridLength(330) : new GridLength(1, GridUnitType.Star);
@@ -219,7 +226,7 @@ public sealed partial class TasksPage : Page
             Grid.SetRow(ListCard, 0);
             Grid.SetColumn(DetailsCard, compact ? 0 : 1);
             Grid.SetRow(DetailsCard, compact ? 1 : 0);
-            DetailsCard.Visibility = Visibility.Visible;
+            UpdateDetails();
         }
         finally { _updatingLayout = false; }
     }

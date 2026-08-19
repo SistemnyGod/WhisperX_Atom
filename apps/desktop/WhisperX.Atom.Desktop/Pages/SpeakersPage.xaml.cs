@@ -12,6 +12,8 @@ public sealed partial class SpeakersPage : Page
     private SpeakersViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
     private bool _updatingLayout;
+    private PageLayoutMode _layoutMode = PageLayoutMode.Wide;
+    private bool _layoutInitialized;
 
     public SpeakersPage()
     {
@@ -119,6 +121,7 @@ public sealed partial class SpeakersPage : Page
         var item = _viewModel.SelectedItem;
         SpeakerDetails.Visibility = item is null ? Visibility.Collapsed : Visibility.Visible;
         DetailsEmptyText.Visibility = item is null ? Visibility.Visible : Visibility.Collapsed;
+        DetailsCard.Visibility = _layoutMode == PageLayoutMode.Wide || item is not null ? Visibility.Visible : Visibility.Collapsed;
         OpenMeetingButton.IsEnabled = item is not null;
         if (item is null) return;
         DetailsName.Text = item.DisplayName;
@@ -130,10 +133,13 @@ public sealed partial class SpeakersPage : Page
     private void SpeakersPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_updatingLayout) return;
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+        if (_layoutInitialized && _layoutMode == mode) return;
         _updatingLayout = true;
         try
         {
-            var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+            _layoutMode = mode;
+            _layoutInitialized = true;
             ActionsPanel.Orientation = mode == PageLayoutMode.Compact ? Orientation.Vertical : Orientation.Horizontal;
             var compact = mode != PageLayoutMode.Wide;
             WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
@@ -158,6 +164,7 @@ public sealed partial class SpeakersPage : Page
                 Grid.SetColumn(child, index % columns);
                 Grid.SetRow(child, index / columns);
             }
+            UpdateDetails();
         }
         finally { _updatingLayout = false; }
     }

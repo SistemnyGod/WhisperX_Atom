@@ -18,14 +18,14 @@
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
 
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False">
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left">
                 <InfoBar.ActionButton>
                     <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
                 </InfoBar.ActionButton>
             </InfoBar>
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" />
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left" />
 
-            <Grid x:Name="WorkspaceGrid" ColumnDefinitions="1.45*,*" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="560">
+            <Grid x:Name="WorkspaceGrid" ColumnDefinitions="1.25*,520" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="600">
                 <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="0">
                     <Grid RowDefinitions="Auto,Auto,Auto,Auto,*">
                         <Grid Padding="20,18" ColumnDefinitions="*,Auto">
@@ -62,7 +62,7 @@
                             <ListView x:Name="TranscriptsList" ItemsSource="{Binding FilteredItems}" SelectionMode="Single" BorderThickness="0" SelectionChanged="TranscriptsList_SelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
-                                        <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="20,13">
+                                            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="20,13" MinHeight="{StaticResource TableRowHeight}">
                                             <Grid ColumnDefinitions="2*,125,72,140" ColumnSpacing="8">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="{Binding MeetingTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
@@ -89,7 +89,7 @@
                     </Grid>
                 </Border>
 
-                <Border x:Name="DetailsCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="20">
+                <Border x:Name="DetailsCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="20" MinWidth="480">
                     <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,*" RowSpacing="12">
                         <TextBlock Text="Выбранная стенограмма" Style="{StaticResource SectionTitleStyle}" />
                         <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
@@ -121,24 +121,36 @@
                         </StackPanel>
 
                         <StackPanel Grid.Row="4" Spacing="8">
-                            <TextBox x:Name="SegmentSearchBox" PlaceholderText="Поиск по тексту стенограммы" Style="{StaticResource InputStyle}" TextChanged="SegmentSearchBox_TextChanged" />
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <Button Content="Скачать TXT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptTextButton_Click" />
-                                <Button Content="Скачать SRT" Style="{StaticResource SecondaryButtonStyle}" Click="ExportTranscriptSrtButton_Click" />
-                                <CheckBox x:Name="HideTechnicalEventsCheckBox" Content="Скрывать технические события" IsChecked="True" Checked="HideTechnicalEventsCheckBox_Changed" Unchecked="HideTechnicalEventsCheckBox_Changed" VerticalAlignment="Center" />
-                            </StackPanel>
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                <TextBox x:Name="SegmentSearchBox" PlaceholderText="Поиск по тексту стенограммы" Style="{StaticResource InputStyle}" TextChanged="SegmentSearchBox_TextChanged" AutomationProperties.Name="Поиск по тексту стенограммы" />
+                                <Button x:Name="PreviousSegmentButton" Grid.Column="1" Content="Пред." Style="{StaticResource SecondaryButtonStyle}" Click="PreviousSegmentButton_Click" AutomationProperties.Name="Предыдущий найденный сегмент" />
+                                <Button x:Name="NextSegmentButton" Grid.Column="2" Content="След." Style="{StaticResource SecondaryButtonStyle}" Click="NextSegmentButton_Click" AutomationProperties.Name="Следующий найденный сегмент" />
+                            </Grid>
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                                <Button Content="Экспорт" Style="{StaticResource SecondaryButtonStyle}" AutomationProperties.Name="Экспортировать стенограмму">
+                                    <Button.Flyout>
+                                        <MenuFlyout>
+                                            <MenuFlyoutItem Text="Скачать TXT" Click="ExportTranscriptTextButton_Click" />
+                                            <MenuFlyoutItem Text="Скачать SRT" Click="ExportTranscriptSrtButton_Click" />
+                                        </MenuFlyout>
+                                    </Button.Flyout>
+                                </Button>
+                                <CheckBox x:Name="HideTechnicalEventsCheckBox" Grid.Column="1" Content="Скрывать технические события" IsChecked="True" Checked="HideTechnicalEventsCheckBox_Changed" Unchecked="HideTechnicalEventsCheckBox_Changed" VerticalAlignment="Center" />
+                            </Grid>
                         </StackPanel>
 
                         <Grid Grid.Row="5">
                             <StackPanel x:Name="TranscriptDetails" Spacing="8">
-                                <ListView x:Name="SegmentsList" ItemsSource="{Binding FilteredSegments}" SelectionMode="Single" MaxHeight="390" SelectionChanged="SegmentsList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView x:Name="SegmentsList" ItemsSource="{Binding FilteredSegments}" SelectionMode="Single" MaxHeight="440" SelectionChanged="SegmentsList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                     <ListView.ItemTemplate>
                                         <DataTemplate>
-                                            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,9">
-                                                <Grid ColumnDefinitions="70,95,*" ColumnSpacing="8">
-                                                    <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap" MaxLines="4" TextTrimming="CharacterEllipsis" />
+                                            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,11" MinHeight="68">
+                                                <Grid ColumnDefinitions="72,*" ColumnSpacing="12">
+                                                    <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" />
+                                                    <StackPanel Grid.Column="1" Spacing="4">
+                                                        <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Speaker}" />
+                                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" MaxLines="6" TextTrimming="CharacterEllipsis" LineHeight="21" />
+                                                    </StackPanel>
                                                 </Grid>
                                             </Border>
                                         </DataTemplate>

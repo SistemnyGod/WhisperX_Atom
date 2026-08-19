@@ -17,9 +17,10 @@
             </controls:PageHeader.Actions>
         </controls:PageHeader>
 
-        <Grid x:Name="FiltersGrid" Grid.Row="1" ColumnDefinitions="2*,*,*,*,Auto" RowDefinitions="Auto" ColumnSpacing="8" RowSpacing="8">
-            <TextBox x:Name="SearchBox" PlaceholderText="Поиск по задаче, встрече или ответственному" Style="{StaticResource InputStyle}" TextChanged="SearchBox_TextChanged" />
-            <ComboBox x:Name="StatusFilterBox" Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Статус" SelectionChanged="StatusFilterBox_SelectionChanged">
+        <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="12">
+        <Grid x:Name="FiltersGrid" ColumnDefinitions="2*,*,*,*,Auto" RowDefinitions="Auto" ColumnSpacing="8" RowSpacing="8">
+            <TextBox x:Name="SearchBox" PlaceholderText="Поиск по задаче, встрече или ответственному" Style="{StaticResource InputStyle}" TextChanged="SearchBox_TextChanged" AutomationProperties.Name="Поиск поручений" />
+            <ComboBox x:Name="StatusFilterBox" Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Статус" SelectionChanged="StatusFilterBox_SelectionChanged" AutomationProperties.Name="Фильтр по статусу">
                 <ComboBoxItem Content="Активные" Tag="ACTIVE" IsSelected="True" />
                 <ComboBoxItem Content="Все статусы" Tag="ALL" />
                 <ComboBoxItem Content="На проверке" Tag="NEEDS_REVIEW" />
@@ -27,37 +28,43 @@
                 <ComboBoxItem Content="Готовые" Tag="DONE" />
                 <ComboBoxItem Content="Отменённые" Tag="CANCELLED" />
             </ComboBox>
-            <ComboBox x:Name="DeadlineFilterBox" Grid.Column="2" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Срок" SelectionChanged="DeadlineFilterBox_SelectionChanged">
+            <ComboBox x:Name="DeadlineFilterBox" Grid.Column="2" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Срок" SelectionChanged="DeadlineFilterBox_SelectionChanged" AutomationProperties.Name="Фильтр по сроку">
                 <ComboBoxItem Content="Любой срок" Tag="ALL" IsSelected="True" />
                 <ComboBoxItem Content="Просроченные" Tag="OVERDUE" />
                 <ComboBoxItem Content="Сегодня" Tag="TODAY" />
                 <ComboBoxItem Content="Ближайшие 7 дней" Tag="NEXT_7_DAYS" />
                 <ComboBoxItem Content="Без срока" Tag="NO_DEADLINE" />
             </ComboBox>
-            <ComboBox x:Name="MeetingFilterBox" Grid.Column="3" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Совещание" SelectionChanged="MeetingFilterBox_SelectionChanged" />
-            <TextBox x:Name="ResponsibleFilterBox" Grid.Column="4" PlaceholderText="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleFilterBox_TextChanged" />
+            <ComboBox x:Name="MeetingFilterBox" Grid.Column="3" Style="{StaticResource FormComboBoxStyle}" PlaceholderText="Совещание" SelectionChanged="MeetingFilterBox_SelectionChanged" AutomationProperties.Name="Фильтр по совещанию" />
+            <TextBox x:Name="ResponsibleFilterBox" Grid.Column="4" PlaceholderText="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleFilterBox_TextChanged" AutomationProperties.Name="Фильтр по ответственному" />
         </Grid>
+        </Border>
 
         <Grid x:Name="TasksGrid" Grid.Row="2" ColumnDefinitions="*,360" RowDefinitions="*,0" ColumnSpacing="14" RowSpacing="14">
             <Border x:Name="ListCard" Grid.Column="0" Style="{StaticResource CardStyle}" Padding="16">
-                <Grid RowDefinitions="Auto,*" RowSpacing="10">
+                <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
                     <Grid ColumnDefinitions="*,Auto">
                         <TextBlock Text="Реестр поручений" Style="{StaticResource SectionTitleStyle}" />
                         <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
                     </Grid>
-                    <Grid Grid.Row="1">
+                    <Grid x:Name="TaskTableHeader" Grid.Row="1" Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="*,130,110" ColumnSpacing="12">
+                        <TextBlock Text="Задача и совещание" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Grid.Column="1" Text="Статус и ответственный" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        <TextBlock Grid.Column="2" Text="Срок" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                    </Grid>
+                    <Grid Grid.Row="2">
                         <ListView x:Name="TaskList" ItemsSource="{Binding FilteredItems}" SelectionMode="Single" SelectionChanged="TaskList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,11">
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,11" MinHeight="{StaticResource TableRowHeight}">
                                         <Grid ColumnDefinitions="*,130,110" ColumnSpacing="12">
                                             <StackPanel Spacing="3">
                                                 <TextBlock Text="{Binding TaskText}" TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding MeetingTitle}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding MeetingTitle}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MeetingTitle}" />
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" Spacing="3">
                                                 <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                                <TextBlock Text="{Binding ResponsibleText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding ResponsibleText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding ResponsibleText}" />
                                             </StackPanel>
                                             <TextBlock Grid.Column="2" Text="{Binding DeadlineText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                                         </Grid>
@@ -79,7 +86,7 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Spacing="12">
                         <TextBlock Text="Поручение" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock x:Name="DetailsMeetingText" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <TextBlock x:Name="DetailsMeetingText" MinHeight="36" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsMeetingText}" />
                         <TextBox x:Name="TaskEditor" Header="Текст задачи" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" Style="{StaticResource InputStyle}" TextChanged="TaskEditor_TextChanged" />
                         <TextBox x:Name="ResponsibleEditor" Header="Ответственный" Style="{StaticResource InputStyle}" TextChanged="ResponsibleEditor_TextChanged" />
                         <DatePicker x:Name="DeadlinePicker" Style="{StaticResource FormDatePickerStyle}" Header="Срок" DateChanged="DeadlinePicker_DateChanged" />
@@ -99,8 +106,8 @@
         </Grid>
 
         <StackPanel Grid.Row="2" Orientation="Vertical" VerticalAlignment="Top" IsHitTestVisible="False">
-            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="True" />
-            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="True" />
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="True" MaxWidth="920" HorizontalAlignment="Left" />
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="True" MaxWidth="920" HorizontalAlignment="Left" />
         </StackPanel>
         <ProgressRing x:Name="LoadingRing" Grid.Row="2" IsActive="False" Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,18,0,0" />
     </Grid>

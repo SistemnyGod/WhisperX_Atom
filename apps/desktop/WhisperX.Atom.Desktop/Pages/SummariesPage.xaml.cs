@@ -12,6 +12,8 @@ public sealed partial class SummariesPage : Page
     private SummariesViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
     private bool _updatingLayout;
+    private PageLayoutMode _layoutMode = PageLayoutMode.Wide;
+    private bool _layoutInitialized;
 
     public SummariesPage()
     {
@@ -83,6 +85,7 @@ public sealed partial class SummariesPage : Page
     {
         if (_viewModel is not null) _viewModel.SelectedItem = SummariesList.SelectedItem as SummaryRegistryItem;
         UpdateDetails();
+        ApplySummaryLayout(ActualWidth, force: true);
     }
 
     private async void RebuildButton_Click(object sender, RoutedEventArgs e)
@@ -125,8 +128,6 @@ public sealed partial class SummariesPage : Page
         EmptyRetryButton.IsEnabled = !_viewModel.IsLoading;
         ErrorInfoBar.Message = _viewModel.ErrorText;
         ErrorInfoBar.IsOpen = hasError;
-        WarningInfoBar.Message = _viewModel.WarningText;
-        WarningInfoBar.IsOpen = !string.IsNullOrWhiteSpace(_viewModel.WarningText);
         UpdateDetails();
     }
 
@@ -134,7 +135,6 @@ public sealed partial class SummariesPage : Page
     {
         if (_viewModel is null) return;
         var item = _viewModel.SelectedItem;
-        DetailsCard.Visibility = Visibility.Visible;
         SummaryDetails.Visibility = item is null ? Visibility.Collapsed : Visibility.Visible;
         DetailsEmptyText.Visibility = item is null ? Visibility.Visible : Visibility.Collapsed;
         RebuildButton.IsEnabled = _viewModel.CanRebuild;
@@ -146,8 +146,12 @@ public sealed partial class SummariesPage : Page
             DetailsStatusBadge.Text = string.Empty;
             DetailsStatusBadge.Status = string.Empty;
             SummaryText.Text = string.Empty;
+            SummaryQuestionsItems.ItemsSource = null;
+            SummaryTasksItems.ItemsSource = null;
+            StructuredSummaryPanel.Visibility = Visibility.Collapsed;
+            SummaryFallbackPanel.Visibility = Visibility.Visible;
             DetailsReviewText.Text = string.Empty;
-            DetailsReviewText.Visibility = Visibility.Collapsed;
+            DetailsNotice.Visibility = Visibility.Collapsed;
             return;
         }
         DetailsTitle.Text = item.MeetingTitle;
@@ -155,8 +159,17 @@ public sealed partial class SummariesPage : Page
         DetailsStatusBadge.Text = item.StatusText;
         DetailsStatusBadge.Status = item.StatusCode;
         SummaryText.Text = item.SummaryText;
-        DetailsReviewText.Text = item.ReviewText;
-        DetailsReviewText.Visibility = item.NeedsReview ? Visibility.Visible : Visibility.Collapsed;
+        var protocol = MeetingProtocolParser.Parse(item.Summary?.Content);
+        var showStructured = protocol.IsProtocol && protocol.IsValid;
+        StructuredSummaryPanel.Visibility = showStructured ? Visibility.Visible : Visibility.Collapsed;
+        SummaryFallbackPanel.Visibility = showStructured ? Visibility.Collapsed : Visibility.Visible;
+        SummaryQuestionsItems.ItemsSource = showStructured ? protocol.Questions : null;
+        SummaryTasksItems.ItemsSource = showStructured ? protocol.Tasks : null;
+        SummaryQuestionsEmptyText.Visibility = showStructured && protocol.Questions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SummaryTasksEmptyText.Visibility = showStructured && protocol.Tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var notice = string.Join(" ", new[] { item.ReviewText, _viewModel.WarningText }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct());
+        DetailsReviewText.Text = notice;
+        DetailsNotice.Visibility = string.IsNullOrWhiteSpace(notice) ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void SummariesPage_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -165,18 +178,42 @@ public sealed partial class SummariesPage : Page
         _updatingLayout = true;
         try
         {
-            var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
-            ActionsPanel.Orientation = mode == PageLayoutMode.Compact ? Orientation.Vertical : Orientation.Horizontal;
-            var compact = mode != PageLayoutMode.Wide;
-            WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
-            WorkspaceGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(430);
-            WorkspaceGrid.RowDefinitions[0].Height = compact ? new GridLength(430) : new GridLength(1, GridUnitType.Star);
-            WorkspaceGrid.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-            Grid.SetColumn(ListCard, 0);
-            Grid.SetRow(ListCard, 0);
-            Grid.SetColumn(DetailsCard, compact ? 0 : 1);
-            Grid.SetRow(DetailsCard, compact ? 1 : 0);
+            ApplySummaryLayout(e.NewSize.Width);
         }
         finally { _updatingLayout = false; }
+    }
+
+    private void ApplySummaryLayout(double width, bool force = false)
+    {
+        if (WorkspaceGrid is null || _viewModel is null) return;
+        var nextMode = ResponsiveLayout.GetMode(width);
+        if (!force && _layoutInitialized && _layoutMode == nextMode) return;
+        _layoutMode = nextMode;
+        _layoutInitialized = true;
+        var compact = _layoutMode == PageLayoutMode.Compact;
+        var standard = _layoutMode == PageLayoutMode.Standard;
+        var hasSelection = _viewModel.SelectedItem is not null;
+        ActionsPanel.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
+
+        WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
+        WorkspaceGrid.ColumnDefinitions[1].Width = _layoutMode == PageLayoutMode.Wide ? new GridLength(520) : new GridLength(0);
+        WorkspaceGrid.RowDefinitions[0].Height = standard ? new GridLength(430) : new GridLength(1, GridUnitType.Star);
+        WorkspaceGrid.RowDefinitions[1].Height = standard ? GridLength.Auto : new GridLength(0);
+        Grid.SetColumn(ListCard, 0);
+        Grid.SetRow(ListCard, 0);
+        Grid.SetColumn(DetailsCard, _layoutMode == PageLayoutMode.Wide ? 1 : 0);
+        Grid.SetRow(DetailsCard, standard ? 1 : 0);
+
+        ListCard.Visibility = compact && hasSelection ? Visibility.Collapsed : Visibility.Visible;
+        DetailsCard.Visibility = compact && !hasSelection ? Visibility.Collapsed : Visibility.Visible;
+        BackToSummaryListButton.Visibility = compact && hasSelection ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BackToSummaryListButton_Click(object sender, RoutedEventArgs e)
+    {
+        SummariesList.SelectedItem = null;
+        if (_viewModel is not null) _viewModel.SelectedItem = null;
+        UpdateDetails();
+        ApplySummaryLayout(ActualWidth, force: true);
     }
 }

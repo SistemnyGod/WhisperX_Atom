@@ -26,7 +26,7 @@
             </TitleBar.IconSource>
             <TitleBar.Content>
                 <Grid x:Name="TitleContentGrid" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="16,0,12,0" SizeChanged="TitleContentGrid_SizeChanged">
-                    <TextBlock x:Name="PageTitleText" Text="Главная" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="PageTitleText" Text="Главная" Visibility="Collapsed" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
                     <StackPanel x:Name="TopStatusCluster" Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
                         <Border x:Name="RecorderStatusPill" Width="132" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
                         <Border x:Name="ServerStatusPill" Width="132" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
@@ -68,7 +68,7 @@
             x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Auto"
-            OpenPaneLength="232"
+            OpenPaneLength="224"
             CompactPaneLength="48"
             SelectionFollowsFocus="Enabled"
             Background="{StaticResource PageBackgroundBrush}"
@@ -190,7 +190,7 @@
             x:Name="GlobalNotificationBar"
             Grid.Row="1"
             Canvas.ZIndex="30"
-            Margin="0,12,20,0"
+            Margin="0,16,24,0"
             HorizontalAlignment="Right"
             VerticalAlignment="Top"
             MaxWidth="460"

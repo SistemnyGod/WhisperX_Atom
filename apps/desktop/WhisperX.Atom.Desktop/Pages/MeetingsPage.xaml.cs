@@ -34,6 +34,7 @@ public sealed partial class MeetingsPage : Page
     private bool _suppressSegmentSeek;
     private bool _transcriptPlaybackSubscribed;
     private bool _hideTechnicalEvents = true;
+    private string? _lastLayoutKey;
 
     public MeetingsPage()
     {
@@ -725,10 +726,17 @@ public sealed partial class MeetingsPage : Page
         _updatingLayout = true;
         try
         {
+            var layoutKey = $"{ResponsiveLayout.GetMode(e.NewSize.Width)}:{e.NewSize.Width < 1080}:{e.NewSize.Width < 1240}:{_workspaceExpanded}";
+            if (string.Equals(_lastLayoutKey, layoutKey, StringComparison.Ordinal)) return;
+            _lastLayoutKey = layoutKey;
             MeetingsActionsPanel.Orientation = ResponsiveLayout.IsWide(e.NewSize.Width)
                 ? Orientation.Horizontal
                 : Orientation.Vertical;
+            WorkspaceActionsPanel.Orientation = e.NewSize.Width < 1080
+                ? Orientation.Vertical
+                : Orientation.Horizontal;
             ApplyWorkspaceLayout(e.NewSize.Width);
+            ApplyMeetingContentLayout(e.NewSize.Width);
         }
         finally { _updatingLayout = false; }
     }
@@ -743,7 +751,7 @@ public sealed partial class MeetingsPage : Page
         MeetingsGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
         MeetingsGrid.ColumnDefinitions[1].Width = expanded || compact
             ? new GridLength(0)
-            : new GridLength(380);
+            : new GridLength(420);
         MeetingsGrid.RowDefinitions[0].Height = expanded || !compact
             ? new GridLength(1, GridUnitType.Star)
             : new GridLength(300);
@@ -758,6 +766,39 @@ public sealed partial class MeetingsPage : Page
         Grid.SetColumn(WorkspaceCard, expanded || compact ? 0 : 1);
         Grid.SetRow(WorkspaceCard, expanded || !compact ? 0 : 1);
         Grid.SetColumnSpan(WorkspaceCard, expanded ? 2 : 1);
+    }
+
+    private void ApplyMeetingContentLayout(double width)
+    {
+        if (TranscriptWorkspaceGrid is null || TranscriptStatusPanel is null || ProtocolCardsGrid is null) return;
+        // The page width includes navigation and padding. At notebook widths the
+        // processing rail moves below the transcript instead of squeezing the
+        // reading column into a narrow strip.
+        var stackTranscriptRail = width < 1240;
+        TranscriptWorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
+        TranscriptWorkspaceGrid.ColumnDefinitions[1].Width = stackTranscriptRail ? new GridLength(0) : new GridLength(300);
+        TranscriptWorkspaceGrid.RowDefinitions[0].Height = new GridLength(1, GridUnitType.Star);
+        TranscriptWorkspaceGrid.RowDefinitions[1].Height = stackTranscriptRail ? GridLength.Auto : new GridLength(0);
+        Grid.SetColumn(TranscriptStatusPanel, stackTranscriptRail ? 0 : 1);
+        Grid.SetRow(TranscriptStatusPanel, stackTranscriptRail ? 1 : 0);
+
+        var compact = ResponsiveLayout.GetMode(width) == PageLayoutMode.Compact;
+        TranscriptHeaderGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : GridLength.Auto;
+        TranscriptHeaderGrid.ColumnDefinitions[2].Width = compact ? new GridLength(0) : GridLength.Auto;
+        Grid.SetColumn(TranscriptReprocessButton, compact ? 0 : 1);
+        Grid.SetRow(TranscriptReprocessButton, compact ? 1 : 0);
+        Grid.SetColumn(TranscriptExportButton, compact ? 0 : 2);
+        Grid.SetRow(TranscriptExportButton, compact ? 1 : 0);
+        TranscriptReprocessButton.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+        TranscriptExportButton.HorizontalAlignment = compact ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        TranscriptOptionsPanel.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
+        ProtocolCardsGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
+        ProtocolCardsGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        if (ProtocolCardsGrid.Children.Count > 1 && ProtocolCardsGrid.Children[1] is FrameworkElement secondaryProtocolCard)
+        {
+            Grid.SetColumn(secondaryProtocolCard, compact ? 0 : 1);
+            Grid.SetRow(secondaryProtocolCard, compact ? 1 : 0);
+        }
     }
 
     private void UpdateListState()
@@ -801,6 +842,7 @@ public sealed partial class MeetingsPage : Page
         WorkspaceContent.Visibility = _workspace.HasMeeting && _workspaceExpanded ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceLoadingOverlay.Visibility = _workspace.IsLoading ? Visibility.Visible : Visibility.Collapsed;
         ApplyWorkspaceLayout(MeetingsGrid.ActualWidth > 0 ? MeetingsGrid.ActualWidth : PageRoot.ActualWidth);
+        ApplyMeetingContentLayout(PageRoot.ActualWidth);
         OpenWorkspaceButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;
         OpenWorkspaceButton.Content = _workspaceExpanded ? "Свернуть" : "Открыть совещание";
         WorkspaceMoreButton.IsEnabled = _workspace.HasMeeting && !_workspace.IsLoading;

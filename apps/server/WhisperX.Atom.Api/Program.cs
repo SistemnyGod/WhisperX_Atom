@@ -1269,6 +1269,23 @@ app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, HttpContext context,
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.ListActionItemsAsync(id));
 });
+// Paginated registries avoid walking every meeting and issuing one detail
+// request per row.  The store applies the user scope before filtering/counting.
+app.MapGet("/api/summaries", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSummaryRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+});
+app.MapGet("/api/speakers", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSpeakerRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+});
+app.MapGet("/api/action-items", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListActionItemRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+});
 app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     var meetingId = await store.GetActionItemMeetingIdAsync(id);

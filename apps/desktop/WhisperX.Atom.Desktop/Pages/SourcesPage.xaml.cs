@@ -12,6 +12,7 @@ public sealed partial class SourcesPage : Page
 {
     private SourcesViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
+    private PageLayoutMode? _lastLayoutMode;
 
     public SourcesPage()
     {
@@ -77,7 +78,10 @@ public sealed partial class SourcesPage : Page
 
     private void SourcesPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var wide = ResponsiveLayout.IsWide(e.NewSize.Width);
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
+        if (_lastLayoutMode == mode) return;
+        _lastLayoutMode = mode;
+        var wide = mode == PageLayoutMode.Wide;
         SourcesActionsPanel.Orientation = wide ? Orientation.Horizontal : Orientation.Vertical;
         ApplyResponsiveLayout(StatusGrid, LocalAgentCard, BackendCard, wide);
         ApplyResponsiveLayout(DevicesGrid, MicrophoneCard, SystemAudioCard, wide);

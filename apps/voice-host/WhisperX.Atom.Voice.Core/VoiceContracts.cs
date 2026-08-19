@@ -29,7 +29,8 @@ public enum VoiceIntent
     StopRecording,
     Confirm,
     Cancel,
-    HistoryQuestion
+    HistoryQuestion,
+    StopSpeaking
 }
 
 public sealed record VoiceCommand(
@@ -82,7 +83,13 @@ public sealed record VoiceHostSnapshot(
     string? LastCommandId = null,
     int RestartCount = 0,
     string? RestartState = null,
-    string? MicrophoneErrorDetail = null);
+    string? MicrophoneErrorDetail = null,
+    string? RequestedVoiceName = null,
+    string? EffectiveVoiceName = null,
+    string? EffectiveVoiceCulture = null,
+    bool VoiceFallbackUsed = false,
+    int SpeechQueueDepth = 0,
+    long SpeechQueueDrops = 0);
 
 public sealed record VoiceResponse(
     string Text,
@@ -90,6 +97,11 @@ public sealed record VoiceResponse(
     bool Success = true,
     string? LocalSessionId = null,
     string? CommandId = null,
-    string? TraceId = null);
+    string? TraceId = null,
+    string? QueryId = null,
+    string? ResponseId = null,
+    string? PlaybackState = null,
+    bool AcceptedForPlayback = false,
+    string? AnswerStatus = null);
 
 public sealed record VoiceTransition(VoiceHostState From, VoiceHostState To, DateTimeOffset At, string Reason);

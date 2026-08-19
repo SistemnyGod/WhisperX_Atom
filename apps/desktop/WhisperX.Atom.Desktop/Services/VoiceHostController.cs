@@ -26,6 +26,7 @@ public sealed class VoiceHostController : IAsyncDisposable
     public int? LastObservedProcessId { get; private set; }
     public int RestartCount { get; private set; }
     public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
+    public event Action<Guid, Guid?>? AssistantResultAvailable;
 
     public void ClearAssistantState() => _broker?.ClearAssistantState();
 
@@ -159,7 +160,11 @@ public sealed class VoiceHostController : IAsyncDisposable
             }
         }
 
-        _broker ??= new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting, _services.VoiceAssistantConversations);
+        if (_broker is null)
+        {
+            _broker = new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting, _services.VoiceAssistantConversations, _services.AssistantDelivery);
+            _broker.AssistantResultAvailable += (queryId, conversationId) => AssistantResultAvailable?.Invoke(queryId, conversationId);
+        }
         _broker.Start();
         var settings = _services.Settings.Load();
         // Keep the always-listening host on the same endpoint that Recorder

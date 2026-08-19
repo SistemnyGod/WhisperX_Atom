@@ -70,6 +70,7 @@ public sealed class TranscriptsViewModel : ObservableObject
     private bool _hideTechnicalEvents = true;
     private TranscriptRegistryItem? _selectedItem;
     private DesktopTranscriptSegment? _selectedSegment;
+    private CancellationTokenSource? _filterDebounce;
 
     public TranscriptsViewModel(FrontendServices services) => _services = services;
 
@@ -80,7 +81,7 @@ public sealed class TranscriptsViewModel : ObservableObject
     public string SearchText
     {
         get => _searchText;
-        set { if (SetProperty(ref _searchText, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _searchText, value)) ScheduleFilters(); }
     }
     public string SegmentSearchText
     {
@@ -93,7 +94,7 @@ public sealed class TranscriptsViewModel : ObservableObject
     public string StatusFilter
     {
         get => _statusFilter;
-        set { if (SetProperty(ref _statusFilter, value)) ApplyFilters(); }
+        set { if (SetProperty(ref _statusFilter, value)) ScheduleFilters(); }
     }
     public bool HideTechnicalEvents
     {
@@ -188,7 +189,7 @@ public sealed class TranscriptsViewModel : ObservableObject
             _allItems.AddRange(registry.Select(item => new TranscriptRegistryItem(item)));
             OnPropertyChanged(nameof(HasLoadedItems));
             OnPropertyChanged(nameof(RegistryCountText));
-            ApplyFilters();
+            ApplyFiltersNow();
             StatusText = _allItems.Count == 0
                 ? "Встреч пока нет."
                 : $"Загружено встреч: {_allItems.Count}. Стенограмма загружается после выбора встречи.";
@@ -198,7 +199,7 @@ public sealed class TranscriptsViewModel : ObservableObject
         {
             ErrorText = SafeError(ex, "Не удалось загрузить стенограммы.");
             _allItems.Clear();
-            ApplyFilters();
+            ApplyFiltersNow();
         }
         finally { IsLoading = false; }
     }
@@ -226,17 +227,52 @@ public sealed class TranscriptsViewModel : ObservableObject
         finally { IsLoading = false; }
     }
 
-    private void ApplyFilters()
+    private void ScheduleFilters()
+    {
+        _filterDebounce?.Cancel();
+        _filterDebounce?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _filterDebounce = cancellation;
+        _ = ApplyFiltersDebouncedAsync(cancellation);
+    }
+
+    private async Task ApplyFiltersDebouncedAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(250, cancellation.Token);
+            ApplyFiltersNow();
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer filter value superseded this operation.
+        }
+        finally
+        {
+            if (ReferenceEquals(_filterDebounce, cancellation))
+            {
+                _filterDebounce = null;
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private void ApplyFiltersNow()
     {
         var query = SearchText.Trim();
-        FilteredItems.Clear();
-        foreach (var item in _allItems.Where(item =>
+        var visible = _allItems.Where(item =>
                      string.IsNullOrWhiteSpace(query)
                      || item.MeetingTitle.Contains(query, StringComparison.OrdinalIgnoreCase)
                      || (item.Meeting.Description?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
                  .Where(item => MatchesStatus(item, StatusFilter))
-                 .OrderByDescending(item => item.Meeting.CreatedAt))
-            FilteredItems.Add(item);
+                 .OrderByDescending(item => item.Meeting.CreatedAt)
+                 .ToList();
+
+        if (!FilteredItems.SequenceEqual(visible))
+        {
+            FilteredItems.Clear();
+            foreach (var item in visible) FilteredItems.Add(item);
+        }
 
         if (SelectedItem is not null && !FilteredItems.Contains(SelectedItem))
             SelectedItem = null;
@@ -254,6 +290,8 @@ public sealed class TranscriptsViewModel : ObservableObject
                      (!HideTechnicalEvents || !IsTechnical(segment))
                      && (string.IsNullOrWhiteSpace(query) || segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase))))
             FilteredSegments.Add(segment);
+        if (SelectedSegment is not null && !FilteredSegments.Contains(SelectedSegment))
+            SelectedSegment = null;
         OnPropertyChanged(nameof(HasSegments));
     }
 

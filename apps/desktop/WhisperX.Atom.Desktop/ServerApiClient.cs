@@ -50,6 +50,10 @@ public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, s
     [JsonIgnore]
     public string DeadlineText => Deadline is DateTime value ? value.ToLocalTime().ToString("dd.MM.yyyy") : "Срок не указан";
 }
+public sealed record DesktopRegistryPage<T>(IReadOnlyList<T> Items, int TotalCount, bool HasMore);
+public sealed record DesktopSummaryRegistryRow(DesktopMeeting Meeting, DesktopSummary? Summary);
+public sealed record DesktopSpeakerRegistryRow(DesktopMeeting Meeting, DesktopSpeaker Speaker);
+public sealed record DesktopActionItemRegistryRow(DesktopMeeting Meeting, DesktopTask Item);
 public sealed record DesktopAgentEnrollment(string AgentId, string Token);
 public sealed record DesktopAgentBootstrapResult(
     string AgentId,
@@ -109,7 +113,7 @@ public sealed record DesktopJob(
             || errorCode.Equals("TRANSCRIPT_INVALID_TIMECODE", StringComparison.OrdinalIgnoreCase)
             || errorCode.Equals("AUDIO_PROCESSING_ERROR", StringComparison.OrdinalIgnoreCase));
 }
-public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY");
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
 public sealed record DesktopAssistantRequestAccepted(string QueryId, string? ConversationId, string ResolvedMode, string? MeetingId, string Status, string Source, double RouterConfidence, string PollUrl, string EventsUrl);
 
 public enum DesktopAuthState
@@ -849,6 +853,45 @@ public sealed class ServerApiClient : IDisposable
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<DesktopSummary>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopRegistryPage<DesktopSummaryRegistryRow>> GetSummaryRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default)
+    {
+        var query = $"page={Math.Max(1, page)}&pageSize={Math.Clamp(pageSize, 1, 200)}";
+        if (!string.IsNullOrWhiteSpace(search)) query += "&search=" + Uri.EscapeDataString(search.Trim());
+        if (!string.IsNullOrWhiteSpace(status)) query += "&status=" + Uri.EscapeDataString(status.Trim());
+        if (meetingId.HasValue) query += "&meetingId=" + meetingId.Value;
+        if (!string.IsNullOrWhiteSpace(sort)) query += "&sort=" + Uri.EscapeDataString(sort.Trim());
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/summaries?" + query, null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<DesktopRegistryPage<DesktopSummaryRegistryRow>>(_json, cancellationToken)
+            ?? new DesktopRegistryPage<DesktopSummaryRegistryRow>([], 0, false);
+    }
+
+    public async Task<DesktopRegistryPage<DesktopSpeakerRegistryRow>> GetSpeakerRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default)
+    {
+        var query = $"page={Math.Max(1, page)}&pageSize={Math.Clamp(pageSize, 1, 200)}";
+        if (!string.IsNullOrWhiteSpace(search)) query += "&search=" + Uri.EscapeDataString(search.Trim());
+        if (!string.IsNullOrWhiteSpace(status)) query += "&status=" + Uri.EscapeDataString(status.Trim());
+        if (meetingId.HasValue) query += "&meetingId=" + meetingId.Value;
+        if (!string.IsNullOrWhiteSpace(sort)) query += "&sort=" + Uri.EscapeDataString(sort.Trim());
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/speakers?" + query, null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<DesktopRegistryPage<DesktopSpeakerRegistryRow>>(_json, cancellationToken)
+            ?? new DesktopRegistryPage<DesktopSpeakerRegistryRow>([], 0, false);
+    }
+
+    public async Task<DesktopRegistryPage<DesktopActionItemRegistryRow>> GetActionItemRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default)
+    {
+        var query = $"page={Math.Max(1, page)}&pageSize={Math.Clamp(pageSize, 1, 200)}";
+        if (!string.IsNullOrWhiteSpace(search)) query += "&search=" + Uri.EscapeDataString(search.Trim());
+        if (!string.IsNullOrWhiteSpace(status)) query += "&status=" + Uri.EscapeDataString(status.Trim());
+        if (meetingId.HasValue) query += "&meetingId=" + meetingId.Value;
+        if (!string.IsNullOrWhiteSpace(sort)) query += "&sort=" + Uri.EscapeDataString(sort.Trim());
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/action-items?" + query, null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<DesktopRegistryPage<DesktopActionItemRegistryRow>>(_json, cancellationToken)
+            ?? new DesktopRegistryPage<DesktopActionItemRegistryRow>([], 0, false);
     }
 
     public async Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default)
