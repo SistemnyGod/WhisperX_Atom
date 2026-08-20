@@ -80,6 +80,12 @@ def test_host_health_advertises_build_identity_and_concurrent_ipc_capabilities()
     assert "AgentIpcProtocol.DeviceEventStreamCapability" in runtime
 
 
+def test_legacy_agent_heartbeat_reports_the_actual_binary_identity():
+    agent = read("apps/recorder-agent/AgentApiClient.cs")
+    assert 'Environment.GetEnvironmentVariable("ATOM_AGENT_VERSION") ?? AgentIpcProtocol.CurrentBuildIdentity' in agent
+    assert '?? "0.1.0"' not in agent.split("public async Task<bool> HeartbeatAsync", 1)[1].split("public async Task", 1)[0]
+
+
 def test_desktop_does_not_open_device_subscription_without_host_capability():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     assert "_deviceEventStreamSupported" in view_model

@@ -268,7 +268,10 @@ public sealed class AgentApiClient : IDisposable
         }
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, $"api/v1/agents/{_agentId}/heartbeat"));
         AddAuthentication(request);
-        var version = Environment.GetEnvironmentVariable("ATOM_AGENT_VERSION") ?? "0.1.0";
+        // Registry/version compatibility must reflect the binary that is
+        // actually sending the heartbeat. A legacy "0.1.0" fallback made
+        // every installed Recorder indistinguishable from an old runtime.
+        var version = Environment.GetEnvironmentVariable("ATOM_AGENT_VERSION") ?? AgentIpcProtocol.CurrentBuildIdentity;
         request.Content = JsonContent.Create(new
         {
             status = "ONLINE",

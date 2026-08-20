@@ -513,18 +513,35 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     static bool IsIdentityMatch(WorkerRuntimeRow worker, string expected)
         => string.Equals(expected, "dev", StringComparison.OrdinalIgnoreCase)
             || string.Equals(worker.Version, expected, StringComparison.Ordinal);
+    // Core media processing is always required. The LLM worker is required
+    // only when either assistant answers or automatic summaries are enabled.
+    // Keeping that distinction here prevents an intentionally disabled
+    // summary worker from making recording/ASR readiness look unhealthy.
+    var autoSummaryEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+    var assistantEnabled = configuration.GetValue("ASSISTANT_ENABLED", true);
+    var qwenEnabled = autoSummaryEnabled || assistantEnabled;
+    var qwenMode = autoSummaryEnabled
+        ? "AUTO_SUMMARY_ENABLED"
+        : assistantEnabled ? "ASSISTANT_ONLY" : "DISABLED";
+    var requiredWorkerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "outbox-relay", "import-worker", "media-worker", "gpu-worker"
+    };
+    if (qwenEnabled) requiredWorkerNames.Add("summary-worker");
+
     var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     var identityMismatch = false;
     foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker" })
     {
+        var required = requiredWorkerNames.Contains(name);
         if (!fresh.TryGetValue(name, out var item) || !IsFreshWorker(item, checkedAt))
         {
-            workerReady[name] = new { status = "UNAVAILABLE", lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
+            workerReady[name] = new { status = "UNAVAILABLE", required, lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
             continue;
         }
         var matches = IsIdentityMatch(item, expectedBuildIdentity);
-        identityMismatch |= !matches;
-        workerReady[name] = new { status = matches ? item.Status : "IDENTITY_MISMATCH", lastSeenAt = item.LastSeenAt, version = item.Version, expectedBuildIdentity, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = matches ? item.LastErrorCode : "WORKER_BUILD_IDENTITY_MISMATCH" };
+        identityMismatch |= required && !matches;
+        workerReady[name] = new { status = matches ? item.Status : "IDENTITY_MISMATCH", required, lastSeenAt = item.LastSeenAt, version = item.Version, expectedBuildIdentity, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = matches ? item.LastErrorCode : "WORKER_BUILD_IDENTITY_MISMATCH" };
     }
 
     var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker)
@@ -535,28 +552,27 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue)
         ? diarizationValue.GetString() ?? "DEGRADED"
         : "DEGRADED";
-    var requiredWorkersReady = new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker" }.All(name =>
+    var requiredWorkersReady = requiredWorkerNames.All(name =>
         fresh.TryGetValue(name, out var worker) &&
         IsFreshWorker(worker, checkedAt) &&
         IsActiveWorker(worker) &&
         IsIdentityMatch(worker, expectedBuildIdentity));
-    var qwenEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     object qwen;
     if (!qwenEnabled)
     {
-        qwen = new { status = "DISABLED", reason = "auto_summary_disabled" };
+        qwen = new { status = "DISABLED", reason = "assistant_and_auto_summary_disabled", mode = qwenMode };
     }
     else if (!nats)
     {
-        qwen = new { status = "DEGRADED", reason = "nats_unavailable" };
+        qwen = new { status = "DEGRADED", reason = "nats_unavailable", mode = qwenMode };
     }
     else if (!fresh.TryGetValue("summary-worker", out var summaryWorker) || !IsFreshWorker(summaryWorker, checkedAt))
     {
-        qwen = new { status = "DEGRADED", reason = "summary_worker_stale" };
+        qwen = new { status = "DEGRADED", reason = "summary_worker_stale", mode = qwenMode };
     }
     else if (!IsIdentityMatch(summaryWorker, expectedBuildIdentity))
     {
-        qwen = new { status = "DEGRADED", reason = "summary_worker_identity_mismatch" };
+        qwen = new { status = "DEGRADED", reason = "summary_worker_identity_mismatch", mode = qwenMode };
     }
     else
     {
@@ -567,15 +583,15 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         var llamaAvailable = capabilities.TryGetProperty("llamaRuntimeAvailable", out var llama) && llama.ValueKind == JsonValueKind.True;
         var gpuBusy = gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         var summaryBusy = summaryWorker.CurrentJobId is not null || string.Equals(summaryWorker.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
-        qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing" }
-            : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing" }
-            : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch" }
-            : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing" }
-            : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready" }
-            : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable" }
-            : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded" }
-            : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy" }
-            : new { status = "READY", reason = "summary_worker_ready" };
+        qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing", mode = qwenMode }
+            : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing", mode = qwenMode }
+            : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch", mode = qwenMode }
+            : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing", mode = qwenMode }
+            : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready", mode = qwenMode }
+            : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable", mode = qwenMode }
+            : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded", mode = qwenMode }
+            : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy", mode = qwenMode }
+            : new { status = "READY", reason = "summary_worker_ready", mode = qwenMode };
     }
     var gpuWorkerFailed = gpuWorker is null
         || string.Equals(gpuWorker.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
@@ -585,7 +601,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
             ? "BUSY"
             : "READY";
-    var ready = postgres && nats && storage && requiredWorkersReady && cuda && !identityMismatch;
+    var ready = postgres && nats && storage && requiredWorkersReady && cuda && !identityMismatch && releaseIdentityValid;
 
     return Results.Ok(new
     {

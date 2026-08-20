@@ -15,10 +15,21 @@ def test_readiness_resolves_disabled_ready_busy_missing_and_stale_without_loadin
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     for state in ("DISABLED", "READY", "BUSY", "DEGRADED", "UNAVAILABLE"):
         assert f'"{state}"' in api
-    for reason in ("auto_summary_disabled", "model_missing", "gpu_lease_busy", "summary_worker_stale"):
+    for reason in ("assistant_and_auto_summary_disabled", "model_missing", "gpu_lease_busy", "summary_worker_stale"):
         assert reason in api
     assert "model_manifest_mismatch" in api
     assert "LocalLlamaServer" not in api.split('app.MapGet("/api/system/readiness"', 1)[1].split('app.MapGet("/api/system/status"', 1)[0]
+
+
+def test_readiness_requires_a_valid_release_identity_and_treats_assistant_only_as_llm_enabled():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    readiness = api.split('app.MapGet("/api/system/readiness"', 1)[1].split('app.MapGet("/api/system/status"', 1)[0]
+    assert 'configuration.GetValue("ASSISTANT_ENABLED", true)' in readiness
+    assert "var qwenEnabled = autoSummaryEnabled || assistantEnabled;" in readiness
+    assert '"ASSISTANT_ONLY"' in readiness
+    assert "if (qwenEnabled) requiredWorkerNames.Add(\"summary-worker\");" in readiness
+    assert "&& releaseIdentityValid;" in readiness
+    assert "identityMismatch |= required && !matches;" in readiness
 
 def test_doctor_surfaces_summary_qwen_llama_and_gpu_lease_reason():
     doctor = read("scripts/doctor-transcription-mvp.ps1")
