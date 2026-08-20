@@ -116,6 +116,23 @@ function Invoke-HostCommand([string]$Command, [hashtable]$Payload = @{}) {
     finally { $pipe.Dispose() }
 }
 
+function Test-WaveFile([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($file.Length -lt 44) { return $false }
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            $header = New-Object byte[] 4
+            if ($stream.Read($header, 0, 4) -ne 4) { return $false }
+            $magic = [Text.Encoding]::ASCII.GetString($header)
+            return $magic -in @("RIFF", "RF64")
+        }
+        finally { $stream.Dispose() }
+    }
+    catch { return $false }
+}
+
 try {
     New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
     $hostInfo = Ensure-ReleaseHost
@@ -166,6 +183,27 @@ try {
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
     if ($null -eq $status) { throw "AUDIOGRAPH_STATUS_MISSING" }
+
+    # Playable audio is derived asynchronously from the durable PCM boundary.
+    # Do not report the local recording as complete until the atomic WAV/RF64
+    # rename has happened and every registered track file is visible.
+    $playableDeadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
+    $playableFiles = @()
+    $playableState = [string]$status.playableAudioState
+    $playableFormatValid = $false
+    $playableReady = $false
+    do {
+        $playableState = [string]$status.playableAudioState
+        $playableFiles = if ($null -ne $status.playableAudioFiles) { @($status.playableAudioFiles) } else { @() }
+        $playableFormatValid = $playableFiles.Count -gt 0 -and (@($playableFiles | ForEach-Object { Test-WaveFile ([string]$_.localPath) }) -notcontains $false)
+        $playableReady = $playableState -eq "READY" -and $playableFormatValid
+        if ($playableReady -or $playableState -eq "FAILED") { break }
+        Start-Sleep -Seconds 2
+        $statusResponse = Invoke-HostCommand "GET_SESSION_STATUS" @{ sessionId = $localSessionId }
+        $status = $statusResponse.sessionStatus
+    } while ($null -ne $status -and [DateTimeOffset]::UtcNow -lt $playableDeadline)
+
+    if ($null -eq $status) { throw "AUDIOGRAPH_PLAYABLE_STATUS_MISSING" }
     # A server-delivery gate must not stop at LOCAL_READY.  The recorder is
     # intentionally local-first, but this acceptance scenario also verifies
     # that the background bind/upload/finalize path reaches a durable terminal
@@ -264,6 +302,14 @@ try {
             archiveExists = $archiveExists
             archiveReady = $archiveReady
             archiveState = [string]$status.archiveState
+            playableAudioState = $playableState
+            playableAudioPath = [string]$status.playableAudioPath
+            playableAudioFileCount = $playableFiles.Count
+            playableAudioFiles = @($playableFiles | ForEach-Object {
+                [ordered]@{ trackType = [string]$_.trackType; localPath = [string]$_.localPath; sizeBytes = [int64]$_.sizeBytes; sampleCount = [int64]$_.sampleCount }
+            })
+            playableFormatValid = $playableFormatValid
+            playableReady = $playableReady
             encodingState = [string]$status.encodingState
             flacFileCount = $flacFiles.Count
             durationSeconds = $durationSeconds
@@ -297,7 +343,7 @@ try {
     $rawGatePassed = $report.result.localFinalizeState -eq "LOCAL_READY" -and $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and ([int]$rawEvidence.rawTerminalFailedCount -eq 0) -and $pipelineGatePassed
     $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
     $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $rawEvidence.localChunkCount -gt 0
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $report.result.playableReady -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }

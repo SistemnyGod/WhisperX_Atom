@@ -78,6 +78,10 @@ public sealed class RecordingViewModel : ObservableObject
     private string _encodingState = "PENDING";
     private string _archiveState = "PENDING";
     private string _deliveryState = "NOT_STARTED";
+    private string _playableAudioState = "NOT_REQUIRED";
+    private string? _playableAudioPath;
+    private string? _playableAudioError;
+    private IReadOnlyList<PlayableAudioFile> _playableAudioFiles = Array.Empty<PlayableAudioFile>();
     private string? _sessionErrorCode;
     private string? _sessionTraceId;
     private DateTimeOffset? _nextRetryAtUtc;
@@ -155,17 +159,83 @@ public sealed class RecordingViewModel : ObservableObject
     public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) OnPropertyChanged(nameof(CanOpenLocalArchive)); } }
-    public string LocalFinalizeState { get => _localFinalizeState; private set { if (SetProperty(ref _localFinalizeState, value)) OnPropertyChanged(nameof(LocalFinalizeStatusLabel)); } }
+    public string LocalFinalizeState
+    {
+        get => _localFinalizeState;
+        private set
+        {
+            if (SetProperty(ref _localFinalizeState, value))
+            {
+                OnPropertyChanged(nameof(LocalFinalizeStatusLabel));
+                OnPropertyChanged(nameof(LocalRecordingFooterLabel));
+            }
+        }
+    }
     public string EncodingState { get => _encodingState; private set { if (SetProperty(ref _encodingState, value)) OnPropertyChanged(nameof(EncodingStatusLabel)); } }
     public string ArchiveState { get => _archiveState; private set { if (SetProperty(ref _archiveState, value)) OnPropertyChanged(nameof(ArchiveStatusLabel)); } }
     public string DeliveryState { get => _deliveryState; private set { if (SetProperty(ref _deliveryState, value)) OnPropertyChanged(nameof(DeliveryStatusLabel)); } }
+    public string PlayableAudioState
+    {
+        get => _playableAudioState;
+        private set
+        {
+            if (SetProperty(ref _playableAudioState, value))
+            {
+                OnPropertyChanged(nameof(PlayableAudioStatusLabel));
+                OnPropertyChanged(nameof(LocalFinalizeStatusLabel));
+                OnPropertyChanged(nameof(LocalRecordingFooterLabel));
+            }
+        }
+    }
+    public string? PlayableAudioPath { get => _playableAudioPath; private set { if (SetProperty(ref _playableAudioPath, value)) { OnPropertyChanged(nameof(CanOpenPlayableAudio)); OnPropertyChanged(nameof(CanOpenLocalArchive)); OnPropertyChanged(nameof(PlayableAudioFilePath)); } } }
+    public string? PlayableAudioError
+    {
+        get => _playableAudioError;
+        private set
+        {
+            if (SetProperty(ref _playableAudioError, value))
+                OnPropertyChanged(nameof(PlayableAudioStatusLabel));
+        }
+    }
+    public IReadOnlyList<PlayableAudioFile> PlayableAudioFiles
+    {
+        get => _playableAudioFiles;
+        private set
+        {
+            if (SetProperty(ref _playableAudioFiles, value))
+            {
+                OnPropertyChanged(nameof(CanOpenPlayableAudio));
+                OnPropertyChanged(nameof(CanOpenLocalArchive));
+                OnPropertyChanged(nameof(PlayableAudioFilePath));
+            }
+        }
+    }
+    public string PlayableAudioStatusLabel => _playableAudioState.ToUpperInvariant() switch
+    {
+        "PENDING" => "Подготовка файла ожидает",
+        "BUILDING" => "Файл собирается из PCM",
+        "RECOVERY_PENDING" => "Ожидается восстановление PCM",
+        "READY" => "Файл готов",
+        "FAILED" => $"Ошибка файла{(string.IsNullOrWhiteSpace(_playableAudioError) ? string.Empty : $": {_playableAudioError}")}",
+        _ => "Файл не требуется"
+    };
+    public bool CanOpenPlayableAudio => PlayableAudioFiles.Any(file => File.Exists(file.LocalPath));
+    public string? PlayableAudioFilePath => PlayableAudioFiles.FirstOrDefault(file => File.Exists(file.LocalPath))?.LocalPath;
     public string LocalFinalizeStatusLabel => _localFinalizeState.ToUpperInvariant() switch
     {
         "FINALIZING_LOCAL" => "Локальный master собирается",
-        "LOCAL_READY" => "Запись сохранена",
+        "LOCAL_READY" => _playableAudioState == "READY" ? "Файл записи готов" : "Исходный PCM защищён; файл готовится",
         "RECOVERY_PENDING" => "Ожидает восстановления локального файла",
         "LOCAL_FAILED" => "Локальная сборка не завершена",
         _ => "Локальное сохранение ожидает"
+    };
+    public string LocalRecordingFooterLabel => _playableAudioState.ToUpperInvariant() switch
+    {
+        "READY" => "Запись сохранена локально. Можно закрыть приложение — кодирование и доставка продолжатся в фоне.",
+        "BUILDING" => "Исходный PCM защищён. Пользовательский файл собирается в фоне; запись не потеряна.",
+        "RECOVERY_PENDING" => "Исходный PCM защищён. Recorder восстановит незавершённый файл автоматически.",
+        "FAILED" => "Исходный PCM защищён. Файл не собран, но запись можно восстановить после исправления причины.",
+        _ => "Исходный PCM защищён. Пользовательский файл будет собран в фоне после остановки записи."
     };
     public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
     public string EncodingStatusLabel => _encodingState.ToUpperInvariant() switch
@@ -207,7 +277,8 @@ public sealed class RecordingViewModel : ObservableObject
     public string RawEncoderReadyLabel => _rawChunksReady == 0
         ? "Сырой PCM: очередь на кодирование пуста"
         : $"Сырой PCM: {_rawChunksReady} чанков готовы к кодированию";
-    public bool CanOpenLocalArchive => !string.IsNullOrWhiteSpace(ArchivePath) && Directory.Exists(ArchivePath);
+    public bool CanOpenLocalArchive => (!string.IsNullOrWhiteSpace(ArchivePath) && Directory.Exists(ArchivePath))
+        || (!string.IsNullOrWhiteSpace(PlayableAudioPath) && Directory.Exists(PlayableAudioPath));
     public string? SelectedMicrophoneId => _microphoneDeviceId;
     public string? SelectedSystemAudioId => _systemAudioDeviceId;
     public string PendingUploadsLabel => _pendingUploads == 0 ? "Нет ожидающих отправки" : $"В очереди отправки: {_pendingUploads}";
@@ -330,6 +401,7 @@ public sealed class RecordingViewModel : ObservableObject
     public async Task StartPollingAsync()
     {
         await RefreshAsync();
+        await RestoreLatestLocalSessionAsync();
         if (_pollCts is not null) return;
         _pollCts = new CancellationTokenSource();
         _pollTask = PollLoopAsync(_pollCts.Token);
@@ -361,6 +433,37 @@ public sealed class RecordingViewModel : ObservableObject
             _pollCts = null;
         }
         await StopProcessingPollingAsync();
+    }
+
+    private async Task RestoreLatestLocalSessionAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(SessionId) || State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing) return;
+        try
+        {
+            var response = await _services.Recorder.ListLocalSessionsAsync(100);
+            var local = response.LocalSessions?
+                .FirstOrDefault(item => item.PlayableAudioState is "PENDING" or "BUILDING" or "READY" or "RECOVERY_PENDING" or "FAILED"
+                    || item.LocalFinalizeState == "LOCAL_READY" && item.DeliveryState is not "CONFIRMED" and not "COMPLETED");
+            if (local is null) return;
+            SessionId = local.SessionId;
+            Title = string.IsNullOrWhiteSpace(local.Title) ? Title : local.Title!;
+            MeetingId = null;
+            LocalFinalizeState = local.LocalFinalizeState;
+            DeliveryState = local.DeliveryState;
+            PlayableAudioState = local.PlayableAudioState;
+            PlayableAudioPath = local.PlayableAudioPath;
+            PlayableAudioError = local.PlayableAudioError;
+            PlayableAudioFiles = local.PlayableFiles;
+            State = RecordingState.Idle;
+            StatusMessage = "Восстановлена локальная запись; доставка и подготовка файла продолжаются в фоне.";
+            StartSessionTracking(local.SessionId);
+        }
+        catch (Exception ex)
+        {
+            // Older Hosts do not implement LIST_LOCAL_SESSIONS; health and
+            // normal recording must remain available in that case.
+            Debug.WriteLine($"Unable to restore local sessions: {ex.Message}");
+        }
     }
 
     private async Task StopSessionTrackingAsync()
@@ -525,6 +628,10 @@ public sealed class RecordingViewModel : ObservableObject
         EncodingState = "PENDING";
         ArchiveState = "PENDING";
         DeliveryState = "NOT_STARTED";
+        PlayableAudioState = "PENDING";
+        PlayableAudioPath = null;
+        PlayableAudioError = null;
+        PlayableAudioFiles = Array.Empty<PlayableAudioFile>();
         _sessionErrorCode = null;
         _sessionTraceId = null;
         _nextRetryAtUtc = null;
@@ -1023,6 +1130,10 @@ public sealed class RecordingViewModel : ObservableObject
         ArchiveState = session.ArchiveState;
         DeliveryState = session.DeliveryState;
         ArchivePath = session.ArchivePath;
+        PlayableAudioState = session.PlayableAudioState;
+        PlayableAudioPath = session.PlayableAudioPath;
+        PlayableAudioError = session.PlayableAudioError;
+        PlayableAudioFiles = session.PlayableAudioFiles ?? Array.Empty<PlayableAudioFile>();
         _sessionErrorCode = session.ErrorCode;
         _sessionTraceId = session.TraceId;
         _nextRetryAtUtc = session.NextRetryAtUtc;
@@ -1068,6 +1179,8 @@ public sealed class RecordingViewModel : ObservableObject
                     ? "Локальный архив не собран. Исходные чанки сохранены, доставка и Transcript V1 продолжаются."
                 : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
                 ? "Запись сохранена локально; кодирование и отправка продолжатся после восстановления FFmpeg."
+                : session.PlayableAudioState is not "READY"
+                    ? "Исходный PCM защищён. Пользовательский WAV собирается в фоне; запись не потеряна."
                 : session.DeliveryState is "CONFIRMED" or "COMPLETED"
                     ? string.Empty
                     : "Локальный файл сохранён. Agent продолжает доставку на сервер.";
@@ -1078,12 +1191,15 @@ public sealed class RecordingViewModel : ObservableObject
                     ? "Архив недоступен, но серверная доставка не остановлена."
                 : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
                 ? "Запись сохранена локально. Ожидается кодирование аудио."
+                : session.PlayableAudioState is not "READY"
+                    ? "Захват завершён; файл собирается из защищённого PCM."
                 : session.DeliveryState is "CONFIRMED" or "COMPLETED"
                     ? "Аудио сохранено и подтверждено сервером."
                     : "Локальная запись сохранена; серверная доставка продолжится автоматически.";
         }
         OnPropertyChanged(nameof(CanRetryUpload));
         OnPropertyChanged(nameof(CanOpenLocalArchive));
+        OnPropertyChanged(nameof(PlayableAudioStatusLabel));
         _chunksTotal = session.LocalChunkCount;
         _chunksConfirmed = session.ConfirmedChunkCount;
         _chunksReady = session.ChunksReady;

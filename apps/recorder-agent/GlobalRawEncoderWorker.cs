@@ -51,6 +51,7 @@ public sealed class RawEncoderWakeSignal
 public sealed class GlobalRawEncoderWorker(
     SpoolStore spool,
     RawEncoderWakeSignal wake,
+    DeliveryWakeSignal deliveryWake,
     RawEncoderRuntimeState runtimeState,
     ILogger<GlobalRawEncoderWorker> logger) : BackgroundService
 {
@@ -146,6 +147,7 @@ public sealed class GlobalRawEncoderWorker(
             if (File.Exists(raw.OutputPath) && await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), raw.OutputPath, raw, cancellationToken).ConfigureAwait(false))
             {
                 await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+                deliveryWake.Signal();
                 runtimeState.MarkSuccess(raw.Id);
                 return;
             }
@@ -160,6 +162,7 @@ public sealed class GlobalRawEncoderWorker(
                 throw new InvalidOperationException("RAW_ENCODER_LEASE_LOST");
             File.Move(outputPart, raw.OutputPath, true);
             await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+            deliveryWake.Signal();
             runtimeState.MarkSuccess(raw.Id);
             logger.LogInformation("Raw chunk encoded. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", raw.SessionId, raw.TrackId, raw.Sequence);
         }

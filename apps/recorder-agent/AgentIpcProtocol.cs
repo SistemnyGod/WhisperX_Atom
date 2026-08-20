@@ -97,7 +97,8 @@ public sealed record AgentIpcResponse(
     int MinimumSupportedProtocolVersion = AgentIpcProtocol.MinimumSupportedVersion,
     int CurrentProtocolVersion = AgentIpcProtocol.Version,
     string? ErrorDetail = null,
-    AgentIpcAudioTelemetry? AudioTelemetry = null)
+    AgentIpcAudioTelemetry? AudioTelemetry = null,
+    IReadOnlyList<LocalSessionSummary>? LocalSessions = null)
 {
     /// <summary>
     /// True when the local IPC endpoint answered with a state payload. Health
@@ -301,7 +302,12 @@ public sealed record RecordingSessionStatus(
     int RawFinalizerCapacity = 0,
     string? ArchiveErrorCode = null,
     string? ArchiveErrorDetail = null,
-    int RawTerminalFailedCount = 0);
+    int RawTerminalFailedCount = 0,
+    string PlayableAudioState = "NOT_REQUIRED",
+    string? PlayableAudioPath = null,
+    IReadOnlyList<PlayableAudioFile>? PlayableAudioFiles = null,
+    string? PlayableAudioError = null,
+    DateTimeOffset? PlayableAudioCreatedAtUtc = null);
 
 public sealed record FinalizationResult(
     bool Success,

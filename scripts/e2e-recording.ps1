@@ -45,6 +45,22 @@ function Invoke-HostCommand([string]$Command, [hashtable]$Payload = @{}) {
     finally { $pipe.Dispose() }
 }
 
+function Test-WaveFile([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($file.Length -lt 44) { return $false }
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            $header = New-Object byte[] 4
+            if ($stream.Read($header, 0, 4) -ne 4) { return $false }
+            return [Text.Encoding]::ASCII.GetString($header) -in @("RIFF", "RF64")
+        }
+        finally { $stream.Dispose() }
+    }
+    catch { return $false }
+}
+
 function Get-HostProcess {
     Get-Process -Name "WhisperX.Atom.Recorder.Host" -ErrorAction SilentlyContinue | Select-Object -First 1
 }
@@ -203,6 +219,21 @@ try {
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     if ($null -eq $status) { throw "E2E_FINAL_STATUS_MISSING" }
 
+    $playableDeadline = [DateTimeOffset]::UtcNow.AddSeconds($FinalizeTimeoutSeconds)
+    $playableState = [string]$status.playableAudioState
+    $playableFiles = @()
+    $playableFormatValid = $false
+    $playableReady = $false
+    do {
+        $playableState = [string]$status.playableAudioState
+        $playableFiles = if ($null -ne $status.playableAudioFiles) { @($status.playableAudioFiles) } else { @() }
+        $playableFormatValid = $playableFiles.Count -gt 0 -and (@($playableFiles | ForEach-Object { Test-WaveFile ([string]$_.localPath) }) -notcontains $false)
+        $playableReady = $playableState -eq "READY" -and $playableFormatValid
+        if ($playableReady -or $playableState -eq "FAILED") { break }
+        Start-Sleep -Seconds 2
+        $status = Get-SessionStatus
+    } while ([DateTimeOffset]::UtcNow -lt $playableDeadline)
+
     $report = [ordered]@{
         schemaVersion = 1
         gate = "RECORDER_E2E"
@@ -222,6 +253,13 @@ try {
             rawFailedCount = [int]$status.rawFailedCount
             errorCode = [string]$status.errorCode
             archiveState = [string]$status.archiveState
+            playableAudioState = $playableState
+            playableAudioFileCount = $playableFiles.Count
+            playableAudioFiles = @($playableFiles | ForEach-Object {
+                [ordered]@{ trackType = [string]$_.trackType; localPath = [string]$_.localPath; sizeBytes = [int64]$_.sizeBytes }
+            })
+            playableFormatValid = $playableFormatValid
+            playableReady = $playableReady
             framesProduced = if ($null -ne $health.health.lastAudioGraphAttempt) { [int64]$health.health.lastAudioGraphAttempt.framesProduced } else { 0 }
             framesConsumed = if ($null -ne $health.health.lastAudioGraphAttempt) { [int64]$health.health.lastAudioGraphAttempt.framesConsumed } else { 0 }
         }
@@ -231,6 +269,8 @@ try {
     Write-Host "Recorder E2E report: $reportPath"
 
     if ($report.result.rawWritingCount -ne 0) { throw "E2E_RAW_WRITING_REMAINS: report=$reportPath" }
+    $playableRequired = $Scenario -notin @("usb-loss", "host-crash")
+    if ($playableRequired -and -not $report.result.playableReady) { throw "E2E_PLAYABLE_AUDIO_NOT_READY: state=$($report.result.playableAudioState) report=$reportPath" }
     if ($report.result.localFinalizeState -eq "LOCAL_FAILED" -and $Scenario -eq "baseline") { throw "E2E_LOCAL_FINALIZE_FAILED: $($report.result.errorCode)" }
     if ($expectedCaptureFailure -and [string]::IsNullOrWhiteSpace($report.result.errorCode)) { throw "E2E_EXPECTED_CAPTURE_FAILURE_NOT_PERSISTED: report=$reportPath" }
 }

@@ -208,7 +208,15 @@ public sealed partial class RecordingPage : Page
     private void OpenArchiveButton_Click(object sender, RoutedEventArgs e)
     {
         var path = ViewModel?.ArchivePath;
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) path = ViewModel?.PlayableAudioPath;
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+    }
+
+    private void OpenPlayableAudioButton_Click(object sender, RoutedEventArgs e)
+    {
+        var path = ViewModel?.PlayableAudioFilePath;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 

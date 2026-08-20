@@ -200,7 +200,19 @@
                             <Button Content="Начать новую запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartButton_Click" IsEnabled="{Binding CanAttemptStart}" />
                             <Button Grid.Column="1" Content="Открыть совещание" Style="{StaticResource SecondaryButtonStyle}" Click="OpenTranscriptButton_Click" IsEnabled="{Binding CanOpenTranscript}" />
                         </Grid>
-                        <TextBlock Text="Запись уже сохранена локально. Можно закрыть приложение — кодирование и доставка продолжатся в фоне." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Исходный воспроизводимый файл" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding PlayableAudioStatusLabel}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Открыть файл" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanOpenPlayableAudio}" Click="OpenPlayableAudioButton_Click" />
+                                    <Button Content="Открыть папку" Style="{StaticResource GhostButtonStyle}" IsEnabled="{Binding CanOpenLocalArchive}" Click="OpenArchiveButton_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <TextBlock Text="{Binding LocalRecordingFooterLabel}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     </StackPanel>
 
                     <InfoBar x:Name="ErrorInfoBar" IsOpen="False" IsClosable="False" Severity="Error">

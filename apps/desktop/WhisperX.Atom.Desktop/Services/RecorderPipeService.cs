@@ -22,6 +22,9 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("GET_SESSION_STATUS", new { sessionId }, cancellationToken);
 
+    public Task<AgentIpcResponse> ListLocalSessionsAsync(int limit = 100, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("LIST_LOCAL_SESSIONS", new { limit = Math.Clamp(limit, 1, 500) }, cancellationToken);
+
     public Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default, string acousticProfile = "AUTO") =>
         _client.SendAsync("START", new { title, meetingId, ownerUserId, localOnly, acousticProfile }, cancellationToken);
 

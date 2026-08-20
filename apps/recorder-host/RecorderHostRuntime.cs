@@ -25,6 +25,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly AudioGraphCaptureEngine _engine;
     private readonly SystemAudioCaptureEngine _systemEngine;
     private readonly RawEncoderWakeSignal _encoderWake;
+    private readonly DeliveryWakeSignal _deliveryWake;
+    private readonly PlayableAudioWakeSignal _playableWake;
     private readonly RawEncoderRuntimeState _encoderRuntimeState;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
     private readonly LiveAudioBroadcaster _liveAudio;
@@ -54,6 +56,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         AudioGraphCaptureEngine engine,
         SystemAudioCaptureEngine systemEngine,
         RawEncoderWakeSignal encoderWake,
+        DeliveryWakeSignal deliveryWake,
+        PlayableAudioWakeSignal playableWake,
         RawEncoderRuntimeState encoderRuntimeState,
         RawFinalizerQueueMetrics rawFinalizerMetrics,
         LiveAudioBroadcaster liveAudio,
@@ -68,6 +72,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _engine = engine;
         _systemEngine = systemEngine;
         _encoderWake = encoderWake;
+        _deliveryWake = deliveryWake;
+        _playableWake = playableWake;
         _encoderRuntimeState = encoderRuntimeState;
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _liveAudio = liveAudio;
@@ -617,6 +623,10 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             // server media finalization are retried by RecorderHostWorker after
             // LOCAL_READY and must not block the user's recording workflow.
             var result = await _delivery.FinalizeLocalAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            // WAV/playable files are a derived local concern and are built by
+            // the single-flight worker after STOP. Never make capture wait.
+            _deliveryWake.Signal();
+            _playableWake.Signal();
             var status = await GetSessionStatusAsync(sessionId, cancellationToken).ConfigureAwait(false);
             return new AgentIpcResponse(
                 result.Success,

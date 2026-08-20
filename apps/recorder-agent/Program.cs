@@ -35,6 +35,7 @@ try
     builder.Services.AddSingleton<IAudioCaptureEngineFactory, LegacyWasapiCaptureEngineFactory>();
     builder.Services.AddSingleton<AgentStateMachine>();
     builder.Services.AddSingleton<RecordingCoordinator>();
+    builder.Services.AddSingleton<DeliveryWakeSignal>();
     builder.Services.AddSingleton<AgentApiClient>();
     builder.Services.AddSingleton<LocalArchiveWriter>();
     builder.Services.AddSingleton<SessionFinalizationCoordinator>();

@@ -67,14 +67,16 @@ public sealed class AgentApiClient : IDisposable
     private readonly object _configurationGate = new();
     private readonly SemaphoreSlim _bindingGate = new(1, 1);
     private readonly AgentStorageSettings _storage;
+    private readonly DeliveryWakeSignal _deliveryWake;
     private static readonly JsonSerializerOptions ConfigJson = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
     };
 
-    public AgentApiClient(AgentStorageSettings storage)
+    public AgentApiClient(AgentStorageSettings storage, DeliveryWakeSignal deliveryWake)
     {
         _storage = storage;
+        _deliveryWake = deliveryWake;
         _configPath = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent", "agent-config.json");
         var config = ReadConfig(_configPath);
@@ -143,6 +145,7 @@ public sealed class AgentApiClient : IDisposable
             _storage.ArchiveRoot, _storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, _storage.RecordingProfile,
             AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired)), cancellationToken);
         File.Move(temporary, _configPath, true);
+        _deliveryWake.Signal();
     }
 
     public async Task UpdateServerUrlAsync(string serverUrl, CancellationToken cancellationToken = default)
@@ -166,6 +169,7 @@ public sealed class AgentApiClient : IDisposable
             AudioConfigurationV2.FromCurrent(_storage.MicrophoneDeviceId, _storage.SystemAudioDeviceId, RecorderRuntimeResolver.Current.CaptureEngine, _storage.UserReselectRequired));
         await PersistConfigurationAsync(temporary, configuration, cancellationToken);
         File.Move(temporary, _configPath, true);
+        _deliveryWake.Signal();
     }
 
     public async Task SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default)
@@ -290,11 +294,13 @@ public sealed class AgentApiClient : IDisposable
             using var response = await _http.SendAsync(request, cancellationToken);
             if (response.IsSuccessStatusCode)
             {
+                var wasConnected = string.Equals(_serverConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase);
                 _serverConnectionState = "CONNECTED";
                 _lastHeartbeatAtUtc = DateTimeOffset.UtcNow;
                 _lastServerError = null;
                 _heartbeatFailures = 0;
                 _nextHeartbeatAtUtc = DateTimeOffset.UtcNow.AddSeconds(30);
+                if (!wasConnected) _deliveryWake.Signal();
                 return true;
             }
 

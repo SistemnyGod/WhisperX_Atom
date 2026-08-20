@@ -125,6 +125,11 @@ public sealed class AgentPipeHost(
                     var statusSessionId = ReadString(request.Payload, "sessionId");
                     if (string.IsNullOrWhiteSpace(statusSessionId)) return Error("session_required");
                     return await SessionStatusAsync(statusSessionId, cancellationToken);
+                case "LIST_LOCAL_SESSIONS":
+                    var limit = request.Payload.TryGetProperty("limit", out var limitValue) && limitValue.TryGetInt32(out var requestedLimit)
+                        ? Math.Clamp(requestedLimit, 1, 500) : 100;
+                    return new AgentIpcResponse(true, "IDLE", null, null, null, ProtocolVersion: AgentIpcProtocol.Version,
+                        LocalSessions: await spool.ListLocalSessionsAsync(limit, cancellationToken));
                 case "CONFIGURE":
                     var serverUrl = ReadString(request.Payload, "serverUrl");
                     var agentToken = ReadString(request.Payload, "token");
@@ -528,7 +533,12 @@ public sealed class AgentPipeHost(
             rawBacklog.Health, rawBacklog.FinalizerQueueDepth, rawBacklog.FinalizerMaximumDepth, rawBacklog.FinalizerCapacity,
             archiveState == "FAILED" ? errorCode : null,
             archiveState == "FAILED" ? error : null,
-            RawTerminalFailedCount: rawBacklog.TerminalFailed);
+            RawTerminalFailedCount: rawBacklog.TerminalFailed,
+            PlayableAudioState: info.PlayableAudioState,
+            PlayableAudioPath: info.PlayableAudioPath,
+            PlayableAudioFiles: await spool.GetPlayableFilesAsync(sessionId, cancellationToken),
+            PlayableAudioError: info.PlayableAudioError,
+            PlayableAudioCreatedAtUtc: info.PlayableAudioCreatedAtUtc);
     }
 
     private static bool IsRetryableCode(string? code) => code is "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_REJECTED" or "SERVER_CHUNKS_MISSING" or "recording_chunks_incomplete" or "CHUNK_UPLOAD_FAILED" or "RAW_RECOVERY_PENDING" or "LOCAL_ENCODER_UNAVAILABLE" or "ENCODER_FAILED" or "FLAC_VALIDATION_FAILED" or "FFMPEG_ENCODE_FAILED" or "ENCODER_TIMEOUT";

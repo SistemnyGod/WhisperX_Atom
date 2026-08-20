@@ -120,7 +120,13 @@ public sealed record RecordingSessionInfo(
     string? ArchiveErrorDetail = null,
     int ArchiveRetryCount = 0,
     DateTimeOffset? ArchiveNextRetryAtUtc = null,
-    string AcousticProfile = "AUTO");
+    string AcousticProfile = "AUTO",
+    string PlayableAudioState = "NOT_REQUIRED",
+    string? PlayableAudioPath = null,
+    string? PlayableAudioError = null,
+    DateTimeOffset? PlayableAudioCreatedAtUtc = null,
+    int PlayableAudioRetryCount = 0,
+    DateTimeOffset? PlayableAudioNextRetryAtUtc = null);
 
 public sealed record LocalDurabilityOutcome(
     string State,
@@ -131,6 +137,33 @@ public sealed record LocalDurabilityOutcome(
 public sealed record RecordingArchiveChunk(string TrackId, string TrackType, int Sequence, string LocalPath, long StartSample, long SampleCount, int SampleRate, int Channels, long SizeBytes, string Sha256);
 public sealed record ChunkDeliveryMetrics(int Total, int Ready, int Uploading, int Confirmed, int Failed, long BytesPending, double? OldestPendingAgeSeconds);
 public sealed record RetentionCandidate(string SessionId, string Category, IReadOnlyList<string> Paths, long Bytes, DateTimeOffset PurgeAfterUtc);
+public sealed record PlayableAudioFile(
+    string SessionId,
+    string TrackId,
+    string TrackType,
+    string FileName,
+    string LocalPath,
+    long SizeBytes,
+    long SampleCount,
+    int SampleRate,
+    int Channels,
+    string Encoding,
+    string Sha256,
+    string State = "READY");
+public sealed record LocalSessionSummary(
+    string SessionId,
+    string? Title,
+    DateTimeOffset? StartedAt,
+    string State,
+    string LocalFinalizeState,
+    string DeliveryState,
+    string PlayableAudioState,
+    string? PlayableAudioPath,
+    string? PlayableAudioError,
+    DateTimeOffset? PlayableAudioCreatedAtUtc,
+    DateTimeOffset? NextRetryAtUtc,
+    DateTimeOffset? PlayableAudioNextRetryAtUtc,
+    IReadOnlyList<PlayableAudioFile> PlayableFiles);
 
 public sealed record RecordingManifest(Guid ServerSessionId, IReadOnlyList<RecordingManifestTrack> Tracks);
 
@@ -177,7 +210,7 @@ public sealed class SpoolStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', acoustic_profile TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT, archive_error_code TEXT, archive_error_detail TEXT, archive_retry_count INTEGER NOT NULL DEFAULT 0, archive_next_retry_at TEXT);
+             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', acoustic_profile TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT, archive_error_code TEXT, archive_error_detail TEXT, archive_retry_count INTEGER NOT NULL DEFAULT 0, archive_next_retry_at TEXT, playable_audio_state TEXT NOT NULL DEFAULT 'NOT_REQUIRED', playable_audio_path TEXT, playable_audio_error TEXT, playable_audio_created_at TEXT, playable_audio_retry_count INTEGER NOT NULL DEFAULT 0, playable_audio_next_retry_at TEXT);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
              CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
              CREATE TABLE IF NOT EXISTS recording_pending_events(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -186,6 +219,7 @@ public sealed class SpoolStore
             CREATE TABLE IF NOT EXISTS server_bindings(local_session_id TEXT NOT NULL, local_track_id TEXT NOT NULL, server_session_id TEXT NOT NULL, server_track_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(local_session_id, local_track_id));
             CREATE TABLE IF NOT EXISTS agent_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agent_command_results(command_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL, status TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS recording_playable_files(session_id TEXT NOT NULL, track_id TEXT NOT NULL, track_type TEXT NOT NULL, file_name TEXT NOT NULL, local_path TEXT NOT NULL, size_bytes INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, encoding TEXT NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'READY', created_at TEXT NOT NULL, PRIMARY KEY(session_id, track_id));
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
         await using var migration = connection.CreateCommand();
@@ -231,7 +265,13 @@ public sealed class SpoolStore
             "ALTER TABLE recording_sessions ADD COLUMN archive_error_code TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN archive_error_detail TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN archive_retry_count INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE recording_sessions ADD COLUMN archive_next_retry_at TEXT"
+            "ALTER TABLE recording_sessions ADD COLUMN archive_next_retry_at TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_state TEXT NOT NULL DEFAULT 'NOT_REQUIRED'",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_path TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_error TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_created_at TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_retry_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_next_retry_at TEXT"
         })
         {
             await using var stateMigration = connection.CreateCommand();
@@ -283,6 +323,7 @@ public sealed class SpoolStore
         }
 
         await RecoverStaleUploadingChunksAsync(cancellationToken);
+        await RecoverStalePlayableBuildsAsync(cancellationToken);
         _initialized.TrySetResult(true);
         }
         catch (Exception ex)
@@ -315,12 +356,22 @@ public sealed class SpoolStore
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<int> RecoverStalePlayableBuildsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET playable_audio_state='PENDING',playable_audio_error='RECORDER_RESTART_DURING_PLAYABLE_BUILD',playable_audio_next_retry_at=$now WHERE playable_audio_state='BUILDING'";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task CreateSessionAsync(string sessionId, Guid? meetingId = null, string? title = null, string? pipelineCorrelationId = null, CancellationToken cancellationToken = default, Guid? ownerUserId = null, bool localOnly = false, string acousticProfile = "AUTO")
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "INSERT OR IGNORE INTO recording_sessions(id,meeting_id,title,owner_user_id,state,started_at,local_finalize_state,delivery_state,meeting_bind_state,delivery_mode,acoustic_profile,pipeline_correlation_id) VALUES($id,$meeting,$title,$owner,'RECORDING',$started,'PENDING','NOT_REQUESTED','UNBOUND',$mode,$acoustic,$correlation)";
+        command.CommandText = "INSERT OR IGNORE INTO recording_sessions(id,meeting_id,title,owner_user_id,state,started_at,local_finalize_state,delivery_state,meeting_bind_state,delivery_mode,acoustic_profile,pipeline_correlation_id,playable_audio_state) VALUES($id,$meeting,$title,$owner,'RECORDING',$started,'PENDING','NOT_REQUESTED','UNBOUND',$mode,$acoustic,$correlation,'PENDING')";
         command.Parameters.AddWithValue("$id", sessionId);
         command.Parameters.AddWithValue("$meeting", (object?)meetingId?.ToString() ?? DBNull.Value);
         command.Parameters.AddWithValue("$title", (object?)title ?? DBNull.Value);
@@ -384,6 +435,118 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$next", nextRetryAtUtc.ToString("O"));
         command.Parameters.AddWithValue("$id", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetPlayableAudioStateAsync(
+        string sessionId,
+        string state,
+        string? path = null,
+        string? error = null,
+        int? retryCount = null,
+        DateTimeOffset? nextRetryAtUtc = null,
+        bool clearError = false,
+        bool clearNextRetry = false,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET playable_audio_state=$state,playable_audio_path=COALESCE($path,playable_audio_path),playable_audio_error=CASE WHEN $clearError=1 THEN NULL ELSE COALESCE($error,playable_audio_error) END,playable_audio_created_at=CASE WHEN $state='READY' THEN $created ELSE playable_audio_created_at END,playable_audio_retry_count=COALESCE($retry,playable_audio_retry_count),playable_audio_next_retry_at=CASE WHEN $clearNext=1 THEN NULL WHEN $next IS NOT NULL THEN $next ELSE playable_audio_next_retry_at END WHERE id=$id";
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$path", (object?)path ?? DBNull.Value);
+        command.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+        command.Parameters.AddWithValue("$clearError", clearError ? 1 : 0);
+        command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$retry", (object?)retryCount ?? DBNull.Value);
+        command.Parameters.AddWithValue("$next", (object?)nextRetryAtUtc?.ToString("O") ?? DBNull.Value);
+        command.Parameters.AddWithValue("$clearNext", clearNextRetry ? 1 : 0);
+        command.Parameters.AddWithValue("$id", sessionId);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ReplacePlayableFilesAsync(string sessionId, IReadOnlyList<PlayableAudioFile> files, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM recording_playable_files WHERE session_id=$session";
+            delete.Parameters.AddWithValue("$session", sessionId);
+            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        foreach (var file in files)
+        {
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = "INSERT INTO recording_playable_files(session_id,track_id,track_type,file_name,local_path,size_bytes,sample_count,sample_rate,channels,encoding,sha256,state,created_at) VALUES($session,$track,$type,$name,$path,$size,$samples,$rate,$channels,$encoding,$sha,$state,$created)";
+            insert.Parameters.AddWithValue("$session", sessionId);
+            insert.Parameters.AddWithValue("$track", file.TrackId);
+            insert.Parameters.AddWithValue("$type", file.TrackType);
+            insert.Parameters.AddWithValue("$name", file.FileName);
+            insert.Parameters.AddWithValue("$path", file.LocalPath);
+            insert.Parameters.AddWithValue("$size", file.SizeBytes);
+            insert.Parameters.AddWithValue("$samples", file.SampleCount);
+            insert.Parameters.AddWithValue("$rate", file.SampleRate);
+            insert.Parameters.AddWithValue("$channels", file.Channels);
+            insert.Parameters.AddWithValue("$encoding", file.Encoding);
+            insert.Parameters.AddWithValue("$sha", file.Sha256);
+            insert.Parameters.AddWithValue("$state", file.State);
+            insert.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<string>> SessionsNeedingPlayableAudioAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('RECORDING','PAUSED','CANCELLED','FINALIZED') AND local_finalize_state='LOCAL_READY' AND playable_audio_state IN ('PENDING','RECOVERY_PENDING','FAILED') AND (playable_audio_next_retry_at IS NULL OR playable_audio_next_retry_at <= $now) ORDER BY started_at";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        var result = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) result.Add(reader.GetString(0));
+        return result;
+    }
+
+    public async Task<IReadOnlyList<PlayableAudioFile>> GetPlayableFilesAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT session_id,track_id,track_type,file_name,local_path,size_bytes,sample_count,sample_rate,channels,encoding,sha256,state FROM recording_playable_files WHERE session_id=$session ORDER BY file_name";
+        command.Parameters.AddWithValue("$session", sessionId);
+        var result = new List<PlayableAudioFile>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            result.Add(new PlayableAudioFile(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetString(9), reader.GetString(10), reader.GetString(11)));
+        return result;
+    }
+
+    public async Task<IReadOnlyList<LocalSessionSummary>> ListLocalSessionsAsync(int limit = 100, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        var result = new List<LocalSessionSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var rows = new List<(string Id, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext)>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            DateTimeOffset? Parse(int ordinal) => reader.IsDBNull(ordinal) || !DateTimeOffset.TryParse(reader.GetString(ordinal), out var value) ? null : value;
+            rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), Parse(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), Parse(9), Parse(10), Parse(11)));
+        }
+        foreach (var row in rows)
+            result.Add(new LocalSessionSummary(row.Id, row.Title, row.StartedAt, row.State, row.Local, row.Delivery, row.Playable,
+                row.Path, row.Error, row.Created, row.Next, row.PlayableNext,
+                await GetPlayableFilesAsync(row.Id, cancellationToken).ConfigureAwait(false)));
+        return result;
     }
 
     public async Task SetMeetingBindStateAsync(string sessionId, string state, CancellationToken cancellationToken = default)
@@ -488,7 +651,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable,meeting_bind_state,delivery_mode,archive_error_code,archive_error_detail,archive_retry_count,archive_next_retry_at,acoustic_profile FROM recording_sessions WHERE id=$session";
+        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable,meeting_bind_state,delivery_mode,archive_error_code,archive_error_detail,archive_retry_count,archive_next_retry_at,acoustic_profile,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,playable_audio_retry_count,playable_audio_next_retry_at FROM recording_sessions WHERE id=$session";
         command.Parameters.AddWithValue("$session", sessionId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -508,6 +671,8 @@ public sealed class SpoolStore
         var meetingBindState = reader.IsDBNull(23) ? "UNBOUND" : reader.GetString(23);
         var deliveryMode = reader.IsDBNull(24) ? "AUTO" : reader.GetString(24);
         DateTimeOffset? archiveRetryAt = reader.IsDBNull(28) ? null : DateTimeOffset.TryParse(reader.GetString(28), out var parsedArchiveRetry) ? parsedArchiveRetry : null;
+        DateTimeOffset? playableCreatedAt = reader.IsDBNull(33) ? null : DateTimeOffset.TryParse(reader.GetString(33), out var parsedPlayableCreated) ? parsedPlayableCreated : null;
+        DateTimeOffset? playableNextRetryAt = reader.IsDBNull(35) ? null : DateTimeOffset.TryParse(reader.GetString(35), out var parsedPlayableRetry) ? parsedPlayableRetry : null;
         return new RecordingSessionInfo(
             sessionId,
             meetingId,
@@ -539,7 +704,13 @@ public sealed class SpoolStore
             reader.IsDBNull(26) ? null : reader.GetString(26),
             reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
             archiveRetryAt,
-            reader.IsDBNull(29) ? "AUTO" : reader.GetString(29));
+            reader.IsDBNull(29) ? "AUTO" : reader.GetString(29),
+            reader.IsDBNull(30) ? "NOT_REQUIRED" : reader.GetString(30),
+            reader.IsDBNull(31) ? null : reader.GetString(31),
+            reader.IsDBNull(32) ? null : reader.GetString(32),
+            playableCreatedAt,
+            reader.IsDBNull(34) ? 0 : reader.GetInt32(34),
+            playableNextRetryAt);
     }
 
     /// <summary>
@@ -965,6 +1136,25 @@ public sealed class SpoolStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             result.Add(new RecordingArchiveChunk(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt64(8), reader.GetString(9)));
+        return result;
+    }
+
+    /// <summary>
+    /// Returns every non-discarded raw chunk for local playable-file recovery.
+    /// The raw timeline remains authoritative even when FLAC encoding has not
+    /// started or failed; callers must run the continuity validator again.
+    /// </summary>
+    public async Task<IReadOnlyList<RawRecordingChunk>> GetRawChunksAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,session_id,track_id,sequence,raw_path,output_path,start_sample,sample_count,sample_rate,channels,track_type,encoding,bits_per_sample,status,raw_size_bytes,raw_sha256,error,source_encoding,source_sub_format,valid_bits_per_sample,encode_attempts,next_encode_attempt_at,last_encode_error_code,encoding_worker_id,encoding_started_at,encoding_lease_expires_at FROM recording_raw_chunks WHERE session_id=$session AND status<>'DISCARDED' ORDER BY track_id,sequence";
+        command.Parameters.AddWithValue("$session", sessionId);
+        var result = new List<RawRecordingChunk>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            result.Add(ReadRawRecordingChunk(reader));
         return result;
     }
 
@@ -2204,6 +2394,7 @@ public sealed class SpoolStore
               AND s.transport_purge_after IS NOT NULL AND s.transport_purge_after <= $now
               AND s.delivery_state IN ('CONFIRMED','COMPLETED')
               AND s.local_finalize_state='LOCAL_READY' AND s.archive_path IS NOT NULL
+              AND s.playable_audio_state IN ('READY','NOT_REQUIRED')
               AND NOT EXISTS (SELECT 1 FROM recording_chunks pending WHERE pending.session_id=s.id AND pending.status<>'CONFIRMED')
               AND NOT EXISTS (SELECT 1 FROM recording_raw_chunks raw WHERE raw.session_id=s.id AND raw.status<>'READY')
             ORDER BY s.transport_purge_after,c.local_path
@@ -2265,7 +2456,8 @@ public sealed class SpoolStore
             FROM recording_raw_chunks r
             WHERE r.status='READY' AND (r.error IS NULL OR r.error='')
               AND r.raw_purge_after IS NOT NULL AND r.raw_purge_after <= $now
-              AND EXISTS (SELECT 1 FROM recording_chunks c WHERE c.track_id=r.track_id AND c.sequence=r.sequence AND c.status IN ('READY','UPLOADING','CONFIRMED'))
+              AND EXISTS (SELECT 1 FROM recording_chunks c WHERE c.session_id=r.session_id AND c.track_id=r.track_id AND c.sequence=r.sequence AND c.status IN ('READY','UPLOADING','CONFIRMED'))
+              AND EXISTS (SELECT 1 FROM recording_sessions s WHERE s.id=r.session_id AND s.playable_audio_state IN ('READY','NOT_REQUIRED'))
             """;
         select.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         var rows = new List<(string SessionId, string TrackId, int Sequence, string RawPath)>();

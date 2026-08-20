@@ -41,6 +41,9 @@ builder.Services.AddSingleton<AgentStorageSettings>();
 builder.Services.AddSingleton(new SpoolStore(dataRoot));
 builder.Services.AddSingleton<AgentApiClient>();
 builder.Services.AddSingleton<LocalArchiveWriter>();
+builder.Services.AddSingleton<LocalPlayableAudioWriter>();
+builder.Services.AddSingleton<DeliveryWakeSignal>();
+builder.Services.AddSingleton<PlayableAudioWakeSignal>();
 builder.Services.AddSingleton<RawChunkRecovery>();
 builder.Services.AddSingleton<SessionFinalizationCoordinator>();
 builder.Services.AddSingleton<RecordingDeliveryCoordinator>();
@@ -60,11 +63,12 @@ builder.Services.AddSingleton<LiveAudioBroadcaster>();
 builder.Services.AddHostedService<RecorderHostPipeServer>();
 builder.Services.AddHostedService<LiveAudioPipeServer>();
 builder.Services.AddHostedService<GlobalRawEncoderWorker>();
+builder.Services.AddHostedService<PlayableAudioWorker>();
 builder.Services.AddHostedService<RecorderHostWorker>();
 
 await builder.Build().RunAsync();
 
-public sealed class RecorderHostWorker(RecorderHostRuntime runtime, ILogger<RecorderHostWorker> logger) : BackgroundService
+public sealed class RecorderHostWorker(RecorderHostRuntime runtime, DeliveryWakeSignal deliveryWake, ILogger<RecorderHostWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -92,7 +96,7 @@ public sealed class RecorderHostWorker(RecorderHostRuntime runtime, ILogger<Reco
             try { await runtime.ReconcileBackgroundAsync(stoppingToken).ConfigureAwait(false); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception ex) { logger.LogWarning(ex, "Recorder Host background worker failed; local spool remains authoritative."); }
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+            await deliveryWake.WaitAsync(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
         }
     }
 }

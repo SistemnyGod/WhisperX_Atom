@@ -80,9 +80,10 @@ public sealed class LocalArchiveWriter(
 
         var startedAt = info.StartedAt ?? DateTimeOffset.UtcNow;
         var title = string.IsNullOrWhiteSpace(info.Title) ? "Запись" : info.Title.Trim();
-        var folderName = $"{startedAt.ToLocalTime():yyyy-MM-dd_HH-mm-ss}_{Sanitize(title)}_{sessionId[..Math.Min(8, sessionId.Length)]}";
-        var archiveRoot = SelectWritableArchiveRoot(sessionId);
-        var directory = Path.Combine(archiveRoot, "Meetings", folderName);
+        // Archive and user-playable files share one deterministic meeting
+        // directory. The resolver also applies the configured-root/fallback
+        // policy before any files are created.
+        var directory = LocalMeetingDirectoryResolver.Resolve(storage, info, sessionId);
         var sourceDirectory = Path.Combine(directory, "source");
         var exportDirectory = Path.Combine(directory, "export");
         try
@@ -95,13 +96,8 @@ public sealed class LocalArchiveWriter(
             // Public Documents can be protected by Windows security controls.
             // Preserve a durable local archive under ProgramData instead of
             // failing the whole recording finalization.
-            var fallbackRoot = FallbackArchiveRoot();
-            logger.LogWarning(exception, "Configured archive root is unavailable; using fallback archive root. Session={SessionId}, ArchiveRoot={ArchiveRoot}", sessionId, fallbackRoot);
-            directory = Path.Combine(fallbackRoot, "Meetings", folderName);
-            sourceDirectory = Path.Combine(directory, "source");
-            exportDirectory = Path.Combine(directory, "export");
-            Directory.CreateDirectory(sourceDirectory);
-            Directory.CreateDirectory(exportDirectory);
+            logger.LogWarning(exception, "Meeting archive directory is unavailable. Session={SessionId}, Directory={Directory}", sessionId, directory);
+            throw;
         }
 
         var trackFiles = new List<ArchiveFileEntry>();
