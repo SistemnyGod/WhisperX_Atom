@@ -130,7 +130,7 @@
                         <TextBlock Text="Действия" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
                         <Button Content="Подключить или восстановить Agent" Style="{StaticResource PrimaryButtonStyle}" Click="ReconnectAgentButton_Click" IsEnabled="{Binding CanReconnectAgent}" AutomationProperties.Name="Подключить или восстановить Recorder Agent" ToolTipService.ToolTip="Проверить локальный сервис и восстановить привязку Agent" />
                         <Button Content="Запустить Recorder Service" Style="{StaticResource SecondaryButtonStyle}" Click="StartRecorderButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Запустить Recorder Service" ToolTipService.ToolTip="Запустить локальный сервис записи" />
-                        <Button Content="Сохранить диагностику" Style="{StaticResource SecondaryButtonStyle}" Click="SaveDiagnosticsButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Сохранить диагностику подключения" ToolTipService.ToolTip="Сохранить технические статусы без аудио, токенов и стенограмм" />
+                        <Button Content="Сформировать диагностический пакет" Style="{StaticResource SecondaryButtonStyle}" Click="SaveDiagnosticsButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Сформировать безопасный диагностический пакет" ToolTipService.ToolTip="Создать ZIP с техническими статусами без аудио, токенов и содержимого стенограмм" />
                         <Button Content="Выйти из API" Style="{StaticResource SecondaryButtonStyle}" Click="LogoutButton_Click" IsEnabled="{Binding CanLogout}" AutomationProperties.Name="Выйти из API" />
                     </StackPanel>
                 </Border>

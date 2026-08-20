@@ -98,3 +98,7 @@ Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для с
 - `scripts/export-diagnostics.ps1` формирует безопасный ZIP только из
   operational metadata. В него не попадают `.env`, токены, cookies, аудио,
   текст стенограммы и содержимое саммари.
+- В Desktop действие «Сформировать диагностический пакет» создаёт такой же
+  атомарный `support-bundle-*.zip` в `%ProgramData%\WhisperXAtom\Diagnostics`;
+  в отчёт добавляются Recorder/Voice/TTS, очереди и server readiness, но не
+  пользовательское содержимое.

@@ -242,6 +242,20 @@ def test_agent_trace_and_diagnostics_export_are_redacted():
     assert "Compress-Archive" in export
 
 
+def test_desktop_support_bundle_is_redacted_and_atomic():
+    diagnostics = read(Path("apps/desktop/WhisperX.Atom.Desktop/Services/ClientRuntimeDiagnostics.cs"))
+    settings = read(Path("apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml"))
+    assert "support-bundle-" in diagnostics
+    assert "ZipFile.CreateFromDirectory" in diagnostics
+    assert "archivePart" in diagnostics and "File.Move(archivePart, archivePath" in diagnostics
+    for marker in ("audioIncluded = false", "transcriptTextIncluded = false", "summaryContentIncluded = false", "tokensIncluded = false"):
+        assert marker in diagnostics
+    assert "LastRecognizedText" not in diagnostics
+    assert "LastResponse" not in diagnostics
+    assert "health.ErrorDetail" not in diagnostics
+    assert "Сформировать диагностический пакет" in settings
+
+
 def test_summary_and_assistant_workers_extend_long_job_leases():
     worker = read(Path("workers/summary_worker/worker.py"))
     assistant = read(Path("workers/summary_worker/assistant.py"))

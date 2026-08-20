@@ -629,7 +629,7 @@ public sealed class SettingsViewModel : ObservableObject
         {
             IsBusy = true;
             DiagnosticsPath = await _services.Diagnostics.WriteAsync();
-            StatusText = $"Диагностика сохранена: {DiagnosticsPath}";
+            StatusText = $"Диагностический пакет сохранён: {DiagnosticsPath}";
             return true;
         }
         catch (Exception ex)
@@ -666,7 +666,7 @@ public sealed class SettingsViewModel : ObservableObject
         {
             IsBusy = true;
             DiagnosticsPath = await _services.Diagnostics.WriteAsync();
-            StatusText = $"Диагностика сохранена: {DiagnosticsPath}";
+            StatusText = $"Диагностический пакет сохранён: {DiagnosticsPath}";
             return true;
         }
         catch (Exception ex)
