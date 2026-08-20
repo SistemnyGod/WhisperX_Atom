@@ -720,7 +720,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
-        await using var sessionCommand = new NpgsqlCommand("SELECT rs.meeting_id,rs.owner_user_id,COALESCE((SELECT u.is_active FROM users u WHERE u.id=rs.owner_user_id),false) FROM recording_sessions rs WHERE rs.id=@id AND rs.agent_id=@agent FOR UPDATE", connection, tx);
+        await using var sessionCommand = new NpgsqlCommand("SELECT rs.meeting_id,rs.owner_user_id,COALESCE((SELECT u.is_active FROM users u WHERE u.id=rs.owner_user_id),false),m.status FROM recording_sessions rs JOIN meetings m ON m.id=rs.meeting_id WHERE rs.id=@id AND rs.agent_id=@agent FOR UPDATE", connection, tx);
         sessionCommand.Parameters.AddWithValue("id", sessionId);
         sessionCommand.Parameters.AddWithValue("agent", agentId);
         await using var sessionReader = await sessionCommand.ExecuteReaderAsync();
@@ -728,7 +728,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             return new FinalizeRecordingResult(false, false, null, null, null, Array.Empty<MissingRecordingChunks>(), "recording_session_not_found");
         var meetingId = sessionReader.GetGuid(0);
         var ownerActive = !sessionReader.IsDBNull(2) && sessionReader.GetBoolean(2);
+        var meetingStatus = sessionReader.IsDBNull(3) ? null : sessionReader.GetString(3);
         await sessionReader.CloseAsync();
+        // Cancellation/deletion wins over a late recorder finalize. This
+        // check must happen before the idempotent existing-job lookup, because
+        // a queued worker may still hold an in-memory upload after cancellation.
+        if (string.Equals(meetingStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase))
+            return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "MEETING_CANCELLED");
         if (!ownerActive)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "OWNER_AUTHORIZATION_REJECTED");
 

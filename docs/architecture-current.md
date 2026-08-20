@@ -107,3 +107,7 @@ Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для с
   скрипт только фиксирует marker, проверяет Named Pipe v6, Voice Host, Docker,
   server readiness и сохранность `localSessionId`. Автоматическая остановка
   контейнеров и запись аудио этим gate запрещены.
+- Отмена встречи сначала в одной транзакции закрывает jobs, outbox и
+  `recording_sessions`. Поздний `FinalizeRecordingAsync` повторно проверяет
+  статус встречи до idempotent job lookup и возвращает `MEETING_CANCELLED`;
+  GPU/Summary persistence также отбрасывают результат отменённой встречи.

@@ -268,6 +268,20 @@ def test_windows_reboot_gate_is_manual_and_preserves_local_session_ids():
     assert 'RequireDocker' in script
 
 
+def test_cancel_and_finalize_close_the_race_without_resurrecting_pipeline():
+    api = read(API)
+    store = read(STORE)
+    assert "UPDATE recording_sessions SET state='CANCELLED'" in api
+    assert "MEETING_CANCELLED" in store
+    finalize = store.split("public async Task<FinalizeRecordingResult> FinalizeRecordingAsync", 1)[1]
+    assert "before the idempotent existing-job lookup" in finalize
+    assert "m.status" in finalize
+    ml = read(Path("workers/ml_worker/persistence.py"))
+    summary = read(Path("workers/summary_worker/worker.py"))
+    assert 'raise RuntimeError("MEETING_CANCELLED")' in ml
+    assert "if meeting is None or str(meeting[0]) == \"CANCELLED\"" in summary
+
+
 def test_summary_and_assistant_workers_extend_long_job_leases():
     worker = read(Path("workers/summary_worker/worker.py"))
     assistant = read(Path("workers/summary_worker/assistant.py"))

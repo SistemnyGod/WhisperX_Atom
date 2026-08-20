@@ -2908,6 +2908,13 @@ public sealed class Database(IConfiguration configuration)
             await using var removeOutbox = new NpgsqlCommand("DELETE FROM outbox_messages WHERE published_at IS NULL AND payload->>'meeting_id'=CAST(@meeting AS text)", connection, transaction);
             removeOutbox.Parameters.AddWithValue("meeting", meetingId);
             await removeOutbox.ExecuteNonQueryAsync();
+            // Close server-side recording sessions in the same transaction as
+            // the meeting cancellation. A late recorder finalize then sees
+            // the cancelled meeting and is rejected before creating/reusing a
+            // media job; the queued IPC command remains the local cleanup path.
+            await using var cancelSessions = new NpgsqlCommand("UPDATE recording_sessions SET state='CANCELLED',finished_at=COALESCE(finished_at,now()) WHERE meeting_id=@meeting AND state NOT IN ('CANCELLED','READY')", connection, transaction);
+            cancelSessions.Parameters.AddWithValue("meeting", meetingId);
+            await cancelSessions.ExecuteNonQueryAsync();
             await using var updateMeeting = new NpgsqlCommand("UPDATE meetings SET status='CANCELLED',finished_at=COALESCE(finished_at,now()) WHERE id=@meeting", connection, transaction);
             updateMeeting.Parameters.AddWithValue("meeting", meetingId);
             await updateMeeting.ExecuteNonQueryAsync();
