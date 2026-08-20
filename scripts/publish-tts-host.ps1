@@ -65,8 +65,6 @@ $smokeStart.CreateNoWindow = $true
 $smokeStart.RedirectStandardInput = $true
 $smokeStart.RedirectStandardOutput = $true
 $smokeStart.RedirectStandardError = $true
-$smokeStart.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
-$smokeStart.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
 $smokeProcess = [Diagnostics.Process]::Start($smokeStart)
 $smokeProcess.StandardInput.WriteLine($smokeRequest)
 $smokeProcess.StandardInput.Close()
