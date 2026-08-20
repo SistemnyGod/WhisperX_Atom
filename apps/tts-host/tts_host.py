@@ -66,8 +66,10 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
                 break
         except ProtocolError as error:
             response = {"ok": False, "errorCode": error.code}
-        except Exception:
-            _log("TTS_RUNTIME_ERROR")
+        except Exception as error:
+            # Preserve privacy: report only the exception class, never its
+            # message because synthesis failures can include request data.
+            _log(f"TTS_RUNTIME_ERROR:{type(error).__name__}")
             response = {"ok": False, "errorCode": "TTS_SYNTHESIS_FAILED"}
         print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
     return 0

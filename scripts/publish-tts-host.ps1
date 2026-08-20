@@ -54,11 +54,19 @@ Copy-Item -LiteralPath $model -Destination (Join-Path $built 'Models\silero-v5_5
 Copy-Item -LiteralPath $modelManifest -Destination (Join-Path $built 'Models\silero-v5_5_ru\model-manifest.json') -Force
 Copy-Item -LiteralPath (Join-Path $source 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $built 'THIRD_PARTY_NOTICES.txt') -Force
 $env:WHISPERX_BUILD_IDENTITY = $identity
-('{"schemaVersion":1,"id":"publish-smoke","op":"ping","buildIdentity":"' + $identity + '"}') | & (Join-Path $built 'TtsHost.exe') --parent-pid $PID
-if ($LASTEXITCODE -ne 0) { throw 'TTS_HOST_SMOKE_FAILED' }
+$smokeLines = @(('{"schemaVersion":1,"id":"publish-smoke","op":"ping","buildIdentity":"' + $identity + '"}') | & (Join-Path $built 'TtsHost.exe') --parent-pid $PID)
+if ($LASTEXITCODE -ne 0 -or $smokeLines.Count -eq 0) { throw 'TTS_HOST_SMOKE_FAILED' }
+try { $smoke = $smokeLines[-1] | ConvertFrom-Json } catch { throw 'TTS_HOST_SMOKE_PROTOCOL_INVALID' }
+if (-not $smoke.ok -or $smoke.state -ne 'READY' -or $smoke.buildIdentity -ne $identity) { throw "TTS_HOST_SMOKE_FAILED: $($smoke.errorCode)" }
 if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
 Move-Item -LiteralPath $built -Destination $out
-$forbidden = @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object { $_.Extension -in '.py','.pyc','.pyo' -or $_.Name -ieq 'python.exe' })
+# PyTorch's frozen runtime intentionally contains vendor modules used by
+# torch.package/JIT. Reject our application sources and a standalone Python
+# interpreter; neither is required or allowed in the installed product.
+$applicationSources = @('tts_host.py','protocol.py','silero_runtime.py','text_normalizer.py')
+$forbidden = @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object {
+    $_.Name -ieq 'python.exe' -or $_.Name -iin $applicationSources -and $_.FullName -notmatch '[\\/]_internal[\\/]torch[\\/]'
+})
 if ($forbidden.Count) { throw "TTS_PRODUCTION_PAYLOAD_CONTAINS_PYTHON: $($forbidden.FullName -join ', ')" }
 @{ schemaVersion=1; component='TtsHost'; buildIdentity=$identity; modelSha256=(Get-FileHash (Join-Path $out 'Models\silero-v5_5_ru\v5_5_ru.pt') -Algorithm SHA256).Hash.ToLowerInvariant(); generatedAtUtc=[DateTimeOffset]::UtcNow.ToString('O') } | ConvertTo-Json | Set-Content (Join-Path $out 'build-identity.json') -Encoding utf8
 Write-Host "TTS_HOST_PUBLISHED=$out"
