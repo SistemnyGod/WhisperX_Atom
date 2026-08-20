@@ -79,13 +79,13 @@ def test_server_marks_chunk_confirmed_only_after_atomic_file_move():
 
 def test_transport_spool_purge_requires_server_media_validation():
     spool = read("apps/recorder-agent/SpoolStore.cs")
-    purge = spool.split("public async Task PurgeFinalizedSessionAsync", 1)[1]
+    purge = spool.split("PurgeFinalizedSessionAsync", 1)[1]
     eligibility = spool.split("public async Task<IReadOnlyList<RetentionCandidate>> GetTransportPurgeCandidatesAsync", 1)[1].split("public async Task<IReadOnlyList<RetentionCandidate>> GetLocalArchivePurgeCandidatesAsync", 1)[0]
     assert "s.media_validated_at IS NOT NULL" in eligibility
     assert "s.transport_purge_after IS NOT NULL AND s.transport_purge_after <= $now" in eligibility
     assert "s.delivery_state IN ('CONFIRMED','COMPLETED')" in eligibility
     assert "pending.status<>'CONFIRMED'" in eligibility
-    assert "if (candidate is null) return;" in purge
+    assert "if (candidate is null) return 0;" in purge
     assert purge.index('DELETE FROM recording_raw_chunks') < purge.index("UPDATE recording_sessions SET state='FINALIZED'")
 
 

@@ -147,6 +147,7 @@ public sealed class GlobalRawEncoderWorker(
             if (File.Exists(raw.OutputPath) && await FlacEncoder.ValidateAsync(RecorderToolPaths.Ffprobe(), raw.OutputPath, raw, cancellationToken).ConfigureAwait(false))
             {
                 await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+                await RecordFlacReadyEventAsync(raw, cancellationToken).ConfigureAwait(false);
                 deliveryWake.Signal();
                 runtimeState.MarkSuccess(raw.Id);
                 return;
@@ -162,6 +163,7 @@ public sealed class GlobalRawEncoderWorker(
                 throw new InvalidOperationException("RAW_ENCODER_LEASE_LOST");
             File.Move(outputPart, raw.OutputPath, true);
             await spool.CompleteRawEncodingAsync(raw, raw.OutputPath, _workerId, cancellationToken).ConfigureAwait(false);
+            await RecordFlacReadyEventAsync(raw, cancellationToken).ConfigureAwait(false);
             deliveryWake.Signal();
             runtimeState.MarkSuccess(raw.Id);
             logger.LogInformation("Raw chunk encoded. Session={SessionId}, Track={TrackId}, Sequence={Sequence}", raw.SessionId, raw.TrackId, raw.Sequence);
@@ -272,6 +274,29 @@ public sealed class GlobalRawEncoderWorker(
             || ex.Message.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
             ? "LOCAL_ENCODER_UNAVAILABLE"
             : "ENCODER_FAILED";
+
+    private async Task RecordFlacReadyEventAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await spool.AddEventIfMissingAsync(
+                raw.SessionId,
+                "PIPELINE_FLAC_READY",
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    trackId = raw.TrackId,
+                    sequence = raw.Sequence,
+                    sizeBytes = new FileInfo(raw.OutputPath).Length
+                }),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Event persistence is diagnostic only; a SQLite lock must not
+            // turn a successfully validated FLAC into an encoding failure.
+            logger.LogDebug(ex, "Unable to persist FLAC-ready event. Session={SessionId}, Sequence={Sequence}", raw.SessionId, raw.Sequence);
+        }
+    }
 
     private async Task RenewLeaseAsync(RawRecordingChunk raw, CancellationToken cancellationToken)
     {

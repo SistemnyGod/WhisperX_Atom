@@ -185,7 +185,10 @@
                                         <TextBlock Text="{Binding VoiceSignalState}" Height="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSignalState}" />
                                         <TextBlock Grid.Column="1" Text="{Binding VoiceLevel}" Height="20" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextAlignment="Right" TextTrimming="CharacterEllipsis" />
                                     </Grid>
-                                    <TextBlock Grid.Row="5" Text="До кодового слова аудио сразу удаляется и не попадает в стенограмму." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    <StackPanel Grid.Row="5" Spacing="2">
+                                        <TextBlock Text="{Binding VoiceAcousticDiagnostics}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="До кодового слова аудио сразу удаляется и не попадает в стенограмму." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
                                 </Grid>
                             </Border>
 
@@ -198,6 +201,7 @@
                                         <ComboBoxItem Tag="balanced" Content="Сбалансированная" />
                                         <ComboBoxItem Tag="high" Content="Высокая" />
                                     </ComboBox>
+                                    <Button Content="Калибровать шум комнаты (5 с)" Click="CalibrateVoiceButton_Click" HorizontalAlignment="Left" AutomationProperties.Name="Калибровать шум комнаты для Мифодия" />
                                     <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" />
                                     <ComboBox ItemsSource="{Binding VoiceOptions}" SelectedItem="{Binding VoiceName, Mode=TwoWay}" PlaceholderText="Выберите русский голос" AutomationProperties.Name="Голос ответов Мифодия" />
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">

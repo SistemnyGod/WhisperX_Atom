@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipRegistry,
+    [switch]$ExpectSummary,
     [string]$Username,
     [string]$Password
 )
@@ -130,8 +131,9 @@ Check "summaryRuntime" {
         validationReason = $workerCapabilities.modelValidationReason
     }
     if ($qwen.status -eq "UNAVAILABLE") { throw "Qwen runtime unavailable: $($qwen.reason)" }
+    if ($ExpectSummary -and $qwen.status -notin @("READY", "BUSY")) { throw "Qwen runtime is not ready: $($qwen.status) / $($qwen.reason)" }
     $qwen.status
-} -WarningOnly
+} -WarningOnly:(!$ExpectSummary)
 Check "services" {
     try {
         $names = @(Get-RunningWhisperXServiceNames)
@@ -150,6 +152,7 @@ Check "services" {
 }
 Check "transcriptOnly" {
     try {
+        if ($ExpectSummary) { return "not-applicable" }
         $running = @(Get-RunningWhisperXServiceNames)
         foreach ($excluded in @("summary-worker", "llama-server")) { if ($running -contains $excluded) { throw "excluded service $excluded is running" } }
         "ready"
@@ -180,7 +183,7 @@ Check "recorder" {
     throw "Recorder Service/host is not running"
 } -WarningOnly
 
-$report = [ordered]@{ generatedAtUtc=[DateTimeOffset]::UtcNow; runtime="transcription-mvp"; checks=$checks; diagnostics=$diagnostics; ok=($failures.Count -eq 0); failures=$failures }
+$report = [ordered]@{ generatedAtUtc=[DateTimeOffset]::UtcNow; runtime=if($ExpectSummary){"transcription-summary"}else{"transcription-mvp"}; checks=$checks; diagnostics=$diagnostics; ok=($failures.Count -eq 0); failures=$failures }
 $report | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $artifactRoot "doctor.json")
 $report | ConvertTo-Json -Depth 6
 if ($failures.Count -gt 0) { exit 1 }

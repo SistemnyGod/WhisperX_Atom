@@ -115,16 +115,46 @@ def test_broker_test_mode_does_not_call_recorder_and_returns_trace():
     assert "commandId" in BROKER and "CacheCommand" in BROKER
 
 
+def test_command_and_conversation_paths_are_disjoint():
+    # All recorder mutations are explicit parser intents and terminate in the
+    # Desktop command switch; conversational text is the only path that emits
+    # ASSISTANT_QUESTION.
+    for intent in (
+        "StartRecording", "StopRecording", "PauseRecording", "ResumeRecording",
+        "AddMarker", "MarkDecision", "MarkActionItem", "GetStatus",
+    ):
+        assert f'VoiceIntent.{intent}' in VOICE_RUNTIME
+    assert 'command = "ASSISTANT_QUESTION"' in BROKER_CLIENT
+    assert 'CreateAssistantRequestAsync(' in BROKER
+    assert 'requestedMode' in BROKER and 'captureContext.RecordingSessionId' in BROKER and 'captureContext.CaptureState' in BROKER
+    command_path = VOICE_RUNTIME.split('var response = command.Intent switch', 1)[1].split('if (command.Intent == VoiceIntent.StartRecording)', 1)[0]
+    assert 'AskAssistantAsync' in command_path
+    # The Assistant call is only the AssistantQuery branch of the switch; no
+    # recorder intent branch can reach it.
+    assert 'VoiceIntent.AssistantQuery =>' in command_path
+
+
 def test_voice_questions_use_the_user_scoped_assistant_and_speak_safe_terminal_results():
     assert 'AskAssistantAsync(string question, string? requestedMode' in BROKER_CLIENT
     assert '"ASSISTANT_QUESTION"' in BROKER
-    assert 'requestedMode = "LIVE_MEETING"' in BROKER
-    assert '"LIVE_MEETING_NOT_READY"' in BROKER
-    assert "ResolveAssistantQuestion" in VOICE_RUNTIME
-    assert '"MEETING_HISTORY"' in VOICE_RUNTIME
-    assert '"CURRENT_MEETING"' in VOICE_RUNTIME
+    # AUTO is intentionally forwarded unchanged.  The API, not the Desktop
+    # transport, decides GENERAL_CHAT/CURRENT_MEETING/LIVE_MEETING.
+    assert 'requestedMode = requestedMode ?? "AUTO"' in BROKER_CLIENT
+    assert "CancelAfter(TimeSpan.FromSeconds(15))" in BROKER_CLIENT
+    assert 'Detail: "broker_timeout"' in BROKER_CLIENT
+    assert 'CreateAssistantRequestAsync(' in BROKER
+    assert 'const string requestedMode = "AUTO"' in BROKER
+    assert 'ReadCaptureContextAsync' in BROKER
+    resolver = (ROOT / "apps/server/WhisperX.Atom.Api/AssistantModeResolver.cs").read_text(encoding="utf-8")
+    assert 'AskAssistantAsync(normalizedQuestion, "AUTO"' in VOICE_RUNTIME
+    assert '"LIVE_MEETING"' in resolver and "ResolveAsync" in resolver
+    assert '"LIVE_MEETING_NOT_READY"' in (ROOT / "apps/server/WhisperX.Atom.Api/Program.cs").read_text(encoding="utf-8")
+    assert 'AskAssistantAsync(normalizedQuestion, "AUTO"' in VOICE_RUNTIME
+    assert "ResolveAssistantQuestion" not in VOICE_RUNTIME
+    assert '"MEETING_HISTORY"' in resolver
+    assert '"CURRENT_MEETING"' in resolver
     assert '"LIVE_MEETING_NOT_READY"' in VOICE_RUNTIME
-    assert '"GENERAL_CHAT"' in VOICE_RUNTIME
+    assert '"GENERAL_CHAT"' in resolver
     # Voice Host never performs the old bounded 180-second polling loop.
     # Desktop owns durable query polling and sends a terminal response back
     # through the backwards-compatible control command.
@@ -143,7 +173,74 @@ def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
     assert "_utteranceRecognizer!.Accept(pcm)" in VOICE_RUNTIME
     # Actions remain parser-controlled, therefore arbitrary text cannot call
     # Recorder before it is classified as an explicit intent.
-    assert "var command = _parser.Parse(text, confidence);" in VOICE_RUNTIME
+    assert "var command = _parser.Parse(text, confidence, MinimumConfidence());" in VOICE_RUNTIME
+    assert "IsAssistantUtterance" in VOICE_PARSER
+    assert "_ => IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery" in VOICE_PARSER
+    assert "DefaultMinimumConfidence = 0.55" in VOICE_PARSER
+    assert "double.IsFinite(confidence)" in VOICE_PARSER
+    assert "minimumConfidence" in VOICE_PARSER
+    assert 'Matches(value, "начни запись")' in VOICE_PARSER
+    assert 'Matches(value, "заверши запись", "останови запись")' in VOICE_PARSER
+    command_table = VOICE_PARSER.split('var intent = withoutWake switch', 1)[1].split('// AssistantQuery', 1)[0]
+    assert '"начать запись"' not in command_table
+    assert '"остановить запись"' not in command_table
+    assert '"запись", "старт"' not in command_table
+    assert "AssistantQuery" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+    assert "HistoryQuestion = AssistantQuery" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+
+
+def test_far_field_front_end_never_mutates_recorder_audio_and_commands_have_separate_confidence_policy():
+    runtime = VOICE_RUNTIME
+    front_end = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioFrontEnd.cs").read_text(encoding="utf-8")
+    assert "_voiceFrontEnd.Process(pcm)" in runtime
+    assert "durable PCM" in runtime
+    assert "HighPassCutoffHz" in front_end
+    assert "MaxGain = 4.0d" in front_end
+    assert "Math.Clamp(filtered * _gain, -0.92d, 0.92d)" in front_end
+    assert '"high" => 0.45' in runtime
+    assert 'VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70' in runtime
+    assert 'VoiceIntent.AssistantQuery => MinimumConfidence()' in runtime
+    assert "IsConfidenceSufficient(command)" in runtime
+
+
+def test_voice_snapshot_exposes_adaptive_vad_diagnostics_without_changing_ipc_shape():
+    detector = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceActivityDetector.cs").read_text(encoding="utf-8")
+    contracts = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+    desktop = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/VoiceHostClient.cs").read_text(encoding="utf-8")
+    assert "NoiseFloorDb" in detector and "ThresholdDb" in detector
+    assert "VoiceNoiseFloorDb = _vad.NoiseFloorDb" in VOICE_RUNTIME
+    assert "VoiceVadThresholdDb = _vad.ThresholdDb" in VOICE_RUNTIME
+    assert "double? VoiceNoiseFloorDb = null" in contracts
+    assert "double? VoiceVadThresholdDb = null" in desktop
+
+
+def test_noise_calibration_is_ephemeral_and_wired_to_desktop_settings():
+    runtime = VOICE_RUNTIME
+    accumulator = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceCalibrationAccumulator.cs").read_text(encoding="utf-8")
+    view_model = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs").read_text(encoding="utf-8")
+    page = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml").read_text(encoding="utf-8")
+    assert 'case "CALIBRATION_START"' in runtime and 'case "CALIBRATION_STOP"' in runtime
+    assert "storesAudio = false" in runtime
+    assert "RecommendedVadThresholdDb" in accumulator
+    assert "ApplyNoiseFloor(result.AverageRms, _sensitivity)" in runtime
+    assert 'SendAsync("CALIBRATION_START"' in view_model
+    assert 'SendAsync("CALIBRATION_STOP")' in view_model
+    assert "Калибровать шум комнаты" in page
+
+
+def test_voice_general_chat_is_not_blocked_by_an_active_recording():
+    broker = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs").read_text(encoding="utf-8")
+    store = (ROOT / "apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs").read_text(encoding="utf-8")
+    parser = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
+    assert "AUTO routing" in broker
+    assert "The authenticated API owns AUTO routing" in broker
+    assert "IsGeneralConversationQuestion" in store
+    assert 'var requestMeetingId = captureContext.IsActive' in broker
+    assert 'скажи привет' in parser
+    assert 'как дела' in parser
+    assert 'пошути' in parser
+    assistant_block = broker.split('if (string.Equals(commandElement.GetString(), "ASSISTANT_QUESTION"', 1)[1].split('if (string.Equals(commandElement.GetString(), "ASSISTANT_RESULT"', 1)[0]
+    assert 'StatusAsync(cancellationToken)' not in assistant_block
 
 
 def test_voice_documentation_matches_the_unrestricted_question_runtime():
@@ -181,7 +278,7 @@ def test_two_track_live_audio_isolated_from_commands_and_bounded():
     assert "_wakeRecognizer" not in live_worker
     assert "_cancelRecognizer" not in live_worker
     assert "MIC_FALLBACK" in VOICE_RUNTIME
-    assert "if (_speech.IsBusy)" in live_worker
+    assert "if (_speech.IsBusy || IsLiveTtsSuppressed())" in live_worker
 
 
 def test_voice_responder_never_uses_legacy_wav_replies():
@@ -203,6 +300,8 @@ def test_tts_cancellation_has_an_isolated_recognizer_and_playback_result():
     assert "TryEnqueueDetailed" in SPEECH_RESPONDER
     assert "_cancelGeneration" in SPEECH_RESPONDER
     assert "AnswerStatus" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+    assert "LiveTtsTailTicks" in VOICE_RUNTIME
+    assert "IsLiveTtsSuppressed" in VOICE_RUNTIME
 
 
 def test_assistant_timing_metadata_is_exposed_without_storing_transcript_locally():
@@ -243,6 +342,14 @@ def test_interrupted_assistant_dispatch_becomes_ambiguous_without_replay():
     assert '"RESERVED"' in VOICE_RUNTIME
     assert '"VOICE_PLAYBACK_LEDGER_UNAVAILABLE"' in VOICE_RUNTIME
     assert '"VOICE_PLAYBACK_LEDGER_UNAVAILABLE"' in BROKER
+
+
+def test_assistant_query_acceptance_is_silent_and_result_is_spoken_once():
+    assert 'Speak: false' in VOICE_RUNTIME
+    assert 'assistant-query-queued' in VOICE_RUNTIME
+    assert 'ASSISTANT_RESULT' in VOICE_RUNTIME
+    # The generic acknowledgement must not be synthesized on every query.
+    assert '"Вопрос принят, отвечу после обработки."' not in VOICE_RUNTIME
 
 
 def test_assistant_page_refreshes_on_voice_result_without_manual_refresh():

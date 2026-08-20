@@ -33,12 +33,20 @@ public sealed class SummaryRegistryItem
 
     private static string FormatSummary(DesktopSummary? summary)
     {
+        if (summary is null) return "Саммари пока не готово.";
+        if (string.Equals(summary.ContentValidity, "INVALID", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(summary.ContentValidity, "FAILED", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(summary.GenerationState, "FAILED", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(summary.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
+            return "Саммари не показано: результат не прошёл проверку формата. Запустите пересборку после готовности V2.";
         return MeetingProtocolParser.Parse(summary?.Content).DisplayText;
     }
 
     private static string FormatReview(DesktopSummary? summary)
     {
         if (summary is null) return string.Empty;
+        if (string.Equals(summary.ContentValidity, "NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase))
+            return "Требует проверки: часть тезисов отклонена или не имеет подтверждённого источника.";
         var root = summary.Content.RootElement;
         if (!root.TryGetProperty("validation", out var validation) || validation.ValueKind != JsonValueKind.Object)
             return string.Equals(summary.Status, "NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase) ? "Требует проверки." : string.Empty;

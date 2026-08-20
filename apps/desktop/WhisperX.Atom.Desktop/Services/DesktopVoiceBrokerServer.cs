@@ -134,46 +134,61 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             }
             if (!_backend.HasSession)
                 return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_api_session_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
-            var requestedMode = root.TryGetProperty("requestedMode", out var modeElement) ? modeElement.GetString() : "AUTO";
+            // Voice questions always use AUTO.  The recording state below is
+            // context only; it is never promoted to LIVE_MEETING by Desktop.
+            // The authenticated API owns that decision after retrieval.
+            const string requestedMode = "AUTO";
+            var captureContext = await ReadCaptureContextAsync(cancellationToken).ConfigureAwait(false);
             var activeMeetingId = _activeMeeting.MeetingId;
-            var captureActive = false;
-            try
-            {
-                var recorderStatus = await _commands.StatusAsync(cancellationToken).ConfigureAwait(false);
-                captureActive = recorderStatus.State is "Recording" or "Paused" or "Starting" or "Finalizing"
-                    || recorderStatus.SessionStatus?.CaptureState is "RECORDING" or "PAUSED";
-            }
-            catch (Exception ex)
-            {
-                _log?.Invoke(ex);
-                return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: "recording_state_unavailable", TraceId: assistantTraceId, CommandId: assistantCommandId);
-            }
-            // Do not simply remove the old active-recording guard. During
-            // capture questions use a separate LIVE_MEETING scope backed by
-            // fresh provisional ASR. If no such context exists, fail closed
-            // without falling back to canonical V1/V2 or general history.
-            if (captureActive)
-            {
-                if (activeMeetingId is null)
-                    return new(false, "LIVE_MEETING_REQUIRED", "Recording", Detail: "active_meeting_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
-                requestedMode = "LIVE_MEETING";
-            }
+            // Voice Host and Desktop are transport layers only.  Do not ask
+            // Recorder for state here and do not classify the question with a
+            // second heuristic.  The authenticated API owns AUTO routing and
+            // the live-context safety gate (including ACTIVE_RECORDING →
+            // LIVE_MEETING).  This keeps general conversation available while
+            // capture is running and prevents client/server routing drift.
             var currentUser = await _backend.GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
             if (currentUser is null)
                 return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_user_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
-            var scopedMode = VoiceScopeFor(requestedMode, activeMeetingId);
-            var conversationId = _voiceConversations.Get(currentUser.Id, scopedMode, scopedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? activeMeetingId : null);
-            var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, activeMeetingId, conversationId, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
+            // The API is the sole owner of AUTO routing. Desktop only carries
+            // an opaque conversation key so voice and text clients share the
+            // same server-side mode resolver.
+            var requestMeetingId = captureContext.IsActive && captureContext.MeetingId is Guid captureMeeting
+                ? captureMeeting
+                : activeMeetingId ?? captureContext.MeetingId;
+            var conversationId = GetVoiceConversationId(currentUser.Id, requestedMode, requestMeetingId);
+            var accepted = await _backend.CreateAssistantRequestAsync(
+                question,
+                requestedMode,
+                requestMeetingId,
+                conversationId,
+                "VOICE",
+                assistantCommandId,
+                assistantTraceId,
+                captureContext.RecordingSessionId,
+                captureContext.CaptureState,
+                previousResolvedMode: null,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (accepted is null)
-                return new(false, captureActive ? "LIVE_MEETING_NOT_READY" : "VOICE_ASSISTANT_UNAVAILABLE", Detail: captureActive ? "live_asr_not_ready" : "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+                return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
             if (Guid.TryParse(accepted.ConversationId, out var acceptedConversation))
-                _voiceConversations.Set(currentUser.Id, accepted.ResolvedMode, Guid.TryParse(accepted.MeetingId, out var acceptedMeeting) ? acceptedMeeting : null, acceptedConversation);
+            {
+                var acceptedMeeting = Guid.TryParse(accepted.MeetingId, out var parsedMeeting) ? parsedMeeting : (Guid?)null;
+                // AUTO is a transport key, not a client-side mode decision.
+                // Keep the resolved key as a compatibility entry for older
+                // Desktop state, while follow-ups use the opaque AUTO key.
+                _voiceConversations.Set(currentUser.Id, "AUTO", acceptedMeeting, acceptedConversation);
+                _voiceConversations.Set(currentUser.Id, accepted.ResolvedMode, acceptedMeeting, acceptedConversation);
+            }
             if (Guid.TryParse(accepted.QueryId, out var queryId))
             {
                 if (!_assistantDelivery.TryAdd(queryId, currentUser.Id.ToString(), assistantCommandId, assistantTraceId, accepted.ResolvedMode, accepted.ConversationId))
                     return new(false, "VOICE_ASSISTANT_QUEUE_FULL", Detail: "assistant_delivery_capacity", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
-            var assistantResponse = new BrokerResponse(true, RecorderState: "ASSISTANT_QUEUED", SpokenText: "Вопрос принят, отвечу после обработки", Detail: accepted.ResolvedMode, TraceId: assistantTraceId, CommandId: assistantCommandId, QueryId: accepted.QueryId, AssistantStatus: accepted.Status, ResolvedMode: accepted.ResolvedMode);
+            // Acceptance is intentionally silent.  The grounded result is
+            // delivered later through ASSISTANT_RESULT; speaking a generic
+            // acknowledgement here makes older Voice Hosts talk over the
+            // user's conversation and creates a false second response.
+            var assistantResponse = new BrokerResponse(true, RecorderState: "ASSISTANT_QUEUED", SpokenText: null, Detail: accepted.ResolvedMode, TraceId: assistantTraceId, CommandId: assistantCommandId, QueryId: accepted.QueryId, AssistantStatus: accepted.Status, ResolvedMode: accepted.ResolvedMode);
             CacheCommand(assistantCommandId, assistantResponse);
             return assistantResponse;
         }
@@ -304,6 +319,33 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
     }
 
+    private async Task<AssistantCaptureContext> ReadCaptureContextAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Recorder health is context enrichment, not a prerequisite for
+            // a conversational answer. Keep an unavailable pipe from making
+            // "Мифодий, привет" wait on the IPC timeout.
+            using var contextCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            contextCts.CancelAfter(TimeSpan.FromSeconds(1));
+            var response = await _commands.StatusAsync(contextCts.Token).ConfigureAwait(false);
+            var state = response.SessionStatus?.CaptureState ?? response.State;
+            var normalized = string.IsNullOrWhiteSpace(state) ? "UNKNOWN" : state.Trim().ToUpperInvariant();
+            var isActive = normalized is "STARTING" or "RECORDING" or "PAUSED" or "AWAITING_AGENT_RECONNECT" or "FINALIZING";
+            return new AssistantCaptureContext(
+                response.MeetingId ?? response.SessionStatus?.MeetingId,
+                Guid.TryParse(response.SessionId ?? response.SessionStatus?.SessionId, out var sessionId) ? sessionId : null,
+                normalized,
+                isActive);
+        }
+        catch
+        {
+            // A missing Recorder IPC must not block normal conversation. The API
+            // still receives UNKNOWN and can consult its durable session row.
+            return new AssistantCaptureContext(null, null, "UNKNOWN", false);
+        }
+    }
+
     private async Task DeliverAssistantResultsAsync()
     {
         while (!_shutdown.IsCancellationRequested)
@@ -405,12 +447,13 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         _ => null
     };
 
-    private static string VoiceScopeFor(string? requestedMode, Guid? activeMeetingId)
+    private Guid? GetVoiceConversationId(Guid userId, string? requestedMode, Guid? meetingId)
     {
-        var mode = (requestedMode ?? "AUTO").Trim().ToUpperInvariant();
-        if (mode == "MEETING_HISTORY") return "MEETING_MEMORY";
-        if (mode is "CURRENT_MEETING" or "LIVE_MEETING" or "GENERAL_CHAT" or "MEETING_MEMORY") return mode;
-        return activeMeetingId.HasValue ? "CURRENT_MEETING" : "GENERAL_CHAT";
+        var normalized = string.IsNullOrWhiteSpace(requestedMode)
+            ? "AUTO"
+            : requestedMode.Trim().ToUpperInvariant();
+        return _voiceConversations.Get(userId, normalized, meetingId)
+            ?? (normalized == "AUTO" ? _voiceConversations.Get(userId, "AUTO", null) : null);
     }
 
     public async ValueTask DisposeAsync()
@@ -423,4 +466,5 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 
     private sealed record BrokerResponse(bool Ok, string? ErrorCode = null, string? RecorderState = null,
         string? LocalSessionId = null, string? LocalFinalizeState = null, string? SpokenText = null, string? Detail = null, string? TraceId = null, string? CommandId = null, string? QueryId = null, string? AssistantStatus = null, string? ResolvedMode = null);
+    private sealed record AssistantCaptureContext(Guid? MeetingId, Guid? RecordingSessionId, string CaptureState, bool IsActive);
 }

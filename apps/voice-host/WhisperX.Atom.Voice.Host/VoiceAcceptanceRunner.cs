@@ -20,12 +20,12 @@ internal static class VoiceAcceptanceRunner
         var cases = new[]
         {
             ("start", "Мифодий, начни запись", VoiceIntent.StartRecording),
-            ("pause", "Мифодий, пауза", VoiceIntent.PauseRecording),
+            ("pause", "Мифодий, поставь на паузу", VoiceIntent.PauseRecording),
             ("resume", "Мифодий, продолжи запись", VoiceIntent.ResumeRecording),
             ("stop", "Мифодий, останови запись", VoiceIntent.StopRecording),
-            ("question-repair", "Мифодий, кто отвечал за ремонт?", VoiceIntent.HistoryQuestion),
-            ("question-deadline", "Мифодий, какой срок назвали?", VoiceIntent.HistoryQuestion),
-            ("question-pump", "Мифодий, что решили по насосу?", VoiceIntent.HistoryQuestion),
+            ("question-repair", "Мифодий, кто отвечал за ремонт?", VoiceIntent.AssistantQuery),
+            ("question-deadline", "Мифодий, какой срок назвали?", VoiceIntent.AssistantQuery),
+            ("question-pump", "Мифодий, что решили по насосу?", VoiceIntent.AssistantQuery),
         };
         var aliases = new[] { "Мифодий, начни запись", "Мефодий, начни запись", "Атом, начни запись" };
         var results = cases.Select(item =>
@@ -38,7 +38,7 @@ internal static class VoiceAcceptanceRunner
                 expectedIntent = item.Item3.ToString(),
                 actualIntent = command.Intent.ToString(),
                 hasWakeWord = parser.HasWakeWord(item.Item2),
-                parameterPresent = item.Item3 == VoiceIntent.HistoryQuestion && !string.IsNullOrWhiteSpace(command.Parameter),
+                parameterPresent = item.Item3 == VoiceIntent.AssistantQuery && !string.IsNullOrWhiteSpace(command.Parameter),
                 accepted = parser.HasWakeWord(item.Item2) && command.Intent == item.Item3,
             };
         }).ToArray();
@@ -47,7 +47,7 @@ internal static class VoiceAcceptanceRunner
             var command = parser.Parse(text, 0.95);
             return new { text, intent = command.Intent.ToString(), accepted = parser.HasWakeWord(text) && command.Intent == VoiceIntent.StartRecording };
         }).ToArray();
-        var passed = results.All(item => item.accepted && (item.expectedIntent != VoiceIntent.HistoryQuestion.ToString() || item.parameterPresent))
+        var passed = results.All(item => item.accepted && (item.expectedIntent != VoiceIntent.AssistantQuery.ToString() || item.parameterPresent))
             && aliasResults.All(item => item.accepted);
         Console.WriteLine(JsonSerializer.Serialize(new
         {

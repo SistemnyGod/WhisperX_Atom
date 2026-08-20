@@ -16,6 +16,25 @@ BUILD_IDENTITY = os.environ.get("WHISPERX_BUILD_IDENTITY", "")
 MODEL_NAME = "v5_5_ru"
 
 
+def _load_build_identity(root: Path) -> str:
+    """Resolve the packaged identity when the parent did not inject it.
+
+    Voice Host still supplies ``WHISPERX_BUILD_IDENTITY`` for rolling
+    compatibility, but a standalone TtsHost health probe must not silently
+    report an empty identity.  The build manifest is shipped beside the
+    executable and contains no secrets.
+    """
+    if BUILD_IDENTITY.strip():
+        return BUILD_IDENTITY.strip()
+    manifest = root / "build-identity.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        value = payload.get("buildIdentity")
+        return value.strip() if isinstance(value, str) else ""
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 def _log(message: str) -> None:
     # Never write request text, names or paths to stdout/stderr.
     print(message, file=sys.stderr, flush=True)
@@ -101,6 +120,8 @@ def main() -> int:
     # from the executable directory in frozen mode so the same layout works
     # in staging, the installer and rollback copies.
     root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    global BUILD_IDENTITY
+    BUILD_IDENTITY = _load_build_identity(root)
     model = root / "Models" / "silero-v5_5_ru" / "v5_5_ru.pt"
     temp = Path(os.environ.get("ATOM_TTS_TEMP_ROOT", Path.home() / "AppData" / "Local" / "WhisperXAtom" / "TTS" / "Temp"))
     return run(model, temp, args.parent_pid, 4)

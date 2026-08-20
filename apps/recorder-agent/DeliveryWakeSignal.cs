@@ -13,13 +13,22 @@ public class DeliveryWakeSignal
 
     public void Signal() => _channel.Writer.TryWrite(true);
 
-    public async ValueTask WaitAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    /// <summary>
+    /// Waits for a signal and returns false for the bounded polling timeout.
+    /// The result lets the canonical Recorder interrupt its command-stream
+    /// poll only when delivery really became due.
+    /// </summary>
+    public async ValueTask<bool> WaitAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
-        try { await _channel.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
-        while (_channel.Reader.TryRead(out _)) { }
+        try
+        {
+            var signaled = await _channel.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false);
+            while (_channel.Reader.TryRead(out _)) { }
+            return signaled;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
     }
 }
 

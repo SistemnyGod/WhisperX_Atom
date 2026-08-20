@@ -137,10 +137,13 @@ media/jobs, Transcript V1/V2, Summary, Assistant, updates и readiness.
 API проверяет scope пользователя до retrieval; `CURRENT_MEETING` не может
 получить evidence другой встречи.
 
-`LIVE_MEETING` хранит временные сегменты в `live_meeting_segments` с TTL и
-проверкой активной recording-сессии. Live evidence фиксируется отдельно от
-`assistant_query_evidence`, а после STOP канонический Assistant снова работает
-только по V1/V2.
+`LIVE_MEETING` хранит provisional-сегменты в `live_meeting_segments` на всём
+интервале записи и переходе `STOP → FINALIZING → V1`. У новых строк есть
+семидневный safety-expiry и политика `UNTIL_V1_READY`; при пригодном V1
+очистка происходит автоматически. Live evidence фиксируется отдельно от
+`assistant_query_evidence`, а после V1 тот же `conversationId` бесшовно
+переключается на канонический V1/V2. Строки, на которые ссылается evidence
+snapshot, сохраняются для аудита.
 
 ### `workers/media_worker`
 
@@ -159,6 +162,23 @@ diarization, technical-event masking и persistence Transcript V1/V2. V1
 Qwen3-8B Summary и grounded Assistant. Берёт evidence только из разрешённого
 scope, фиксирует retrieval до вызова модели и валидирует claims после ответа.
 Summary запускается после качественного V2; `NEEDS_REVIEW` блокирует summary.
+
+### `AssistantModeResolver`
+
+`apps/server/WhisperX.Atom.Api/AssistantModeResolver.cs` — единый владелец
+контекстной маршрутизации Assistant. Получает вопрос, запрошенный режим,
+пользователя, активную встречу и состояние записи; возвращает
+`resolvedMode`, `meetingId`, `reason`, `confidence` и optional `conversationId`.
+Для `AUTO` сначала восстанавливается scope follow-up, но только при новом
+сильном retrieval-совпадении. Затем проверяется live-память активной или
+финализируемой сессии (до пригодного V1), после неё — текущая встреча, затем
+history-поиск для history-like вопросов, и только после отсутствия evidence
+выбирается `GENERAL_CHAT`. После V1 тот же follow-up переключается на
+канонический transcript. Пробы выполняются
+через Russian FTS и те же transcript quality/RBAC-фильтры, что и worker; одних
+ключевых слов для выбора meeting scope недостаточно. Ошибка
+`LIVE_MEETING_NOT_READY` закрывает только явно запрошенный live-запрос, а
+обычный `AUTO` безопасно деградирует в общий чат.
 
 ### `workers/import_worker`
 

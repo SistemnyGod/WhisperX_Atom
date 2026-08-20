@@ -10,6 +10,7 @@ durability и безопасные точки рефакторинга опис�
 | Модуль | Расположение | Ответственность |
 | --- | --- | --- |
 | Control API | `apps/server/WhisperX.Atom.Api` | Auth, meetings, uploads, jobs, transcript, speakers, summaries, assistant, agents, audit |
+| AssistantModeResolver | `apps/server/WhisperX.Atom.Api/AssistantModeResolver.cs` | Единая retrieval-aware маршрутизация AUTO/GENERAL_CHAT/CURRENT_MEETING/MEETING_MEMORY/LIVE_MEETING для текста и голоса; scope follow-up, FTS quality/RBAC probes и live readiness |
 | Desktop | `apps/desktop/WhisperX.Atom.Desktop` | WinUI 3 shell, pages, ViewModels, REST/SSE и Named Pipe client |
 | Recorder Core | `apps/recorder-agent` | Capture, FLAC encoding, SQLite spool, archive, session state |
 | Recorder Service | `apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj` | Windows Service host, IPC pipe, background delivery |

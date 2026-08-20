@@ -250,6 +250,47 @@ def test_summary_and_assistant_workers_extend_long_job_leases():
     assert "lease_expires_at=now()+interval '30 minutes'" in worker
 
 
+def test_outbox_requeues_starved_queued_jobs_without_stealing_active_leases():
+    relay = read(Path("workers/outbox_relay/worker.py"))
+    assert "recover_starved_queued" in relay
+    assert "OUTBOX_QUEUED_WATCHDOG_SECONDS" in relay
+    assert "j.status='QUEUED'" in relay
+    assert "i.lease_expires_at > now()" in relay
+    assert "QUEUED_WATCHDOG_REQUEUED" in relay
+    assert "llm.summarize" in relay and "ml.transcribe" in relay and "media.ingest" in relay
+    # A published outbox row is not proof that a consumer received it.  The
+    # watchdog must be allowed to emit a fresh event after its debounce window
+    # instead of permanently suppressing a stuck QUEUED job.
+    assert "j.updated_at < now() - interval '{stale_seconds} seconds'" in relay
+    assert "message id is intentional" in relay
+    assert "def _watchdog_seconds" in relay
+
+
+def test_recorder_delivery_wake_interrupts_idle_command_poll():
+    agent = read(Path("apps/recorder-agent/Program.cs"))
+    assert "DeliveryWakeSignal deliveryWake" in agent
+    assert "var commandTask = api.ReadCommandsAsync" in agent
+    assert "deliveryWake.WaitAsync(TimeSpan.FromSeconds(5)" in agent
+    assert "pollTimeout.Cancel()" in agent
+
+
+def test_pipeline_lineage_exposes_durable_stage_timings_and_delivery_events():
+    store = read(Path("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs"))
+    coordinator = read(Path("apps/recorder-agent/RecordingDeliveryCoordinator.cs"))
+    assert "StageTimings = null" in store
+    assert "rs.stage_timings" in store
+    for event in (
+        "PIPELINE_LOCAL_READY",
+        "PIPELINE_FLAC_READY",
+        "PIPELINE_UPLOAD_STARTED",
+        "PIPELINE_FINALIZE_ACCEPTED",
+        "PIPELINE_MEDIA_READY",
+        "PIPELINE_DELIVERY_PENDING",
+    ):
+        assert event in coordinator
+    assert "AddEventIfMissingAsync" in coordinator
+
+
 def test_recorder_host_fallback_is_idempotent_and_uses_existing_agent_state():
     host = read(Path("scripts/start-recorder-host.ps1"))
     start = read(Path("scripts/start-transcription-mvp.ps1"))

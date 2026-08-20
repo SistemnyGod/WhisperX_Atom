@@ -57,6 +57,13 @@ class TtsHostContractTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             self.assertEqual(response["state"], "READY")
 
+    def test_packaged_identity_is_used_when_environment_is_empty(self):
+        identity = "1.0.1+" + "a" * 40
+        with patch.object(tts_host, "BUILD_IDENTITY", ""), patch.object(
+            Path, "read_text", return_value=json.dumps({"buildIdentity": identity})
+        ):
+            self.assertEqual(tts_host._load_build_identity(Path("C:/packaged")), identity)
+
     def test_model_manifest_is_noncommercial_pilot_and_no_model_is_tracked(self):
         manifest = json.loads((ROOT / "apps" / "tts-host" / "model-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["modelId"], "silero-v5_5_ru")

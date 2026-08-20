@@ -86,6 +86,8 @@ def test_vertical_e2e_script_requires_lineage_ids_and_excludes_audio_from_result
     assert "/api/meetings/$meetingId/pipeline" in script
     assert "VERTICAL_DUPLICATE_OR_MISSING_STAGE" in script
     assert "duplicateCheck" in script
+    assert "stageTimings = $chain.stageTimings" in script
+    assert "transcriptV1ReadyAtUtc" in script
 
 
 def test_server_bundle_rollback_script_uses_safe_interpolated_drive_name():

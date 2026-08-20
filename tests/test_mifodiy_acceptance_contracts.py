@@ -40,8 +40,9 @@ def test_production_gate_can_exercise_voice_host_to_desktop_broker_path():
     assert "command = 'TEXT'" in SCRIPT
     for marker in ("question-repair", "question-deadline", "question-pump"):
         assert marker in SCRIPT
-    assert "acceptance with { QueryId = result.QueryId }" in host_runtime
-    assert "answerStatus: result.AssistantStatus" in host_runtime
+    assert "QueryId: result.QueryId" in host_runtime
+    assert "Speak: false" in host_runtime
+    assert "AnswerStatus: result.AssistantStatus" in host_runtime
     assert "CURRENT_MEETING" in SCRIPT
 
 

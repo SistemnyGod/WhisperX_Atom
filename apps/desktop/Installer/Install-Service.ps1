@@ -2,7 +2,8 @@ param(
     [string]$ServiceDirectory = (Join-Path $PSScriptRoot "Service"),
     [string]$RecorderHostDirectory,
     [string]$AllowedUserSid,
-    [string]$AllowedUserSidFile
+    [string]$AllowedUserSidFile,
+    [string]$ServerOrigin = "http://192.168.2.194:8080"
 )
 $ErrorActionPreference = "Stop"
 $serviceName = "WhisperXAtomRecorder"
@@ -256,7 +257,20 @@ Write-Host "AGENT_DATA_ROOT_ACL_READY=true"
 Write-Host "AGENT_DB_ACL_READY=$($agentDbAclReady.ToString().ToLowerInvariant())"
 Set-Content -LiteralPath (Join-Path $agentDataRoot "allowed-user.sid") -Value $AllowedUserSid -Encoding ascii -NoNewline
 $agentConfigPath = Join-Path $agentDataRoot "agent-config.json"
-$serverOrigin = if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { "http://127.0.0.1:0" } else { $env:WHISPERX_API_URL }
+$defaultServerOrigin = "http://192.168.2.194:8080"
+$serverOrigin = if ([string]::IsNullOrWhiteSpace($ServerOrigin)) {
+    if ([string]::IsNullOrWhiteSpace($env:WHISPERX_API_URL)) { $defaultServerOrigin } else { $env:WHISPERX_API_URL }
+} else { $ServerOrigin }
+$serverOriginUri = $null
+$validServerOrigin = (
+    [Uri]::TryCreate($serverOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$serverOriginUri) -and
+    $serverOriginUri.Scheme -in @('http', 'https') -and
+    -not ($serverOriginUri.IsLoopback -and $serverOriginUri.Port -eq 0)
+)
+if (-not $validServerOrigin) {
+    throw "SERVER_ORIGIN_INVALID: $serverOrigin"
+}
+$serverOrigin = $serverOriginUri.ToString().TrimEnd('/')
 $machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "WhisperXAtom\client-config.json"
 $userAgentConfigPath = Get-UserAgentConfigPathForSid -Sid $AllowedUserSid
 # A user-scoped Host configuration owns the runtime lease. Preserve its
@@ -287,7 +301,11 @@ $existingOrigin = if ($existingMachine -and $existingMachine.serverOrigin) { [st
 if ($existingOrigin) {
     try {
         $existingUri = [Uri]$existingOrigin
-        if ($existingUri.Scheme -in @("http", "https")) { $serverOrigin = $existingUri.ToString() }
+        if ($existingUri.Scheme -in @("http", "https") -and -not ($existingUri.IsLoopback -and $existingUri.Port -eq 0)) {
+            # Preserve the user's existing managed origin on upgrades. The
+            # installer default is used only for a new or inert configuration.
+            $serverOrigin = $existingUri.ToString().TrimEnd('/')
+        }
     } catch { }
 }
 $existingAudio = if ($existingMachine) { $existingMachine.audioConfiguration } else { $null }

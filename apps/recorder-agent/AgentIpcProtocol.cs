@@ -206,7 +206,19 @@ public sealed record AgentIpcHealth(
     string? EncoderCurrentChunkId = null,
     DateTimeOffset? EncoderLastSuccessAtUtc = null,
     string? EncoderLastErrorCode = null,
-    int EncoderQueueDepth = 0);
+    int EncoderQueueDepth = 0,
+    // Additive storage-retention diagnostics. Older Desktop clients ignore
+    // these optional tail fields; newer clients can show cleanup health
+    // without inferring it from capture readiness.
+    DateTimeOffset? StorageRetentionLastRunAtUtc = null,
+    DateTimeOffset? StorageRetentionLastSuccessAtUtc = null,
+    long StorageRetentionRawBytesReclaimed = 0,
+    long StorageRetentionTransportBytesReclaimed = 0,
+    long StorageRetentionPlayableBytesReclaimed = 0,
+    long StorageRetentionArchiveBytesReclaimed = 0,
+    long StorageRetentionTemporaryBytesReclaimed = 0,
+    long StorageRetentionCandidates = 0,
+    long StorageRetentionFailures = 0);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

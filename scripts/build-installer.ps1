@@ -1,7 +1,15 @@
 ﻿param(
-    [switch]$SkipPublish
+    [switch]$SkipPublish,
+    [string]$ServerOrigin = "http://192.168.2.194:8080"
 )
 $ErrorActionPreference = "Stop"
+$originUri = $null
+$validOrigin = (
+    [Uri]::TryCreate($ServerOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$originUri) -and
+    $originUri.Scheme -in @("http", "https") -and
+    -not ($originUri.IsLoopback -and $originUri.Port -eq 0)
+)
+if (-not $validOrigin) { throw "INSTALLER_SERVER_ORIGIN_INVALID: $ServerOrigin" }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $publish = Join-Path $repoRoot "scripts\publish-desktop.ps1"
 $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
@@ -30,7 +38,7 @@ if (Test-Path -LiteralPath $setup -PathType Leaf) {
     Move-Item -LiteralPath $setup -Destination $previousSetup
 }
 try {
-    & $isccPath $iss
+    & $isccPath "/DServerOrigin=$($originUri.ToString().TrimEnd('/'))" $iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 } catch {
     if (-not (Test-Path -LiteralPath $setup) -and $previousSetup -and (Test-Path -LiteralPath $previousSetup)) {

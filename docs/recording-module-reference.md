@@ -131,6 +131,23 @@ retry. `GetLocalDurabilityAsync` перед `LOCAL_READY` сверяет бай�
 `CONFIRMED`; иначе отложенная доставка ошибочно превращает готовую сессию в
 `NO_AUDIO_CAPTURED`.
 
+### `apps/recorder-host/StorageRetentionWorker.cs`
+
+Это единственный новый владелец плановой очистки для установленного AudioGraph
+Recorder Host. Worker запускает state-driven проход с интервалом
+`WHISPERX_RETENTION_INTERVAL_SECONDS` (по умолчанию 300 секунд, допустимо
+30–3600), а SQLite остаётся источником истины. Порядок прохода: arm grace для
+playable WAV, raw recovery, подтверждённые transport chunks, опциональный
+server/local archive retention, playable WAV и только затем известные временные
+`.wav.part`/`.flac.part`/`.opus.part`. Никакие `.pcm.part`, `LOCAL_ONLY`, активные
+сессии, живые encoding leases или незавершённые uploads не удаляются.
+
+`StorageRetentionMetrics` хранит только счётчики и timestamps последнего прохода:
+reclaimed bytes по категориям, число кандидатов, armed sessions и failed runs.
+Ошибки отдельных шагов не прерывают проход: следующий шаг продолжает выполняться,
+а health IPC отражает накопленный счётчик ошибок.
+Тексты встреч, аудио и credentials в метрики не попадают.
+
 ### `apps/recorder-agent/RecordingTimelineValidator.cs`
 
 Чистая политика без I/O. Для каждой дорожки проверяет sequence с нуля,
@@ -189,6 +206,14 @@ Voice Host пока имеет отдельный WASAPI-поток для wake-
 Host, а объединение capture fan-out выполняется отдельным контрактным этапом
 после runtime-проверки. При активной записи Voice Host не должен открывать
 другой endpoint молча или менять выбранный Recorder endpoint.
+
+Для распознавания голоса Voice Host после своего 16 kHz downmix использует
+отдельную производную копию `VoiceAudioFrontEnd` (high-pass, ограниченный AGC,
+limiter). Эта обработка не применяется к Recorder PCM, playable WAV или FLAC:
+оригинал остаётся доступным для восстановления, WhisperX и повторной
+обработки. Выбранный endpoint передаётся Desktop из той же настройки
+`MicrophoneDeviceId`, что используется Recorder; effective/requested IDs
+показываются в health, чтобы расхождение было обнаруживаемым, а не скрытым.
 
 ### `apps/recorder-agent/SessionFinalizationCoordinator.cs`
 

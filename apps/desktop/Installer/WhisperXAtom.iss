@@ -1,6 +1,9 @@
 ; Build after running scripts/publish-desktop.ps1
 #define AppName "WhisperX Atom"
 #define AppVersion "1.0.1"
+#ifndef ServerOrigin
+#define ServerOrigin "http://192.168.2.194:8080"
+#endif
 
 [Setup]
 AppId={{B6C9F93C-20E5-4E31-9E86-4A7B119D1B01}
@@ -59,7 +62,7 @@ begin
 end;
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -RecorderHostDirectory ""{app}\RecorderHost"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-Service.ps1"" -ServerOrigin ""{#ServerOrigin}"" -RecorderHostDirectory ""{app}\RecorderHost"" -AllowedUserSidFile ""{commonappdata}\WhisperXAtom\installer-user.sid"""; Flags: waituntilterminated
 ; The per-user config script is deliberately fire-and-forget. Inno Setup is
 ; elevated, while this script must run in the original user's DPAPI/profile
 ; scope; waiting for the runasoriginaluser hand-off can deadlock the UAC

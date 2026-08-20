@@ -157,6 +157,19 @@ class SummaryWorkerTests(unittest.TestCase):
         }, {"1"}, {"1": "Только вопрос по фильтру."}, {"1": (0, 1000)}, "2026-08-10")
         self.assertEqual("FAILED", result["quality"]["status"])
 
+    def test_protocol_structural_model_artifact_is_rejected(self):
+        result = validate_protocol_result({
+            "questions_and_decisions": [{
+                "topic": "{'topic': 'Насос'}",
+                "context": "SEG-ID: SEG-1",
+                "decision": "Проверить насос",
+                "evidence_segment_ids": ["1"],
+            }],
+            "tasks": [],
+        }, {"1"}, {"1": "Проверить насос."}, {"1": (0, 1000)}, "2026-08-10")
+        self.assertEqual([], result["questions_and_decisions"])
+        self.assertEqual(1, result["quality"]["rejected_items"])
+
     def test_protocol_result_computes_source_range_and_keeps_deadline_text(self):
         result = validate_protocol_result({
             "questions_and_decisions": [{

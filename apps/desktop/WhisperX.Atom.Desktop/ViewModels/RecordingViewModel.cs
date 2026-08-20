@@ -33,6 +33,9 @@ public sealed class RecordingViewModel : ObservableObject
     private bool _recordingProfileManaged;
     private CancellationTokenSource? _processingCts;
     private Task? _processingTask;
+    private string? _processingObservedJobKey;
+    private DateTimeOffset _processingObservedSinceUtc;
+    private bool _processingJobObserved;
     private CancellationTokenSource? _sessionCts;
     private Task? _sessionTask;
     private bool _serverProcessingExpected;
@@ -140,7 +143,15 @@ public sealed class RecordingViewModel : ObservableObject
         new("LARGE_ROOM", "Большой кабинет — усиление")
     ];
     public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) { NotifyCommands(); OnPropertyChanged(nameof(CanTestAudio)); OnPropertyChanged(nameof(CanRunRoomAcousticCheck)); } } }
-    public string Title { get => _title; set => SetProperty(ref _title, value); }
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (SetProperty(ref _title, value) && _meetingId is Guid meetingId)
+                _services.ActiveMeeting.Set(meetingId, value);
+        }
+    }
     public string? SessionId
     {
         get => _sessionId;
@@ -149,7 +160,15 @@ public sealed class RecordingViewModel : ObservableObject
             if (SetProperty(ref _sessionId, value)) OnPropertyChanged(nameof(CanRetryUpload));
         }
     }
-    public Guid? MeetingId { get => _meetingId; private set => SetProperty(ref _meetingId, value); }
+    public Guid? MeetingId
+    {
+        get => _meetingId;
+        private set
+        {
+            if (SetProperty(ref _meetingId, value) && value is Guid meetingId)
+                _services.ActiveMeeting.Set(meetingId, Title);
+        }
+    }
     public long? MediaTimeMs { get => _mediaTimeMs; private set { if (SetProperty(ref _mediaTimeMs, value)) OnPropertyChanged(nameof(MediaTimeLabel)); } }
     public string MediaTimeLabel => MediaTimeMs is long value ? FormatMediaTime(value) : "00:00:00";
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
@@ -1042,6 +1061,9 @@ public sealed class RecordingViewModel : ObservableObject
         ProcessingProgress = 0;
         ProcessingStatus = "Ожидаю подтверждение записи и постановку WhisperX в очередь…";
         TranscriptStatus = "Стенограмма ожидает обработки.";
+        _processingObservedJobKey = null;
+        _processingObservedSinceUtc = DateTimeOffset.UtcNow;
+        _processingJobObserved = false;
         IsProcessing = true;
         _processingCts = new CancellationTokenSource();
         _processingTask = PollProcessingAsync(meetingId, _processingCts.Token);
@@ -1228,12 +1250,24 @@ public sealed class RecordingViewModel : ObservableObject
 
     private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(45);
+        // Do not apply one wall-clock timeout to every ASR/enrichment job. A
+        // cold large-v3 load and V2 diarization have very different normal
+        // durations. Only the absence of a durable job has a bounded wait;
+        // once a job exists, the stage/heartbeat watchdog below reports a
+        // stall without cancelling or losing the job.
+        var jobCreationDeadline = DateTimeOffset.UtcNow.AddMinutes(5);
         try
         {
-            while (!cancellationToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 if (await RefreshProcessingAsync(meetingId, cancellationToken)) return;
+                if (!_processingJobObserved && DateTimeOffset.UtcNow >= jobCreationDeadline)
+                {
+                    ProcessingError = "PROCESSING_JOB_NOT_CREATED: сервер принял запись, но job WhisperX ещё не создан.";
+                    ProcessingStatus = "Ожидание постановки WhisperX прервано";
+                    WarningMessage = "Локальная запись сохранена. Проверьте доставку/сборку медиа и обновите статус позже; повторная запись не требуется.";
+                    return;
+                }
                 try
                 {
                     var jobs = await _services.Backend.GetJobsAsync(meetingId, cancellationToken);
@@ -1249,11 +1283,6 @@ public sealed class RecordingViewModel : ObservableObject
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
 
-            if (!cancellationToken.IsCancellationRequested)
-            {
-                ProcessingError = "Время ожидания WhisperX истекло. Откройте совещание для повторной проверки или перезапустите job.";
-                ProcessingStatus = "Обработка не подтверждена вовремя";
-            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
@@ -1293,8 +1322,36 @@ public sealed class RecordingViewModel : ObservableObject
 
         if (job is not null)
         {
+            _processingJobObserved = true;
+            var observedKey = $"{job.Id}|{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}";
+            if (!string.Equals(_processingObservedJobKey, observedKey, StringComparison.Ordinal))
+            {
+                _processingObservedJobKey = observedKey;
+                _processingObservedSinceUtc = DateTimeOffset.UtcNow;
+            }
             ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
-            ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            var observedFor = DateTimeOffset.UtcNow - _processingObservedSinceUtc;
+            var queuedStalled = string.Equals(job.Status, "QUEUED", StringComparison.OrdinalIgnoreCase)
+                && observedFor >= TimeSpan.FromMinutes(2);
+            var runningStalled = string.Equals(job.Status, "RUNNING", StringComparison.OrdinalIgnoreCase)
+                && observedFor >= TimeSpan.FromMinutes(30);
+            ProcessingStatus = queuedStalled
+                ? "Задача в очереди дольше 2 минут · Worker не подтвердил получение"
+                : runningStalled
+                    ? "WhisperX не сообщает прогресс более 30 минут · проверяю Worker"
+                    : $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            if (!queuedStalled && !runningStalled && string.IsNullOrWhiteSpace(job.Error))
+                ProcessingError = string.Empty;
+            if (queuedStalled)
+            {
+                ProcessingError = "JOB_QUEUED_TIMEOUT: запись сохранена, но Worker ещё не подтвердил получение задачи.";
+                WarningMessage = "Локальная запись и V1-контур не повреждены. Проверьте readiness GPU/Media Worker; автоматическое восстановление продолжится.";
+            }
+            else if (runningStalled)
+            {
+                ProcessingError = "JOB_PROGRESS_STALLED: Worker не сообщил новый этап обработки.";
+                WarningMessage = "WhisperX выполняется дольше ожидаемого. Job остаётся в durable-очереди и будет восстановлен после истечения lease.";
+            }
             if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = MapProcessingError(job.Error);
             if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
             {
@@ -1337,7 +1394,15 @@ public sealed class RecordingViewModel : ObservableObject
             }
         }
 
-        return false;
+        // A stalled job is durable and will be recovered by the relay/worker
+        // watchdog, but the Desktop must not keep an indeterminate spinner
+        // forever. The user can refresh or reopen the meeting to resume live
+        // progress tracking.
+        return job is not null
+            && ((string.Equals(job.Status, "QUEUED", StringComparison.OrdinalIgnoreCase)
+                 && DateTimeOffset.UtcNow - _processingObservedSinceUtc >= TimeSpan.FromMinutes(2))
+                || (string.Equals(job.Status, "RUNNING", StringComparison.OrdinalIgnoreCase)
+                    && DateTimeOffset.UtcNow - _processingObservedSinceUtc >= TimeSpan.FromMinutes(30)));
     }
 
     private static bool IsAsrJob(DesktopJob job) =>
@@ -1362,12 +1427,27 @@ public sealed class RecordingViewModel : ObservableObject
     private static string DisplayStage(string stage) => stage.ToUpperInvariant() switch
     {
         "INGEST" => "подготовка медиа",
+        "UPLOADED" or "READY_FOR_ASR" => "медиа готово, ожидает WhisperX",
         "NORMALIZING" => "нормализация аудио",
+        "WAITING_FOR_GPU" => "ожидание GPU Worker",
+        "MODEL_LOADING" => "загрузка модели WhisperX",
         "TRANSCRIBING" => "WhisperX ASR",
+        "ASR_READY" => "быстрая стенограмма V1 готова",
         "ALIGNING" => "выравнивание таймкодов",
         "DIARIZING" => "диаризация спикеров",
         "QUALITY_CHECK" => "проверка качества",
         "PERSISTING" => "сохранение стенограммы",
+        "ENRICHED_READY" => "стенограмма V2 готова",
+        "PREPARING_CONTEXT" => "подготовка контекста саммари",
+        "EXTRACTING_FACTS" => "извлечение фактов",
+        "MERGING_FACTS" => "объединение фактов",
+        "GROUPING_TOPICS" => "группировка тем",
+        "RESOLVING_DECISIONS" => "проверка решений",
+        "EXTRACTING_TASKS" => "извлечение поручений",
+        "RESOLVING_DEADLINES" => "проверка сроков",
+        "VALIDATING_EVIDENCE" => "проверка источников",
+        "GENERATING_SUMMARY" => "формирование саммари",
+        "DEDUPLICATING" => "удаление дублей",
         "READY" => "готово",
         "FAILED" => "ошибка",
         _ => stage

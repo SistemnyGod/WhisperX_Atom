@@ -30,6 +30,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly RawEncoderRuntimeState _encoderRuntimeState;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
     private readonly LiveAudioBroadcaster _liveAudio;
+    private readonly StorageRetentionMetrics _retentionMetrics;
     private readonly ILogger<RecorderHostRuntime> _logger;
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly SemaphoreSlim _recoveryGate = new(1, 1);
@@ -61,6 +62,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         RawEncoderRuntimeState encoderRuntimeState,
         RawFinalizerQueueMetrics rawFinalizerMetrics,
         LiveAudioBroadcaster liveAudio,
+        StorageRetentionMetrics retentionMetrics,
         ILogger<RecorderHostRuntime> logger)
     {
         _spool = spool;
@@ -77,6 +79,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _encoderRuntimeState = encoderRuntimeState;
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _liveAudio = liveAudio;
+        _retentionMetrics = retentionMetrics;
         _logger = logger;
         _engine.CaptureFailed += OnCaptureFailed;
         _systemEngine.CaptureFailed += OnCaptureFailed;
@@ -225,6 +228,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var systemTelemetry = _systemEngine.Telemetry;
         var effectiveSystemDevice = _systemEngine.SelectedDevice;
         var encoder = _encoderRuntimeState.Snapshot();
+        var retention = _retentionMetrics.Snapshot;
         var rawHealth = new RawChunkBacklog(0, 0, 0, 0, 0);
         try { rawHealth = await _spool.GetRawChunkBacklogAsync(cancellationToken: cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogDebug(ex, "Raw backlog is not available while Host is starting."); }
@@ -331,7 +335,16 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             EncoderCurrentChunkId: encoder.CurrentChunkId,
             EncoderLastSuccessAtUtc: encoder.LastSuccessAtUtc,
             EncoderLastErrorCode: encoder.LastErrorCode,
-            EncoderQueueDepth: encoder.QueueDepth);
+            EncoderQueueDepth: encoder.QueueDepth,
+            StorageRetentionLastRunAtUtc: retention.LastRunAtUtc,
+            StorageRetentionLastSuccessAtUtc: retention.LastSuccessAtUtc,
+            StorageRetentionRawBytesReclaimed: retention.LastRawBytesReclaimed,
+            StorageRetentionTransportBytesReclaimed: retention.LastTransportBytesReclaimed,
+            StorageRetentionPlayableBytesReclaimed: retention.LastPlayableBytesReclaimed,
+            StorageRetentionArchiveBytesReclaimed: retention.LastArchiveBytesReclaimed,
+            StorageRetentionTemporaryBytesReclaimed: retention.LastTemporaryBytesReclaimed,
+            StorageRetentionCandidates: retention.LastRetentionCandidates,
+            StorageRetentionFailures: retention.FailedRuns);
         return new AgentIpcResponse(
             _initializationError is null && !systemAudioUnavailable && _lastCaptureFailureCode is null,
             _engine.State.ToString(),

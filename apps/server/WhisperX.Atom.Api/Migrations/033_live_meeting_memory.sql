@@ -1,7 +1,8 @@
--- Ephemeral provisional ASR memory for questions during an active recording.
--- It deliberately contains text/timing metadata only: no audio and no
--- canonical transcript rows are written here. Rows expire automatically via
--- expires_at and are never used by final V1/V2 retrieval.
+-- Provisional ASR memory for questions during an active recording and the
+-- post-STOP hand-off. It deliberately contains text/timing metadata only:
+-- no audio and no canonical transcript rows are written here. Rows are kept
+-- until V1 is usable (with a safety deadline added by migration 036) and are
+-- never used by final V1/V2 retrieval.
 CREATE TABLE IF NOT EXISTS live_meeting_segments(
   id uuid PRIMARY KEY,
   meeting_id uuid NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,

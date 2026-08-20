@@ -24,6 +24,16 @@ $machineConfigPath = Join-Path ([Environment]::GetFolderPath([Environment+Specia
 $machineConfig = if (Test-Path -LiteralPath $machineConfigPath -PathType Leaf) {
     try { Get-Content -LiteralPath $machineConfigPath -Raw | ConvertFrom-Json } catch { $null }
 } else { $null }
+$machineServerOrigin = if ($machineConfig -and $machineConfig.serverOrigin) { [string]$machineConfig.serverOrigin } else { "http://192.168.2.194:8080" }
+$machineServerUri = $null
+$validMachineServerOrigin = (
+    [Uri]::TryCreate($machineServerOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$machineServerUri) -and
+    $machineServerUri.Scheme -in @("http", "https") -and
+    -not ($machineServerUri.IsLoopback -and $machineServerUri.Port -eq 0)
+)
+if (-not $validMachineServerOrigin) {
+    $machineServerOrigin = "http://192.168.2.194:8080"
+}
 $userInstallationId = if ($existing -and $existing.InstallationId) { [string]$existing.InstallationId } elseif ($existing -and $existing.installationId) { [string]$existing.installationId } else { $null }
 $machineInstallationId = if ($machineConfig -and $machineConfig.InstallationId) { [string]$machineConfig.InstallationId } elseif ($machineConfig -and $machineConfig.installationId) { [string]$machineConfig.installationId } else { $null }
 $validUserInstallationId = [Guid]::Empty
@@ -44,7 +54,7 @@ $requiresReselect = -not [string]::IsNullOrWhiteSpace($existingDevice) -and -not
 # The Host configuration is per user. Keep the encrypted token exactly as it
 # is; this installer never writes a plaintext token or changes DPAPI scope.
 $configuration = [ordered]@{
-    ServerUrl = if ($existing -and $existing.ServerUrl) { [string]$existing.ServerUrl } else { "" }
+    ServerUrl = if ($existing -and $existing.ServerUrl) { [string]$existing.ServerUrl } else { $machineServerOrigin.TrimEnd('/') }
     AgentId = if ($existing -and $existing.AgentId) { [string]$existing.AgentId } else { "" }
     Token = if ($existing -and $existing.Token) { [string]$existing.Token } else { "" }
     Encrypted = if ($existing -and $null -ne $existing.Encrypted) { [bool]$existing.Encrypted } else { $true }

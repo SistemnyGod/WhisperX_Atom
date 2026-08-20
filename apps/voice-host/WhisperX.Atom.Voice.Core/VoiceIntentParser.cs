@@ -3,12 +3,25 @@ using System.Globalization;
 namespace WhisperX.Atom.Voice;
 
 /// <summary>
-/// Deterministic command parser used after Vosk/whisper.cpp recognition.
-/// It deliberately accepts a small, explicit Russian vocabulary so that an
-/// uncertain free-form recognition cannot trigger a recorder command.
+/// Deterministic intent gate used after Vosk/whisper.cpp recognition.
+///
+/// Recorder mutations remain a small, explicit Russian vocabulary.  Every
+/// other confidently recognized non-empty utterance is deliberately classified
+/// as an AssistantQuery after the wake word. Empty, low-confidence or
+/// unrecognizable speech remains Unknown. This is the important safety
+/// boundary: arbitrary speech can only become an LLM request; it can never
+/// mutate the recorder unless it matched one of the explicit command forms
+/// above.
 /// </summary>
 public sealed class VoiceIntentParser
 {
+    /// <summary>
+    /// Default confidence floor for a recognized utterance. The runtime can
+    /// provide a sensitivity-specific value, but the parser itself remains
+    /// fail-closed when called directly by an IPC/self-test consumer.
+    /// </summary>
+    public const double DefaultMinimumConfidence = 0.55;
+
     // "Мифодий" is the product wake word. "Мефодий" is a common speech
     // recognition variant and "Атом" remains a temporary compatibility alias
     // for already trained users.
@@ -21,30 +34,52 @@ public sealed class VoiceIntentParser
             .Any(word => WakeWords.Contains(word, StringComparer.OrdinalIgnoreCase));
     }
 
-    public VoiceCommand Parse(string text, double confidence = 1.0)
+    public VoiceCommand Parse(
+        string text,
+        double confidence = 1.0,
+        double minimumConfidence = DefaultMinimumConfidence)
     {
         var normalized = Normalize(text);
         var withoutWake = RemoveWakeWord(normalized);
-        if (string.IsNullOrWhiteSpace(withoutWake))
+        var threshold = double.IsFinite(minimumConfidence)
+            ? Math.Clamp(minimumConfidence, 0d, 1d)
+            : DefaultMinimumConfidence;
+
+        // Low-confidence or non-finite recognition is never allowed to reach
+        // strict command matching. Only a confidently recognized command can
+        // mutate Recorder, while a confidently recognized non-command becomes
+        // AssistantQuery below.
+        if (string.IsNullOrWhiteSpace(withoutWake)
+            || !double.IsFinite(confidence)
+            || confidence < threshold)
             return new VoiceCommand(VoiceIntent.Unknown, text, confidence, CreatedAt: DateTimeOffset.UtcNow);
 
+        // Keep this table intentionally narrow. Infinitives and bare nouns
+        // are conversational text, not commands: for example, «остановить
+        // запись» and «начать запись» must reach the Assistant rather than
+        // mutate the Recorder. A command starts with an explicit imperative
+        // pattern (or one of the exact status/confirmation tokens).
         var intent = withoutWake switch
         {
-            var value when Matches(value, "начни запись", "начать запись", "запись", "старт") => VoiceIntent.StartRecording,
-            var value when Matches(value, "пауза", "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
-            var value when Matches(value, "продолжи", "продолжить", "возобнови запись") => VoiceIntent.ResumeRecording,
-            var value when Matches(value, "метка", "поставь метку", "добавь метку") => VoiceIntent.AddMarker,
-            var value when Matches(value, "решение", "отметь решение", "зафиксируй решение") => VoiceIntent.MarkDecision,
-            var value when Matches(value, "поручение", "отметь поручение", "зафиксируй поручение", "задача") => VoiceIntent.MarkActionItem,
-            var value when Matches(value, "статус", "состояние", "что происходит") => VoiceIntent.GetStatus,
-            var value when Matches(value, "заверши", "завершить", "останови запись", "стоп") => VoiceIntent.StopRecording,
+            var value when Matches(value, "начни запись") => VoiceIntent.StartRecording,
+            var value when Matches(value, "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
+            var value when Matches(value, "продолжи запись", "возобнови запись") => VoiceIntent.ResumeRecording,
+            var value when Matches(value, "поставь метку", "добавь метку") => VoiceIntent.AddMarker,
+            var value when Matches(value, "отметь решение", "зафиксируй решение") => VoiceIntent.MarkDecision,
+            var value when Matches(value, "отметь поручение", "зафиксируй поручение") => VoiceIntent.MarkActionItem,
+            var value when Matches(value, "статус", "состояние") => VoiceIntent.GetStatus,
+            var value when Matches(value, "заверши запись", "останови запись") => VoiceIntent.StopRecording,
             var value when Matches(value, "остановись", "замолчи", "прекрати говорить", "останови ответ") => VoiceIntent.StopSpeaking,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
-            _ => IsQuestion(withoutWake) ? VoiceIntent.HistoryQuestion : VoiceIntent.Unknown
+            // AssistantQuery is the canonical conversational intent.
+            // HistoryQuestion remains an enum alias for older IPC consumers.
+            // Context (GENERAL_CHAT/CURRENT_MEETING/LIVE_MEETING) is resolved
+            // centrally by the API, not in Voice Host.
+            _ => IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery : VoiceIntent.Unknown
         };
 
-        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.HistoryQuestion
+        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.AssistantQuery
             ? ExtractParameter(withoutWake, intent)
             : null;
         return new VoiceCommand(intent, text, confidence, parameter, DateTimeOffset.UtcNow);
@@ -70,7 +105,29 @@ public sealed class VoiceIntentParser
         || value.StartsWith("найди ", StringComparison.Ordinal)
         || value.StartsWith("объясни ", StringComparison.Ordinal)
         || value.StartsWith("прочитай ", StringComparison.Ordinal)
-        || value.StartsWith("сделай ", StringComparison.Ordinal);
+        || value.StartsWith("сделай ", StringComparison.Ordinal)
+        // Conversational requests are routed to the Assistant as well. They
+        // are intentionally not recorder commands, so they remain safe while
+        // capture is active and when no meeting is open.
+        || value is "привет" or "здравствуй" or "здравствуйте" or "добрый день" or "доброе утро" or "добрый вечер"
+        || value is "скажи привет" or "как дела" or "как тебя зовут" or "кто ты" or "спасибо" or "спасибо мифодий"
+        || value is "расскажи анекдот" or "пошути" or "поговори со мной"
+        || value.StartsWith("скажи ", StringComparison.Ordinal)
+        || value.StartsWith("пошути ", StringComparison.Ordinal)
+        || value.StartsWith("поговори ", StringComparison.Ordinal)
+        || value.StartsWith("переведи ", StringComparison.Ordinal)
+        || value.StartsWith("напиши ", StringComparison.Ordinal);
+
+    private static bool IsAssistantUtterance(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        if (IsQuestion(value)) return true;
+        // A short, confidently recognised phrase such as «погода» or
+        // «привет» is still a valid conversational request.  Confidence is
+        // checked by VoiceHostRuntime before this gate is executed, so this
+        // fallback does not turn low-quality audio into a recorder action.
+        return value.Length >= 2;
+    }
 
     private static bool Matches(string value, params string[] candidates) => candidates.Any(candidate =>
         value.Equals(candidate, StringComparison.Ordinal) || value.StartsWith(candidate + " ", StringComparison.Ordinal));

@@ -395,6 +395,13 @@ def test_summary_details_render_protocol_as_readable_sections_with_text_fallback
     assert "protocol.IsProtocol && protocol.IsValid" in codebehind
 
 
+def test_summary_registry_does_not_render_failed_content_as_raw_text():
+    view_model = (DESKTOP / "ViewModels" / "SummariesViewModel.cs").read_text(encoding="utf-8")
+    assert 'ContentValidity, "INVALID"' in view_model
+    assert 'GenerationState, "FAILED"' in view_model
+    assert "Саммари не показано" in view_model
+
+
 def test_summary_compact_mode_uses_master_detail_and_scoped_warning_notice():
     page = (DESKTOP / "Pages" / "SummariesPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "SummariesPage.xaml.cs").read_text(encoding="utf-8")

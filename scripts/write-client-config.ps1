@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ServerOrigin = "http://127.0.0.1:0",
+    [string]$ServerOrigin = "http://192.168.2.194:8080",
     [switch]$Managed,
     [ValidateSet("AUDIOGRAPH", "LEGACY_WASAPI")]
     [string]$CaptureEngine = ""

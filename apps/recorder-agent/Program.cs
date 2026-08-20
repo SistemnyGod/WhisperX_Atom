@@ -55,7 +55,7 @@ finally
     await Log.CloseAndFlushAsync();
 }
 
-public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, RecordingDeliveryCoordinator delivery, RawChunkRecovery rawRecovery, DeviceHealthMonitor deviceHealth, ILogger<RecorderWorker> logger) : BackgroundService
+public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, RecordingCoordinator recorder, AgentApiClient api, AgentStorageSettings storage, RecordingDeliveryCoordinator delivery, RawChunkRecovery rawRecovery, DeviceHealthMonitor deviceHealth, DeliveryWakeSignal deliveryWake, ILogger<RecorderWorker> logger) : BackgroundService
 {
     private RecorderRuntimeLease? _runtimeLease;
 
@@ -169,8 +169,29 @@ public sealed class RecorderWorker(SpoolStore spool, AgentStateMachine state, Re
                 cursor = await FlushPendingCommandResultsAsync(cursor, stoppingToken);
                 pollTimeout.CancelAfter(TimeSpan.FromSeconds(5));
                 IReadOnlyList<AgentCommandEnvelope> commands;
-                try { commands = await api.ReadCommandsAsync(cursor, pollTimeout.Token); }
-                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { commands = Array.Empty<AgentCommandEnvelope>(); }
+                // The command stream is also our bounded idle poll.  Race it
+                // with the coalesced delivery signal so a reconnect, a newly
+                // encoded FLAC, or a manual retry wakes delivery immediately
+                // instead of waiting for the next five-second stream timeout.
+                using var wakeCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var commandTask = api.ReadCommandsAsync(cursor, pollTimeout.Token);
+                var wakeTask = deliveryWake.WaitAsync(TimeSpan.FromSeconds(5), wakeCancellation.Token).AsTask();
+                if (await Task.WhenAny(commandTask, wakeTask).ConfigureAwait(false) == wakeTask)
+                {
+                    var woke = false;
+                    try { woke = await wakeTask.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { }
+                    if (woke) pollTimeout.Cancel();
+                    try { await commandTask.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { }
+                    commands = Array.Empty<AgentCommandEnvelope>();
+                }
+                else
+                {
+                    wakeCancellation.Cancel();
+                    try { commands = await commandTask.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { commands = Array.Empty<AgentCommandEnvelope>(); }
+                }
                 foreach (var command in commands)
                 {
                     var saved = await spool.GetCommandResultAsync(command.Id, stoppingToken);

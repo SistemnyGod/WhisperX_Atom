@@ -29,7 +29,11 @@ public enum VoiceIntent
     StopRecording,
     Confirm,
     Cancel,
-    HistoryQuestion,
+    // Canonical conversational intent. Keep the old member as an alias so
+    // older clients/tests that deserialize or compare HistoryQuestion remain
+    // compatible with the same numeric value.
+    AssistantQuery,
+    HistoryQuestion = AssistantQuery,
     StopSpeaking
 }
 
@@ -108,7 +112,9 @@ public sealed record VoiceHostSnapshot(
     long TtsLastSynthesisMs = 0,
     bool TtsFallbackUsed = false,
     string? TtsFallbackReason = null,
-    int TtsRestartCount = 0);
+    int TtsRestartCount = 0,
+    double? VoiceNoiseFloorDb = null,
+    double? VoiceVadThresholdDb = null);
 
 public sealed record VoiceResponse(
     string Text,

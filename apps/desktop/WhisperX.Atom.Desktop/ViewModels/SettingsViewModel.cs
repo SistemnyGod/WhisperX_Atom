@@ -42,6 +42,7 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceLevel = "—";
     private double _voiceLevelNormalized;
     private string _voiceSignalState = "Ожидание аудиокадров";
+    private string _voiceAcousticDiagnostics = "Автокалибровка: ожидание аудио";
     private string _voiceWakeWordMode = "—";
     private string _voiceRuntimeBuild = "—";
     private string _voiceRuntimeProcess = "—";
@@ -146,6 +147,7 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceLevel { get => _voiceLevel; private set => SetProperty(ref _voiceLevel, value); }
     public double VoiceLevelNormalized { get => _voiceLevelNormalized; private set => SetProperty(ref _voiceLevelNormalized, value); }
     public string VoiceSignalState { get => _voiceSignalState; private set => SetProperty(ref _voiceSignalState, value); }
+    public string VoiceAcousticDiagnostics { get => _voiceAcousticDiagnostics; private set => SetProperty(ref _voiceAcousticDiagnostics, value); }
     public string VoiceWakeWordMode { get => _voiceWakeWordMode; private set => SetProperty(ref _voiceWakeWordMode, value); }
     public string VoiceRuntimeBuild { get => _voiceRuntimeBuild; private set => SetProperty(ref _voiceRuntimeBuild, value); }
     public string VoiceRuntimeProcess { get => _voiceRuntimeProcess; private set => SetProperty(ref _voiceRuntimeProcess, value); }
@@ -224,6 +226,7 @@ public sealed class SettingsViewModel : ObservableObject
                 VoiceLiveMode = "Live-контекст: недоступен";
                 VoiceLiveTracks = "Дорожки: —";
                 VoiceLiveStats = "Live ASR: —";
+                VoiceAcousticDiagnostics = "Автокалибровка: нет данных";
                 var controllerError = _services.VoiceHost.LastErrorCode;
                 ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                     controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}",
@@ -278,6 +281,7 @@ public sealed class SettingsViewModel : ObservableObject
             };
             VoiceLiveTracks = $"Дорожки: микрофон — {LiveTrackLabel(response.LiveRoomTrackState)} · система — {LiveTrackLabel(response.LiveSystemTrackState)}";
             VoiceLiveStats = $"Live ASR: опубликовано {response.LiveSegmentsPublished} · подавлено {response.LiveSegmentsSuppressed} · drops {response.LiveAudioDrops}";
+            VoiceAcousticDiagnostics = $"Автокалибровка: шум {FormatDb(response.VoiceNoiseFloorDb)} · VAD {FormatDb(response.VoiceVadThresholdDb)}";
             var restartCount = _services.VoiceHost.RestartCount;
             if (_voiceRestartCountCache != restartCount)
             {
@@ -301,6 +305,7 @@ public sealed class SettingsViewModel : ObservableObject
             VoiceLiveMode = "Live-контекст: недоступен";
             VoiceLiveTracks = "Дорожки: —";
             VoiceLiveStats = "Live ASR: —";
+            VoiceAcousticDiagnostics = "Автокалибровка: ошибка чтения telemetry";
             var errorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
             ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                 $"Voice Host: {errorCode}",
@@ -404,6 +409,10 @@ public sealed class SettingsViewModel : ObservableObject
         _ => state
     };
 
+    private static string FormatDb(double? value) => value is double number && double.IsFinite(number)
+        ? $"{number:0.0} dBFS"
+        : "—";
+
     public async Task TestVoiceSpeechAsync(string phrase)
     {
         try
@@ -419,6 +428,37 @@ public sealed class SettingsViewModel : ObservableObject
     {
         try { _ = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("TEST_TTS"); }
         catch (Exception ex) { VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE"); }
+    }
+
+    public async Task CalibrateVoiceNoiseAsync()
+    {
+        try
+        {
+            VoiceAcousticDiagnostics = "Автокалибровка: не говорите 5 секунд…";
+            var client = new WhisperX.Atom.Desktop.VoiceHostClient();
+            var started = await client.SendAsync("CALIBRATION_START", new { phase = "NOISE" }).ConfigureAwait(true);
+            if (!started.Ok)
+            {
+                VoiceAcousticDiagnostics = $"Автокалибровка: {started.Error ?? "недоступна"}";
+                return;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(true);
+            var completed = await client.SendAsync("CALIBRATION_STOP").ConfigureAwait(true);
+            if (!completed.Ok || completed.Data is not JsonElement data)
+            {
+                VoiceAcousticDiagnostics = $"Автокалибровка: {completed.Error ?? "не завершена"}";
+                return;
+            }
+            var rmsDb = data.TryGetProperty("rmsDb", out var rms) && rms.TryGetDouble(out var rmsValue) ? rmsValue : (double?)null;
+            var peakDb = data.TryGetProperty("peakDb", out var peak) && peak.TryGetDouble(out var peakValue) ? peakValue : (double?)null;
+            var thresholdDb = data.TryGetProperty("recommendedVadThresholdDb", out var threshold) && threshold.TryGetDouble(out var thresholdValue) ? thresholdValue : (double?)null;
+            VoiceAcousticDiagnostics = $"Автокалибровка: шум {FormatDb(rmsDb)} · пик {FormatDb(peakDb)} · VAD {FormatDb(thresholdDb)}";
+        }
+        catch (Exception ex)
+        {
+            VoiceAcousticDiagnostics = "Автокалибровка: Voice Host недоступен";
+            VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+        }
     }
 
     private async Task ApplyVoiceSettingsAsync()

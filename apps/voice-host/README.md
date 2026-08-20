@@ -1,6 +1,6 @@
 # WhisperX Atom Voice Host
 
-`WhisperX.Atom.Voice.Host` is the hidden, Desktop-managed Windows SessionHost. It listens to the selected microphone in memory, recognizes the wake word `Мифодий` (aliases `Мефодий` and temporary `Атом`) and an explicit allowlist of fixed recorder commands. In managed mode it sends intents to the Desktop broker; Desktop is the only owner of Recorder commands and the Voice Host never owns recordings or spool data.
+`WhisperX.Atom.Voice.Host` is the hidden, Desktop-managed Windows SessionHost. It listens to the selected microphone in memory, recognizes the wake word `Мифодий` (aliases `Мефодий` and temporary `Атом`), executes only an explicit allowlist of fixed recorder commands, and forwards every other confident utterance to the conversational Assistant. In managed mode it sends intents to the Desktop broker; Desktop is the only owner of Recorder commands and the Voice Host never owns recordings or spool data.
 
 Until microphone and voice-to-answer acceptance are complete, the feature is
 marked **Experimental**. The Desktop Broker, Assistant API and grounded Qwen
@@ -50,7 +50,35 @@ installed Russian Windows voice.
 
 - Audio callback only copies into a bounded pooled queue.
 - One worker performs stateful WDL resampling and feeds Vosk 20 ms PCM16 frames.
+- The Voice Host applies a derived far-field front-end after resampling: a
+  speech-band high-pass, bounded adaptive gain and limiter. This copy is used
+  only by VAD/Vosk; Recorder durable PCM, FLAC and playable WAV retain the
+  original signal. The front-end is allocation-free per frame and resets only
+  with the Voice Host audio lifecycle.
+- VAD sensitivity and recognition confidence are separate policies. A high
+  VAD sensitivity no longer imposes a 0.68 floor on ordinary questions;
+  conversational queries use the recognition floor, while START/PAUSE/RESUME
+  use a stricter command threshold and STOP remains confirmation-gated below
+  0.70.
+- `STATUS` exposes the adaptive VAD noise floor and threshold in dBFS. Desktop
+  shows these values as an acoustic diagnostic, so a quiet or noisy room can
+  be calibrated from measured audio instead of a blind sensitivity guess.
+- `CALIBRATION_START`/`CALIBRATION_STOP` provide a short noise-floor sample
+  for the Settings button. The accumulator keeps only RMS/peak counters in
+  memory, never stores or transmits microphone bytes, and applies the measured
+  floor to the VAD policy after completion.
 - Bare commands cannot wake the assistant; fixed commands require a wake word.
+- After a wake word, the intent gate gives recorder mutations priority only for
+  the explicit command allowlist. Any confidently recognized non-empty
+  utterance becomes an `VoiceIntent.AssistantQuery` and `ASSISTANT_QUESTION` with
+  `requestedMode=AUTO`; the API resolves it to
+  `GENERAL_CHAT`, `CURRENT_MEETING`, or isolated `LIVE_MEETING`.
+  Empty, low-confidence, non-finite, or unrecognizable recognition remains
+  `Unknown` and cannot reach Recorder or the Assistant.
+- Voice Host always forwards conversational requests with `requestedMode=AUTO`.
+  It does not resolve `GENERAL_CHAT`, `CURRENT_MEETING`, or `LIVE_MEETING`;
+  that policy lives in the server `AssistantModeResolver` and is shared with
+  the Desktop text Assistant.
 - The bundled small model uses a documented phonetic `Мефодий` grammar fallback. Set `ATOM_VOSK_EXACT_WAKE_WORD=true` only with a model that contains the canonical `Мифодий` token; the runtime reports the active mode in health.
 - Stop executes immediately at confidence >= 0.70; otherwise it requires a separate `Мифодий, подтверждаю` within 10 seconds.
 - Managed startup validates the installed path, build identity, PID and parent process. `STATUS` remains available while startup is in progress; commands return `VOICE_HOST_NOT_INITIALIZED` until the runtime is ready.

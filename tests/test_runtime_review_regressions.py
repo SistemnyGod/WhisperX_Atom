@@ -206,6 +206,13 @@ def test_installer_requires_safe_idle_host_shutdown_before_update():
     assert "Prepare-RecorderHostUpdate" in installer
 
 
+def test_upgrade_preflight_fails_closed_when_recorder_state_exists_without_host():
+    preflight = read("apps/desktop/Installer/Preflight-Upgrade.ps1")
+    assert "Get-RecorderStateDatabasePath" in preflight
+    assert "INSTALL_BLOCKED_RECORDER_STATE_UNKNOWN" in preflight
+    assert "durable Recorder database exists" in preflight
+
+
 def test_desktop_distinguishes_running_host_from_unresponsive_pipe():
     controller = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderServiceController.cs")
     assert "InspectHostProcess" in controller

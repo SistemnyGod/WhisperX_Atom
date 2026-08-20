@@ -60,17 +60,27 @@ internal sealed class VoiceIntentBrokerClient
     public async Task<VoiceBrokerResponse> AskAssistantAsync(string question, string? requestedMode, bool testMode, CancellationToken cancellationToken, string? traceId = null, string? commandId = null)
     {
         traceId ??= Guid.NewGuid().ToString("N");
+        // Acceptance is durable on the server; a slow LAN must not leave the
+        // Voice Host in EXECUTING forever. This timeout applies only to this
+        // broker request and never cancels Recorder or host shutdown.
+        using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        requestTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var requestCancellation = requestTimeout.Token;
         try
         {
-            await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
+            await using var pipe = await ConnectWithRetryAsync(requestCancellation).ConfigureAwait(false);
             using var reader = new StreamReader(pipe);
             await using var writer = new StreamWriter(pipe) { AutoFlush = true };
             var request = new { command = "ASSISTANT_QUESTION", question, requestedMode = requestedMode ?? "AUTO", testMode, timestamp = DateTimeOffset.UtcNow, traceId, commandId };
-            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), requestCancellation).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(requestCancellation).ConfigureAwait(false);
             return string.IsNullOrWhiteSpace(line)
                 ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId)
                 : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json) ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", TraceId: traceId, CommandId: commandId);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "broker_timeout", TraceId: traceId, CommandId: commandId);
         }
         catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException)
         {

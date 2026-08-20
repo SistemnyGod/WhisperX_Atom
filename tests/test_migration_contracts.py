@@ -24,3 +24,11 @@ def test_migration_runner_uses_immutable_id_and_checksum_history():
     assert "schema_migration_checksums(version text PRIMARY KEY" in source
     assert "Path.GetFileNameWithoutExtension(file)" in source
     assert "MIGRATION_CHECKSUM_MISMATCH" in source
+
+
+def test_live_memory_retention_migration_keeps_stop_to_v1_handoff_bounded():
+    migration = (MIGRATIONS / "036_live_meeting_retention.sql").read_text(encoding="utf-8")
+    assert "retention_policy" in migration
+    assert "UNTIL_V1_READY" in migration
+    assert "CANONICALIZED" in migration
+    assert "7 days" in migration

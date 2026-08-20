@@ -27,6 +27,7 @@ public sealed record StorageRetentionPolicy(
     TimeSpan DiagnosticRetention,
     TimeSpan LocalMasterRetention,
     TimeSpan ServerArchiveRetention,
+    TimeSpan PlayableAudioRetention,
     int WarningPercent,
     int CriticalPercent,
     long BlockFreeBytes)
@@ -57,6 +58,7 @@ public sealed record StorageRetentionPolicy(
             ReadDays("WHISPERX_RETENTION_DIAGNOSTIC_DAYS", 14),
             ReadDays("WHISPERX_RETENTION_LOCAL_MASTER_DAYS", 0),
             ReadDays("WHISPERX_RETENTION_SERVER_ARCHIVE_DAYS", 0),
+            ReadHours("WHISPERX_RETENTION_PLAYABLE_HOURS", 24),
             ReadPercent("WHISPERX_STORAGE_WARNING_PERCENT", 15),
             ReadPercent("WHISPERX_STORAGE_CRITICAL_PERCENT", 8),
             blockBytes);

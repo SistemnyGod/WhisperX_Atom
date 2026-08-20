@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -16,6 +17,8 @@ public sealed partial class AssistantPage : Page
     private bool _showEvidence;
     private bool _showConversationList;
     private string? _lastLayoutKey;
+    private DispatcherQueueTimer? _assistantRefreshTimer;
+    private int _assistantRefreshInFlight;
 
     public AssistantPage() => InitializeComponent();
 
@@ -29,6 +32,10 @@ public sealed partial class AssistantPage : Page
         DataContext = _viewModel;
         _viewModel.PropertyChanged += ViewModel_PropertyChanged;
         _services.AssistantResultAvailable += Services_AssistantResultAvailable;
+        _assistantRefreshTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
+        _assistantRefreshTimer.Interval = TimeSpan.FromSeconds(3);
+        _assistantRefreshTimer.Tick += AssistantRefreshTimer_Tick;
+        _assistantRefreshTimer.Start();
         try { await _viewModel.LoadAsync(_pageCts.Token); ModeBox.SelectedItem = _viewModel.SelectedMode; ContextBox.SelectedItem = _viewModel.SelectedContext; UpdateState(); }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось загрузить ИИ-помощника.")); }
@@ -37,11 +44,36 @@ public sealed partial class AssistantPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         if (_services is not null) _services.AssistantResultAvailable -= Services_AssistantResultAvailable;
+        if (_assistantRefreshTimer is not null)
+        {
+            _assistantRefreshTimer.Stop();
+            _assistantRefreshTimer.Tick -= AssistantRefreshTimer_Tick;
+            _assistantRefreshTimer = null;
+        }
         _viewModel?.CancelPending();
         _pageCts?.Cancel();
         _pageCts?.Dispose();
         _pageCts = null;
         base.OnNavigatedFrom(e);
+    }
+
+    private async void AssistantRefreshTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        var viewModel = _viewModel;
+        var pageCts = _pageCts;
+        if (viewModel is null || pageCts is null || viewModel.IsAsking || !viewModel.HasPendingMessages)
+            return;
+        if (Interlocked.Exchange(ref _assistantRefreshInFlight, 1) != 0) return;
+        try
+        {
+            using var refreshCts = CancellationTokenSource.CreateLinkedTokenSource(pageCts.Token);
+            refreshCts.CancelAfter(TimeSpan.FromSeconds(5));
+            await viewModel.RefreshSelectedConversationAsync(refreshCts.Token);
+            UpdateState();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось обновить состояние ответа.")); }
+        finally { Interlocked.Exchange(ref _assistantRefreshInFlight, 0); }
     }
 
     private void Services_AssistantResultAvailable(Guid queryId, Guid? conversationId)

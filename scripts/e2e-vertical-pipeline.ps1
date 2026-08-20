@@ -57,10 +57,20 @@ try {
 
   $deadline = (Get-Date).AddSeconds($FinalizeTimeoutSeconds)
   $chain = $null
+  $v1ReadyAtUtc = $null
+  $mediaReadyAtUtc = $null
+  $enrichmentReadyAtUtc = $null
+  $summaryReadyAtUtc = $null
   do {
     try {
       $chains = @(Invoke-RestMethod -Uri "$url/api/meetings/$meetingId/pipeline" -WebSession $session -TimeoutSec 10)
       if ($chains.Count -gt 0) { $chain = $chains[$chains.Count - 1] }
+      if ($chain) {
+        if (-not $mediaReadyAtUtc -and [string]$chain.mediaStatus -in @("READY", "CONFIRMED")) { $mediaReadyAtUtc = [DateTimeOffset]::UtcNow.ToString("o") }
+        if (-not $v1ReadyAtUtc -and [string]$chain.transcriptV1Id -and [string]$chain.transcriptV1Status -in @("READY", "PARTIAL_READY")) { $v1ReadyAtUtc = [DateTimeOffset]::UtcNow.ToString("o") }
+        if (-not $enrichmentReadyAtUtc -and [string]$chain.transcriptV2Id -and [string]$chain.transcriptV2Status -in @("READY", "PARTIAL_READY")) { $enrichmentReadyAtUtc = [DateTimeOffset]::UtcNow.ToString("o") }
+        if (-not $summaryReadyAtUtc -and [string]$chain.summaryId -and [string]$chain.summaryStatus -in @("READY", "NEEDS_REVIEW")) { $summaryReadyAtUtc = [DateTimeOffset]::UtcNow.ToString("o") }
+      }
       if ($chain -and $chain.transcriptV2Id -and $chain.summaryId -and $chain.summaryStatus -in @("READY","NEEDS_REVIEW")) { break }
     } catch { }
     Start-Sleep -Seconds 3
@@ -98,6 +108,13 @@ try {
     summaryJobId = [string]$chain.summaryJobId
     summaryId = [string]$chain.summaryId
     pipelineCorrelationId = [string]$chain.pipelineCorrelationId
+    stageTimings = $chain.stageTimings
+    checkpoints = [ordered]@{
+      mediaReadyAtUtc = $mediaReadyAtUtc
+      transcriptV1ReadyAtUtc = $v1ReadyAtUtc
+      transcriptV2ReadyAtUtc = $enrichmentReadyAtUtc
+      summaryReadyAtUtc = $summaryReadyAtUtc
+    }
     stages = [ordered]@{ localReady = [string]$recorder.result.localFinalizeState; media = [string]$chain.mediaStatus; asr = [string]$chain.asrJobStatus; v1 = [string]$chain.transcriptV1Status; enrichment = [string]$chain.enrichmentJobStatus; v2 = [string]$chain.transcriptV2Status; summary = [string]$chain.summaryStatus }
     duplicateCheck = [ordered]@{ asrJobs = $asrCount; enrichmentJobs = $enrichmentCount; summaryJobs = $summaryCount; transcriptV1 = $v1Count; transcriptV2 = $v2Count }
     safety = [ordered]@{ audioIncluded = $false; transcriptIncluded = $false; credentialsIncluded = $false; tokensIncluded = $false }

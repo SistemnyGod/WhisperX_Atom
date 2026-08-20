@@ -62,7 +62,8 @@ public sealed record RecordingPipelineChain(
     string? SummaryJobStage,
     Guid? SummaryId,
     string? SummaryStatus,
-    string? PipelineCorrelationId);
+    string? PipelineCorrelationId,
+    JsonDocument? StageTimings = null);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt,
     string? ContentValidity = null, string? GenerationState = null, string? ErrorCode = null);
@@ -82,6 +83,16 @@ public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, s
     public JsonElement? Timings => AnswerMetadata?.RootElement.TryGetProperty("timings", out var timings) == true ? timings.Clone() : null;
 };
 public sealed record AssistantRequestRoute(string ResolvedMode, double Confidence, string? ErrorCode = null, string? Clarification = null);
+/// <summary>
+/// Cheap, scope-safe retrieval signal used by the API router.  It deliberately
+/// contains no transcript text: the worker remains the only component that
+/// materializes evidence for an Assistant answer.
+/// </summary>
+public sealed record AssistantRetrievalProbe(int MatchCount, double BestRank)
+{
+    public bool HasMatch => MatchCount > 0;
+    public bool HasStrongMatch => MatchCount > 0 && BestRank >= 0.05d;
+}
 public sealed record LiveMeetingAppendResult(Guid RecordingSessionId, int AcceptedCount);
 public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY");
 public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null);
@@ -795,7 +806,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                    r.enrichment_job_id,ej.status,ej.stage,
                    r.transcript_v2_id,v2.status,
                    r.summary_job_id,sj.status,sj.stage,
-                   r.summary_id,s.status,r.pipeline_correlation_id
+                   r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -820,7 +831,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             reader.IsDBNull(12) ? null : reader.GetGuid(12), reader.IsDBNull(13) ? null : reader.GetString(13),
             reader.IsDBNull(14) ? null : reader.GetGuid(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16),
             reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18),
-            reader.IsDBNull(19) ? null : reader.GetString(19));
+            reader.IsDBNull(19) ? null : reader.GetString(19),
+            reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20)));
     }
 
     public async Task<IReadOnlyList<RecordingPipelineChain>> GetMeetingPipelineChainsAsync(Guid meetingId)
@@ -830,7 +842,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             SELECT r.recording_session_id,r.meeting_id,r.media_asset_id,a.status,
                    r.asr_job_id,aj.status,aj.stage,r.transcript_v1_id,v1.status,
                    r.enrichment_job_id,ej.status,ej.stage,r.transcript_v2_id,v2.status,
-                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id
+                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -839,6 +851,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             LEFT JOIN transcripts v2 ON v2.id=r.transcript_v2_id
             LEFT JOIN jobs sj ON sj.id=r.summary_job_id
             LEFT JOIN summaries s ON s.id=r.summary_id
+            JOIN recording_sessions rs ON rs.id=r.recording_session_id
             WHERE r.meeting_id=@meeting ORDER BY r.created_at
             """, connection);
         command.Parameters.AddWithValue("meeting", meetingId);
@@ -853,7 +866,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 reader.IsDBNull(9) ? null : reader.GetGuid(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
                 reader.IsDBNull(12) ? null : reader.GetGuid(12), reader.IsDBNull(13) ? null : reader.GetString(13),
                 reader.IsDBNull(14) ? null : reader.GetGuid(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16),
-                reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetString(19)));
+                reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetString(19),
+                reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20))));
         }
         return result;
     }
@@ -894,9 +908,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Stores short-lived provisional ASR segments for the active recording.
-    /// This path is intentionally separate from transcript V1/V2 and requires
-    /// an active session owned by the authenticated user (or an operator).
+    /// Stores provisional ASR segments for an active or just-stopped
+    /// (FINALIZING) recording. The latter accepts recognizer tail segments
+    /// while rows are kept through STOP until a usable V1 exists (with a
+    /// seven-day safety deadline). It remains separate from transcript V1/V2
+    /// and requires a session owned by the authenticated user (or an operator).
     /// </summary>
     public async Task<LiveMeetingAppendResult?> AppendLiveMeetingSegmentsAsync(
         Guid meetingId,
@@ -913,7 +929,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             FROM recording_sessions
             WHERE meeting_id=@meeting
               AND (@session IS NULL OR id=@session)
-              AND state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT')
+              AND state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT','FINALIZING')
             ORDER BY started_at DESC,id DESC
             LIMIT 1
             FOR UPDATE
@@ -942,14 +958,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             if (string.Equals(item.ChannelRole, "MIC_FALLBACK", StringComparison.OrdinalIgnoreCase)
                 && sourceTrackType == "room-microphone") channelRole = "MIC_FALLBACK";
             await using var insert = new NpgsqlCommand("""
-                INSERT INTO live_meeting_segments(id,meeting_id,recording_session_id,start_ms,end_ms,text,confidence,revision,source_track_type,source_track_id,channel_role,quality_flags,captured_at,expires_at,created_by)
-                VALUES(@id,@meeting,@session,@start,@end,@text,@confidence,@revision,@sourceTrackType,@sourceTrackId,@channelRole,@qualityFlags,now(),now()+interval '5 minutes',@user)
+                INSERT INTO live_meeting_segments(id,meeting_id,recording_session_id,start_ms,end_ms,text,confidence,revision,source_track_type,source_track_id,channel_role,quality_flags,captured_at,expires_at,retention_policy,created_by)
+                VALUES(@id,@meeting,@session,@start,@end,@text,@confidence,@revision,@sourceTrackType,@sourceTrackId,@channelRole,@qualityFlags,now(),now()+interval '7 days','UNTIL_V1_READY',@user)
                 ON CONFLICT(id) DO UPDATE SET
                   text=EXCLUDED.text,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms,
                   confidence=EXCLUDED.confidence,revision=EXCLUDED.revision,
                   source_track_type=EXCLUDED.source_track_type,source_track_id=EXCLUDED.source_track_id,
                   channel_role=EXCLUDED.channel_role,quality_flags=EXCLUDED.quality_flags,
-                  captured_at=EXCLUDED.captured_at,expires_at=EXCLUDED.expires_at
+                  captured_at=EXCLUDED.captured_at,
+                  expires_at=GREATEST(live_meeting_segments.expires_at, EXCLUDED.expires_at),
+                  retention_policy='UNTIL_V1_READY'
                 WHERE live_meeting_segments.meeting_id=EXCLUDED.meeting_id
                   AND live_meeting_segments.recording_session_id=EXCLUDED.recording_session_id
                   AND EXCLUDED.revision >= live_meeting_segments.revision
@@ -972,10 +990,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var prune = new NpgsqlCommand("""
             DELETE FROM live_meeting_segments
             WHERE meeting_id=@meeting AND recording_session_id=@session
-              AND (expires_at <= now() OR id IN (
+              AND (expires_at <= now()
+                OR EXISTS (
+                  SELECT 1 FROM transcripts t
+                  WHERE t.meeting_id=live_meeting_segments.meeting_id
+                    AND t.version=1
+                    AND t.status IN ('READY','PARTIAL_READY')
+                ) OR id IN (
                 SELECT id FROM live_meeting_segments
                 WHERE meeting_id=@meeting AND recording_session_id=@session
-                ORDER BY captured_at DESC,id DESC OFFSET 256
+                ORDER BY captured_at DESC,id DESC OFFSET 8192
               ))
               AND NOT EXISTS (
                 SELECT 1 FROM assistant_live_query_evidence e
@@ -989,35 +1013,190 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return new LiveMeetingAppendResult(activeSessionId, accepted);
     }
 
-    public async Task<bool> HasLiveMeetingContextAsync(Guid meetingId)
+    public async Task<bool> HasLiveMeetingContextAsync(Guid meetingId, Guid? recordingSessionId = null)
     {
         await using var connection = await OpenAsync();
-        return await HasLiveMeetingContextAsync(connection, null, meetingId);
+        return await HasLiveMeetingContextAsync(connection, null, meetingId, recordingSessionId);
     }
 
-    public async Task<bool> HasActiveRecordingAsync(Guid meetingId)
+    public async Task<bool> HasActiveRecordingAsync(Guid meetingId, Guid? recordingSessionId = null)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand("""
             SELECT EXISTS(
               SELECT 1 FROM recording_sessions
               WHERE meeting_id=@meeting
-                AND state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT','FINALIZING'))
+                AND (@session IS NULL OR id=@session)
+                AND state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT'))
             """, connection);
         command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("session", (object?)recordingSessionId ?? DBNull.Value);
         return (bool)(await command.ExecuteScalarAsync() ?? false);
     }
 
-    private static async Task<bool> HasLiveMeetingContextAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, Guid meetingId)
+    /// <summary>
+    /// Probes only fresh provisional rows.  This is intentionally separate
+    /// from live_context in the worker: the API needs a small routing signal,
+    /// not the text that will become an immutable evidence snapshot.
+    /// </summary>
+    public async Task<AssistantRetrievalProbe> ProbeLiveAssistantContextAsync(
+        Guid meetingId,
+        Guid? userId,
+        bool includeAll,
+        string query,
+        Guid? recordingSessionId = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            WITH hits AS (
+                SELECT ts_rank_cd(
+                    to_tsvector('russian', COALESCE(l.text,'')),
+                    websearch_to_tsquery('russian', @query)) AS rank
+                FROM live_meeting_segments l
+                JOIN recording_sessions r ON r.id=l.recording_session_id
+                JOIN meetings m ON m.id=l.meeting_id
+                WHERE l.meeting_id=@meeting
+                  AND l.expires_at>now()
+                  AND (@session IS NULL OR r.id=@session)
+                  AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT','FINALIZING')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM transcripts t
+                    WHERE t.meeting_id=l.meeting_id
+                      AND t.version=1
+                      AND t.status IN ('READY','PARTIAL_READY')
+                  )
+                  AND (@include_all OR m.owner_id=@owner)
+                  AND to_tsvector('russian', COALESCE(l.text,''))
+                      @@ websearch_to_tsquery('russian', @query)
+            )
+            SELECT COUNT(*)::int, COALESCE(MAX(rank),0.0) FROM hits
+            """, connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("session", (object?)recordingSessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("owner", (object?)userId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("query", NormalizeAssistantProbeQuery(query));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return !await reader.ReadAsync(cancellationToken)
+            ? new AssistantRetrievalProbe(0, 0)
+            : new AssistantRetrievalProbe(reader.GetInt32(0), reader.IsDBNull(1) ? 0d : reader.GetDouble(1));
+    }
+
+    /// <summary>
+    /// Probes the latest usable transcript for one meeting.  The quality gate
+    /// is deliberately identical to Assistant retrieval, so AUTO routing can
+    /// never select a meeting whose canonical context the worker would reject.
+    /// </summary>
+    public async Task<AssistantRetrievalProbe> ProbeCurrentMeetingAssistantContextAsync(
+        Guid meetingId,
+        Guid? userId,
+        bool includeAll,
+        string query,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            WITH hits AS (
+                SELECT ts_rank_cd(
+                    to_tsvector('russian', COALESCE(s.text,'')),
+                    websearch_to_tsquery('russian', @query)) AS rank
+                FROM transcript_segments s
+                JOIN transcripts t ON t.id=s.transcript_id
+                JOIN meetings m ON m.id=t.meeting_id
+                WHERE t.meeting_id=@meeting
+                  AND (@include_all OR m.owner_id=@owner)
+                  AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                  AND t.status IN ('READY','PARTIAL_READY')
+                  AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY[
+                      'ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED',
+                      'SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY'])
+                  AND COALESCE(s.is_hidden,false)=false
+                  AND to_tsvector('russian', COALESCE(s.text,''))
+                      @@ websearch_to_tsquery('russian', @query)
+            )
+            SELECT COUNT(*)::int, COALESCE(MAX(rank),0.0) FROM hits
+            """, connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("owner", (object?)userId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("query", NormalizeAssistantProbeQuery(query));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return !await reader.ReadAsync(cancellationToken)
+            ? new AssistantRetrievalProbe(0, 0)
+            : new AssistantRetrievalProbe(reader.GetInt32(0), reader.IsDBNull(1) ? 0d : reader.GetDouble(1));
+    }
+
+    /// <summary>
+    /// History probe over meetings visible to the caller.  It returns only a
+    /// count/rank; the worker later applies hybrid retrieval and evidence
+    /// snapshots to the same RBAC boundary.
+    /// </summary>
+    public async Task<AssistantRetrievalProbe> ProbeMeetingMemoryAssistantContextAsync(
+        Guid? userId,
+        bool includeAll,
+        string query,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            WITH hits AS (
+                SELECT ts_rank_cd(
+                    to_tsvector('russian', COALESCE(s.text,'')),
+                    websearch_to_tsquery('russian', @query)) AS rank
+                FROM transcript_segments s
+                JOIN transcripts t ON t.id=s.transcript_id
+                JOIN meetings m ON m.id=t.meeting_id
+                WHERE (@include_all OR m.owner_id=@owner)
+                  AND m.created_at>=now()-interval '90 days'
+                  AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                  AND t.status IN ('READY','PARTIAL_READY')
+                  AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY[
+                      'ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED',
+                      'SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY'])
+                  AND COALESCE(s.is_hidden,false)=false
+                  AND to_tsvector('russian', COALESCE(s.text,''))
+                      @@ websearch_to_tsquery('russian', @query)
+            )
+            SELECT COUNT(*)::int, COALESCE(MAX(rank),0.0) FROM hits
+            """, connection);
+        command.Parameters.AddWithValue("owner", (object?)userId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("query", NormalizeAssistantProbeQuery(query));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return !await reader.ReadAsync(cancellationToken)
+            ? new AssistantRetrievalProbe(0, 0)
+            : new AssistantRetrievalProbe(reader.GetInt32(0), reader.IsDBNull(1) ? 0d : reader.GetDouble(1));
+    }
+
+    private static string NormalizeAssistantProbeQuery(string? query)
+    {
+        var normalized = string.Join(' ', (query ?? string.Empty).Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length > 1000 ? normalized[..1000] : normalized;
+    }
+
+    private static async Task<bool> HasLiveMeetingContextAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction? transaction,
+        Guid meetingId,
+        Guid? recordingSessionId = null)
     {
         await using var command = new NpgsqlCommand("""
             SELECT EXISTS(
               SELECT 1 FROM live_meeting_segments l
               JOIN recording_sessions r ON r.id=l.recording_session_id
               WHERE l.meeting_id=@meeting AND l.expires_at>now()
-                AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT'))
+                AND (@session IS NULL OR r.id=@session)
+                AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT','FINALIZING')
+                AND NOT EXISTS (
+                  SELECT 1 FROM transcripts t
+                  WHERE t.meeting_id=l.meeting_id
+                    AND t.version=1
+                    AND t.status IN ('READY','PARTIAL_READY')
+                ))
             """, connection, transaction);
         command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("session", (object?)recordingSessionId ?? DBNull.Value);
         return (bool)(await command.ExecuteScalarAsync() ?? false);
     }
 
@@ -1056,27 +1235,40 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.assistant',@payload::jsonb)", connection, tx);
         outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", payload);
         await outbox.ExecuteNonQueryAsync();
+        // The conversation keeps the last server-resolved scope. This is
+        // metadata only; factual context still comes exclusively from the
+        // retrieval snapshot created by the Assistant worker.
+        if (conversationId is Guid existingConversation && userId is Guid ownerUser)
+        {
+            await using var updateConversation = new NpgsqlCommand("""
+                UPDATE assistant_conversations
+                SET assistant_mode=@mode, updated_at=now()
+                WHERE id=@conversation AND user_id=@user AND deleted_at IS NULL
+                """, connection, tx);
+            updateConversation.Parameters.AddWithValue("mode", assistantMode);
+            updateConversation.Parameters.AddWithValue("conversation", existingConversation);
+            updateConversation.Parameters.AddWithValue("user", ownerUser);
+            await updateConversation.ExecuteNonQueryAsync();
+        }
         await tx.CommitAsync();
         return new AssistantQueryRow(id, meetingId, query, "QUEUED", null, null, JsonDocument.Parse("[]"), null, DateTime.UtcNow, null, assistantMode, requestedMode, routerConfidence, normalizedSource);
     }
 
     public static AssistantRequestRoute RouteAssistantRequest(string query, string? requestedMode, Guid? activeMeetingId, bool privileged)
-    {
-        var normalized = requestedMode?.Trim().ToUpperInvariant();
-        if (normalized is not (null or "" or "AUTO" or "GENERAL_CHAT" or "MEETING_MEMORY" or "MEETING_HISTORY" or "CURRENT_MEETING" or "LIVE_MEETING"))
-            return new("", 0, "ASSISTANT_MODE_INVALID");
-        var text = query.Trim().ToLowerInvariant();
-        var explicitGeneral = text.Contains("общий вопрос") || text.Contains("вне совещания") || text.Contains("просто объясни");
-        var explicitHistory = text.Contains("по истории") || text.Contains("когда обсуждали") || text.Contains("в прошлых совещаниях");
-        var generalShape = text.StartsWith("что такое ") || text.StartsWith("объясни ") || text.StartsWith("как работает ") || text.StartsWith("напиши ") || text.StartsWith("переведи ");
-        var mode = normalized is null or "" or "AUTO"
-            ? explicitGeneral || generalShape ? "GENERAL_CHAT" : explicitHistory ? "MEETING_MEMORY" : activeMeetingId.HasValue ? "CURRENT_MEETING" : ""
-            : normalized == "MEETING_HISTORY" ? "MEETING_MEMORY" : normalized;
-        if (mode == "GENERAL_CHAT") return new(mode, explicitGeneral || normalized == "GENERAL_CHAT" ? 0.98 : 0.82);
-        if (mode is "CURRENT_MEETING" or "LIVE_MEETING" && activeMeetingId is null) return new(mode, 0.55, "ASSISTANT_MEETING_REQUIRED", "Откройте нужное совещание, чтобы я отвечал по его контексту.");
-        if (string.IsNullOrWhiteSpace(mode)) return new("", 0.45, "ASSISTANT_CONTEXT_REQUIRED", "Уточните: ответить по текущему совещанию, по истории или в общем чате?");
-        return new(mode, explicitHistory || (normalized is not null && normalized != "AUTO") ? 0.94 : 0.86);
-    }
+        => AssistantModeResolver.ResolveStatic(query, requestedMode, activeMeetingId, privileged);
+
+    /// <summary>
+    /// Short conversational utterances remain available during recording.
+    /// They do not require transcript evidence and must not be forced into
+    /// the provisional LIVE_MEETING scope.
+    /// </summary>
+    // Kept as source-compatible shims for older contract tests and extensions.
+    // New request handling uses AssistantModeResolver exclusively.
+    private static bool IsGeneralConversationQuestion(string text)
+        => AssistantModeResolver.IsGeneralConversationQuestion(text);
+
+    private static bool LooksLikeMeetingQuestion(string text)
+        => AssistantModeResolver.LooksLikeMeetingQuestion(text);
 
     public async Task<IReadOnlyList<AssistantConversationRow>> ListAssistantConversationsAsync(Guid userId, bool includeArchived = false)
     {
@@ -1105,6 +1297,34 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             """, connection);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("user", userId);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadConversation(reader) : null;
+    }
+
+    /// <summary>
+    /// Returns the latest user-owned conversation for an AUTO follow-up when
+    /// Desktop has no local pointer (for example after a restart). Only the
+    /// opaque conversation scope is returned; message text remains in the
+    /// assistant subsystem and is never copied into a voice-specific store.
+    /// </summary>
+    public async Task<AssistantConversationRow?> GetLatestAssistantConversationAsync(
+        Guid userId,
+        Guid? meetingId,
+        string? requestedMode = "AUTO")
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT id,user_id,title,scope_type,meeting_id,archived_at IS NOT NULL,created_at,updated_at,assistant_mode
+            FROM assistant_conversations
+            WHERE user_id=@user AND deleted_at IS NULL AND archived_at IS NULL
+              AND (@meeting IS NULL OR meeting_id=@meeting)
+              AND (@mode='AUTO' OR @mode IS NULL OR assistant_mode=CASE WHEN @mode='MEETING_HISTORY' THEN 'MEETING_MEMORY' ELSE @mode END)
+            ORDER BY updated_at DESC,id DESC
+            LIMIT 1
+            """, connection);
+        command.Parameters.AddWithValue("user", userId);
+        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.AddWithValue("mode", string.IsNullOrWhiteSpace(requestedMode) ? "AUTO" : requestedMode.Trim().ToUpperInvariant());
         await using var reader = await command.ExecuteReaderAsync();
         return await reader.ReadAsync() ? ReadConversation(reader) : null;
     }

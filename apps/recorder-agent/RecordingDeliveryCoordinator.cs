@@ -113,6 +113,11 @@ public sealed class RecordingDeliveryCoordinator(
             errorDetail: null,
             clearError: true,
             cancellationToken: cancellationToken);
+        await RecordPipelineEventAsync(localSessionId, "PIPELINE_LOCAL_READY", new
+        {
+            localFinalizeState = "LOCAL_READY",
+            deliveryState
+        }, cancellationToken).ConfigureAwait(false);
         return new FinalizationResult(
             true,
             "LOCAL_READY",
@@ -233,6 +238,7 @@ public sealed class RecordingDeliveryCoordinator(
                 archivePath: archivePath,
                 preserveError: true,
                 cancellationToken: cancellationToken);
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_FLAC_READY", new { archivePath = Path.GetFileName(archivePath) }, cancellationToken).ConfigureAwait(false);
             return ("LOCAL_READY", archivePath);
         }
         catch (Exception ex)
@@ -318,6 +324,7 @@ public sealed class RecordingDeliveryCoordinator(
         {
             if (serverSessionId is not Guid server)
             {
+                await RecordPipelineEventAsync(localSessionId, "PIPELINE_BIND_STARTED", cancellationToken: cancellationToken).ConfigureAwait(false);
                 await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "BINDING", preserveError: true, cancellationToken: cancellationToken);
                 var tracks = await spool.GetTrackInfosAsync(localSessionId, cancellationToken);
                 if (tracks.Count == 0)
@@ -333,8 +340,10 @@ public sealed class RecordingDeliveryCoordinator(
                     tracks,
                     spool,
                     cancellationToken);
+                await RecordPipelineEventAsync(localSessionId, "PIPELINE_BOUND", new { serverSessionId = server }, cancellationToken).ConfigureAwait(false);
             }
 
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_UPLOAD_STARTED", cancellationToken: cancellationToken).ConfigureAwait(false);
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "UPLOADING",
                 preserveError: true,
@@ -362,6 +371,8 @@ public sealed class RecordingDeliveryCoordinator(
                     chunkMetrics.Failed > 0 ? "UPLOAD_RETRY_PENDING" : "UPLOAD_PENDING");
             }
 
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_UPLOAD_READY", new { chunks = chunkMetrics.Confirmed }, cancellationToken).ConfigureAwait(false);
+
             // A server session must not be finalized while any raw segment is
             // still WRITING/RAW_READY/ENCODING/ENCODE_FAILED. Ready chunks may
             // be uploaded now; the next background pass will finalize once the
@@ -377,6 +388,7 @@ public sealed class RecordingDeliveryCoordinator(
             }
 
             await spool.SetFinalizationStateAsync(localSessionId, deliveryState: "RECONCILING", preserveError: true, cancellationToken: cancellationToken);
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_FINALIZE_STARTED", new { serverSessionId = server }, cancellationToken).ConfigureAwait(false);
             var finalized = await api.FinalizeServerSessionAsync(server, localSessionId, spool, cancellationToken);
             if (!finalized.Accepted)
             {
@@ -385,6 +397,14 @@ public sealed class RecordingDeliveryCoordinator(
                     finalized.ErrorCode ?? "Server did not confirm the session",
                     cancellationToken);
             }
+
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_FINALIZE_ACCEPTED", new
+            {
+                mediaAssetId = finalized.MediaAssetId,
+                jobId = finalized.JobId,
+                meetingId = finalized.MeetingId,
+                traceId = finalized.TraceId
+            }, cancellationToken).ConfigureAwait(false);
 
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "WAITING_SERVER_ASSEMBLY",
@@ -406,6 +426,12 @@ public sealed class RecordingDeliveryCoordinator(
                 return new FinalizationResult(true, "SERVER_FINALIZE", null, true, null, server, null, null, finalized.MeetingId, finalized.MediaAssetId, finalized.JobId, finalized.TraceId);
 
             await spool.MarkMediaValidatedAsync(localSessionId, cancellationToken);
+            await RecordPipelineEventAsync(localSessionId, "PIPELINE_MEDIA_READY", new
+            {
+                mediaAssetId = finalized.MediaAssetId,
+                jobId = finalized.JobId,
+                meetingId = finalized.MeetingId
+            }, cancellationToken).ConfigureAwait(false);
             await spool.SetFinalizationStateAsync(localSessionId,
                 deliveryState: "CONFIRMED",
                 retryCount: 0,
@@ -445,6 +471,7 @@ public sealed class RecordingDeliveryCoordinator(
             nextRetryAtUtc: nextRetry,
             errorRetryable: true,
             cancellationToken: cancellationToken);
+        await RecordPipelineEventAsync(sessionId, "PIPELINE_DELIVERY_PENDING", new { errorCode, retryAtUtc = nextRetry }, cancellationToken).ConfigureAwait(false);
         // Local recording is complete and remains a successful local gate. The
         // background retry is represented by PENDING_SERVER, not a delivery
         // failure visible to the local acceptance gate.
@@ -468,7 +495,36 @@ public sealed class RecordingDeliveryCoordinator(
             traceId: result.TraceId,
             clearNextRetry: !result.Retryable,
             cancellationToken: cancellationToken);
+        await RecordPipelineEventAsync(sessionId, "PIPELINE_DELIVERY_FAILED", new
+        {
+            errorCode = result.ErrorCode,
+            retryable = result.Retryable,
+            traceId = result.TraceId
+        }, cancellationToken).ConfigureAwait(false);
         return result with { NextRetryAtUtc = nextRetry };
+    }
+
+    private async Task RecordPipelineEventAsync(
+        string sessionId,
+        string eventType,
+        object? payload = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            // The local event timeline is observability only.  A locked SQLite
+            // database or a full diagnostics spool must never turn a durable
+            // PCM/FLAC delivery result into a failed recording.
+            await spool.AddEventIfMissingAsync(
+                sessionId,
+                eventType,
+                payload is null ? "{}" : System.Text.Json.JsonSerializer.Serialize(payload),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Unable to persist pipeline event {EventType}. Session={SessionId}", eventType, sessionId);
+        }
     }
 
     private static TimeSpan GetRetryDelay(int retryCount)

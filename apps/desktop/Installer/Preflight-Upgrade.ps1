@@ -11,8 +11,19 @@ $voiceName = 'WhisperX.Atom.Voice.Host'
 $desktopName = 'WhisperX.Atom.Desktop'
 
 function Get-ProcessImagePathSafe([Diagnostics.Process]$Process) {
-    try { return [IO.Path]::GetFullPath($Process.MainModule.FileName) }
-    catch { throw "INSTALL_BLOCKED_UNINSPECTABLE_PROCESS: PID=$($Process.Id) Name=$($Process.ProcessName)" }
+    # Process.Path is the least-privileged query and works for a same-user
+    # unpackaged Host even when MainModule is blocked by cross-bitness or
+    # protected-process rules. Fall back to MainModule only when Path is not
+    # available; never continue with an unverified process.
+    try {
+        $path = [string]$Process.Path
+        if (-not [string]::IsNullOrWhiteSpace($path)) { return [IO.Path]::GetFullPath($path) }
+    } catch { }
+    try {
+        $path = [string]$Process.MainModule.FileName
+        if (-not [string]::IsNullOrWhiteSpace($path)) { return [IO.Path]::GetFullPath($path) }
+    } catch { }
+    throw "INSTALL_BLOCKED_UNINSPECTABLE_PROCESS: PID=$($Process.Id) Name=$($Process.ProcessName)"
 }
 
 function Test-InstalledProcess([Diagnostics.Process]$Process) {
@@ -71,6 +82,20 @@ function Wait-ProcessExit([Diagnostics.Process[]]$Processes, [DateTime]$Deadline
     throw "INSTALL_PROCESS_DID_NOT_EXIT: $($alive.Id -join ',')"
 }
 
+function Get-RecorderStateDatabasePath {
+    $commonData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($commonData)) { return $null }
+    return Join-Path $commonData 'WhisperXAtom\Agent\agent.db'
+}
+
+# An existing durable spool means that the Recorder owns user data even when
+# its process is currently down.  In that situation a missing Host/IPC is not
+# evidence of idleness: it can be a crash, a pending finalization, or an
+# active capture whose process has not been observed yet.  Do not let Setup
+# copy new Recorder binaries until the canonical Host can answer HEALTH.
+$stateDb = Get-RecorderStateDatabasePath
+$recorderStateExists = $null -ne $stateDb -and (Test-Path -LiteralPath $stateDb -PathType Leaf)
+
 # Fail closed if Windows cannot inspect the target process. Never terminate a
 # process merely because it has a familiar name; path ownership is the gate.
 $processes = @(
@@ -86,6 +111,9 @@ if ($null -ne $disk -and [int64]$disk.FreeSpace -lt 2GB) {
 }
 
 $recorder = @($processes | Where-Object ProcessName -eq $recorderName)
+if ($recorder.Count -eq 0 -and $recorderStateExists) {
+    throw 'INSTALL_BLOCKED_RECORDER_STATE_UNKNOWN: durable Recorder database exists but the canonical Host/IPC is unavailable.'
+}
 if ($recorder.Count -gt 0) {
     $health = Invoke-JsonPipe 'WhisperXAtomRecorderHost' 'HEALTH'
     if ($null -eq $health) { throw 'INSTALL_BLOCKED_UNRESPONSIVE_RECORDER_HOST' }

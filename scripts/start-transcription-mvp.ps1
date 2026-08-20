@@ -4,6 +4,10 @@ param(
     [switch]$SkipRecorder,
     [switch]$StartWatchdog,
     [switch]$Rebuild,
+    # The historical MVP mode is transcript-only by default. The full
+    # launcher opts in explicitly so a diagnostic run cannot unexpectedly
+    # reserve the GPU for Qwen.
+    [switch]$EnableSummary,
     [ValidateSet("host", "container")][string]$GpuMode = ""
 )
 
@@ -14,7 +18,13 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
 if ([string]::IsNullOrWhiteSpace($GpuMode)) { $GpuMode = if ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "host" } }
 $env:GPU_WORKER_MODE = $GpuMode
-$env:AUTO_SUMMARY_ENABLED = "false"
+$summaryEnabled = [bool]$EnableSummary
+$env:AUTO_SUMMARY_ENABLED = if ($summaryEnabled) { "true" } else { "false" }
+# Transcript-only mode must also disable the assistant flag. The API treats
+# either Assistant or automatic Summary as a reason to require summary-worker
+# readiness; leaving the default `ASSISTANT_ENABLED=true` would make the
+# intentionally worker-free MVP report itself unhealthy.
+$env:ASSISTANT_ENABLED = if ($summaryEnabled) { "true" } else { "false" }
 $env:DIARIZATION_MODE = "preferred"
 
 foreach ($required in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN")) {
@@ -34,22 +44,31 @@ Push-Location $repo
 try {
     docker info | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "DOCKER_UNAVAILABLE: Docker Desktop is not ready." }
-    & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile llm --profile llm-diagnostic stop summary-worker llama-server | Out-Null
+    # The diagnostic llama-server is never allowed to share the GPU with
+    # WhisperX. The managed Summary Worker owns its own short-lived llama
+    # runtime and must remain running when summaries are enabled.
+    if ($summaryEnabled) {
+        & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile llm-diagnostic stop llama-server | Out-Null
+    }
+    else {
+        & docker compose --env-file (Join-Path $repo ".env") -f compose.dev.yml --profile llm --profile llm-diagnostic stop summary-worker llama-server | Out-Null
+    }
 
     $compose = @("compose", "--env-file", (Join-Path $repo ".env"), "-f", "compose.dev.yml", "--profile", "core")
+    if ($summaryEnabled) { $compose += "--profile"; $compose += "llm" }
     if ($GpuMode -eq "container") { $compose += @("--profile", "gpu") }
     $compose += @("up", "-d", "--pull", "never")
     if ($Rebuild) { $compose += "--build" }
     & docker @compose
-    if ($LASTEXITCODE -ne 0) { throw "DOCKER_CORE_START_FAILED: transcript-only Compose could not start." }
+    if ($LASTEXITCODE -ne 0) { throw "DOCKER_CORE_START_FAILED: WhisperX Compose could not start." }
 
     if ($GpuMode -eq "host") {
         & (Join-Path $PSScriptRoot "start-host-gpu-worker.ps1") -PythonPath $env:WHISPERX_HOST_PYTHON
         if ($LASTEXITCODE -ne 0) { throw "HOST_WORKER_START_FAILED: host GPU Worker did not become ready." }
     }
 
-    & (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") -SkipRegistry
-    if ($LASTEXITCODE -ne 0) { throw "API_NOT_READY: Transcript MVP readiness check failed." }
+    & (Join-Path $PSScriptRoot "doctor-transcription-mvp.ps1") -SkipRegistry -ExpectSummary:$summaryEnabled
+    if ($LASTEXITCODE -ne 0) { throw "API_NOT_READY: WhisperX readiness check failed." }
 
     if (-not $SkipRecorder) {
         $captureEngine = (Resolve-RecorderRuntime).CaptureEngine
@@ -86,8 +105,10 @@ try {
         recorder = if ($SkipRecorder) { "OPTIONAL" } else { "READY" }
         desktop = if ($SkipDesktop) { "OPTIONAL" } else { "READY" }
         watchdog = if ($StartWatchdog -and $GpuMode -eq "host") { "READY" } else { "OPTIONAL" }
-        qwen = "DISABLED"
+        qwen = if ($summaryEnabled) { "ENABLED" } else { "DISABLED" }
+        automaticSummary = $summaryEnabled
     })
-    Write-Host "WhisperX runtime is ready. GPU mode: $GpuMode" -ForegroundColor Green
+    $summaryText = if ($summaryEnabled) { "automatic summaries enabled" } else { "transcript-only MVP" }
+    Write-Host "WhisperX runtime is ready. GPU mode: $GpuMode; $summaryText" -ForegroundColor Green
 }
 finally { Pop-Location }

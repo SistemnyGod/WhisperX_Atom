@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import socket
+import time
 from datetime import datetime
 from typing import Any
 import logging
@@ -156,6 +157,44 @@ class SummaryRepository:
                 (meeting_id,),
             ).fetchone()
             return str(row[0]) if row and row[0] else None
+
+    def record_pipeline_metrics(self, job_id: str, meeting_id: str, metrics: dict[str, Any] | None) -> None:
+        """Persist summary timings alongside the recording lineage.
+
+        Only bounded numeric diagnostics are stored.  This keeps the
+        per-recording trace useful after logs rotate without copying prompt,
+        answer or transcript content into ``stage_timings``.
+        """
+        if not isinstance(metrics, dict):
+            return
+        safe: dict[str, float | int] = {}
+        for key, value in metrics.items():
+            if isinstance(key, str) and len(key) <= 80 and isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric = float(value)
+                if numeric >= 0 and numeric == numeric and numeric != float("inf"):
+                    safe[key] = int(numeric) if isinstance(value, int) else round(numeric, 3)
+        if not safe:
+            return
+        with self._db.connection() as connection:
+            correlation = connection.execute(
+                "SELECT pipeline_correlation_id FROM jobs WHERE id=%s",
+                (job_id,),
+            ).fetchone()
+            if correlation and correlation[0]:
+                session = connection.execute(
+                    "SELECT id FROM recording_sessions WHERE pipeline_correlation_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (str(correlation[0]),),
+                ).fetchone()
+            else:
+                session = connection.execute(
+                    "SELECT id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (meeting_id,),
+                ).fetchone()
+            if session:
+                connection.execute(
+                    "UPDATE recording_sessions SET stage_timings=COALESCE(stage_timings,'{}'::jsonb) || %s::jsonb WHERE id=%s",
+                    (Jsonb(safe), session[0]),
+                )
 
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None) -> None:
         stage = validate_stage_name(stage)
@@ -452,6 +491,7 @@ class SummaryWorker:
 
 
     async def handle(self, payload: dict[str, Any]) -> None:
+        started_at = time.perf_counter()
         job_id = str(payload["job_id"])
         meeting_id = str(require_meeting_id(payload))
         transcript_id = str(payload["transcript_id"]) if payload.get("transcript_id") else None
@@ -472,6 +512,7 @@ class SummaryWorker:
                 raise RuntimeError("transcript_has_no_segments")
             self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 10)
             LOGGER.info("job=%s waiting for GPU lease", job_id)
+            llm_started_at = time.perf_counter()
             async with self._gpu_lease:
                 LOGGER.info("job=%s acquired GPU lease", job_id)
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
@@ -508,7 +549,21 @@ class SummaryWorker:
             LOGGER.info("job=%s released GPU lease", job_id)
             self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
             self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
+            persist_started_at = time.perf_counter()
             persisted = await asyncio.to_thread(self.repository.persist, job_id, meeting_id, transcript_id, result, self.model_alias)
+            try:
+                await asyncio.to_thread(
+                    self.repository.record_pipeline_metrics,
+                    job_id,
+                    meeting_id,
+                    {
+                        "summary_llm_ms": max(0.0, (time.perf_counter() - llm_started_at) * 1000.0),
+                        "summary_persist_ms": max(0.0, (time.perf_counter() - persist_started_at) * 1000.0),
+                        "summary_total_ms": max(0.0, (time.perf_counter() - started_at) * 1000.0),
+                    },
+                )
+            except Exception:
+                LOGGER.warning("summary_pipeline_metrics_persist_failed job=%s", job_id, exc_info=True)
             if not persisted:
                 LOGGER.info("summary job=%s result discarded because the meeting was cancelled or deleted", job_id)
                 await asyncio.to_thread(self.repository.release_message, message_id)

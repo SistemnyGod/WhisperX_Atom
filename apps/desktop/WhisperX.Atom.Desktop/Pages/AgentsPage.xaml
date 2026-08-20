@@ -160,6 +160,13 @@
                             <TextBlock Text="{Binding SystemAudioText}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
+                    <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+                        <StackPanel>
+                            <TextBlock Text="Retention локального хранилища" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Text="{Binding RetentionText}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock Grid.Column="1" Text="{Binding RetentionWarningText}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" VerticalAlignment="Bottom" />
+                    </Grid>
                 </StackPanel>
             </Border>
         </StackPanel>

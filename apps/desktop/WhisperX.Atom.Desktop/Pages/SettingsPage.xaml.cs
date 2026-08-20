@@ -277,6 +277,14 @@ public sealed partial class SettingsPage : Page
         UpdateStatus();
     }
 
+    private async void CalibrateVoiceButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.CalibrateVoiceNoiseAsync();
+        UpdateVoiceStatusVisual();
+        UpdateStatus();
+    }
+
     private async void RefreshVoiceButton_Click(object sender, RoutedEventArgs e)
     {
         await RefreshVoiceDiagnosticsAsync();

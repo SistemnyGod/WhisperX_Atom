@@ -372,8 +372,8 @@ def test_runtime_config_and_legacy_standby_preserve_the_audiograph_default():
     assert "Legacy Recorder Service is in standby" in service
     assert "RELEASE_DEFAULT" in script_resolver
     assert "WhisperXAtomRecorderHost" in script_resolver
-    assert "127.0.0.1:0" in config_writer
-    assert "192.168.2.194" not in config_writer
+    assert 'ServerOrigin = "http://192.168.2.194:8080"' in config_writer
+    assert "192.168.2.194" in config_writer
 
 
 def test_recorder_host_health_exposes_identity_for_desktop_bootstrap():

@@ -122,6 +122,46 @@ def test_host_runtime_automation_and_resumable_tus_contracts_are_explicit():
     assert "Register-ScheduledTask" in startup
 
 
+def test_e2e_result_captures_pipeline_lineage_and_stage_timings():
+    e2e = read("scripts/e2e-core.ps1")
+    assert '"/api/meetings/$($meeting.id)/pipeline"' in e2e
+    assert "pipelineChains = $pipelineChains" in e2e
+    assert "stageTimings =" in e2e
+
+
+def test_desktop_surfaces_stalled_queued_or_running_jobs_without_cancelling_them():
+    vm = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "JOB_QUEUED_TIMEOUT" in vm
+    assert "JOB_PROGRESS_STALLED" in vm
+    assert "TimeSpan.FromMinutes(2)" in vm
+    assert "TimeSpan.FromMinutes(30)" in vm
+    assert "durable-очереди" in vm
+    assert "jobCreationDeadline" in vm
+    assert "PROCESSING_JOB_NOT_CREATED" in vm
+    assert "DateTimeOffset.UtcNow < deadline" not in vm
+
+
+def test_gpu_pipeline_metrics_are_persisted_on_recording_lineage():
+    worker = read("workers/ml_worker/worker.py")
+    persistence = read("workers/ml_worker/persistence.py")
+    assert "pipeline_metrics" in worker
+    assert "record_pipeline_metrics" in worker
+    assert '"enrichment_" if enrichment_job else ""' in worker
+    assert "pipeline_metrics_persist_failed" in worker
+    assert "stage_timings" in persistence
+    assert "safe: dict[str, float | int | bool | None]" in persistence
+    assert "COALESCE(stage_timings,'{}'::jsonb) || %s::jsonb" in persistence
+
+
+def test_summary_pipeline_metrics_are_persisted_without_content():
+    worker = read("workers/summary_worker/worker.py")
+    assert "summary_llm_ms" in worker
+    assert "summary_persist_ms" in worker
+    assert "summary_total_ms" in worker
+    assert "record_pipeline_metrics" in worker
+    assert "summary_pipeline_metrics_persist_failed" in worker
+
+
 def test_release_gate_blocks_without_complete_live_core_evidence():
     gate = read("scripts/release-gate.ps1")
     e2e = read("scripts/e2e-core.ps1")

@@ -23,15 +23,21 @@ def test_lan_compose_publishes_only_gateway_and_uses_lan_environment():
     assert "SERVER_ORIGIN=http://192.168.2.194:8080" in example
 
 
-def test_client_has_no_machine_specific_server_fallback():
+def test_client_installer_pins_the_managed_lan_server_origin():
     agent = read("apps/recorder-agent/AgentApiClient.cs")
     desktop = read("apps/desktop/WhisperX.Atom.Desktop/DesktopSettings.cs")
     installer = read("apps/desktop/Installer/Install-Service.ps1")
+    iss = read("apps/desktop/Installer/WhisperXAtom.iss")
     assert "UnconfiguredServerSink" in agent
     assert "127.0.0.1:0" in desktop
-    assert "127.0.0.1:0" in installer
+    assert 'ServerOrigin = "http://192.168.2.194:8080"' in installer
+    assert 'defaultServerOrigin = "http://192.168.2.194:8080"' in installer
+    assert '-ServerOrigin ""{#ServerOrigin}""' in iss
     assert "192.168.2.194" not in desktop
     assert "uri.IsLoopback && uri.Port == 0" in agent
+    builder = read("scripts/build-installer.ps1")
+    assert "[string]$ServerOrigin" in builder
+    assert "/DServerOrigin=" in builder
 
 
 def test_lan_gateway_routes_only_api_health_and_files():
@@ -139,6 +145,12 @@ def test_health_and_version_endpoints_are_public_compatibility_contracts():
     assert 'app.MapGet("/health/ready"' in api
     assert 'app.MapGet("/api/system/version"' in api
     assert "serverTimeUtc" in api
+
+
+def test_installed_desktop_uses_direct_lan_http_without_inheriting_proxy_settings():
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+    assert "UseProxy = false" in client
+    assert "External proxy support is not part of" in client
 
 
 def test_readiness_checks_are_concurrent_safe_and_degrade_to_structured_status():

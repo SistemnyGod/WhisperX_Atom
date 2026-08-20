@@ -406,11 +406,12 @@ class AssistantRepository:
         return context, valid, ("ASR_DRAFT" if kinds and kinds <= {"ASR_DRAFT", "V1"} else "ENRICHED"), ("LOW_TRANSCRIPT_QUALITY" if low_quality else None)
 
     def live_context(self, meeting_id: str | None, query: str = "") -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
-        """Read only fresh provisional segments for LIVE_MEETING.
+        """Read provisional segments for LIVE_MEETING through the V1 hand-off.
 
-        This deliberately does not join transcripts and cannot see V1/V2.
-        The bounded in-memory ranking is sufficient for the short live window;
-        final retrieval remains the canonical Russian FTS path after STOP.
+        The rows remain separate from canonical transcripts while a recording
+        is active and while the session is FINALIZING. Once a usable V1 exists
+        the API cleanup path retires them, so this context can never replace
+        V1/V2. The database query still uses only text/timing/provenance.
         """
         self._last_retrieval_metadata = {
             "method": "LIVE_PROVISIONAL_LEXICAL",
@@ -427,9 +428,15 @@ class AssistantRepository:
                 FROM live_meeting_segments l
                 JOIN recording_sessions r ON r.id=l.recording_session_id
                 WHERE l.meeting_id=%s AND l.expires_at>now()
-                  AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT')
+                  AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT','FINALIZING')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM transcripts t
+                      WHERE t.meeting_id=l.meeting_id
+                        AND t.version=1
+                        AND t.status IN ('READY','PARTIAL_READY')
+                  )
                 ORDER BY start_ms,id
-                LIMIT 256
+                LIMIT 8192
                 """,
                 (meeting_id,),
             ).fetchall()
@@ -685,7 +692,8 @@ class AssistantWorker:
                     "Отвечай по-русски как доброжелательный универсальный помощник. "
                     "Это обычный чат, поэтому можно объяснять общие темы и помогать с текстами. "
                     "Не выдавай внутренние данные приложения за факты и верни только JSON с answer, voice_answer, evidence_segment_ids и claims. "
-                    "Для обычного чата evidence_segment_ids и claims должны быть пустыми массивами."
+                    "Для обычного чата evidence_segment_ids и claims должны быть пустыми массивами. "
+                    "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
                 user_content = f"Вопрос: {query}"
             elif assistant_mode == "LIVE_MEETING":
@@ -697,7 +705,8 @@ class AssistantWorker:
                 system_prompt = (
                     "Отвечай по-русски только по свежим provisional ASR-фрагментам текущего совещания. "
                     "Это оперативный черновой контекст, не финальная стенограмма: не добавляй факты, которых нет в сегментах. "
-                    "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds."
+                    "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds. "
+                    "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
                 user_content = f"Вопрос: {query}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
             else:
@@ -712,7 +721,8 @@ class AssistantWorker:
                 await asyncio.to_thread(self.repository.snapshot_evidence, query_id, valid)
                 system_prompt = (
                     "Отвечай по-русски. Используй только приведённые сегменты стенограмм. "
-                    "Не выдумывай факты. Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds."
+                    "Не выдумывай факты. Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds. "
+                    "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
                 user_content = f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"
             history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
@@ -721,6 +731,7 @@ class AssistantWorker:
                 *history,
                 {"role": "user", "content": user_content},
             ]
+            synthesis_completed = False
             async with self.lease:
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 try:
@@ -735,9 +746,15 @@ class AssistantWorker:
                             {"role": "user", "content": "Проверка grounding не пройдена. Верни только claims с существующими evidenceIds из контекста; каждый факт обязан иметь хотя бы один источник."},
                         ]
                         result = await client.invoke_json(retry_messages, ASSISTANT_SCHEMA)
+                    synthesis_completed = True
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
-                    await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id)
+                    # Do not turn a failed model start, timeout or malformed
+                    # response into a synthetic terminal answer.  The outer
+                    # failure path must be able to record FAILED/LLM_UNAVAILABLE
+                    # and leave the durable query retryable.
+                    if synthesis_completed:
+                        await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id)
         except Exception as exc:
             self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())
             LOGGER.exception("assistant query failed: %s", query_id)

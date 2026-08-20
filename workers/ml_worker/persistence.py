@@ -226,6 +226,54 @@ class JobRepository:
             ).fetchone()
             return str(row[0]) if row and row[0] else None
 
+    def record_pipeline_metrics(self, job_id: str, meeting_id: str, metrics: dict[str, Any] | None, prefix: str = "") -> None:
+        """Attach numeric GPU-pipeline metrics to the durable recording lineage.
+
+        The result metadata is useful for the worker log, but logs are not a
+        reliable per-recording audit trail.  Keep only bounded numeric fields
+        in ``recording_sessions.stage_timings``; transcript text, paths and
+        credentials never cross this diagnostic boundary.
+        """
+        if not isinstance(metrics, dict):
+            return
+        safe: dict[str, float | int | bool | None] = {}
+        for key, value in metrics.items():
+            if not isinstance(key, str) or len(key) > 80:
+                continue
+            storage_key = f"{prefix}{key}" if prefix else key
+            if isinstance(value, bool) or value is None:
+                if key in {"checkpoint_hit"}:
+                    safe[storage_key] = value
+                continue
+            if isinstance(value, (int, float)):
+                numeric = float(value)
+                if numeric >= 0 and numeric == numeric and numeric != float("inf"):
+                    safe[storage_key] = int(numeric) if isinstance(value, int) else round(numeric, 3)
+        if not safe:
+            return
+        payload = Jsonb(safe)
+        with self._db.connection() as connection:
+            correlation = connection.execute(
+                "SELECT pipeline_correlation_id FROM jobs WHERE id=%s",
+                (job_id,),
+            ).fetchone()
+            if correlation and correlation[0]:
+                session = connection.execute(
+                    "SELECT id FROM recording_sessions WHERE pipeline_correlation_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (str(correlation[0]),),
+                ).fetchone()
+            else:
+                session = connection.execute(
+                    "SELECT id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (meeting_id,),
+                ).fetchone()
+            if not session:
+                return
+            connection.execute(
+                "UPDATE recording_sessions SET stage_timings=COALESCE(stage_timings,'{}'::jsonb) || %s::jsonb WHERE id=%s",
+                (payload, session[0]),
+            )
+
     def job_type(self, job_id: str) -> str | None:
         with self._db.connection() as connection:
             row = connection.execute("SELECT type FROM jobs WHERE id=%s", (job_id,)).fetchone()

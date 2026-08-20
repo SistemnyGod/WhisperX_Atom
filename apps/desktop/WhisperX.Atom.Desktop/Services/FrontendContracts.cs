@@ -75,7 +75,7 @@ public interface IBackendService : IDisposable
     Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
-    Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, Guid? recordingSessionId = null, string? captureState = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default);
     Task<bool> PublishLiveMeetingSegmentsAsync(Guid meetingId, Guid? recordingSessionId, IReadOnlyList<DesktopLiveMeetingSegment> segments, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
     Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
@@ -182,24 +182,22 @@ public sealed class ActiveMeetingContext
 }
 
 /// <summary>
-/// Keeps only opaque server conversation identifiers for voice follow-ups.
+/// Keeps only an in-memory cache of opaque server conversation identifiers for
+/// voice follow-ups. Conversation history and scope truth live in the server
+/// assistant_conversations/assistant_messages tables; no voice-history file is
+/// created on the client.
 /// The key deliberately includes the authenticated user and the resolved
 /// scope, so a question from another meeting or user cannot inherit context.
 /// </summary>
 public sealed class VoiceAssistantConversationStore
 {
     private readonly object _gate = new();
-    private readonly string _path;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Dictionary<(Guid UserId, string Mode, Guid? MeetingId), (Guid ConversationId, DateTimeOffset ExpiresAt)> _items = new();
 
     public VoiceAssistantConversationStore(string? root = null, Func<DateTimeOffset>? clock = null)
     {
-        root ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "Assistant");
-        Directory.CreateDirectory(root);
-        _path = Path.Combine(root, "voice-conversations.json");
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
-        Load();
     }
 
     public Guid? Get(Guid userId, string mode, Guid? meetingId)
@@ -217,55 +215,16 @@ public sealed class VoiceAssistantConversationStore
         {
             Prune();
             _items[(userId, NormalizeMode(mode), meetingId)] = (conversationId, _clock().AddMinutes(30));
-            PersistLocked();
         }
     }
 
-    public void Clear() { lock (_gate) { _items.Clear(); PersistLocked(); } }
+    public void Clear() { lock (_gate) { _items.Clear(); } }
 
     private void Prune()
     {
         foreach (var key in _items.Where(item => item.Value.ExpiresAt <= _clock()).Select(item => item.Key).ToArray())
             _items.Remove(key);
     }
-
-    private void Load()
-    {
-        lock (_gate)
-        {
-            try
-            {
-                if (!File.Exists(_path)) return;
-                var persisted = JsonSerializer.Deserialize<Dictionary<string, PersistedConversation>>(File.ReadAllText(_path)) ?? [];
-                foreach (var item in persisted)
-                {
-                    var parts = item.Key.Split('|', 3);
-                    if (parts.Length != 3 || !Guid.TryParse(parts[0], out var userId) || !Guid.TryParse(item.Value.ConversationId, out var conversationId)) continue;
-                    Guid? meetingId = Guid.TryParse(parts[2], out var parsedMeeting) ? parsedMeeting : null;
-                    _items[(userId, parts[1], meetingId)] = (conversationId, item.Value.ExpiresAt);
-                }
-                Prune();
-            }
-            catch { _items.Clear(); }
-        }
-    }
-
-    private void PersistLocked()
-    {
-        try
-        {
-            var persisted = _items.ToDictionary(
-                item => $"{item.Key.UserId:N}|{item.Key.Mode}|{item.Key.MeetingId?.ToString("N") ?? "-"}",
-                item => new PersistedConversation(item.Value.ConversationId.ToString("N"), item.Value.ExpiresAt),
-                StringComparer.Ordinal);
-            var temporary = _path + ".part";
-            File.WriteAllText(temporary, JsonSerializer.Serialize(persisted));
-            File.Move(temporary, _path, true);
-        }
-        catch { /* runtime persistence is best effort; identifiers never contain user content */ }
-    }
-
-    private sealed record PersistedConversation(string ConversationId, DateTimeOffset ExpiresAt);
 
     private static string NormalizeMode(string? mode) => string.Equals(mode, "MEETING_HISTORY", StringComparison.OrdinalIgnoreCase)
         ? "MEETING_MEMORY"

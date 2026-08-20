@@ -23,8 +23,33 @@ def test_transcript_only_runtime_contract_is_explicit():
     assert '"up", "-d", "--pull", "never"' in start
     assert "Rebuild" in start
     assert "stop summary-worker llama-server" in start
+    assert "EnableSummary" in start
+    assert 'if ($summaryEnabled) { $compose += "--profile"; $compose += "llm" }' in start
+    assert 'qwen = if ($summaryEnabled) { "ENABLED" } else { "DISABLED" }' in start
+    assert '$env:ASSISTANT_ENABLED = if ($summaryEnabled) { "true" } else { "false" }' in start
     assert "doctor.json" in doctor
     assert "Runs = 5" in e2e
+    assert "WithSummary" in e2e
+    assert "-ExpectSummary:$WithSummary" in e2e
+    assert 'if ($WithLlm) { $env:AUTO_SUMMARY_ENABLED = "true" }' in read("scripts/e2e-core.ps1")
+
+
+def test_full_launcher_enables_summary_without_changing_transcript_only_mvp():
+    run = read("scripts/run-whisperx.ps1")
+    doctor = read("scripts/doctor-whisperx.ps1")
+    transcript_doctor = read("scripts/doctor-transcription-mvp.ps1")
+    assert "TranscriptOnly" in run
+    assert "params.EnableSummary = $true" in run
+    assert "-ExpectSummary:(!$TranscriptOnly)" in run
+    assert "[switch]$ExpectSummary" in doctor
+    assert "[switch]$TranscriptOnly" in doctor
+    assert "-WarningOnly:(!$ExpectSummary)" in transcript_doctor
+    assert 'if ($ExpectSummary -and $qwen.status -notin @("READY", "BUSY"))' in transcript_doctor
+    assert "$qwenRequiredFailure = $expectSummary" in doctor
+    assert "$failed = $failed -or ($transcriptExit -ne 0)" in doctor
+    assert "-TranscriptOnly:$TranscriptOnly" in run
+    env_example = read(".env.example")
+    assert "AUTO_SUMMARY_ENABLED=true" in env_example
 
 
 def test_processing_quality_gate_and_partial_result_contracts():

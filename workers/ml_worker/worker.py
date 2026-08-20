@@ -217,6 +217,20 @@ class GpuWorker:
                 payload["correlation_id"] = message.get("correlation_id") or payload.get("correlation_id")
                 payload["meeting_id"] = meeting_id
                 payload["processing_job_id"] = job_id
+                pipeline_metrics = payload.get("metadata", {}).get("pipeline_metrics") if isinstance(payload.get("metadata"), dict) else None
+                try:
+                    await asyncio.to_thread(
+                        self._repository.record_pipeline_metrics,
+                        job_id,
+                        meeting_id,
+                        pipeline_metrics,
+                        "enrichment_" if enrichment_job else "",
+                    )
+                except Exception:
+                    # Diagnostics must never turn a valid V1/V2 result into a
+                    # failed job when an older database has no timing column
+                    # or the telemetry write is temporarily unavailable.
+                    LOGGER.warning("pipeline_metrics_persist_failed job=%s", job_id, exc_info=True)
                 if asr_only_job:
                     # The callback persisted PARTIAL_READY V1 immediately
                     # after ASR. Closing this job must not create a second

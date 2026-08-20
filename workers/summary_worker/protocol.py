@@ -12,6 +12,12 @@ _STOPWORDS = {
     "нужно", "можно", "надо", "будем", "сегодня", "завтра", "вопрос", "тема",
 }
 
+_STRUCTURAL_ARTIFACTS = ("{'", '"SEG-ID"', "'SEG-ID'", "evidence_segment_ids", "__class__")
+
+
+def _contains_structural_artifact(value: Any) -> bool:
+    return isinstance(value, str) and any(token in value for token in _STRUCTURAL_ARTIFACTS)
+
 
 def validate_protocol_candidates(
     candidates: list[dict[str, Any]],
@@ -247,6 +253,9 @@ def validate_protocol_result(
     review_items = 0
 
     for item in normalized["questions_and_decisions"]:
+        if any(_contains_structural_artifact(item.get(field)) for field in ("topic", "context", "decision")):
+            rejected_items += 1
+            continue
         evidence = _unique_ids(item["evidence_segment_ids"], valid_ids)
         item["evidence_segment_ids"] = evidence
         reasons = [] if evidence and _claim_supported(
@@ -269,6 +278,9 @@ def validate_protocol_result(
         questions.append(item)
 
     for item in normalized["tasks"]:
+        if any(_contains_structural_artifact(item.get(field)) for field in ("task", "deadline_text")):
+            rejected_items += 1
+            continue
         evidence = _unique_ids(item["evidence_segment_ids"], valid_ids)
         item["evidence_segment_ids"] = evidence
         evidence_text = " ".join(segment_texts.get(value, "") for value in evidence)

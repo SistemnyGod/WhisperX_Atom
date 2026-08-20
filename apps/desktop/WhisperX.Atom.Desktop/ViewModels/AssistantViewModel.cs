@@ -70,6 +70,8 @@ public sealed class AssistantViewModel : ObservableObject
     public string RoleText { get => _roleText; private set => SetProperty(ref _roleText, value); }
     public bool HasConversations => Conversations.Count > 0;
     public bool HasMessages => Messages.Count > 0;
+    /// <summary>Whether the selected chat still has server-side work queued.</summary>
+    public bool HasPendingMessages => Messages.Any(item => !item.IsUser && !IsTerminalStatus(item.Status));
     public bool HasAnswer => !string.IsNullOrWhiteSpace(AnswerText);
     public bool HasEvidence => Evidence.Count > 0;
     public bool HasAnswerWithoutEvidence => HasAnswer && !HasEvidence;
@@ -199,6 +201,7 @@ public sealed class AssistantViewModel : ObservableObject
         Messages.Clear();
         foreach (var message in messages) Messages.Add(message);
         OnPropertyChanged(nameof(HasMessages));
+        OnPropertyChanged(nameof(HasPendingMessages));
         SelectedMessage = Messages.LastOrDefault(item => !item.IsUser) ?? Messages.LastOrDefault();
         StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status) : "Чат готов к вопросу.";
     }
@@ -211,6 +214,7 @@ public sealed class AssistantViewModel : ObservableObject
         Messages.Clear();
         foreach (var message in messages) Messages.Add(message);
         OnPropertyChanged(nameof(HasMessages));
+        OnPropertyChanged(nameof(HasPendingMessages));
         SelectedMessage = Messages.FirstOrDefault(item => item.Id == selectedId)
             ?? Messages.LastOrDefault(item => !item.IsUser)
             ?? Messages.LastOrDefault();
@@ -248,14 +252,35 @@ public sealed class AssistantViewModel : ObservableObject
             Messages.Add(result.AssistantMessage);
             Question = string.Empty;
             OnPropertyChanged(nameof(HasMessages));
+            OnPropertyChanged(nameof(HasPendingMessages));
             SelectedMessage = result.AssistantMessage;
-            StatusText = DisplayStatus(result.AssistantMessage.Status);
-            var completed = await _services.Backend.WaitForAssistantMessageAsync(Guid.Parse(SelectedConversation.Id), Guid.Parse(result.AssistantMessage.Id), cancellationToken);
+            StatusText = "Ответ готовится…";
+
+            // The POST is durable. Bound the foreground wait so a stalled SSE
+            // connection or a cold Qwen model cannot leave the composer in an
+            // endless "sending" state. The page refresh loop observes the
+            // same server-side message after this short window.
+            DesktopAssistantMessage? completed;
+            using (var responseWait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                responseWait.CancelAfter(TimeSpan.FromSeconds(15));
+                try
+                {
+                    completed = await _services.Backend.WaitForAssistantMessageAsync(
+                        Guid.Parse(SelectedConversation.Id),
+                        Guid.Parse(result.AssistantMessage.Id),
+                        responseWait.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    completed = null;
+                }
+            }
             if (completed is not null) ReplaceMessage(completed);
             if (completed is null)
             {
-                StatusText = "Ответ продолжает обрабатываться на сервере";
-                ErrorText = "Ожидание ответа завершено, но запрос сохранён. Откройте чат позже или нажмите «Обновить».";
+                StatusText = "Ответ готовится на сервере";
+                ErrorText = "Запрос сохранён. Открытый чат обновится автоматически, когда ответ будет готов.";
                 return;
             }
             SelectedMessage = completed;
@@ -296,6 +321,7 @@ public sealed class AssistantViewModel : ObservableObject
             Messages.Clear();
             Evidence.Clear();
             OnPropertyChanged(nameof(HasMessages));
+            OnPropertyChanged(nameof(HasPendingMessages));
         }
         OnPropertyChanged(nameof(HasConversations));
     }
@@ -358,6 +384,7 @@ public sealed class AssistantViewModel : ObservableObject
         if (index < 0) return;
         Messages[index] = message;
         OnPropertyChanged(nameof(HasMessages));
+        OnPropertyChanged(nameof(HasPendingMessages));
     }
 
     private void ApplySelectedMessage(DesktopAssistantMessage? message)
@@ -400,5 +427,15 @@ public sealed class AssistantViewModel : ObservableObject
         "FAILED" => "Помощник завершил запрос с ошибкой",
         _ => "Состояние неизвестно"
     };
+
+    private static bool IsTerminalStatus(string? status) => status is not null &&
+        (status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("ANSWERED", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("ANSWERED_WITH_WARNING", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("NO_EVIDENCE", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("GROUNDING_REJECTED", StringComparison.OrdinalIgnoreCase)
+         || status.Equals("LLM_UNAVAILABLE", StringComparison.OrdinalIgnoreCase));
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Помощник не выполнил запрос.");
 }

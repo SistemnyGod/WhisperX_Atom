@@ -14,6 +14,7 @@ builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", Log
 builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
 builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
+builder.Services.AddSingleton<AssistantModeResolver>();
 builder.Services.AddHostedService<OperationalRecoveryService>();
 builder.Services.AddHttpClient("nats-readiness", client => client.Timeout = TimeSpan.FromSeconds(2));
 static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
@@ -1529,8 +1530,9 @@ app.MapGet("/api/assistant/conversations", async (HttpContext context, UnifiedPr
         : Results.Ok(await store.ListAssistantConversationsAsync(userId.Value, includeArchived == true));
 });
 // Provisional ASR ingress for the active recording. This is intentionally
-// separate from transcript V1/V2: it is short-lived, text-only, and rejected
-// unless a matching recording session is currently active.
+// separate from transcript V1/V2: it is text-only and accepted while a
+// matching recording session is active or draining its FINALIZING tail. Rows
+// remain available through STOP until V1 is usable, with a bounded deadline.
 app.MapPost("/api/assistant/live-segments/{meetingId:guid}", async (Guid meetingId, LiveMeetingSegmentsRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context);
@@ -1544,7 +1546,13 @@ app.MapPost("/api/assistant/live-segments/{meetingId:guid}", async (Guid meeting
         request.Segments ?? Array.Empty<LiveMeetingSegmentRequest>());
     return result is null
         ? Results.Conflict(new { error = "LIVE_MEETING_NOT_ACTIVE", status = "LIVE_ASR_NOT_READY" })
-        : Results.Accepted($"/api/assistant/live-segments/{meetingId}", new { recordingSessionId = result.RecordingSessionId, acceptedCount = result.AcceptedCount, expiresInSeconds = 300 });
+        : Results.Accepted($"/api/assistant/live-segments/{meetingId}", new
+        {
+            recordingSessionId = result.RecordingSessionId,
+            acceptedCount = result.AcceptedCount,
+            expiresInSeconds = 7 * 24 * 60 * 60,
+            retentionPolicy = "UNTIL_V1_READY"
+        });
 });
 app.MapGet("/api/assistant/live-context/{meetingId:guid}", async (Guid meetingId, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1621,7 +1629,7 @@ app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{message
 // Unified entry point used by Desktop text chat and the managed Voice Host.
 // Voice never receives a server token: the Desktop broker forwards this call
 // with the user's authenticated API session and its active meeting context.
-app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, HttpContext context, UnifiedProductStore store) =>
+app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, HttpContext context, UnifiedProductStore store, AssistantModeResolver modeResolver, CancellationToken cancellationToken) =>
 {
     var userId = CurrentUserId(context);
     if (userId is null) return Results.Unauthorized();
@@ -1633,22 +1641,29 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
     if (request.ActiveMeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
         return Results.NotFound();
 
-    var route = UnifiedProductStore.RouteAssistantRequest(question, request.RequestedMode, request.ActiveMeetingId, IsPrivileged(context));
+    var route = await modeResolver.ResolveAsync(new AssistantModeResolutionRequest(
+        question,
+        request.RequestedMode,
+        userId,
+        request.ActiveMeetingId,
+        request.RecordingSessionId,
+        request.CaptureState,
+        request.ConversationId,
+        request.PreviousResolvedMode,
+        IsPrivileged(context)), cancellationToken);
+    // The resolver may recover a meeting scope from a persisted conversation
+    // after Desktop restart. Re-apply the HTTP RBAC check to that resolved
+    // id; checking only ActiveMeetingId would allow a stale conversation to
+    // create a query for a meeting the user no longer can access.
+    if (route.MeetingId is Guid resolvedMeetingForAccess && !await CanAccessMeetingAsync(context, resolvedMeetingForAccess))
+        return Results.NotFound();
+    if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
-    // Never answer from a stale canonical transcript while capture is active.
-    // If a provisional context exists, transparently move AUTO/CURRENT
-    // requests into the isolated LIVE_MEETING scope; otherwise fail closed.
-    if (route.ResolvedMode == "CURRENT_MEETING" && request.ActiveMeetingId is Guid recordingMeeting
-        && await store.HasActiveRecordingAsync(recordingMeeting))
-    {
-        if (!await store.HasLiveMeetingContextAsync(recordingMeeting))
-            return Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." });
-        route = route with { ResolvedMode = "LIVE_MEETING" };
-    }
     if (route.ResolvedMode == "LIVE_MEETING")
     {
-        if (request.ActiveMeetingId is not Guid liveMeeting || !await store.HasLiveMeetingContextAsync(liveMeeting))
+        if (route.MeetingId is null)
             return Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." });
     }
 
@@ -1657,14 +1672,14 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
     if (request.ConversationId is Guid suppliedConversation)
     {
         var existing = await store.GetAssistantConversationAsync(suppliedConversation, userId.Value);
-        var expectedMeeting = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
+        var expectedMeeting = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? route.MeetingId : null;
         var expectedScope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
         if (existing is null || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase) || existing.MeetingId != expectedMeeting)
             request = request with { ConversationId = null };
     }
 
     var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
-    var resolvedMeetingId = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
+    var resolvedMeetingId = route.MeetingId;
     // Keep voice and text requests in the same scoped conversation. A caller
     // may provide an existing conversation; otherwise create one atomically
     // in the resolved scope so follow-up questions retain context.
@@ -1689,24 +1704,38 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         status = query.Status,
         source = query.Source,
         routerConfidence = route.Confidence,
+        routingReason = route.Reason,
+        confidence = route.Confidence,
         pollUrl = $"/api/assistant/queries/{query.Id}",
         eventsUrl = $"/api/assistant/queries/{query.Id}/events"
     });
 });
-app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store) =>
+app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store, AssistantModeResolver modeResolver, CancellationToken cancellationToken) =>
 {
     if (request.MeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
         return Results.NotFound();
-    var mode = request.AssistantMode?.Trim().ToUpperInvariant();
-    if (mode == "GENERAL_CHAT")
-    {
-        if (CurrentUserId(context) is null) return Results.Unauthorized();
-        if (request.MeetingId is not null) return Results.BadRequest(new { error = "general_chat_cannot_use_meeting" });
-    }
-    else if (request.MeetingId is null && !IsPrivileged(context))
-        return Results.BadRequest(new { error = "meeting_required" });
-    var query = await store.CreateAssistantQueryAsync(request.MeetingId, request.Query, CurrentUserId(context), request.AssistantMode);
-    return query is null ? Results.BadRequest(new { error = "meeting_not_ready_or_query_invalid" }) : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var route = await modeResolver.ResolveAsync(new AssistantModeResolutionRequest(
+        request.Query,
+        request.AssistantMode ?? "AUTO",
+        userId,
+        request.MeetingId,
+        null,
+        null,
+        null,
+        null,
+        IsPrivileged(context)), cancellationToken);
+    if (route.MeetingId is Guid queryMeetingForAccess && !await CanAccessMeetingAsync(context, queryMeetingForAccess))
+        return Results.NotFound();
+    if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
+    if (!string.IsNullOrWhiteSpace(route.ErrorCode))
+        return Results.BadRequest(new { error = route.ErrorCode, spokenText = route.Clarification });
+    var query = await store.CreateAssistantQueryAsync(route.MeetingId, request.Query, userId, route.ResolvedMode);
+    return query is null
+        ? Results.BadRequest(new { error = "assistant_context_not_ready", routingReason = route.Reason })
+        : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
 });
 app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1922,7 +1951,17 @@ public record CreateTrackRequest(string TrackType, string? DeviceId, string? Dev
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
-public record AssistantRequestRequest(string Question, string? RequestedMode = "AUTO", Guid? ActiveMeetingId = null, Guid? ConversationId = null, string? Source = "DESKTOP", string? CommandId = null, string? TraceId = null);
+public record AssistantRequestRequest(
+    string Question,
+    string? RequestedMode = "AUTO",
+    Guid? ActiveMeetingId = null,
+    Guid? ConversationId = null,
+    string? Source = "DESKTOP",
+    string? CommandId = null,
+    string? TraceId = null,
+    Guid? RecordingSessionId = null,
+    string? CaptureState = null,
+    string? PreviousResolvedMode = null);
 public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
     string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 public sealed record LiveMeetingSegmentsRequest(Guid? RecordingSessionId, IReadOnlyList<LiveMeetingSegmentRequest> Segments);
@@ -2261,23 +2300,24 @@ public sealed class Database(IConfiguration configuration)
             await reviewMeetings.ExecuteNonQueryAsync(cancellationToken);
         }
         // LIVE_MEETING is provisional memory, never canonical transcript data.
-        // Expiry is enforced by the recovery loop as well as the ingest path so
-        // an idle server cannot retain live speech indefinitely. Keep a segment
-        // briefly while a non-terminal assistant query still references it;
-        // otherwise its FK evidence snapshot is allowed to cascade away.
+        // Keep it through STOP until a usable V1 exists. A seven-day expiry is
+        // only the safety deadline for a permanently stuck pipeline. Evidence
+        // snapshots keep their source rows so completed conversations remain
+        // auditable after the provisional context is retired.
         await using (var liveMemory = new NpgsqlCommand("""
             DELETE FROM live_meeting_segments AS segment
-            WHERE segment.expires_at <= now()
+            WHERE (
+                segment.expires_at <= now()
+                OR EXISTS (
+                    SELECT 1 FROM transcripts AS transcript
+                    WHERE transcript.meeting_id=segment.meeting_id
+                      AND transcript.version=1
+                      AND transcript.status IN ('READY','PARTIAL_READY')
+                )
+              )
               AND NOT EXISTS (
-                  SELECT 1
-                  FROM assistant_live_query_evidence AS evidence
-                  JOIN assistant_queries AS query ON query.id=evidence.query_id
+                  SELECT 1 FROM assistant_live_query_evidence AS evidence
                   WHERE evidence.live_segment_id=segment.id
-                    AND query.status NOT IN (
-                        'READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED',
-                        'NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED',
-                        'LLM_UNAVAILABLE')
-                    AND query.created_at > now()-interval '15 minutes'
               )
             """, connection, transaction))
         {

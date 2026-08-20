@@ -19,7 +19,7 @@
 
 ```text
 выбранный микрофон
-  → Voice Host / Vosk
+  → Voice Host / wake Vosk + unrestricted utterance Vosk
   → Desktop Voice Broker
       ├─ RecordingCommandService → Recorder Host
       └─ пользовательская API-сессия → Assistant API
@@ -47,7 +47,7 @@ Broker и текущую пользовательскую сессию.
 - `IMPLEMENTED`: live-телеметрия содержит RMS, peak, clipping, signal state,
   sequence и фактически открытый endpoint, но не содержит аудио.
 
-### Wake word и команды записи
+### Wake word, разговор и команды записи
 
 - `IMPLEMENTED`: основное имя — «Мифодий»; поддерживаются «Мефодий» и временный
   alias «Атом».
@@ -55,6 +55,22 @@ Broker и текущую пользовательскую сессию.
   `Мефодий`; exact-режим разрешён только для модели с соответствующим токеном.
 - `IMPLEMENTED`: START, STOP, PAUSE, RESUME, STATUS, marker, decision и action
   item распознаются до Assistant routing.
+- `IMPLEMENTED`: после wake word любой уверенно распознанный некомандный текст
+  получает канонический `VoiceIntent.AssistantQuery` и проходит в
+  `ASSISTANT_QUESTION`; старое имя `HistoryQuestion` оставлено только как
+  enum-алиас. Пустые, низкоуверенные, с NaN/Infinity в confidence и неразборчивые результаты
+  остаются `Unknown`. Voice Host не пытается определить тип бизнес-контекста
+  и не содержит LLM-логики.
+- `IMPLEMENTED`: Desktop Broker передаёт `requestedMode=AUTO` и активный
+  `meetingId` в API. Серверный `AssistantModeResolver` сначала пробует
+  retrieval в scope follow-up, затем live-контекст активной записи, текущую
+  встречу и history-память; только отсутствие сильного Russian FTS/evidence
+  совпадения в явно общем вопросе приводит к `GENERAL_CHAT`. Явно
+  исторический/совещательный вопрос без совпадения остаётся в
+  `MEETING_MEMORY`, чтобы worker вернул `NO_EVIDENCE`, а не придумал ответ из
+  общих знаний. Capture state, transcript quality и RBAC применяются на
+  стороне API/БД, поэтому текстовый и голосовой клиенты используют единый
+  routing contract, а ключевые слова остаются лишь подсказкой.
 - `IMPLEMENTED`: низкоуверенный STOP требует отдельного подтверждения в течение
   десяти секунд; повтор одной команды в течение двух секунд подавляется.
 - `IMPLEMENTED`: кнопки Desktop и голос используют один
@@ -75,13 +91,24 @@ Broker и текущую пользовательскую сессию.
 - `IMPLEMENTED`: `SYSTEM_RESPONSE_STARTED/FINISHED` создают sample-based
   технические интервалы. Сервер скрывает пересекающиеся технические сегменты
   из пользовательской стенограммы.
+- `IMPLEMENTED`: принятие Assistant-вопроса не озвучивает шаблонное
+  «вопрос принят» и не дублирует ответ. Voice Host возвращается к listening,
+  а в TTS попадает только поздний grounded `voice_answer`; во время реального
+  playback обе provisional-дорожки подавляются и возобновляются после
+  короткого tail-интервала.
 
-### Текстовый Assistant
+### Текстовый и голосовой Assistant
 
 - `IMPLEMENTED`: Desktop имеет страницу «ИИ-помощник», постоянные диалоги,
   сообщения, источники и переход к сегменту по таймкоду.
-- `IMPLEMENTED`: публичные режимы — `CURRENT_MEETING`, `MEETING_HISTORY` и
-  `GENERAL_CHAT`; внутренний `MEETING_MEMORY` сохраняется как alias истории.
+- `IMPLEMENTED`: после durable-приёма сообщения Desktop ждёт ответ в
+  foreground не более 15 секунд. Если Qwen холодный или SSE временно завис,
+  composer освобождается, а открытый чат обновляется раз в три секунды до
+  terminal-статуса; запрос не создаётся повторно.
+- `IMPLEMENTED`: публичный пользовательский режим — `AUTO`; серверный resolver
+  выбирает `GENERAL_CHAT`, `CURRENT_MEETING`, `MEETING_MEMORY` или
+  `LIVE_MEETING`. `MEETING_HISTORY` сохраняется как обратно совместимый alias
+  `MEETING_MEMORY`.
 - `IMPLEMENTED`: `CURRENT_MEETING` получает активный `meetingId` из открытой
   карточки совещания. Ordinary user ищет только по собственным доступным
   встречам; расширенный scope разрешён серверной ролью.
@@ -97,6 +124,9 @@ Broker и текущую пользовательскую сессию.
 - `IMPLEMENTED`: Qwen3-8B возвращает экранный `answer`, короткий
   `voice_answer`, evidence IDs и claims. Voice answer ограничивается тремя
   предложениями и 500 символами.
+- `IMPLEMENTED`: ошибка запуска/таймаута Qwen не превращается в пустой
+  `READY`: worker сохраняет terminal failure, а исходный запрос остаётся
+  видимым для retry.
 - `IMPLEMENTED`: для meeting-режимов проверяются evidence IDs, пересечение
   содержательных токенов и числовые значения. При первой ошибке разрешена одна
   повторная генерация; затем возвращается `GROUNDING_REJECTED`.
@@ -117,8 +147,8 @@ Broker и текущую пользовательскую сессию.
 ### LIVE-вопросы во время записи
 
 - `IMPLEMENTED`: вопросы во время `RECORDING`, `PAUSED`, `STARTING` и
-  `FINALIZING` не читают старую V1/V2. Broker направляет их в отдельный
-  `LIVE_MEETING` scope.
+  `FINALIZING` не читают старую V1/V2. API атомарно переводит `AUTO` в
+  отдельный `LIVE_MEETING` scope после проверки свежей provisional-памяти.
 - `IMPLEMENTED`: Voice Host ведёт отдельную unrestricted Vosk-сессию только
   пока Recorder активен и публикует текстовые provisional-сегменты через
   Desktop Broker. Канонический PCM этого контура не меняется.
@@ -129,9 +159,15 @@ Broker и текущую пользовательскую сессию.
 - `IMPLEMENTED`: подтверждённый ответ live-помечается
   `ANSWERED_WITH_WARNING`, `provisional=true`, `canonicalTranscript=false` и
   не становится Transcript V1/V2 или основанием для Summary.
-- `IMPLEMENTED`: live-память имеет TTL пять минут, лимит 256 сегментов и
-  фоновую очистку recovery-задачей. Незавершённый запрос удерживает нужные
-  сегменты не более 15 минут; затем live evidence удаляется каскадно.
+- `IMPLEMENTED`: live-память сохраняется на всё совещание и на переход
+  `STOP → FINALIZING → V1`. Для новых сегментов действует safety-expiry семь
+  дней, но обычная очистка выполняется сразу после пригодного V1. Хранилище
+  ограничено 8192 сегментами на сессию; строки, вошедшие в
+  `assistant_live_query_evidence`, не удаляются до завершения аудита.
+- `IMPLEMENTED`: после появления V1 resolver больше не выбирает
+  `LIVE_MEETING`: follow-up продолжает ту же беседу, но retrieval переключается
+  на канонический V1 (а затем V2). Provisional-текст никогда не становится
+  источником Summary или заменой V1/V2.
 - `RUNTIME_REQUIRED`: качество live ASR и задержка ответа ещё требуют
   установленной проверки на реальном микрофоне в активной встрече.
 

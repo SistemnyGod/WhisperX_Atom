@@ -41,6 +41,11 @@ dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --n
   -Runs 5
 ```
 
+Для вертикальной проверки `V1 → V2 → Summary` добавьте `-WithSummary`.
+Перед этим полный локальный runtime должен быть запущен через
+`.\scripts\run-whisperx.ps1` без `-TranscriptOnly`; параметр поднимет профиль
+`llm` и потребует готовый Summary Worker/Qwen.
+
 ## Ручные recovery-сценарии
 
 1. Остановить host GPU Worker во время job и убедиться, что watchdog восстанавливает процесс, а job получает redelivery.

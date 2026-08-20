@@ -9,6 +9,114 @@ from workers.nats_utils import ensure_stream
 from workers.runtime_heartbeat import AsyncHeartbeat
 
 
+def _watchdog_seconds(name: str, default: int, minimum: int) -> int:
+    try:
+        configured = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        configured = default
+    return max(minimum, configured)
+
+
+def recover_starved_queued(connection) -> int:
+    """Re-emit one durable event for a QUEUED job no worker has claimed.
+
+    A published outbox row only proves that the relay handed a message to
+    JetStream. If NATS or a consumer disappeared immediately afterwards, the
+    job can otherwise remain QUEUED forever. The watchdog is deliberately
+    one-shot per queue stall (the marker is cleared by normal retry/claim
+    transitions), and never steals a job with an active inbox lease.
+    """
+    stale_seconds = _watchdog_seconds("OUTBOX_QUEUED_WATCHDOG_SECONDS", 120, 60)
+    rows = connection.execute(f"""
+        SELECT j.id,j.meeting_id,j.type,j.stage,j.attempt,j.media_asset_id,
+               a.storage_key,a.asr_storage_key,a.source_type,
+               j.input_transcript_id,t.language,t.quality_metadata,
+               j.pipeline_correlation_id
+        FROM jobs j
+        LEFT JOIN media_assets a ON a.id=j.media_asset_id
+        LEFT JOIN transcripts t ON t.id=j.input_transcript_id
+        WHERE j.status='QUEUED'
+          AND j.updated_at < now() - interval '{stale_seconds} seconds'
+          -- The marker is only a debounce window, not a terminal state.  A
+          -- relay can mark the job and crash after the original outbox row
+          -- was marked published but before JetStream made it visible to a
+          -- consumer.  Allow another emission once the watchdog interval has
+          -- elapsed; otherwise the job would remain QUEUED forever.
+          AND (
+              COALESCE(j.error_code,'') <> 'QUEUED_WATCHDOG_REQUEUED'
+              OR j.updated_at < now() - interval '{stale_seconds} seconds'
+          )
+          AND j.type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE')
+          AND NOT EXISTS (
+              SELECT 1 FROM inbox_messages i
+              WHERE i.job_id=j.id AND i.lease_expires_at > now()
+          )
+        ORDER BY j.updated_at
+        FOR UPDATE OF j SKIP LOCKED
+    """).fetchall()
+    recovered = 0
+    for (
+        job_id, meeting_id, job_type, stage, attempt, asset_id,
+        storage_key, asr_storage_key, source_type,
+        transcript_id, language, quality_metadata, correlation_id,
+    ) in rows:
+        metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
+        normalized_type = str(job_type)
+        normalized_stage = str(stage or "")
+        if normalized_type == "SUMMARIZE":
+            topic = "llm.summarize"
+            payload = {
+                "message_id": str(__import__("uuid").uuid4()),
+                "job_id": str(job_id), "meeting_id": str(meeting_id),
+                "transcript_id": str(transcript_id) if transcript_id else None,
+                "source_hash": metadata.get("asr_audio_hash"),
+                "correlation_id": str(correlation_id) if correlation_id else None,
+            }
+        elif normalized_type == "TRANSCRIBE" and normalized_stage in {"INGEST", "UPLOADED", "VALIDATING", "NORMALIZING"}:
+            topic = "media.ingest"
+            payload = {
+                "message_id": str(__import__("uuid").uuid4()),
+                "job_id": str(job_id), "meeting_id": str(meeting_id),
+                "media_asset_id": str(asset_id) if asset_id else None,
+                "stage": normalized_stage or "UPLOADED", "attempt": int(attempt),
+                "storage_key": storage_key, "source_type": source_type,
+                "correlation_id": str(correlation_id) if correlation_id else None,
+            }
+        else:
+            topic = "ml.transcribe"
+            payload = {
+                "message_id": str(__import__("uuid").uuid4()),
+                "job_id": str(job_id), "meeting_id": str(meeting_id),
+                "media_asset_id": str(asset_id) if asset_id else None,
+                "transcript_id": str(transcript_id) if transcript_id else None,
+                "stage": normalized_stage or "ASR_READY", "attempt": int(attempt),
+                "storage_key": asr_storage_key or metadata.get("asr_storage_key"),
+                "source_type": source_type, "language": str(language or metadata.get("language") or "ru"),
+                "acousticProfile": str(metadata.get("acoustic_profile") or "AUTO"),
+                "correlation_id": str(correlation_id) if correlation_id else None,
+            }
+        connection.execute(
+            "UPDATE jobs SET error_code='QUEUED_WATCHDOG_REQUEUED',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='QUEUED'",
+            (job_id,),
+        )
+        pending = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic=%s AND payload->>'job_id'=%s AND published_at IS NULL)",
+            (topic, str(job_id)),
+        ).fetchone()[0]
+        if not pending:
+            # Do not rely on the historical row: it may already be marked
+            # published even though NATS/JetStream lost the hand-off.  A new
+            # message id is intentional; consumers deduplicate by durable
+            # job/transcript id, while the relay gets one fresh delivery
+            # opportunity.
+            connection.execute(
+                "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),%s,%s::jsonb)",
+                (topic, json.dumps(payload)),
+            )
+        recovered += 1
+    return recovered
+
+
 async def recover_expired(connection) -> None:
     """Repair events lost between an outbox publish and worker ACK.
 
@@ -19,7 +127,7 @@ async def recover_expired(connection) -> None:
     stale RUNNING jobs and lock rows so two relays cannot repair the same job
     concurrently.
     """
-    stale_seconds = max(30, int(os.getenv("OUTBOX_STALE_LEASE_SECONDS", "90")))
+    stale_seconds = _watchdog_seconds("OUTBOX_STALE_LEASE_SECONDS", 90, 30)
     now_stale = f"(j.last_heartbeat IS NULL OR j.lease_expires_at IS NULL OR j.lease_expires_at < now() OR j.last_heartbeat < now() - interval '{stale_seconds} seconds')"
 
     media_rows = connection.execute(f"""
@@ -153,6 +261,9 @@ async def run() -> None:
     while True:
         published = False
         with psycopg.connect(conninfo) as connection:
+            recovered = recover_starved_queued(connection)
+            if recovered:
+                print(f"outbox_queued_watchdog_requeued={recovered}", flush=True)
             await recover_expired(connection)
             row = connection.execute(
                 "SELECT id, topic, payload FROM outbox_messages WHERE published_at IS NULL ORDER BY created_at, id LIMIT 1"

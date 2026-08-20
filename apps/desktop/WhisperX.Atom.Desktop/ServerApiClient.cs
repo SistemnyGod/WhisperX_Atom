@@ -117,7 +117,18 @@ public sealed record DesktopJob(
             || errorCode.Equals("AUDIO_PROCESSING_ERROR", StringComparison.OrdinalIgnoreCase));
 }
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
-public sealed record DesktopAssistantRequestAccepted(string QueryId, string? ConversationId, string ResolvedMode, string? MeetingId, string Status, string Source, double RouterConfidence, string PollUrl, string EventsUrl);
+public sealed record DesktopAssistantRequestAccepted(
+    string QueryId,
+    string? ConversationId,
+    string ResolvedMode,
+    string? MeetingId,
+    string Status,
+    string Source,
+    double RouterConfidence,
+    string PollUrl,
+    string EventsUrl,
+    string? RoutingReason = null,
+    double? Confidence = null);
 public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
     string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 
@@ -164,13 +175,18 @@ public sealed class ServerApiClient : IDisposable
 
     public ServerApiClient(string? baseUrl = null)
     {
-        var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies };
+        // The installed client talks to the private LAN gateway directly. Do
+        // not inherit a developer/OS HTTP proxy here: a stale proxy can turn a
+        // reachable 192.168.x.x API into a misleading SERVER_TIMEOUT or
+        // SERVER_NETWORK_UNREACHABLE. External proxy support is not part of
+        // the LAN runtime contract.
+        var handler = new HttpClientHandler { UseCookies = true, CookieContainer = _cookies, UseProxy = false };
         _http = new HttpClient(handler)
         {
             BaseAddress = new Uri(NormalizeBaseUrl(baseUrl ?? DesktopSettings.DefaultApiUrl())),
             Timeout = ApiRequestTimeout
         };
-        _uploadHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        _uploadHttp = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
         var machineConfig = MachineServerConfig.Load();
         var serverOrigin = machineConfig?.Managed == true
             ? machineConfig.ServerOrigin
@@ -847,9 +863,9 @@ public sealed class ServerApiClient : IDisposable
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantQuery>(_json, cancellationToken);
     }
-    public async Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, CancellationToken cancellationToken = default)
+    public async Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, Guid? recordingSessionId = null, string? captureState = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/requests", new { question, requestedMode, activeMeetingId, conversationId, source, commandId, traceId }, cancellationToken);
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/requests", new { question, requestedMode, source, activeMeetingId, recordingSessionId, captureState, conversationId, previousResolvedMode, commandId, traceId }, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
     }

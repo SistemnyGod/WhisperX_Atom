@@ -27,6 +27,7 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
+if ($WithLlm) { $env:AUTO_SUMMARY_ENABLED = "true" }
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { $BaseUrl = if ($env:WHISPERX_DEV_API_URL) { $env:WHISPERX_DEV_API_URL } else { "http://127.0.0.1:8080" } }
 if ([string]::IsNullOrWhiteSpace($TusUrl)) { $TusUrl = if ($env:WHISPERX_TUS_URL) { $env:WHISPERX_TUS_URL } else { "$BaseUrl/files" } }
 if ([string]::IsNullOrWhiteSpace($Username)) { $Username = if ($env:BOOTSTRAP_ADMIN_USERNAME) { $env:BOOTSTRAP_ADMIN_USERNAME } else { "admin" } }
@@ -271,6 +272,8 @@ if ($meeting -and $WaitForGpu) {
 if ($meeting -and $ResultPath) {
   $media = @(Invoke-Api GET "/api/meetings/$($meeting.id)/media")
   $jobs = @(Invoke-Api GET "/api/meetings/$($meeting.id)/jobs")
+  $pipelineChains = @()
+  try { $pipelineChains = @(Invoke-Api GET "/api/meetings/$($meeting.id)/pipeline") } catch { $pipelineChains = @() }
   $traceJob = $jobs | Where-Object {
     $_.PSObject.Properties.Name -contains "traceId" -and -not [string]::IsNullOrWhiteSpace([string]$_.traceId)
   } | Select-Object -First 1
@@ -303,6 +306,10 @@ if ($meeting -and $ResultPath) {
     transcriptSegmentCount = if ($transcript) { @($transcript.segments).Count } else { 0 }
     summaryId = if ($summary) { [string]$summary.id } else { $null }
     summaryStatus = if ($summary) { [string]$summary.status } else { $null }
+    pipelineChains = $pipelineChains
+    stageTimings = @($pipelineChains | ForEach-Object {
+      if ($_.PSObject.Properties.Name -contains "stageTimings") { $_.stageTimings }
+    } | Where-Object { $null -ne $_ })
     localArchiveReady = $flacReady
     flacReady = $flacReady
     deliveryConfirmed = [bool]$DeliveryConfirmed

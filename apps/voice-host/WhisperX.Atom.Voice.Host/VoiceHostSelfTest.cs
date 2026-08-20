@@ -24,6 +24,20 @@ internal static class VoiceHostSelfTest
         Assert(tonePcm.Length > 0 && tonePcm.Length % 2 == 0, "tone conversion");
         Assert(!detector.IsSpeech(silencePcm, "balanced"), "silence VAD");
         Assert(detector.IsSpeech(tonePcm, "balanced"), "tone VAD");
+        var frontEnd = new VoiceAudioFrontEnd();
+        var quietVoice = new byte[320 * 2];
+        for (var sample = 0; sample < 320; sample++)
+        {
+            var value = (short)(Math.Sin(sample * 2 * Math.PI * 440 / 16000) * short.MaxValue * 0.02);
+            BitConverter.GetBytes(value).CopyTo(quietVoice, sample * 2);
+        }
+        var quietVoiceRms = PcmRms(quietVoice);
+        frontEnd.Process(quietVoice);
+        Assert(PcmRms(quietVoice) > quietVoiceRms, "far-field gain");
+        Assert(PcmPeak(quietVoice) <= 0.93, "far-field limiter");
+        var silenceVoice = new byte[quietVoice.Length];
+        frontEnd.Process(silenceVoice);
+        Assert(PcmRms(silenceVoice) < 0.01, "far-field silence gate");
         var silenceMetrics = VoiceAudioCapture.ComputeMetrics(silence, silence.Length, format);
         Assert(silenceMetrics.Rms == 0 && silenceMetrics.Peak == 0 && !silenceMetrics.Clipping, "silence telemetry");
         var toneMetrics = VoiceAudioCapture.ComputeMetrics(tone, tone.Length, format);
@@ -60,5 +74,26 @@ internal static class VoiceHostSelfTest
     private static void Assert(bool value, string name)
     {
         if (!value) throw new InvalidOperationException("Voice host self-test failed: " + name);
+    }
+
+    private static double PcmRms(byte[] pcm)
+    {
+        if (pcm.Length < 2) return 0;
+        var sum = 0d;
+        var count = pcm.Length / 2;
+        for (var i = 0; i < count; i++)
+        {
+            var value = BitConverter.ToInt16(pcm, i * 2) / (double)short.MaxValue;
+            sum += value * value;
+        }
+        return Math.Sqrt(sum / count);
+    }
+
+    private static double PcmPeak(byte[] pcm)
+    {
+        var peak = 0d;
+        for (var i = 0; i + 1 < pcm.Length; i += 2)
+            peak = Math.Max(peak, Math.Abs(BitConverter.ToInt16(pcm, i) / (double)short.MaxValue));
+        return peak;
     }
 }

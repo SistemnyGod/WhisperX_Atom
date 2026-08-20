@@ -132,8 +132,13 @@ Copy-Item .env.lan.example .env.lan
 Машинная настройка хранится в `C:\ProgramData\WhisperXAtom\client-config.json`:
 
 ```json
-{"schemaVersion":1,"serverOrigin":"http://192.168.2.194:8080","managed":true}
+{"schemaVersion":2,"serverOrigin":"http://192.168.2.194:8080","managed":true}
 ```
+
+Pilot-установщик передаёт этот LAN origin в `Install-Service.ps1` и создаёт
+такой же `ServerUrl` в пользовательской конфигурации Recorder. На обновлении
+существующий валидный origin сохраняется; инертный `http://127.0.0.1:0` не
+считается рабочим адресом и заменяется на `http://192.168.2.194:8080`.
 
 После входа Desktop выполняет `POST /api/agents/bootstrap`. Для нового InstallationId plaintext Agent token возвращается один раз, передаётся в Recorder по защищённому IPC и сохраняется DPAPI LocalMachine. Активный Agent при следующем входе только получает user-link; revoked Agent требует повторного enrollment.
 

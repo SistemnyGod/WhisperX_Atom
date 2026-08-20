@@ -126,7 +126,9 @@ public sealed record RecordingSessionInfo(
     string? PlayableAudioError = null,
     DateTimeOffset? PlayableAudioCreatedAtUtc = null,
     int PlayableAudioRetryCount = 0,
-    DateTimeOffset? PlayableAudioNextRetryAtUtc = null);
+    DateTimeOffset? PlayableAudioNextRetryAtUtc = null,
+    DateTimeOffset? PlayableAudioPurgeAfterUtc = null,
+    DateTimeOffset? PlayableAudioPurgedAtUtc = null);
 
 public sealed record LocalDurabilityOutcome(
     string State,
@@ -271,7 +273,9 @@ public sealed class SpoolStore
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_error TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_created_at TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_retry_count INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_next_retry_at TEXT"
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_next_retry_at TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_purge_after TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_purged_at TEXT"
         })
         {
             await using var stateMigration = connection.CreateCommand();
@@ -651,7 +655,7 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable,meeting_bind_state,delivery_mode,archive_error_code,archive_error_detail,archive_retry_count,archive_next_retry_at,acoustic_profile,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,playable_audio_retry_count,playable_audio_next_retry_at FROM recording_sessions WHERE id=$session";
+        command.CommandText = "SELECT meeting_id,title,started_at,state,local_finalize_state,delivery_state,archive_path,last_error_code,last_error_detail,retry_count,next_retry_at,media_asset_id,processing_job_id,trace_id,pipeline_correlation_id,server_accepted_at,media_validated_at,transport_purge_after,local_archive_purge_after,local_archive_purged_at,owner_user_id,last_error_http_status,last_error_retryable,meeting_bind_state,delivery_mode,archive_error_code,archive_error_detail,archive_retry_count,archive_next_retry_at,acoustic_profile,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,playable_audio_retry_count,playable_audio_next_retry_at,playable_audio_purge_after,playable_audio_purged_at FROM recording_sessions WHERE id=$session";
         command.Parameters.AddWithValue("$session", sessionId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -673,6 +677,8 @@ public sealed class SpoolStore
         DateTimeOffset? archiveRetryAt = reader.IsDBNull(28) ? null : DateTimeOffset.TryParse(reader.GetString(28), out var parsedArchiveRetry) ? parsedArchiveRetry : null;
         DateTimeOffset? playableCreatedAt = reader.IsDBNull(33) ? null : DateTimeOffset.TryParse(reader.GetString(33), out var parsedPlayableCreated) ? parsedPlayableCreated : null;
         DateTimeOffset? playableNextRetryAt = reader.IsDBNull(35) ? null : DateTimeOffset.TryParse(reader.GetString(35), out var parsedPlayableRetry) ? parsedPlayableRetry : null;
+        DateTimeOffset? playablePurgeAfter = reader.IsDBNull(36) ? null : DateTimeOffset.TryParse(reader.GetString(36), out var parsedPlayablePurge) ? parsedPlayablePurge : null;
+        DateTimeOffset? playablePurgedAt = reader.IsDBNull(37) ? null : DateTimeOffset.TryParse(reader.GetString(37), out var parsedPlayablePurged) ? parsedPlayablePurged : null;
         return new RecordingSessionInfo(
             sessionId,
             meetingId,
@@ -710,7 +716,9 @@ public sealed class SpoolStore
             reader.IsDBNull(32) ? null : reader.GetString(32),
             playableCreatedAt,
             reader.IsDBNull(34) ? 0 : reader.GetInt32(34),
-            playableNextRetryAt);
+            playableNextRetryAt,
+            playablePurgeAfter,
+            playablePurgedAt);
     }
 
     /// <summary>
@@ -2387,12 +2395,14 @@ public sealed class SpoolStore
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT s.id,s.transport_purge_after,c.local_path,c.size_bytes
+            SELECT s.id,s.transport_purge_after,c.local_path,c.size_bytes,s.archive_path
             FROM recording_sessions s
             JOIN recording_chunks c ON c.session_id=s.id AND c.status='CONFIRMED'
             WHERE s.media_validated_at IS NOT NULL
               AND s.transport_purge_after IS NOT NULL AND s.transport_purge_after <= $now
               AND s.delivery_state IN ('CONFIRMED','COMPLETED')
+              AND s.delivery_mode <> 'LOCAL_ONLY'
+              AND s.state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING')
               AND s.local_finalize_state='LOCAL_READY' AND s.archive_path IS NOT NULL
               AND s.playable_audio_state IN ('READY','NOT_REQUIRED')
               AND NOT EXISTS (SELECT 1 FROM recording_chunks pending WHERE pending.session_id=s.id AND pending.status<>'CONFIRMED')
@@ -2401,17 +2411,22 @@ public sealed class SpoolStore
             """;
         command.Parameters.AddWithValue("$now", now.ToString("O"));
         var grouped = new Dictionary<string, (DateTimeOffset PurgeAfter, List<string> Paths, long Bytes)>();
+        var archivePaths = new Dictionary<string, string?>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!DateTimeOffset.TryParse(reader.GetString(1), out var purgeAfter)) continue;
+            archivePaths[reader.GetString(0)] = reader.IsDBNull(4) ? null : reader.GetString(4);
             var entry = grouped.TryGetValue(reader.GetString(0), out var existing)
                 ? existing : (PurgeAfter: purgeAfter, Paths: new List<string>(), Bytes: 0L);
             entry.Paths.Add(reader.GetString(2));
             entry.Bytes += reader.GetInt64(3);
             grouped[reader.GetString(0)] = entry;
         }
-        return grouped.Select(item => new RetentionCandidate(item.Key, "transport", item.Value.Paths, item.Value.Bytes, item.Value.PurgeAfter)).ToArray();
+        return grouped
+            .Where(item => IsValidatedArchivePath(archivePaths.GetValueOrDefault(item.Key)))
+            .Select(item => new RetentionCandidate(item.Key, "transport", item.Value.Paths, item.Value.Bytes, item.Value.PurgeAfter))
+            .ToArray();
     }
 
     public async Task<IReadOnlyList<RetentionCandidate>> GetLocalArchivePurgeCandidatesAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
@@ -2424,9 +2439,11 @@ public sealed class SpoolStore
             FROM recording_sessions
             WHERE media_validated_at IS NOT NULL
               AND delivery_state IN ('CONFIRMED','COMPLETED')
+              AND delivery_mode <> 'LOCAL_ONLY'
               AND local_finalize_state='LOCAL_READY'
               AND local_archive_purge_after IS NOT NULL AND local_archive_purge_after <= $now
               AND local_archive_purged_at IS NULL
+              AND state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING')
             ORDER BY local_archive_purge_after
             """;
         command.Parameters.AddWithValue("$now", now.ToString("O"));
@@ -2436,6 +2453,7 @@ public sealed class SpoolStore
         {
             if (reader.IsDBNull(1) || !DateTimeOffset.TryParse(reader.GetString(2), out var purgeAfter)) continue;
             var directory = reader.GetString(1);
+            if (!IsValidatedArchivePath(directory)) continue;
             // Metadata remains in manifest.json; only derived/local audio can be
             // reclaimed after the server copy is confirmed.
             var paths = new[] { Path.Combine(directory, "export", "master.flac"), Path.Combine(directory, "export", "preview.opus") }
@@ -2446,47 +2464,306 @@ public sealed class SpoolStore
         return result;
     }
 
-    public async Task PurgeEligibleRawRecoveryAsync(CancellationToken cancellationToken = default)
+    private static bool IsValidatedArchivePath(string? directory)
     {
+        if (string.IsNullOrWhiteSpace(directory)) return false;
+        try
+        {
+            var root = Path.GetFullPath(directory);
+            var master = Path.Combine(root, "export", "master.flac");
+            var manifest = Path.Combine(root, "manifest.json");
+            if (!Directory.Exists(root) || !File.Exists(master) || !File.Exists(manifest)) return false;
+            if (new FileInfo(master).Length <= 0) return false;
+            using var document = JsonDocument.Parse(File.ReadAllText(manifest));
+            if (!document.RootElement.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array)
+                return false;
+            foreach (var file in files.EnumerateArray())
+            {
+                if (!file.TryGetProperty("relativePath", out var relative)
+                    || relative.ValueKind != JsonValueKind.String
+                    || !file.TryGetProperty("kind", out var kind)
+                    || kind.ValueKind != JsonValueKind.String
+                    || !file.TryGetProperty("name", out var name)
+                    || name.ValueKind != JsonValueKind.String)
+                    continue;
+                if (!string.Equals(kind.GetString(), "export", StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(name.GetString(), "master", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var manifestMaster = Path.GetFullPath(Path.Combine(root, relative.GetString()!));
+                return string.Equals(manifestMaster, master, StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(manifestMaster)
+                    && new FileInfo(manifestMaster).Length > 0;
+            }
+            return false;
+        }
+        catch (JsonException) { return false; }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
+    }
+
+    public async Task<int> ArmPlayableAudioRetentionAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var policy = StorageRetentionPolicy.FromEnvironment();
+        if (policy.PlayableAudioRetention <= TimeSpan.Zero) return 0;
+
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var select = connection.CreateCommand();
         select.CommandText = """
-            SELECT r.session_id,r.track_id,r.sequence,r.raw_path
-            FROM recording_raw_chunks r
-            WHERE r.status='READY' AND (r.error IS NULL OR r.error='')
-              AND r.raw_purge_after IS NOT NULL AND r.raw_purge_after <= $now
-              AND EXISTS (SELECT 1 FROM recording_chunks c WHERE c.session_id=r.session_id AND c.track_id=r.track_id AND c.sequence=r.sequence AND c.status IN ('READY','UPLOADING','CONFIRMED'))
-              AND EXISTS (SELECT 1 FROM recording_sessions s WHERE s.id=r.session_id AND s.playable_audio_state IN ('READY','NOT_REQUIRED'))
+            SELECT id,archive_path
+            FROM recording_sessions s
+            WHERE s.playable_audio_state='READY'
+              AND s.playable_audio_purge_after IS NULL
+              AND s.playable_audio_purged_at IS NULL
+              AND s.delivery_mode <> 'LOCAL_ONLY'
+              AND s.media_validated_at IS NOT NULL
+              AND s.delivery_state IN ('CONFIRMED','COMPLETED')
+              AND s.local_finalize_state='LOCAL_READY'
+              AND s.archive_path IS NOT NULL
+              AND s.state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING')
+              AND NOT EXISTS (SELECT 1 FROM recording_chunks c WHERE c.session_id=s.id AND c.status<>'CONFIRMED')
+              AND NOT EXISTS (SELECT 1 FROM recording_raw_chunks r WHERE r.session_id=s.id AND r.status<>'READY')
             """;
-        select.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
-        var rows = new List<(string SessionId, string TrackId, int Sequence, string RawPath)>();
+        var rows = new List<(string Id, string? ArchivePath)>();
         await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
-            while (await reader.ReadAsync(cancellationToken)) rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3)));
+        {
+            while (await reader.ReadAsync(cancellationToken))
+                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
 
+        var armed = 0;
+        var purgeAfter = now.Add(policy.PlayableAudioRetention).ToString("O");
         foreach (var row in rows)
         {
-            try { if (File.Exists(row.RawPath)) File.Delete(row.RawPath); }
+            if (!IsValidatedArchivePath(row.ArchivePath)) continue;
+            await using var update = connection.CreateCommand();
+            update.CommandText = """
+                UPDATE recording_sessions
+                SET playable_audio_purge_after=COALESCE(playable_audio_purge_after,$purge)
+                WHERE id=$id AND playable_audio_state='READY' AND playable_audio_purge_after IS NULL
+                  AND playable_audio_purged_at IS NULL AND delivery_mode<>'LOCAL_ONLY'
+                """;
+            update.Parameters.AddWithValue("$id", row.Id);
+            update.Parameters.AddWithValue("$purge", purgeAfter);
+            armed += await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+        return armed;
+    }
+
+    public async Task<IReadOnlyList<RetentionCandidate>> GetPlayableAudioPurgeCandidatesAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        if (StorageRetentionPolicy.FromEnvironment().PlayableAudioRetention <= TimeSpan.Zero)
+            return Array.Empty<RetentionCandidate>();
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.id,s.playable_audio_purge_after,f.local_path,f.size_bytes,s.archive_path
+            FROM recording_sessions s
+            JOIN recording_playable_files f ON f.session_id=s.id AND f.state='READY'
+            WHERE s.playable_audio_state='READY'
+              AND s.playable_audio_purge_after IS NOT NULL AND s.playable_audio_purge_after <= $now
+              AND s.playable_audio_purged_at IS NULL
+              AND s.delivery_mode <> 'LOCAL_ONLY'
+              AND s.media_validated_at IS NOT NULL
+              AND s.delivery_state IN ('CONFIRMED','COMPLETED')
+              AND s.local_finalize_state='LOCAL_READY'
+              AND s.archive_path IS NOT NULL
+              AND s.state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING')
+              AND NOT EXISTS (SELECT 1 FROM recording_chunks c WHERE c.session_id=s.id AND c.status<>'CONFIRMED')
+              AND NOT EXISTS (SELECT 1 FROM recording_raw_chunks r WHERE r.session_id=s.id AND r.status<>'READY')
+            ORDER BY s.playable_audio_purge_after,f.local_path
+            """;
+        command.Parameters.AddWithValue("$now", now.ToString("O"));
+        var grouped = new Dictionary<string, (DateTimeOffset PurgeAfter, List<string> Paths, long Bytes, string? ArchivePath)>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!DateTimeOffset.TryParse(reader.GetString(1), out var purgeAfter)) continue;
+            var id = reader.GetString(0);
+            var entry = grouped.TryGetValue(id, out var existing)
+                ? existing
+                : (PurgeAfter: purgeAfter, Paths: new List<string>(), Bytes: 0L, ArchivePath: reader.IsDBNull(4) ? null : reader.GetString(4));
+            entry.Paths.Add(reader.GetString(2));
+            entry.Bytes += reader.GetInt64(3);
+            grouped[id] = entry;
+        }
+        return grouped
+            .Where(item => IsValidatedArchivePath(item.Value.ArchivePath))
+            .Select(item => new RetentionCandidate(item.Key, "playableAudio", item.Value.Paths, item.Value.Bytes, item.Value.PurgeAfter))
+            .ToArray();
+    }
+
+    public async Task<long> PurgeEligiblePlayableAudioAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        long reclaimed = 0;
+        foreach (var candidate in await GetPlayableAudioPurgeCandidatesAsync(now, cancellationToken))
+        {
+            var failed = false;
+            foreach (var path in candidate.Paths.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (!File.Exists(path)) continue;
+                    var length = new FileInfo(path).Length;
+                    File.Delete(path);
+                    reclaimed += length;
+                }
+                catch (IOException) { failed = true; }
+                catch (UnauthorizedAccessException) { failed = true; }
+            }
+            if (failed) continue;
+
+            await using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using (var files = connection.CreateCommand())
+            {
+                files.Transaction = transaction;
+                files.CommandText = "UPDATE recording_playable_files SET state='PURGED' WHERE session_id=$session AND state='READY'";
+                files.Parameters.AddWithValue("$session", candidate.SessionId);
+                await files.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await using (var session = connection.CreateCommand())
+            {
+                session.Transaction = transaction;
+                session.CommandText = "UPDATE recording_sessions SET playable_audio_state='PURGED', playable_audio_purged_at=$now WHERE id=$session AND playable_audio_state='READY' AND playable_audio_purge_after IS NOT NULL AND playable_audio_purge_after <= $now AND delivery_mode<>'LOCAL_ONLY'";
+                session.Parameters.AddWithValue("$session", candidate.SessionId);
+                session.Parameters.AddWithValue("$now", now.ToString("O"));
+                await session.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        return reclaimed;
+    }
+
+    public async Task<long> CleanupStaleGeneratedPartsAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var cutoff = now - StorageRetentionPolicy.FromEnvironment().TemporaryProcessing;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT archive_path,playable_audio_path
+            FROM recording_sessions
+            WHERE state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING')
+              AND local_finalize_state NOT IN ('FINALIZING_LOCAL','RECOVERY_PENDING')
+              AND playable_audio_state<>'BUILDING'
+              AND NOT EXISTS (SELECT 1 FROM recording_raw_chunks r WHERE r.session_id=recording_sessions.id AND r.encoding_lease_expires_at IS NOT NULL AND r.encoding_lease_expires_at > $now)
+              AND NOT EXISTS (SELECT 1 FROM recording_chunks c WHERE c.session_id=recording_sessions.id AND c.status='UPLOADING')
+            """;
+        command.Parameters.AddWithValue("$now", now.ToString("O"));
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0)) directories.Add(reader.GetString(0));
+                if (!reader.IsDBNull(1)) directories.Add(reader.GetString(1));
+            }
+        }
+        long reclaimed = 0;
+        foreach (var directory in directories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Directory.Exists(directory)) continue;
+            foreach (var pattern in new[] { "*.wav.part", "*.flac.part", "*.opus.part" })
+            {
+                IEnumerable<string> files;
+                try { files = Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly).ToArray(); }
+                catch (IOException) { continue; }
+                catch (UnauthorizedAccessException) { continue; }
+                foreach (var path in files)
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(path) > cutoff.UtcDateTime) continue;
+                        var length = new FileInfo(path).Length;
+                        File.Delete(path);
+                        reclaimed += length;
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+        }
+        return reclaimed;
+    }
+
+    public async Task<long> PurgeEligibleRawRecoveryAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var select = connection.CreateCommand();
+        var now = DateTimeOffset.UtcNow;
+        select.CommandText = """
+            SELECT r.session_id,r.track_id,r.sequence,r.raw_path,c.local_path,c.size_bytes
+            FROM recording_raw_chunks r
+            JOIN recording_chunks c ON c.session_id=r.session_id AND c.track_id=r.track_id AND c.sequence=r.sequence
+            WHERE r.status='READY' AND (r.error IS NULL OR r.error='')
+              AND r.raw_purge_after IS NOT NULL AND r.raw_purge_after <= $now
+              AND c.status IN ('READY','UPLOADING','CONFIRMED')
+              AND EXISTS (SELECT 1 FROM recording_sessions s WHERE s.id=r.session_id AND s.playable_audio_state IN ('READY','NOT_REQUIRED') AND s.delivery_mode<>'LOCAL_ONLY' AND s.delivery_state IN ('CONFIRMED','COMPLETED') AND s.media_validated_at IS NOT NULL AND s.state NOT IN ('RECORDING','PAUSED','STARTING','FINALIZING','CANCELLED','RECOVERY_PENDING') AND s.local_finalize_state='LOCAL_READY')
+            """;
+        select.Parameters.AddWithValue("$now", now.ToString("O"));
+        var rows = new List<(string SessionId, string TrackId, int Sequence, string RawPath, string EncodedPath, long EncodedSize)>();
+        await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+            while (await reader.ReadAsync(cancellationToken)) rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4), reader.GetInt64(5)));
+
+        long reclaimed = 0;
+        foreach (var row in rows)
+        {
+            // SQLite status is necessary but not sufficient: a stale READY
+            // row must not allow deletion of the only raw recovery copy when
+            // the validated FLAC has disappeared from disk.
+            try
+            {
+                if (!File.Exists(row.EncodedPath)) continue;
+                var encodedLength = new FileInfo(row.EncodedPath).Length;
+                if (encodedLength <= 0 || (row.EncodedSize > 0 && encodedLength != row.EncodedSize)) continue;
+            }
             catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            try
+            {
+                if (File.Exists(row.RawPath))
+                {
+                    reclaimed += new FileInfo(row.RawPath).Length;
+                    File.Delete(row.RawPath);
+                }
+            }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
             await using var delete = connection.CreateCommand();
             delete.CommandText = "DELETE FROM recording_raw_chunks WHERE session_id=$session AND track_id=$track AND sequence=$sequence AND status='READY' AND (error IS NULL OR error='') AND raw_purge_after <= $now";
             delete.Parameters.AddWithValue("$session", row.SessionId);
             delete.Parameters.AddWithValue("$track", row.TrackId);
             delete.Parameters.AddWithValue("$sequence", row.Sequence);
-            delete.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+            delete.Parameters.AddWithValue("$now", now.ToString("O"));
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
+        return reclaimed;
     }
 
-    public async Task PurgeEligibleLocalArchivesAsync(CancellationToken cancellationToken = default)
+    public async Task<long> PurgeEligibleLocalArchivesAsync(CancellationToken cancellationToken = default)
     {
+        long reclaimed = 0;
         foreach (var candidate in await GetLocalArchivePurgeCandidatesAsync(DateTimeOffset.UtcNow, cancellationToken))
         {
             var failed = false;
             foreach (var path in candidate.Paths)
             {
-                try { if (File.Exists(path)) File.Delete(path); }
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        reclaimed += new FileInfo(path).Length;
+                        File.Delete(path);
+                    }
+                }
                 catch (IOException) { failed = true; }
+                catch (UnauthorizedAccessException) { failed = true; }
             }
             if (failed) continue;
             await using var connection = new SqliteConnection(_connectionString);
@@ -2497,25 +2774,58 @@ public sealed class SpoolStore
             command.Parameters.AddWithValue("$session", candidate.SessionId);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
+        return reclaimed;
     }
 
-    public async Task PurgeFinalizedSessionAsync(string sessionId, CancellationToken cancellationToken = default)
+    public async Task<long> PurgeFinalizedSessionAsync(string sessionId, CancellationToken cancellationToken = default)
     {
         var candidate = (await GetTransportPurgeCandidatesAsync(DateTimeOffset.UtcNow, cancellationToken))
             .SingleOrDefault(item => string.Equals(item.SessionId, sessionId, StringComparison.Ordinal));
         // A 202 from server finalize only queues assembly. Pending, failed, and
         // grace-protected transport remains recoverable on disk.
-        if (candidate is null) return;
+        if (candidate is null) return 0;
 
         var deleteFailed = false;
+        long reclaimed = 0;
+        var rawPaths = new List<string>();
+        await using (var rawConnection = new SqliteConnection(_connectionString))
+        {
+            await rawConnection.OpenAsync(cancellationToken);
+            await using var rawSelect = rawConnection.CreateCommand();
+            rawSelect.CommandText = "SELECT raw_path FROM recording_raw_chunks WHERE session_id=$session AND status='READY' AND (error IS NULL OR error='')";
+            rawSelect.Parameters.AddWithValue("$session", sessionId);
+            await using var rawReader = await rawSelect.ExecuteReaderAsync(cancellationToken);
+            while (await rawReader.ReadAsync(cancellationToken)) rawPaths.Add(rawReader.GetString(0));
+        }
         foreach (var path in candidate.Paths)
         {
-            try { if (File.Exists(path)) File.Delete(path); }
+            try
+            {
+                if (File.Exists(path))
+                {
+                    reclaimed += new FileInfo(path).Length;
+                    File.Delete(path);
+                }
+            }
             catch (IOException) { deleteFailed = true; }
+            catch (UnauthorizedAccessException) { deleteFailed = true; }
+        }
+        foreach (var path in rawPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    reclaimed += new FileInfo(path).Length;
+                    File.Delete(path);
+                }
+            }
+            catch (IOException) { deleteFailed = true; }
+            catch (UnauthorizedAccessException) { deleteFailed = true; }
         }
         // Keep SQLite rows when any file is locked so the next controlled pass
         // can retry from state rather than assuming a successful purge.
-        if (deleteFailed) return;
+        if (deleteFailed) return 0;
 
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -2542,5 +2852,6 @@ public sealed class SpoolStore
             await finalize.ExecuteNonQueryAsync(cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
+        return reclaimed;
     }
 }

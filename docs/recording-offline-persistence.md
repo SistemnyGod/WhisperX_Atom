@@ -10,6 +10,13 @@
 - `LocalArchiveWriter` создаёт FLAC/master в той же папке встречи, используя `LocalMeetingDirectoryResolver`.
 - `GlobalRawEncoderWorker` отдельно кодирует FLAC; `DeliveryWakeSignal` только ускоряет polling, но не заменяет SQLite.
 - `RecordingDeliveryCoordinator` выполняет bind/upload/finalize и повторяет retryable ошибки независимо от playable WAV.
+- `StorageRetentionWorker` (канонический AudioGraph Host) периодически выполняет
+  state-driven cleanup из `SpoolStore`: raw PCM после всех барьеров, transport chunks
+  после подтверждённого media/archive, playable WAV после отдельного grace-периода и
+  безопасную очистку известных `*.wav.part`/`*.flac.part`/`*.opus.part`. Он никогда не
+  сканирует и не удаляет `.pcm.part`, LOCAL_ONLY или единственную неподтверждённую копию.
+  Каждый шаг изолирован: ошибка одного шага логируется и не останавливает остальные;
+  health IPC сообщает время прохода, reclaimed bytes по категориям, кандидатов и ошибки.
 
 ## Состояния
 
@@ -23,6 +30,13 @@ PENDING → BUILDING → READY
 ```
 
 Старые записи получают `NOT_REQUIRED`; новые записи начинают с `PENDING`. Raw PCM не удаляется, пока playable WAV (или legacy `NOT_REQUIRED`), FLAC и подтверждённая серверная доставка не прошли retention gate.
+
+Для playable-файлов SQLite хранит `playable_audio_purge_after` и
+`playable_audio_purged_at`. По умолчанию используется 24 часа
+(`WHISPERX_RETENTION_PLAYABLE_HOURS`); значение `0` отключает очистку. Файлы
+переходят в `PURGED` только после проверки `export/master.flac` и `manifest.json`,
+`CONFIRMED/COMPLETED` delivery и истечения grace. Заблокированный файл оставляет
+метаданные в `READY` для следующей попытки.
 
 ## Поток после STOP
 

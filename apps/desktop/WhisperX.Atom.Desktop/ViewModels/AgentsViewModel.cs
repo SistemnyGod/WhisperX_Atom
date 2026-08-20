@@ -17,6 +17,8 @@ public sealed class AgentsViewModel : ObservableObject
     private string _archiveRoot = "—";
     private string _storageText = "—";
     private string _pendingUploadsText = "—";
+    private string _retentionText = "Проверка очистки…";
+    private string _retentionWarningText = string.Empty;
     private string _microphoneText = "—";
     private string _systemAudioText = "—";
     private string _processingStatus = "Проверка WhisperX…";
@@ -40,6 +42,8 @@ public sealed class AgentsViewModel : ObservableObject
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
     public string StorageText { get => _storageText; private set => SetProperty(ref _storageText, value); }
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
+    public string RetentionText { get => _retentionText; private set => SetProperty(ref _retentionText, value); }
+    public string RetentionWarningText { get => _retentionWarningText; private set => SetProperty(ref _retentionWarningText, value); }
     public string MicrophoneText { get => _microphoneText; private set => SetProperty(ref _microphoneText, value); }
     public string SystemAudioText { get => _systemAudioText; private set => SetProperty(ref _systemAudioText, value); }
     public string ProcessingStatus { get => _processingStatus; private set => SetProperty(ref _processingStatus, value); }
@@ -178,6 +182,17 @@ public sealed class AgentsViewModel : ObservableObject
         PendingUploadsText = health.PendingUploadSessions.ToString();
         MicrophoneText = $"{(health.Microphone ? "готов" : "не найден")} · {health.CaptureDeviceCount} устройств";
         SystemAudioText = $"{(health.SystemAudio ? "готов" : "не найден")} · {health.RenderDeviceCount} устройств";
+        var reclaimed = health.StorageRetentionRawBytesReclaimed
+            + health.StorageRetentionTransportBytesReclaimed
+            + health.StorageRetentionPlayableBytesReclaimed
+            + health.StorageRetentionArchiveBytesReclaimed
+            + health.StorageRetentionTemporaryBytesReclaimed;
+        RetentionText = health.StorageRetentionLastRunAtUtc is null
+            ? "Ещё не запускалась"
+            : $"Последний проход: {health.StorageRetentionLastRunAtUtc.Value.ToLocalTime():dd.MM.yyyy HH:mm} · освобождено {FormatBytes(reclaimed)}";
+        RetentionWarningText = health.StorageRetentionFailures > 0
+            ? $"Ошибки отдельных операций: {health.StorageRetentionFailures} · повтор будет выполнен автоматически"
+            : "Ошибок retention нет";
     }
 
     private void ClearHealth()
@@ -187,6 +202,8 @@ public sealed class AgentsViewModel : ObservableObject
         PendingUploadsText = "—";
         MicrophoneText = "Нет данных";
         SystemAudioText = "Нет данных";
+        RetentionText = "Нет данных";
+        RetentionWarningText = string.Empty;
     }
 
     private void ClearAgents()
