@@ -51,14 +51,28 @@ $env:APP_VERSION = $identity
 $compose = @('--project-name','whisperx-atom','--env-file',(Join-Path $repo $EnvFile),'-f',(Join-Path $repo 'compose.dev.yml'),'-f',(Join-Path $repo 'compose.lan.yml'))
 $profiles = @('--profile','core','--profile','gpu','--profile','lan')
 if ($IncludeLlm) { $profiles += @('--profile','llm') }
-
-if (-not $SkipBuild) {
-    & docker compose @compose @profiles build --pull=false
-    if ($LASTEXITCODE -ne 0) { throw "RELEASE_IMAGE_BUILD_FAILED" }
-}
-
 $appServices = @('api','outbox-relay','import-worker','media-worker','gpu-worker')
 if ($IncludeLlm) { $appServices += 'summary-worker' }
+
+if (-not $SkipBuild) {
+    # A release tag is immutable for a commit.  Reuse a pre-existing image only
+    # under that exact tag; its OCI labels are verified below before it can enter
+    # the bundle.  This makes an interrupted build resumable without overwriting
+    # a potentially mismatched image.
+    $servicesToBuild = @()
+    foreach ($service in $appServices) {
+        $image = "whisperx-atom-$($service):$tag"
+        & docker image inspect $image 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { $servicesToBuild += $service }
+    }
+    if ($servicesToBuild.Count -gt 0) {
+        & docker compose @compose @profiles build --pull=false @servicesToBuild
+        if ($LASTEXITCODE -ne 0) { throw "RELEASE_IMAGE_BUILD_FAILED" }
+    } else {
+        Write-Host "RELEASE_IMAGES_ALREADY_BUILT=$tag"
+    }
+}
+
 $imageRecords = [ordered]@{}
 function Get-DockerImageMetadata([string]$image) {
     # Do not use a Go-template map lookup here.  Windows PowerShell's native
