@@ -2043,7 +2043,9 @@ public sealed record JobRow(
     int Attempt,
     string? Error,
     string? ErrorCode = null,
-    string? PipelineCorrelationId = null);
+    string? PipelineCorrelationId = null,
+    DateTime? LastHeartbeat = null,
+    DateTime? UpdatedAt = null);
 public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
 public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
@@ -2865,7 +2867,7 @@ public sealed class Database(IConfiguration configuration)
     public async Task<JobRow?> GetJobAsync(Guid id)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id FROM jobs WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at FROM jobs WHERE id=@id", connection);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null : ReadJob(reader);
@@ -2875,7 +2877,7 @@ public sealed class Database(IConfiguration configuration)
     {
         var result = new List<JobRow>();
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
         command.Parameters.AddWithValue("id", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadJob(reader));
@@ -3188,7 +3190,9 @@ public sealed class Database(IConfiguration configuration)
             reader.GetInt32(6),
             reader.IsDBNull(7) ? null : reader.GetString(7),
             reader.FieldCount > 8 && !reader.IsDBNull(8) ? reader.GetString(8) : null,
-            reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : null);
+            reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : null,
+            reader.FieldCount > 10 && !reader.IsDBNull(10) ? reader.GetDateTime(10) : null,
+            reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetDateTime(11) : null);
 
     private static MediaAssetRow ReadMedia(NpgsqlDataReader reader) =>
         new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10));

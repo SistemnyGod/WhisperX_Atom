@@ -95,7 +95,9 @@ public sealed record DesktopJob(
     int Attempt,
     string? Error,
     string? ErrorCode = null,
-    string? PipelineCorrelationId = null)
+    string? PipelineCorrelationId = null,
+    DateTime? LastHeartbeat = null,
+    DateTime? UpdatedAt = null)
 {
     [JsonIgnore]
     public string StatusText => UiStatusMapper.Text(Status);
@@ -168,7 +170,7 @@ public sealed record DesktopPipelineRun(
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
     string? RecordingState = null);
-public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true);
 public sealed record DesktopAssistantRequestAccepted(
     string QueryId,
     string? ConversationId,

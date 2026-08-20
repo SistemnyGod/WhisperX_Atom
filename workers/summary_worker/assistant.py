@@ -18,6 +18,40 @@ from .summarizer import LlamaCppClient
 from .hybrid_retrieval import HybridRetriever, RetrievalCandidate
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
+
+ASSISTANT_MAX_RETRIES = max(0, int(os.getenv("ASSISTANT_MAX_RETRIES", "3")))
+
+
+class AssistantRetryScheduled(RuntimeError):
+    """The current delivery was durably moved back to QUEUED."""
+
+    def __init__(self, delay_seconds: float, attempt: int):
+        super().__init__("ASSISTANT_RETRY_SCHEDULED")
+        self.delay_seconds = delay_seconds
+        self.attempt = attempt
+
+
+def assistant_retry_delay_seconds(attempt: int) -> float:
+    # Keep retries short enough for an interactive assistant while adding a
+    # small deterministic jitter so several requests do not stampede Qwen.
+    return {1: 5, 2: 15, 3: 30, 4: 60, 5: 120}.get(attempt, 300) + attempt * 0.37
+
+
+def is_retryable_assistant_error(exc: BaseException) -> bool:
+    """Retry only infrastructure failures; terminal answer failures stay visible."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    terminal = (
+        "no_evidence", "grounding_rejected", "scope_violation", "invalid_json",
+        "response_content_is_not_text", "assistant_query_invalid", "schema_invalid",
+        "model_not_found", "invalid_llm_", "gpu_required_but_no_layers",
+    )
+    if any(token in text for token in terminal):
+        return False
+    return any(token in text for token in (
+        "timeout", "timed out", "connection", "refused", "unavailable", "temporarily",
+        "503", "502", "llama", "gpu", "cuda", "nats", "postgres", "psycopg",
+        "broken pipe", "server_exit", "lease", "busy",
+    ))
 # Kept as a compatibility marker for older Desktop/Voice clients. New
 # clients receive the explicit NO_EVIDENCE error code below, while rolling
 # upgrades may still look for the historical empty-context name.
@@ -198,13 +232,62 @@ class AssistantRepository:
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with self._db.connection() as connection:
             row = connection.execute("""
-                UPDATE assistant_queries SET status=%s,error_code=%s
+                UPDATE assistant_queries
+                SET status=%s,error_code=%s,updated_at=now(),
+                    next_retry_at=NULL,
+                    retryable=CASE WHEN %s IN ('FAILED','LLM_UNAVAILABLE') THEN false ELSE retryable END
                 WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
                 RETURNING id,assistant_message_id
-                """, (status, error, query_id)).fetchone()
+                """, (status, error, status, query_id)).fetchone()
             if row and row[1]:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
+
+    def schedule_retry(
+        self,
+        query_id: str,
+        error: str,
+        message_id: str | None = None,
+        max_attempts: int = ASSISTANT_MAX_RETRIES,
+    ) -> int | None:
+        """Atomically release the inbox claim and schedule one delayed retry."""
+        max_attempts = max(0, int(max_attempts))
+        with self._db.connection() as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    UPDATE assistant_queries
+                    SET status='QUEUED',
+                        error_code='ASSISTANT_RETRY_PENDING',
+                        retry_count=retry_count+1,
+                        next_retry_at=now() + ((CASE WHEN retry_count=0 THEN 5
+                                                     WHEN retry_count=1 THEN 15
+                                                     WHEN retry_count=2 THEN 30
+                                                     WHEN retry_count=3 THEN 60
+                                                     WHEN retry_count=4 THEN 120
+                                                     ELSE 300 END) * interval '1 second'),
+                        retryable=true,
+                        answer_metadata=jsonb_set(
+                            COALESCE(answer_metadata,'{}'::jsonb),
+                            '{retry}',
+                            jsonb_build_object('state','PENDING','error',%s,'updatedAt',now()),
+                            true),
+                        updated_at=now()
+                    WHERE id=%s
+                      AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
+                      AND retry_count < %s
+                    RETURNING retry_count
+                    """,
+                    (error[:500], query_id, max_attempts),
+                ).fetchone()
+                if row is not None:
+                    connection.execute(
+                        "UPDATE assistant_messages SET status='QUEUED',error_code='ASSISTANT_RETRY_PENDING' WHERE id=(SELECT assistant_message_id FROM assistant_queries WHERE id=%s)",
+                        (query_id,),
+                    )
+                    if message_id:
+                        connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
+            return int(row[0]) if row else None
 
     def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         """Retrieve scope-safe evidence with Russian FTS + embeddings.
@@ -618,7 +701,7 @@ class AssistantRepository:
             evidence.append(item)
         with self._db.connection() as connection:
             row = connection.execute(
-                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
+                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now(),updated_at=now(),next_retry_at=NULL,retryable=false WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
                 (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": bool(claims), "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
             ).fetchone()
             if evidence_ids:
@@ -756,6 +839,33 @@ class AssistantWorker:
                     if synthesis_completed:
                         await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id)
         except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            if is_retryable_assistant_error(exc):
+                scheduled_attempt = await asyncio.to_thread(
+                    self.repository.schedule_retry,
+                    query_id,
+                    detail,
+                    message_id or None,
+                    ASSISTANT_MAX_RETRIES,
+                )
+                if scheduled_attempt is not None:
+                    delay = assistant_retry_delay_seconds(scheduled_attempt)
+                    LOGGER.warning(
+                        "assistant query=%s retry scheduled attempt=%s delay=%ss",
+                        query_id,
+                        scheduled_attempt,
+                        delay,
+                    )
+                    raise AssistantRetryScheduled(delay, scheduled_attempt) from exc
+                # The retry budget is exhausted.  Persist a terminal state and
+                # let the consumer ACK the current delivery; a terminal
+                # assistant request must not loop forever in JetStream.
+                self.repository.set_status(query_id, "FAILED", error="ASSISTANT_RETRY_EXHAUSTED")
+                LOGGER.error("assistant query=%s retry budget exhausted: %s", query_id, detail)
+                return
+            # Deterministic validation/scope/model configuration failures are
+            # terminal.  They remain visible to Desktop and cannot be retried
+            # by a stale NATS delivery.
             self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())
-            LOGGER.exception("assistant query failed: %s", query_id)
-            raise
+            LOGGER.error("assistant query=%s entered terminal failure: %s", query_id, detail)
+            return

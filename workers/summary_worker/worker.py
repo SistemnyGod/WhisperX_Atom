@@ -27,7 +27,7 @@ from .contracts import (
 )
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
 from .llama_subprocess import LocalLlamaRuntime
-from .assistant import AssistantWorker
+from .assistant import AssistantRetryScheduled, AssistantWorker
 
 LOGGER = logging.getLogger("whisperx.summary-worker")
 
@@ -718,6 +718,14 @@ async def run() -> None:
                     async with maintain_message(message, on_tick=lambda: asyncio.to_thread(assistant_worker.repository.renew_lease, query_id, message_id)):
                         await assistant_worker.handle(payload)
                     await message.ack()
+                except AssistantRetryScheduled as exc:
+                    LOGGER.warning(
+                        "assistant retry scheduled query_id=%s attempt=%s delay=%ss",
+                        query_id,
+                        exc.attempt,
+                        exc.delay_seconds,
+                    )
+                    await message.nak(delay=exc.delay_seconds)
                 except Exception:
                     LOGGER.exception("assistant_message_failed query_id=%s", query_id)
                     await message.nak()
