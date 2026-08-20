@@ -1919,7 +1919,8 @@ public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocu
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantRequestRequest(string Question, string? RequestedMode = "AUTO", Guid? ActiveMeetingId = null, Guid? ConversationId = null, string? Source = "DESKTOP", string? CommandId = null, string? TraceId = null);
-public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0);
+public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
+    string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 public sealed record LiveMeetingSegmentsRequest(Guid? RecordingSessionId, IReadOnlyList<LiveMeetingSegmentRequest> Segments);
 public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);

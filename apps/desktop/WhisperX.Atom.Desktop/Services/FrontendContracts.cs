@@ -122,7 +122,18 @@ public sealed record AssistantEvidenceItem(
     long? EndMs,
     string? Timecode,
     string? Speaker,
-    string? Text);
+    string? Text,
+    string? SourceTrackType = null,
+    string? ChannelRole = null)
+{
+    public string SourceLabel => ChannelRole?.ToUpperInvariant() switch
+    {
+        "REMOTE_SYSTEM" => "Источник: удалённый звук",
+        "MIC_FALLBACK" => "Источник: резервный микрофон",
+        _ when string.Equals(SourceTrackType, "system-audio", StringComparison.OrdinalIgnoreCase) => "Источник: удалённый звук",
+        _ => "Источник: микрофон помещения"
+    };
+}
 public sealed record DesktopAssistantConversation(string Id, string Title, string ScopeType, string? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY")
 {
     public string ContextLabel => AssistantMode.ToUpperInvariant() switch

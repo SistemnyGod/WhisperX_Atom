@@ -82,6 +82,23 @@ def test_live_answer_is_explicitly_provisional_in_metadata_and_status():
     assert '"canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL"' in worker
 
 
+def test_live_memory_preserves_audio_track_provenance_and_deduplicates_echo():
+    worker = read("workers/summary_worker/assistant.py")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/035_live_meeting_track_provenance.sql")
+    recorder = read("apps/recorder-host/LiveAudioBroadcaster.cs")
+    recorder_contracts = read("apps/recorder-host/LiveAudioContracts.cs")
+    voice = read("apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs")
+    assert "source_track_type" in migration and "source_track_id" in migration and "channel_role" in migration
+    assert "REMOTE_SYSTEM" in worker and "sourceTrackType" in worker
+    assert "SequenceMatcher" in worker and "0.85" in worker
+    assert "LIVE_AUDIO_V1" in recorder and "QueueCapacityPerTrack" in recorder
+    assert "_liveLocalRecognizer" in voice and "_liveRemoteRecognizer" in voice
+    live_client = read("apps/voice-host/WhisperX.Atom.Voice.Host/LiveAudioClient.cs")
+    assert "WhisperXAtomLiveAudioV1" in live_client
+    assert 'JsonPropertyName("localSessionId")' in recorder_contracts
+    assert 'JsonPropertyName("localSessionId")' in live_client
+
+
 def test_live_memory_has_bounded_background_cleanup_and_keeps_inflight_queries_briefly():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     assert "DELETE FROM live_meeting_segments AS segment" in api

@@ -56,7 +56,9 @@ builder.Services.AddSingleton<RecorderHostRuntime>();
 builder.Services.AddSingleton<RawEncoderWakeSignal>();
 builder.Services.AddSingleton<RawEncoderRuntimeState>();
 builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
+builder.Services.AddSingleton<LiveAudioBroadcaster>();
 builder.Services.AddHostedService<RecorderHostPipeServer>();
+builder.Services.AddHostedService<LiveAudioPipeServer>();
 builder.Services.AddHostedService<GlobalRawEncoderWorker>();
 builder.Services.AddHostedService<RecorderHostWorker>();
 

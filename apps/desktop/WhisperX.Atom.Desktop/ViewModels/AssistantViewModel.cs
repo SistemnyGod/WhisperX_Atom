@@ -349,7 +349,10 @@ public sealed class AssistantViewModel : ObservableObject
             {
                 var id = GetString(item, "segmentId");
                 if (string.IsNullOrWhiteSpace(id)) continue;
-                Evidence.Add(new AssistantEvidenceItem(GetString(item, "meetingId"), id, GetLong(item, "startMs"), GetLong(item, "endMs"), GetString(item, "timecode"), GetString(item, "speaker"), GetString(item, "text")));
+                Evidence.Add(new AssistantEvidenceItem(
+                    GetString(item, "meetingId"), id, GetLong(item, "startMs"), GetLong(item, "endMs"),
+                    GetString(item, "timecode"), GetString(item, "speaker"), GetString(item, "text"),
+                    GetString(item, "sourceTrackType"), GetString(item, "channelRole")));
             }
         }
         OnPropertyChanged(nameof(HasEvidence));

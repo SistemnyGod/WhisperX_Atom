@@ -6,6 +6,7 @@ import os
 import re
 import socket
 import hashlib
+from difflib import SequenceMatcher
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -154,12 +155,14 @@ class AssistantRepository:
         self._db = DatabaseConnectionPool(self.conninfo, "assistant-worker")
         self._hybrid = HybridRetriever()
         self._last_retrieval_metadata: dict[str, Any] = {}
+        self._live_provenance: dict[str, tuple[str, str | None, str | None]] = {}
 
     def close(self) -> None:
         self._db.close()
 
     def clear_retrieval_metadata(self) -> None:
         self._last_retrieval_metadata = {}
+        self._live_provenance = {}
 
     def claim(self, message_id: str, query_id: str) -> bool:
         with self._db.connection() as connection:
@@ -414,12 +417,13 @@ class AssistantRepository:
             "embeddingProvider": None,
             "scopeMeetingId": meeting_id,
         }
+        self._live_provenance = {}
         if not meeting_id:
             return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"
         with self._db.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT l.id,l.meeting_id,l.start_ms,l.end_ms,l.text,l.confidence
+                SELECT l.id,l.meeting_id,l.start_ms,l.end_ms,l.text,l.confidence,l.source_track_type,l.source_track_id,l.channel_role
                 FROM live_meeting_segments l
                 JOIN recording_sessions r ON r.id=l.recording_session_id
                 WHERE l.meeting_id=%s AND l.expires_at>now()
@@ -431,6 +435,29 @@ class AssistantRepository:
             ).fetchall()
         if not rows:
             return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"
+        # A remote speaker is often also audible through the room microphone.
+        # Keep one evidence row for a near-identical utterance, preferring the
+        # direct render-loopback source. This only affects provisional memory;
+        # canonical V1/V2 still process both original tracks independently.
+        original_live_count = len(rows)
+        deduped: list[tuple[Any, ...]] = []
+        for row in rows:
+            text = str(row[4]).strip()
+            normalized = re.sub(r"[^\wА-Яа-яЁё]+", " ", text.lower().replace("ё", "е")).strip()
+            duplicate_index = None
+            for index, previous in enumerate(deduped):
+                if abs(int(row[2]) - int(previous[2])) > 1500:
+                    continue
+                previous_text = re.sub(r"[^\wА-Яа-яЁё]+", " ", str(previous[4]).lower().replace("ё", "е")).strip()
+                if normalized and previous_text and SequenceMatcher(None, normalized, previous_text).ratio() >= 0.85:
+                    duplicate_index = index
+                    break
+            if duplicate_index is None:
+                deduped.append(row)
+            elif str(row[8] or "") == "REMOTE_SYSTEM" and str(deduped[duplicate_index][8] or "") != "REMOTE_SYSTEM":
+                deduped[duplicate_index] = row
+        rows = deduped
+        self._last_retrieval_metadata["deduplicatedSegments"] = max(0, original_live_count - len(deduped))
         query_tokens = {
             token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", (query or "").lower().replace("ё", "е"))
             if token not in _LIVE_RETRIEVAL_STOPWORDS
@@ -457,10 +484,12 @@ class AssistantRepository:
         valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
         lines: list[str] = []
         for row in selected_rows:
-            segment_id, meeting_value, start_ms, end_ms, text, _confidence = row
+            segment_id, meeting_value, start_ms, end_ms, text, _confidence, source_track_type, source_track_id, channel_role = row
             key = str(segment_id)
+            self._live_provenance[key] = (str(source_track_type or "room-microphone"), str(source_track_id) if source_track_id else None, str(channel_role or "LOCAL_ROOM"))
             valid[key] = (str(meeting_value), int(start_ms), int(end_ms), str(text).strip(), "LIVE_PROVISIONAL", "", 0)
-            lines.append(f"[SEG-{key} {int(start_ms)//1000}s] {str(text).strip()}")
+            source_label = "удалённый звук" if channel_role == "REMOTE_SYSTEM" else "микрофон помещения"
+            lines.append(f"[SEG-{key} {int(start_ms)//1000}s {source_label}] {str(text).strip()}")
         context = "\n".join(lines)
         if len(context) > 36000:
             context = context[:36000].rsplit("\n", 1)[0]
@@ -501,11 +530,12 @@ class AssistantRepository:
                 for rank, (segment_id, value) in enumerate(valid.items(), start=1):
                     meeting_id, start_ms, end_ms, text, _, transcript_id, transcript_version = value
                     if value[4] == "LIVE_PROVISIONAL":
+                        source_type, source_id, channel_role = self._live_provenance.get(segment_id, ("room-microphone", None, "LOCAL_ROOM"))
                         connection.execute(
-                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
-                               VALUES(%s,%s,%s,'RETRIEVED',%s,%s,%s,%s)
+                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256,source_track_type,source_track_id,channel_role)
+                               VALUES(%s,%s,%s,'RETRIEVED',%s,%s,%s,%s,%s,%s,%s)
                                ON CONFLICT(query_id,live_segment_id,snapshot_kind) DO NOTHING""",
-                            (query_id, segment_id, rank, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                            (query_id, segment_id, rank, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest(), source_type, source_id, channel_role),
                         )
                     else:
                         connection.execute(
@@ -572,7 +602,13 @@ class AssistantRepository:
             if not answer:
                 answer = "В доступной стенограмме не найден подтверждённый ответ."
             voice = "В стенограмме не найден подтверждённый ответ."
-        evidence = [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2], "transcriptVersionKind": valid[value][4]} for value in evidence_ids]
+        evidence = []
+        for value in evidence_ids:
+            item = {"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2], "transcriptVersionKind": valid[value][4]}
+            if valid[value][4] == "LIVE_PROVISIONAL":
+                source_type, source_id, channel_role = self._live_provenance.get(value, ("room-microphone", None, "LOCAL_ROOM"))
+                item.update({"sourceTrackType": source_type, "sourceTrackId": source_id, "channelRole": channel_role})
+            evidence.append(item)
         with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
@@ -582,11 +618,12 @@ class AssistantRepository:
                 for rank, segment_id in enumerate(evidence_ids, start=1):
                     meeting_value, start_ms, end_ms, text, _, transcript_id, transcript_version = valid[segment_id]
                     if valid[segment_id][4] == "LIVE_PROVISIONAL":
+                        source_type, source_id, channel_role = self._live_provenance.get(segment_id, ("room-microphone", None, "LOCAL_ROOM"))
                         connection.execute(
-                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
-                               VALUES(%s,%s,%s,'CITED',%s,%s,%s,%s)
+                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256,source_track_type,source_track_id,channel_role)
+                               VALUES(%s,%s,%s,'CITED',%s,%s,%s,%s,%s,%s,%s)
                                ON CONFLICT(query_id,live_segment_id,snapshot_kind) DO NOTHING""",
-                            (query_id, segment_id, rank, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                            (query_id, segment_id, rank, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest(), source_type, source_id, channel_role),
                         )
                     else:
                         connection.execute(

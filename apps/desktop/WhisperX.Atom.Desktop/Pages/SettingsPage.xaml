@@ -204,6 +204,9 @@
                                         <TextBlock Text="{Binding VoiceVoiceStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceVoiceStatus}" />
                                         <TextBlock Grid.Column="1" Text="{Binding VoiceSpeechQueue}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSpeechQueue}" />
                                     </Grid>
+                                    <TextBlock Text="{Binding VoiceLiveMode}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveMode}" />
+                                    <TextBlock Text="{Binding VoiceLiveTracks}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveTracks}" />
+                                    <TextBlock Text="{Binding VoiceLiveStats}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveStats}" />
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
                                         <StackPanel Spacing="2">
                                             <TextBlock Text="Скорость" Style="{StaticResource CaptionStyle}" />

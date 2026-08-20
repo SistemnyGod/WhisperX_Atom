@@ -117,7 +117,8 @@ public sealed record DesktopJob(
 }
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
 public sealed record DesktopAssistantRequestAccepted(string QueryId, string? ConversationId, string ResolvedMode, string? MeetingId, string Status, string Source, double RouterConfidence, string PollUrl, string EventsUrl);
-public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0);
+public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
+    string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 
 public enum DesktopAuthState
 {

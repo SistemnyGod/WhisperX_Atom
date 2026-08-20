@@ -27,6 +27,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly RawEncoderWakeSignal _encoderWake;
     private readonly RawEncoderRuntimeState _encoderRuntimeState;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
+    private readonly LiveAudioBroadcaster _liveAudio;
     private readonly ILogger<RecorderHostRuntime> _logger;
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly SemaphoreSlim _recoveryGate = new(1, 1);
@@ -55,6 +56,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         RawEncoderWakeSignal encoderWake,
         RawEncoderRuntimeState encoderRuntimeState,
         RawFinalizerQueueMetrics rawFinalizerMetrics,
+        LiveAudioBroadcaster liveAudio,
         ILogger<RecorderHostRuntime> logger)
     {
         _spool = spool;
@@ -68,6 +70,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _encoderWake = encoderWake;
         _encoderRuntimeState = encoderRuntimeState;
         _rawFinalizerMetrics = rawFinalizerMetrics;
+        _liveAudio = liveAudio;
         _logger = logger;
         _engine.CaptureFailed += OnCaptureFailed;
         _systemEngine.CaptureFailed += OnCaptureFailed;
@@ -511,7 +514,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                     "PCM_S16",
                     null,
                     16), sessionId, cancellationToken).ConfigureAwait(false);
-                writer = new AudioGraphSessionWriter(sessionId, trackId, "room-microphone", _spool, _storage, _engine, _encoderWake, _rawFinalizerMetrics, _logger);
+                writer = new AudioGraphSessionWriter(sessionId, trackId, "room-microphone", _spool, _storage, _engine, _encoderWake, _rawFinalizerMetrics, _liveAudio, _logger);
                 writer.CaptureFailed += OnCaptureFailed;
                 _writer = writer;
             }
@@ -532,12 +535,13 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                     "PCM_S16",
                     null,
                     16), sessionId, cancellationToken).ConfigureAwait(false);
-                systemWriter = new AudioGraphSessionWriter(sessionId, trackId, "system-audio", _spool, _storage, _systemEngine, _encoderWake, _rawFinalizerMetrics, _logger);
+                systemWriter = new AudioGraphSessionWriter(sessionId, trackId, "system-audio", _spool, _storage, _systemEngine, _encoderWake, _rawFinalizerMetrics, _liveAudio, _logger);
                 systemWriter.CaptureFailed += OnCaptureFailed;
                 _systemWriter = systemWriter;
             }
             await _spool.AddEventAsync(sessionId, "RECORDING_REQUESTED", cancellationToken: cancellationToken).ConfigureAwait(false);
             _sessionId = sessionId;
+            _liveAudio.StartSession(sessionId, meetingId, needsSystemAudio);
             if (writer is not null) await writer.StartAsync(cancellationToken).ConfigureAwait(false);
             if (systemWriter is not null) await systemWriter.StartAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -903,6 +907,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         {
             if (_writer is not null) await _engine.PauseAsync(cancellationToken).ConfigureAwait(false);
             if (_systemWriter is not null) await _systemEngine.PauseAsync(cancellationToken).ConfigureAwait(false);
+            if (_sessionId is not null) _liveAudio.SetPaused(_sessionId, true);
             return await HealthAsync(cancellationToken).ConfigureAwait(false);
         }
         finally { _audioOperationGate.Release(); }
@@ -915,6 +920,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         {
             if (_writer is not null) await _engine.ResumeAsync(cancellationToken).ConfigureAwait(false);
             if (_systemWriter is not null) await _systemEngine.ResumeAsync(cancellationToken).ConfigureAwait(false);
+            if (_sessionId is not null) _liveAudio.SetPaused(_sessionId, false);
             return await HealthAsync(cancellationToken).ConfigureAwait(false);
         }
         finally { _audioOperationGate.Release(); }
@@ -1372,6 +1378,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             if (systemWriter is not null) systemWriter.CaptureFailed -= OnCaptureFailed;
             _writer = null;
             _systemWriter = null;
+            _liveAudio.StopSession(_sessionId);
             _sessionId = null;
         }
     }
@@ -1427,6 +1434,7 @@ internal sealed class AudioGraphSessionWriter
     private readonly IHostCaptureSource _engine;
     private readonly RawEncoderWakeSignal _encoderWake;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
+    private readonly LiveAudioBroadcaster _liveAudio;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _notStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     // Raw finalization is the only bounded in-memory stage. SQLite remains the
@@ -1470,7 +1478,7 @@ internal sealed class AudioGraphSessionWriter
         return Math.Clamp(value, 2, 32);
     }
 
-    public AudioGraphSessionWriter(string sessionId, string trackId, string trackType, SpoolStore spool, AgentStorageSettings storage, IHostCaptureSource engine, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, ILogger logger)
+    public AudioGraphSessionWriter(string sessionId, string trackId, string trackType, SpoolStore spool, AgentStorageSettings storage, IHostCaptureSource engine, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, LiveAudioBroadcaster liveAudio, ILogger logger)
     {
         _sessionId = sessionId;
         _trackId = trackId;
@@ -1480,6 +1488,7 @@ internal sealed class AudioGraphSessionWriter
         _engine = engine;
         _encoderWake = encoderWake;
         _rawFinalizerMetrics = rawFinalizerMetrics;
+        _liveAudio = liveAudio;
         _rawFinalizerMetrics.Configure(ReadRawFinalizerCapacity());
         _logger = logger;
     }
@@ -1654,6 +1663,12 @@ internal sealed class AudioGraphSessionWriter
     private async Task ConsumeFrameAsync(AudioFrame frame)
     {
         await AppendAsync(frame).ConfigureAwait(false);
+        // Provisional ASR receives a copied/downsampled frame only after the
+        // continuity consumer accepted it. TryPublish is intentionally
+        // non-blocking and can drop provisional data without affecting PCM.
+        _liveAudio.TryPublish(
+            _sessionId, _trackId, _trackType, frame.Pcm16Memory.ToArray(),
+            frame.CapturedAtUtc, frame.SampleCount);
         // Count a frame only after the writer accepted its bytes. This keeps
         // produced/consumed and queue-depth telemetry honest when a disk
         // failure interrupts the durable consumer.

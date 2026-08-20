@@ -51,6 +51,9 @@ public sealed class SettingsViewModel : ObservableObject
     private bool _voiceFallbackUsed;
     private string _voiceSpeechQueue = "Очередь речи: 0";
     private string _voiceAssistantDelivery = "Доставка ответов: —";
+    private string _voiceLiveMode = "Live-контекст: MIC_FALLBACK";
+    private string _voiceLiveTracks = "Дорожки: микрофон — ожидание · система — ожидание";
+    private string _voiceLiveStats = "Live ASR: опубликовано 0 · подавлено 0 · drops 0";
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
     public ObservableCollection<string> VoiceOptions { get; } = new();
@@ -111,6 +114,9 @@ public sealed class SettingsViewModel : ObservableObject
     public bool VoiceFallbackUsed { get => _voiceFallbackUsed; private set { if (SetProperty(ref _voiceFallbackUsed, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
     public string VoiceSpeechQueue { get => _voiceSpeechQueue; private set => SetProperty(ref _voiceSpeechQueue, value); }
     public string VoiceAssistantDelivery { get => _voiceAssistantDelivery; private set => SetProperty(ref _voiceAssistantDelivery, value); }
+    public string VoiceLiveMode { get => _voiceLiveMode; private set => SetProperty(ref _voiceLiveMode, value); }
+    public string VoiceLiveTracks { get => _voiceLiveTracks; private set => SetProperty(ref _voiceLiveTracks, value); }
+    public string VoiceLiveStats { get => _voiceLiveStats; private set => SetProperty(ref _voiceLiveStats, value); }
     public string VoiceVoiceStatus => VoiceFallbackUsed ? $"Используется fallback: {VoiceEffectiveVoice}" : $"Используется: {VoiceEffectiveVoice}";
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public string VoiceStatusLabel => ToVoiceStatusLabel(VoiceStatus);
@@ -195,6 +201,9 @@ public sealed class SettingsViewModel : ObservableObject
                 VoiceEffectiveVoice = "—";
                 VoiceFallbackUsed = false;
                 VoiceSpeechQueue = "Очередь речи: —";
+                VoiceLiveMode = "Live-контекст: недоступен";
+                VoiceLiveTracks = "Дорожки: —";
+                VoiceLiveStats = "Live ASR: —";
                 var controllerError = _services.VoiceHost.LastErrorCode;
                 ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                     controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}",
@@ -240,6 +249,14 @@ public sealed class SettingsViewModel : ObservableObject
                 : $"{response.EffectiveVoiceName} ({response.EffectiveVoiceCulture ?? "ru-RU"})";
             VoiceFallbackUsed = response.VoiceFallbackUsed;
             VoiceSpeechQueue = $"Очередь речи: {response.SpeechQueueDepth} · отброшено: {response.SpeechQueueDrops}";
+            VoiceLiveMode = response.LiveAudioMode switch
+            {
+                "DUAL_TRACK" => "Live-контекст: микрофон + звук системы",
+                "MIC_ONLY" => "Live-контекст: только микрофон",
+                _ => "Live-контекст: резервный микрофон"
+            };
+            VoiceLiveTracks = $"Дорожки: микрофон — {LiveTrackLabel(response.LiveRoomTrackState)} · система — {LiveTrackLabel(response.LiveSystemTrackState)}";
+            VoiceLiveStats = $"Live ASR: опубликовано {response.LiveSegmentsPublished} · подавлено {response.LiveSegmentsSuppressed} · drops {response.LiveAudioDrops}";
             var restartCount = _services.VoiceHost.RestartCount;
             if (_voiceRestartCountCache != restartCount)
             {
@@ -260,6 +277,9 @@ public sealed class SettingsViewModel : ObservableObject
             VoiceEffectiveVoice = "—";
             VoiceFallbackUsed = false;
             VoiceSpeechQueue = "Очередь речи: —";
+            VoiceLiveMode = "Live-контекст: недоступен";
+            VoiceLiveTracks = "Дорожки: —";
+            VoiceLiveStats = "Live ASR: —";
             var errorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
             ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                 $"Voice Host: {errorCode}",
@@ -354,6 +374,14 @@ public sealed class SettingsViewModel : ObservableObject
         if (status.Contains("heartbeat", StringComparison.OrdinalIgnoreCase) || status.Contains("недоступ", StringComparison.OrdinalIgnoreCase) || status.Contains("ошиб", StringComparison.OrdinalIgnoreCase)) return "Требуется настройка";
         return "Проверяется";
     }
+
+    private static string LiveTrackLabel(string state) => state switch
+    {
+        "ACTIVE" => "активна",
+        "CONNECTED" => "подключена",
+        "WAITING" => "ожидание",
+        _ => state
+    };
 
     public async Task TestVoiceSpeechAsync(string phrase)
     {

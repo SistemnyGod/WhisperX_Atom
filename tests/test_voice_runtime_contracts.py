@@ -154,6 +154,28 @@ def test_live_meeting_has_a_separate_provisional_asr_producer():
     assert "Live provisional ASR publish failed" in VOICE_RUNTIME
 
 
+def test_two_track_live_audio_isolated_from_commands_and_bounded():
+    live_client = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/LiveAudioClient.cs").read_text(encoding="utf-8")
+    live_broadcaster = (ROOT / "apps/recorder-host/LiveAudioBroadcaster.cs").read_text(encoding="utf-8")
+    assert "WhisperXAtomLiveAudioV1" in live_client
+    assert "QueueCapacityPerTrack" in live_broadcaster
+    assert "TryPublish" in live_broadcaster
+    assert "SESSION_PAUSED" in live_broadcaster and "SESSION_RESUMED" in live_broadcaster
+    assert "systemAudioEnabled" in live_broadcaster and "systemAudioEnabled" in live_client
+    assert "ConnectionChanged" in live_client and "MIC_FALLBACK" in VOICE_RUNTIME
+    assert "_liveLocalRecognizer" in VOICE_RUNTIME and "_liveRemoteRecognizer" in VOICE_RUNTIME
+    assert 'string.Equals(frame.TrackType, "system-audio", StringComparison.OrdinalIgnoreCase)' in VOICE_RUNTIME
+    # The system track is consumed only by the provisional recognizer worker;
+    # command/wake recognizers remain on the normal microphone callback.
+    live_worker = VOICE_RUNTIME[VOICE_RUNTIME.index("private async Task ProcessLiveAudioFramesAsync"):VOICE_RUNTIME.index("private async Task ProcessLiveAsrAsync")]
+    assert "_liveRemoteRecognizer" in live_worker
+    assert "_utteranceRecognizer" not in live_worker
+    assert "_wakeRecognizer" not in live_worker
+    assert "_cancelRecognizer" not in live_worker
+    assert "MIC_FALLBACK" in VOICE_RUNTIME
+    assert "if (_speech.IsBusy)" in live_worker
+
+
 def test_voice_responder_never_uses_legacy_wav_replies():
     assert "public bool UsesPreRecordedResponses => false" in SPEECH_RESPONDER
     assert "PlayWavAsync" not in SPEECH_RESPONDER

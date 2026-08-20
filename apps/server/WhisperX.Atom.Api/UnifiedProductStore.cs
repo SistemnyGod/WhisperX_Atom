@@ -932,14 +932,22 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             if (item.Id == Guid.Empty || string.IsNullOrWhiteSpace(item.Text)
                 || item.Text.Trim().Length > 2000 || item.StartMs < 0 || item.EndMs <= item.StartMs
                 || item.EndMs - item.StartMs > 10 * 60 * 1000
-                || item.Confidence is < 0 or > 1)
+                || item.Confidence is < 0 or > 1
+                || item.MeetingId is Guid suppliedMeeting && suppliedMeeting != meetingId)
                 continue;
+            var sourceTrackType = string.Equals(item.SourceTrackType, "system-audio", StringComparison.OrdinalIgnoreCase)
+                ? "system-audio" : "room-microphone";
+            var channelRole = sourceTrackType == "system-audio" ? "REMOTE_SYSTEM" : "LOCAL_ROOM";
+            if (string.Equals(item.ChannelRole, "MIC_FALLBACK", StringComparison.OrdinalIgnoreCase)
+                && sourceTrackType == "room-microphone") channelRole = "MIC_FALLBACK";
             await using var insert = new NpgsqlCommand("""
-                INSERT INTO live_meeting_segments(id,meeting_id,recording_session_id,start_ms,end_ms,text,confidence,revision,captured_at,expires_at,created_by)
-                VALUES(@id,@meeting,@session,@start,@end,@text,@confidence,@revision,now(),now()+interval '5 minutes',@user)
+                INSERT INTO live_meeting_segments(id,meeting_id,recording_session_id,start_ms,end_ms,text,confidence,revision,source_track_type,source_track_id,channel_role,quality_flags,captured_at,expires_at,created_by)
+                VALUES(@id,@meeting,@session,@start,@end,@text,@confidence,@revision,@sourceTrackType,@sourceTrackId,@channelRole,@qualityFlags,now(),now()+interval '5 minutes',@user)
                 ON CONFLICT(id) DO UPDATE SET
                   text=EXCLUDED.text,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms,
                   confidence=EXCLUDED.confidence,revision=EXCLUDED.revision,
+                  source_track_type=EXCLUDED.source_track_type,source_track_id=EXCLUDED.source_track_id,
+                  channel_role=EXCLUDED.channel_role,quality_flags=EXCLUDED.quality_flags,
                   captured_at=EXCLUDED.captured_at,expires_at=EXCLUDED.expires_at
                 WHERE live_meeting_segments.meeting_id=EXCLUDED.meeting_id
                   AND live_meeting_segments.recording_session_id=EXCLUDED.recording_session_id
@@ -953,6 +961,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             insert.Parameters.AddWithValue("text", item.Text.Trim());
             insert.Parameters.AddWithValue("confidence", (object?)item.Confidence ?? DBNull.Value);
             insert.Parameters.AddWithValue("revision", Math.Max(0, item.Revision));
+            insert.Parameters.AddWithValue("sourceTrackType", sourceTrackType);
+            insert.Parameters.AddWithValue("sourceTrackId", (object?)item.SourceTrackId ?? DBNull.Value);
+            insert.Parameters.AddWithValue("channelRole", channelRole);
+            insert.Parameters.AddWithValue("qualityFlags", (object?)item.QualityFlags ?? DBNull.Value);
             insert.Parameters.AddWithValue("user", userId);
             accepted += await insert.ExecuteNonQueryAsync();
         }

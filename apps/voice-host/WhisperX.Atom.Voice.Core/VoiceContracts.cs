@@ -89,7 +89,13 @@ public sealed record VoiceHostSnapshot(
     string? EffectiveVoiceCulture = null,
     bool VoiceFallbackUsed = false,
     int SpeechQueueDepth = 0,
-    long SpeechQueueDrops = 0);
+    long SpeechQueueDrops = 0,
+    string LiveAudioMode = "MIC_FALLBACK",
+    string LiveRoomTrackState = "WAITING",
+    string LiveSystemTrackState = "WAITING",
+    long LiveAudioDrops = 0,
+    long LiveSegmentsPublished = 0,
+    long LiveSegmentsSuppressed = 0);
 
 public sealed record VoiceResponse(
     string Text,

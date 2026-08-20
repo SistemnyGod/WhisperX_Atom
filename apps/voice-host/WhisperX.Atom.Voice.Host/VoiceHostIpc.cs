@@ -28,7 +28,12 @@ internal sealed record VoiceLiveAsrSegment(
     long EndMs,
     string Text,
     double? Confidence = null,
-    int Revision = 0);
+    int Revision = 0,
+    string? SourceTrackType = null,
+    string? SourceTrackId = null,
+    string? ChannelRole = null,
+    string? QualityFlags = null,
+    Guid? MeetingId = null);
 
 internal sealed record VoiceBrokerResponse(
     bool Ok,

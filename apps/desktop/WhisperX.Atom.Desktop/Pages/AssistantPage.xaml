@@ -93,6 +93,7 @@
                                     <TextBlock Text="{Binding Timecode}" Foreground="{StaticResource AccentBrush}" />
                                     <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
                                     <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                     <Button Content="Открыть источник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenEvidenceButton_Click" />
                                 </StackPanel>
                             </DataTemplate>

@@ -68,6 +68,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
     private readonly VoskRecognizer? _liveRecognizer;
+    private readonly VoskRecognizer? _liveLocalRecognizer;
+    private readonly VoskRecognizer? _liveRemoteRecognizer;
+    private readonly LiveAudioClient _liveAudio;
+    private readonly Channel<LiveAudioFrameDto> _liveFrameQueue = Channel.CreateBounded<LiveAudioFrameDto>(new BoundedChannelOptions(128)
+    {
+        SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.DropWrite,
+        AllowSynchronousContinuations = false
+    });
     private readonly ILogger<VoiceHostRuntime>? _logger;
     private readonly Channel<VoiceAudioBlock> _audioQueue = Channel.CreateBounded<VoiceAudioBlock>(new BoundedChannelOptions(20)
     {
@@ -92,12 +100,20 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private AudioPcmConverter? _converter;
     private Task? _audioWorker;
     private Task? _liveStatusPollTask;
+    private Task? _liveAudioWorker;
     private DateTimeOffset _wakeStartedAt;
     private DateTimeOffset _commandStartedAt;
     private DateTimeOffset _lastSpeechAt;
     private DateTimeOffset _liveRecordingStartedAt;
     private string? _pendingRecognizedText;
     private Guid? _liveRecordingSessionId;
+    private int _liveAudioConnected;
+    private int _liveSystemAudioEnabled;
+    private long _liveAudioDrops;
+    private long _liveSegmentsPublished;
+    private long _liveSegmentsSuppressed;
+    private string _liveRoomTrackState = "WAITING";
+    private string _liveSystemTrackState = "WAITING";
 
     private bool _commandSession;
     private int _liveRecordingActive;
@@ -176,6 +192,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 _utteranceRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _cancelRecognizer = new VoskRecognizer(modelPath, grammar: CancelGrammar);
                 _liveRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
+                _liveLocalRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
+                _liveRemoteRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _nativeRuntimeReady = true;
                 _modelReady = true;
             }
@@ -191,6 +209,13 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _lastErrorCode = _modelError;
             _logger?.LogWarning(ex, "Vosk voice model or native runtime could not be loaded.");
         }
+
+        _liveAudio = new LiveAudioClient();
+        _liveAudio.FrameReceived += OnLiveAudioFrame;
+        _liveAudio.SessionChanged += OnLiveAudioSessionChanged;
+        _liveAudio.ConnectionChanged += OnLiveAudioConnectionChanged;
+        _liveAudio.Start();
+        _liveAudioWorker = Task.Run(ProcessLiveAudioFramesAsync);
     }
 
     public VoiceHostSnapshot Snapshot
@@ -238,6 +263,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceFallbackUsed = _speech.VoiceFallbackUsed,
                 SpeechQueueDepth = _speech.QueueDepth,
                 SpeechQueueDrops = _speech.QueueDrops,
+                LiveAudioMode = Volatile.Read(ref _liveAudioConnected) == 1
+                    ? (Volatile.Read(ref _liveSystemAudioEnabled) == 1 ? "DUAL_TRACK" : "MIC_ONLY")
+                    : "MIC_FALLBACK",
+                LiveRoomTrackState = _liveRoomTrackState,
+                LiveSystemTrackState = _liveSystemTrackState,
+                LiveAudioDrops = Interlocked.Read(ref _liveAudioDrops) + _liveAudio.Drops,
+                LiveSegmentsPublished = Interlocked.Read(ref _liveSegmentsPublished),
+                LiveSegmentsSuppressed = Interlocked.Read(ref _liveSegmentsSuppressed),
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
         }
@@ -740,7 +773,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         // Provisional meeting ASR is isolated from the command recognizer.
         // It is advisory only: failures and drops never affect Recorder or
         // the canonical V1/V2 pipeline.
-        if (Volatile.Read(ref _liveRecordingActive) == 1 && Volatile.Read(ref _liveRecordingPaused) == 0)
+        if (Volatile.Read(ref _liveRecordingActive) == 1 && Volatile.Read(ref _liveRecordingPaused) == 0
+            && Volatile.Read(ref _liveAudioConnected) == 0)
             await ProcessLiveAsrAsync(pcm, cancellationToken).ConfigureAwait(false);
 
         var now = DateTimeOffset.UtcNow;
@@ -878,9 +912,148 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _lastErrorCode = null;
     }
 
+    private void OnLiveAudioFrame(LiveAudioFrameDto frame)
+    {
+        if (string.Equals(frame.TrackType, "system-audio", StringComparison.OrdinalIgnoreCase))
+            _liveSystemTrackState = "ACTIVE";
+        else
+            _liveRoomTrackState = "ACTIVE";
+        if (!_liveFrameQueue.Writer.TryWrite(frame))
+            Interlocked.Increment(ref _liveAudioDrops);
+    }
+
+    private void OnLiveAudioConnectionChanged(bool connected)
+    {
+        if (connected) return;
+        // Keep the Recorder status/session context, but immediately enable the
+        // microphone-only provisional fallback while the local pipe reconnects.
+        Interlocked.Exchange(ref _liveAudioConnected, 0);
+        _liveRoomTrackState = Volatile.Read(ref _liveRecordingActive) == 1 ? "FALLBACK" : "WAITING";
+        _liveSystemTrackState = Volatile.Read(ref _liveRecordingActive) == 1 ? "UNAVAILABLE" : "WAITING";
+    }
+
+    private void OnLiveAudioSessionChanged(LiveAudioSessionDto session)
+    {
+        if (string.Equals(session.Event, "SESSION_STARTED", StringComparison.OrdinalIgnoreCase))
+        {
+            var localSessionId = session.LocalSessionId ?? session.SessionId;
+            _liveRecordingSessionId = Guid.TryParse(localSessionId, out var parsed) ? parsed : null;
+            _liveRecordingStartedAt = session.CapturedAtUtc;
+            Interlocked.Exchange(ref _liveRecordingActive, 1);
+            Interlocked.Exchange(ref _liveRecordingPaused, session.Paused ? 1 : 0);
+            Interlocked.Exchange(ref _liveAudioConnected, 1);
+            Interlocked.Exchange(ref _liveSystemAudioEnabled, session.SystemAudioEnabled ? 1 : 0);
+            _liveRoomTrackState = "CONNECTED";
+            _liveSystemTrackState = session.SystemAudioEnabled ? "CONNECTED" : "DISABLED";
+            lock (_recognitionGate)
+            {
+                _liveLocalRecognizer?.ResetSession();
+                _liveRemoteRecognizer?.ResetSession();
+            }
+            return;
+        }
+
+        if (string.Equals(session.Event, "SESSION_PAUSED", StringComparison.OrdinalIgnoreCase))
+        {
+            Interlocked.Exchange(ref _liveRecordingPaused, 1);
+            return;
+        }
+
+        if (string.Equals(session.Event, "SESSION_RESUMED", StringComparison.OrdinalIgnoreCase))
+        {
+            Interlocked.Exchange(ref _liveRecordingPaused, 0);
+            return;
+        }
+
+        if (string.Equals(session.Event, "SESSION_STOPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            Interlocked.Exchange(ref _liveRecordingActive, 0);
+            Interlocked.Exchange(ref _liveRecordingPaused, 0);
+            Interlocked.Exchange(ref _liveAudioConnected, 0);
+            Interlocked.Exchange(ref _liveSystemAudioEnabled, 0);
+            _liveRecordingSessionId = null;
+            _liveRecordingStartedAt = default;
+            _liveRoomTrackState = "WAITING";
+            _liveSystemTrackState = "WAITING";
+            lock (_recognitionGate)
+            {
+                _liveLocalRecognizer?.ResetSession();
+                _liveRemoteRecognizer?.ResetSession();
+            }
+        }
+    }
+
+    private async Task ProcessLiveAudioFramesAsync()
+    {
+        try
+        {
+            await foreach (var frame in _liveFrameQueue.Reader.ReadAllAsync(_shutdown.Token).ConfigureAwait(false))
+            {
+                if (!_modelReady || !_state.Snapshot.Enabled || Volatile.Read(ref _liveRecordingActive) == 0
+                    || Volatile.Read(ref _liveRecordingPaused) == 1)
+                    continue;
+                // Voice Host TTS is captured by both room and loopback tracks
+                // on some machines. Never publish a response as participant
+                // speech; the canonical technical-event masking still applies
+                // to final ASR assets.
+                if (_speech.IsBusy)
+                {
+                    lock (_recognitionGate)
+                    {
+                        _liveLocalRecognizer?.ResetSession();
+                        _liveRemoteRecognizer?.ResetSession();
+                    }
+                    continue;
+                }
+                var localSessionId = frame.LocalSessionId ?? frame.SessionId;
+                if (!Guid.TryParse(localSessionId, out var frameSession)
+                    || _liveRecordingSessionId is not Guid activeSession
+                    || frameSession != activeSession)
+                    continue;
+                if (!string.Equals(frame.Protocol, "LIVE_AUDIO_V1", StringComparison.OrdinalIgnoreCase)
+                    || frame.SampleRate != 16_000 || frame.Channels != 1)
+                    continue;
+                byte[] pcm;
+                try { pcm = Convert.FromBase64String(frame.Pcm16Base64); }
+                catch (FormatException) { continue; }
+                if (pcm.Length == 0) continue;
+                var recognizer = string.Equals(frame.TrackType, "system-audio", StringComparison.OrdinalIgnoreCase)
+                    ? _liveRemoteRecognizer
+                    : _liveLocalRecognizer;
+                if (recognizer is null) continue;
+                VoiceRecognitionResult result;
+                lock (_recognitionGate) result = recognizer.Accept(pcm);
+                if (!result.IsEndpoint || string.IsNullOrWhiteSpace(result.Text)) continue;
+                var text = result.Text.Trim();
+                lock (_recognitionGate) recognizer.ResetSession();
+                if (text.Length < 2 || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)) continue;
+                var normalized = text.ToLowerInvariant();
+                if (normalized.Contains("мифодий", StringComparison.Ordinal)
+                    || normalized.Contains("мефодий", StringComparison.Ordinal)
+                    || normalized.Contains("атом", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref _liveSegmentsSuppressed);
+                    continue;
+                }
+                var startMs = Math.Max(0, frame.StartMs - Math.Min(1200, frame.DurationMs));
+                var endMs = Math.Max(startMs + 1, frame.StartMs + frame.DurationMs);
+                var segment = new VoiceLiveAsrSegment(
+                    Guid.NewGuid(), startMs, endMs, text,
+                    result.Confidence > 0 ? Math.Clamp(result.Confidence, 0, 1) : null,
+                    0, frame.TrackType, frame.TrackId, frame.ChannelRole,
+                    frame.Gap || frame.DroppedBefore > 0 ? "LIVE_AUDIO_DROPPED" : null,
+                    frame.MeetingId);
+                await PublishLiveAsrSegmentAsync(segment, _shutdown.Token).ConfigureAwait(false);
+                Interlocked.Increment(ref _liveSegmentsPublished);
+            }
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
+        catch (Exception ex) { _logger?.LogWarning(ex, "Live audio ASR worker stopped unexpectedly."); }
+    }
+
     private async Task ProcessLiveAsrAsync(byte[] pcm, CancellationToken cancellationToken)
     {
-        if (_commandSession || _state.Snapshot.State is VoiceHostState.WakeDetected or VoiceHostState.Capturing or VoiceHostState.Recognizing)
+        if (_commandSession || _speech.IsBusy || _state.Snapshot.State is VoiceHostState.WakeDetected or VoiceHostState.Capturing or VoiceHostState.Recognizing)
             return;
         VoiceRecognitionResult result;
         lock (_recognitionGate)
@@ -906,14 +1079,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             startMs,
             endMs,
             text,
-            result.Confidence > 0 ? Math.Clamp(result.Confidence, 0, 1) : null);
+            result.Confidence > 0 ? Math.Clamp(result.Confidence, 0, 1) : null,
+            0, "room-microphone", null, "MIC_FALLBACK", null, null);
         _ = PublishLiveAsrSegmentAsync(segment, cancellationToken);
     }
 
     private async Task PublishLiveAsrSegmentAsync(VoiceLiveAsrSegment segment, CancellationToken cancellationToken)
     {
         if (_desktopBroker is null || Volatile.Read(ref _liveRecordingActive) == 0) return;
-        if (!await _livePublishGate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        await _livePublishGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await _desktopBroker.PublishLiveAsrSegmentsAsync(_liveRecordingSessionId, [segment], cancellationToken).ConfigureAwait(false);
@@ -1671,13 +1845,18 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _disposed = true;
         _audio.Stop();
         _audioQueue.Writer.TryComplete();
+        _liveFrameQueue.Writer.TryComplete();
         _shutdown.Cancel();
         try { if (_audioWorker is not null) await _audioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        try { if (_liveAudioWorker is not null) await _liveAudioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         try { if (_liveStatusPollTask is not null) await _liveStatusPollTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        await _liveAudio.DisposeAsync().ConfigureAwait(false);
         _utteranceRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
         _cancelRecognizer?.Dispose();
         _liveRecognizer?.Dispose();
+        _liveLocalRecognizer?.Dispose();
+        _liveRemoteRecognizer?.Dispose();
         _speech.Dispose();
         _executionGate.Dispose();
         _audioOperationGate.Dispose();

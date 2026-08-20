@@ -5,8 +5,14 @@
 неполную каноническую стенограмму.
 
 ```text
-Recorder / Voice Host provisional ASR producer
-        -> POST /api/assistant/live-segments/{meetingId}
+Recorder Host
+   ├─ room-microphone ──► LiveAudio v1 ──► Vosk LOCAL_ROOM
+   └─ system-audio ─────► LiveAudio v1 ──► Vosk REMOTE_SYSTEM
+                                      │
+                              fusion + echo dedup
+                                      │
+                                      ▼
+                         POST /api/assistant/live-segments/{meetingId}
         -> live_meeting_segments (TTL 5 минут, только текст и таймкоды)
         -> Voice Host -> Desktop Broker
         -> POST /api/assistant/requests {requestedMode: LIVE_MEETING}
@@ -44,14 +50,32 @@ provisional-сегментов, возвращается `LIVE_MEETING_NOT_READY
 
 ## Производитель provisional ASR
 
-Managed Voice Host держит отдельный unrestricted Vosk-сеанс на том же выбранном
-микрофонном endpoint и начинает его только после подтверждения активной записи
-(включая запись, запущенную кнопкой, через двухсекундный Broker status poll).
-Канонический PCM по-прежнему принадлежит Recorder; Voice Host использует свою
-live-копию только для оперативного provisional ASR. Фраза закрывается на Vosk endpoint,
-получает относительные таймкоды и отправляется в Broker командой
-`LIVE_ASR_SEGMENTS`. Публикация выполняется одной bounded single-flight
-операцией и никогда не блокирует capture, SQLite, FLAC или delivery.
+Recorder Host владеет аудиодорожками и после continuity validation передаёт их в
+отдельный локальный named pipe `WhisperXAtomLiveAudioV1`. Это не второй consumer
+AudioGraph-канала: live tap копирует PCM уже после проверки, а durable PCM,
+SQLite, FLAC и delivery никогда не ждут Vosk. На каждой дорожке есть bounded
+очередь; при переполнении удаляется только provisional-кадр и увеличивается
+счётчик drops. Каждое сообщение содержит `sessionId` и явный алиас
+`localSessionId`, `meetingId`, `trackId`, роль дорожки, sequence и общую
+session-relative временную шкалу.
+
+Managed Voice Host держит два независимых unrestricted Vosk-сеанса:
+`LOCAL_ROOM` для микрофона и `REMOTE_SYSTEM` для системного звука. System audio
+никогда не подаётся в wake/command/cancel recognizer. Фраза получает источник,
+роль дорожки, относительные таймкоды и quality flags. Одинаковые реплики в окне
+±1,5 секунды сравниваются после нормализации (`ё/е`, регистр, пунктуация); при
+сходстве от 0,85 остаётся системная копия, а разные одновременные реплики
+сохраняются обе.
+
+Если LiveAudio IPC недоступен, Voice Host временно использует микрофонный
+`MIC_FALLBACK`; system-audio fallback не имеет. Аудио live остаётся только в
+памяти, а в Broker/API уходят исключительно текстовые provisional-сегменты.
+Публикация выполняется bounded single-flight операцией и никогда не блокирует
+capture, SQLite, FLAC или delivery.
+
+При выключенном loopback Voice Host работает в `MIC_ONLY`; в Desktop/диагностике
+отдельно видны состояние микрофонной и системной дорожек, drops, опубликованные
+и подавленные сегменты.
 
 Командные фразы и участки wake/command-session отбрасываются из live-памяти.
 Если Voice Host, Desktop Broker или API недоступны, сегмент теряется только как
