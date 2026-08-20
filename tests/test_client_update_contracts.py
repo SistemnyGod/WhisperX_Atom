@@ -100,6 +100,8 @@ def test_clean_runtime_gate_requires_one_identity_and_excludes_legacy_python_pay
     assert "productionPath" in script
     assert "AudioGraph Recorder Host" in script
     assert "--untracked-files=normal" in publish
+    assert "GIT_STATUS_FAILED" in publish
+    assert "2>NUL" in publish
     assert "PRODUCTION_PAYLOAD_CONTAINS_LEGACY_PYTHON" in publish
     assert "RELEASE_COMPONENT_IDENTITY_MISMATCH" in publish
 

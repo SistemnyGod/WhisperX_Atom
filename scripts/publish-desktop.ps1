@@ -10,10 +10,18 @@ $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ([string]::IsNullOrWhiteSpace($gitCommit) -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
     throw "Unable to resolve a full release commit; refusing to publish an unidentified runtime."
 }
-# A clean installed runtime must be reproducible.  Include normal untracked
+# A clean installed runtime must be reproducible. Include normal untracked
 # files in the gate: a new source file (or a legacy Python entry point) must
 # never be silently omitted from the commit that produced the binaries.
-$dirtyFiles = @(& git -C $repoRoot status --porcelain --untracked-files=normal 2>$null)
+#
+# The workspace can contain ignored test-owned directories that are no longer
+# readable by the interactive user. `git` writes warnings about those paths to
+# stderr; in PowerShell 7 they can be promoted to terminating native-command
+# errors even though `git status` itself succeeds. Run the status command via
+# cmd with stderr explicitly discarded, while still checking its actual exit
+# code so a genuine Git failure remains fail-closed.
+$dirtyFiles = @(cmd.exe /d /s /c "git -C `"$repoRoot`" status --porcelain --untracked-files=normal 2>NUL")
+if ($LASTEXITCODE -ne 0) { throw "GIT_STATUS_FAILED: cannot determine release cleanliness." }
 $dirtyAllowed = $AllowDirty -or ($env:WHISPERX_ALLOW_DIRTY_RELEASE -in @("1", "true", "yes"))
 if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
     throw "Working tree is dirty; commit the release or set WHISPERX_ALLOW_DIRTY_RELEASE only for an explicit development package."
