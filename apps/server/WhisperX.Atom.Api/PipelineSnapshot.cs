@@ -30,7 +30,8 @@ public sealed record RecordingPipelineSnapshot(
     PipelineStageSnapshot Summary,
     JsonDocument? StageTimings = null,
     DateTime? CreatedAt = null,
-    DateTime? UpdatedAt = null);
+    DateTime? UpdatedAt = null,
+    PipelineStageSnapshot? Recording = null);
 
 public static class RecordingPipelineSnapshotResolver
 {
@@ -41,6 +42,7 @@ public static class RecordingPipelineSnapshotResolver
             chain.MediaAssetId is null ? "WAITING_FOR_UPLOAD" : "UPLOAD_CONFIRMED",
             chain.MediaAssetId is null ? 0 : 100,
             chain.MediaAssetId);
+        var recording = Stage(chain.RecordingState, null, chain.RecordingState);
         var media = Stage(chain.MediaStatus, chain.MediaAssetId, "MEDIA_ASSEMBLY");
         var asr = Stage(chain.AsrJobStatus, chain.AsrJobId, chain.AsrJobStage);
         var v1 = Stage(chain.TranscriptV1Status, chain.TranscriptV1Id, "ASR_DRAFT");
@@ -50,7 +52,7 @@ public static class RecordingPipelineSnapshotResolver
         var baseSnapshot = new RecordingPipelineSnapshot(
             chain.RecordingSessionId, chain.MeetingId, chain.PipelineCorrelationId,
             "PROCESSING", "MEDIA", null, false, null,
-            delivery, media, asr, v1, enrichment, v2, summary, chain.StageTimings, chain.CreatedAt, chain.UpdatedAt);
+            delivery, media, asr, v1, enrichment, v2, summary, chain.StageTimings, chain.CreatedAt, chain.UpdatedAt, recording);
 
         if (!IsReady(media.Status) && !IsWorkerReady(workerReadiness, "media-worker"))
             return Waiting(baseSnapshot, "MEDIA", "MEDIA_WORKER", "MEDIA_WORKER_UNAVAILABLE");

@@ -24,6 +24,7 @@ def test_server_exposes_canonical_pipeline_snapshot_without_replacing_lineage():
         "Summary is an optional enrichment",
         "CreatedAt",
         "UpdatedAt",
+        "Recording",
     ):
         assert field in snapshot
     assert "public RecordingPipelineSnapshot Snapshot" in store
@@ -31,6 +32,7 @@ def test_server_exposes_canonical_pipeline_snapshot_without_replacing_lineage():
     assert "GetPipelineWorkerReadinessAsync" in store
     assert "SnapshotOverride" in read("apps/server/WhisperX.Atom.Api/Program.cs")
     assert 'meetings/{id:guid}/pipeline' in api
+    assert "RecordingState" in store
 
 
 def test_desktop_consumes_snapshot_with_job_fallback_for_rolling_compatibility():

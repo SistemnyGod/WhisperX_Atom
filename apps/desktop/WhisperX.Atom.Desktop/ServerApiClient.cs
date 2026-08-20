@@ -140,7 +140,8 @@ public sealed record DesktopPipelineSnapshot(
     DesktopPipelineStage Summary,
     JsonDocument? StageTimings = null,
     DateTime? CreatedAt = null,
-    DateTime? UpdatedAt = null);
+    DateTime? UpdatedAt = null,
+    DesktopPipelineStage? Recording = null);
 public sealed record DesktopPipelineRun(
     Guid RecordingSessionId,
     Guid MeetingId,
@@ -165,7 +166,8 @@ public sealed record DesktopPipelineRun(
     JsonDocument? StageTimings = null,
     DesktopPipelineSnapshot? Snapshot = null,
     DateTime? CreatedAt = null,
-    DateTime? UpdatedAt = null);
+    DateTime? UpdatedAt = null,
+    string? RecordingState = null);
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
 public sealed record DesktopAssistantRequestAccepted(
     string QueryId,
