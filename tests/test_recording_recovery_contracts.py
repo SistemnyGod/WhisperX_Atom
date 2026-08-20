@@ -19,6 +19,15 @@ def test_archive_creation_is_single_flight_and_temps_are_attempt_scoped():
     assert "SemaphoreSlim(1, 1)" in coordinator
 
 
+def test_local_archive_ffprobe_accepts_numeric_or_quoted_integer_fields_safely():
+    archive = read("apps/recorder-agent/LocalArchiveWriter.cs")
+    parser = archive.split("private static bool TryReadJsonInt", 1)[1].split("private static void ValidateTrack", 1)[0]
+    assert "candidate.ValueKind == JsonValueKind.Number" in parser
+    assert "candidate.ValueKind == JsonValueKind.String" in parser
+    assert "candidate.GetString()" in parser
+    assert parser.index("candidate.ValueKind == JsonValueKind.Number") < parser.index("candidate.TryGetInt32")
+
+
 def test_server_receipt_and_status_are_agent_scoped_before_spool_cleanup():
     api = read("apps/recorder-agent/AgentApiClient.cs")
     server = read("apps/server/WhisperX.Atom.Api/Program.cs")

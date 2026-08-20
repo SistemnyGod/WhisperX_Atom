@@ -463,8 +463,15 @@ public sealed class LocalArchiveWriter(
     private static bool TryReadJsonInt(JsonElement element, string property, out int value)
     {
         value = 0;
-        return element.TryGetProperty(property, out var candidate)
-            && (candidate.TryGetInt32(out value) || int.TryParse(candidate.ToString(), out value));
+        if (!element.TryGetProperty(property, out var candidate)) return false;
+        if (candidate.ValueKind == JsonValueKind.Number)
+            return candidate.TryGetInt32(out value);
+        return candidate.ValueKind == JsonValueKind.String
+            && int.TryParse(
+                candidate.GetString(),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value);
     }
 
     private static void ValidateTrack(IReadOnlyList<RecordingArchiveChunk> chunks)

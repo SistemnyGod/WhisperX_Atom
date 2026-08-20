@@ -176,10 +176,29 @@ public sealed class SpeechResponder : IDisposable
 
     private static TtsEngineRouter CreateDefaultRouter(string expectedBuildIdentity)
     {
-        var root = AppContext.BaseDirectory; var executable = Path.Combine(root, "TtsHost", OperatingSystem.IsWindows() ? "TtsHost.exe" : "TtsHost"); var modelRoot = Path.Combine(root, "TtsHost", "Models", "silero-v5_5_ru");
+        var ttsHostRoot = ResolveTtsHostRoot(AppContext.BaseDirectory);
+        var executable = Path.Combine(ttsHostRoot, OperatingSystem.IsWindows() ? "TtsHost.exe" : "TtsHost");
+        var modelRoot = Path.Combine(ttsHostRoot, "Models", "silero-v5_5_ru");
         var identity = string.IsNullOrWhiteSpace(expectedBuildIdentity) ? Environment.GetEnvironmentVariable("WHISPERX_BUILD_IDENTITY") ?? string.Empty : expectedBuildIdentity;
         var silero = new SileroTtsEngine(executable, modelRoot, Environment.GetEnvironmentVariable("ATOM_TTS_MODEL_SHA256") ?? string.Empty, identity);
         return new TtsEngineRouter(silero, new WindowsTtsEngine(), new SpeechAudioPlayer());
+    }
+
+    internal static string ResolveTtsHostRoot(string voiceHostBaseDirectory)
+    {
+        var executableName = OperatingSystem.IsWindows() ? "TtsHost.exe" : "TtsHost";
+        var nested = Path.Combine(voiceHostBaseDirectory, "TtsHost");
+        if (File.Exists(Path.Combine(nested, executableName))) return nested;
+
+        var normalizedBase = Path.TrimEndingDirectorySeparator(Path.GetFullPath(voiceHostBaseDirectory));
+        var parent = Directory.GetParent(normalizedBase)?.FullName;
+        var sibling = parent is null ? null : Path.Combine(parent, "TtsHost");
+        if (sibling is not null && File.Exists(Path.Combine(sibling, executableName))) return sibling;
+
+        // Keep the historical nested path in diagnostics when no packaged
+        // runtime is present. Silero can then fail normally and the configured
+        // Windows fallback remains available.
+        return nested;
     }
 
     public void Dispose()

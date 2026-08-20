@@ -8,6 +8,14 @@ VOICE_RUNTIME = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRunti
 VOICE_RECOGNIZERS = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceRecognizers.cs").read_text(encoding="utf-8")
 VOICE_PARSER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
 SPEECH_RESPONDER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/SpeechResponder.cs").read_text(encoding="utf-8")
+
+
+def test_silero_runtime_resolves_installed_sibling_tts_host_layout():
+    assert "ResolveTtsHostRoot(AppContext.BaseDirectory)" in SPEECH_RESPONDER
+    resolver = SPEECH_RESPONDER.split("internal static string ResolveTtsHostRoot", 1)[1]
+    assert 'Path.Combine(voiceHostBaseDirectory, "TtsHost")' in resolver
+    assert 'Path.Combine(parent, "TtsHost")' in resolver
+    assert "File.Exists(Path.Combine(sibling, executableName))" in resolver
 VOICE_CAPTURE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioCapture.cs").read_text(encoding="utf-8")
 VOICE_IPC = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostIpc.cs").read_text(encoding="utf-8")
 VOICE_TELEMETRY = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceTelemetryPipeServer.cs").read_text(encoding="utf-8")
