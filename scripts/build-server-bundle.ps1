@@ -54,24 +54,37 @@ if (-not $SkipBuild) {
 $appServices = @('api','outbox-relay','import-worker','media-worker','gpu-worker')
 if ($IncludeLlm) { $appServices += 'summary-worker' }
 $imageRecords = [ordered]@{}
+function Get-DockerImageMetadata([string]$image) {
+    # Do not use a Go-template map lookup here.  Windows PowerShell's native
+    # argument marshalling removes the inner quotes from `index .Config.Labels
+    # "..."`, which makes the release packager fail after a successful build.
+    # Docker's JSON result is stable and retains dotted OCI label names.
+    $raw = (& docker image inspect $image | Out-String)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        throw "RELEASE_IMAGE_INSPECT_FAILED: $image"
+    }
+    $record = @($raw | ConvertFrom-Json)[0]
+    if ($null -eq $record) { throw "RELEASE_IMAGE_INSPECT_EMPTY: $image" }
+    return $record
+}
 foreach ($service in $appServices) {
     $image = "whisperx-atom-$($service):$tag"
-    $inspect = docker image inspect $image --format '{{.Id}}'
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($inspect | Out-String))) { throw "RELEASE_IMAGE_MISSING: $image" }
-    $labels = docker image inspect $image --format '{{index .Config.Labels "io.whisperx.atom.build-identity"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.version"}}'
-    if ($LASTEXITCODE -ne 0) { throw "RELEASE_IMAGE_LABELS_MISSING: $image" }
-    $labelParts = (($labels | Out-String).Trim()).Split('|')
-    if ($labelParts.Count -lt 3 -or $labelParts[0] -ne $identity -or $labelParts[1] -ne $commit -or $labelParts[2] -ne $identity) { throw "RELEASE_IMAGE_LABELS_MISMATCH: $image" }
-    $imageRecords[$service] = [ordered]@{ reference = $image; imageId = ($inspect | Out-String).Trim(); buildIdentity = $labelParts[0]; revision = $labelParts[1] }
+    $inspect = Get-DockerImageMetadata $image
+    $labels = $inspect.Config.Labels
+    $actualIdentity = [string]$labels.'io.whisperx.atom.build-identity'
+    $actualRevision = [string]$labels.'org.opencontainers.image.revision'
+    $actualVersion = [string]$labels.'org.opencontainers.image.version'
+    if ([string]::IsNullOrWhiteSpace($actualIdentity) -or [string]::IsNullOrWhiteSpace($actualRevision) -or [string]::IsNullOrWhiteSpace($actualVersion)) { throw "RELEASE_IMAGE_LABELS_MISSING: $image" }
+    if ($actualIdentity -ne $identity -or $actualRevision -ne $commit -or $actualVersion -ne $identity) { throw "RELEASE_IMAGE_LABELS_MISMATCH: $image" }
+    $imageRecords[$service] = [ordered]@{ reference = $image; imageId = [string]$inspect.Id; buildIdentity = $actualIdentity; revision = $actualRevision }
 }
 $configuredImages = @(& docker compose @compose @profiles config --images | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 if ($LASTEXITCODE -ne 0 -or $configuredImages.Count -eq 0) { throw "RELEASE_COMPOSE_IMAGE_LIST_FAILED" }
 $infrastructure = [ordered]@{}
 foreach ($image in $configuredImages) {
-    $inspect = docker image inspect $image --format '{{.Id}}'
-    if ($LASTEXITCODE -ne 0) { throw "RELEASE_INFRA_IMAGE_MISSING: $image" }
+    $inspect = Get-DockerImageMetadata $image
     if ($image -match ':(dev|latest)(@|$)') { throw "RELEASE_INFRA_IMAGE_UNPINNED: $image" }
-    $infrastructure[$image] = [ordered]@{ reference = $image; imageId = ($inspect | Out-String).Trim() }
+    $infrastructure[$image] = [ordered]@{ reference = $image; imageId = [string]$inspect.Id }
 }
 
 $finalRoot = [IO.Path]::GetFullPath((Join-Path $repo $OutputRoot))

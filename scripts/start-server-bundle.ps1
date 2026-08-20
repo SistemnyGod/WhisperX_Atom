@@ -20,6 +20,18 @@ if ($manifest.buildIdentity -match 'dev|dirty' -or $manifest.releaseTag -match '
 $tag = [string]$manifest.releaseTag
 $identity = [string]$manifest.buildIdentity
 
+function Get-DockerImageMetadata([string]$image) {
+    # Parsing JSON avoids a Windows PowerShell quoting bug in `docker inspect
+    # --format` when accessing dotted OCI labels.
+    $raw = (& docker image inspect $image | Out-String)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        throw "SERVER_IMAGE_INSPECT_FAILED: $image"
+    }
+    $record = @($raw | ConvertFrom-Json)[0]
+    if ($null -eq $record) { throw "SERVER_IMAGE_INSPECT_EMPTY: $image" }
+    return $record
+}
+
 function Read-EnvValue([string]$name) {
     $line = Get-Content -LiteralPath $envFile -Encoding utf8 | Where-Object { $_ -match "^$name=" } | Select-Object -First 1
     if ($null -eq $line) { return $null }
@@ -45,15 +57,16 @@ if (-not (Test-Path -LiteralPath $imagesTar -PathType Leaf)) { throw 'SERVER_IMA
 if ($LASTEXITCODE -ne 0) { throw 'SERVER_IMAGES_LOAD_FAILED' }
 foreach ($property in $manifest.images.PSObject.Properties) {
     $image = [string]$property.Value.reference
-    $actualId = (docker image inspect $image --format '{{.Id}}' | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $actualId -ne [string]$property.Value.imageId) { throw "SERVER_IMAGE_ID_MISMATCH: $image" }
-    $actualIdentity = (docker image inspect $image --format '{{index .Config.Labels "io.whisperx.atom.build-identity"}}' | Out-String).Trim()
+    $metadata = Get-DockerImageMetadata $image
+    $actualId = [string]$metadata.Id
+    if ($actualId -ne [string]$property.Value.imageId) { throw "SERVER_IMAGE_ID_MISMATCH: $image" }
+    $actualIdentity = [string]$metadata.Config.Labels.'io.whisperx.atom.build-identity'
     if ($actualIdentity -ne $identity) { throw "SERVER_IMAGE_IDENTITY_LABEL_MISMATCH: $image" }
 }
 foreach ($property in $manifest.infrastructureImages.PSObject.Properties) {
     $image = [string]$property.Value.reference
-    $actualId = (docker image inspect $image --format '{{.Id}}' | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $actualId -ne [string]$property.Value.imageId) { throw "SERVER_INFRA_IMAGE_ID_MISMATCH: $image" }
+    $actualId = [string](Get-DockerImageMetadata $image).Id
+    if ($actualId -ne [string]$property.Value.imageId) { throw "SERVER_INFRA_IMAGE_ID_MISMATCH: $image" }
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $config 'backups') | Out-Null

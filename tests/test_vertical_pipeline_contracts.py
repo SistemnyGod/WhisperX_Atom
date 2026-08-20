@@ -92,3 +92,14 @@ def test_server_bundle_rollback_script_uses_safe_interpolated_drive_name():
     bundle = read("scripts/start-server-bundle.ps1")
     assert '${name}:' in bundle
     assert '$name:' not in bundle
+
+
+def test_server_bundle_reads_oci_labels_from_docker_json_on_windows_powershell():
+    builder = read("scripts/build-server-bundle.ps1")
+    launcher = read("scripts/start-server-bundle.ps1")
+    for script in (builder, launcher):
+        assert "function Get-DockerImageMetadata" in script
+        assert "docker image inspect $image | Out-String" in script
+        assert "ConvertFrom-Json" in script
+    assert "io.whisperx.atom.build-identity" in builder
+    assert "RELEASE_IMAGE_LABELS_MISMATCH" in builder
