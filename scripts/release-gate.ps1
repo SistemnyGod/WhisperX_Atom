@@ -111,7 +111,11 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
         try {
             $json = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
             if ($scenario -eq "backup-restore") {
-                $scenarioReady = ($json.backupVerified -eq $true -and $json.cleanRestore -eq $true)
+                # A pg_restore success alone is not disaster-recovery evidence:
+                # the isolated database still has to prove meetings, V1/V2,
+                # summaries and playable audio.  Keep the gate fail-closed
+                # until the operator records those content checks.
+                $scenarioReady = ($json.backupVerified -eq $true -and $json.cleanRestore -eq $true -and $json.contentChecksPassed -eq $true)
             } else {
                 $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
             }

@@ -8,7 +8,8 @@ param(
     [string]$Database = "",
     [string]$User = "",
     [string]$RuntimeManifestPath = "artifacts\release\runtime-manifest.json",
-    [string]$MigrationRoot = ""
+    [string]$MigrationRoot = "",
+    [string]$ArchiveSha256Path = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,8 +27,13 @@ function Get-EnvValue([string]$Name, [string]$Default) {
     if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
     return $value
 }
+function Resolve-RepoPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ([IO.Path]::IsPathRooted($Path)) { return [IO.Path]::GetFullPath($Path) }
+    return [IO.Path]::GetFullPath((Join-Path $repo $Path))
+}
 function Get-SchemaVersion {
-    $root = if ($MigrationRoot) { [IO.Path]::GetFullPath($MigrationRoot) } else { Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations" }
+    $root = if ($MigrationRoot) { Resolve-RepoPath $MigrationRoot } else { Join-Path $repo "apps\server\WhisperX.Atom.Api\Migrations" }
     $migration = Get-ChildItem -LiteralPath $root -Filter "*.sql" -File |
         Sort-Object Name | Select-Object -Last 1
     if ($null -eq $migration) { throw "SCHEMA_MIGRATION_NOT_FOUND" }
@@ -47,6 +53,8 @@ function Invoke-PgDump([string]$Destination, [string]$DbUser, [string]$DbName) {
     if ($process.ExitCode -ne 0) { throw "PG_DUMP_FAILED" }
 }
 
+$ComposeFile = Resolve-RepoPath $ComposeFile
+$RuntimeManifestPath = Resolve-RepoPath $RuntimeManifestPath
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path (Get-EnvValue "WHISPERX_BACKUP_HOST" "C:\WhisperXAtom\Backups") $stamp }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -74,7 +82,7 @@ try {
         excluded = @("POSTGRES_PASSWORD", "JWT_SECRET", "TUS_HOOK_SECRET", "AGENT tokens", "cookies", "HF_TOKEN", "VOICE_HOST_TOKEN")
     }
     $safeConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stage "runtime-config.json") -Encoding utf8
-    $runtimeManifest = Join-Path $repo $RuntimeManifestPath
+    $runtimeManifest = $RuntimeManifestPath
     if (Test-Path -LiteralPath $runtimeManifest -PathType Leaf) { Copy-Item -LiteralPath $runtimeManifest -Destination (Join-Path $stage "runtime-manifest.json") }
 
     $dataRoot = Get-EnvValue "WHISPERX_DATA_HOST" "C:\WhisperXAtom\Data"
@@ -97,9 +105,29 @@ try {
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stage "backup-manifest.json") -Encoding utf8
     $archive = Join-Path $OutputDirectory "whisperx-atom-backup-$stamp.zip"
-    Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -CompressionLevel Optimal -Force
+    # Windows PowerShell's Compress-Archive is limited by the classic 2 GB
+    # ZIP path.  Prefer the inbox bsdtar Zip64 writer for media-inclusive
+    # backups, while retaining a compatibility fallback on older hosts.
+    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($tar) {
+        & $tar.Source -a -c -f $archive -C $stage .
+        if ($LASTEXITCODE -ne 0) { throw "BACKUP_ARCHIVE_CREATE_FAILED" }
+    } else {
+        Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -CompressionLevel Optimal -Force
+    }
     if (-not (Test-Path -LiteralPath $archive)) { throw "BACKUP_ARCHIVE_NOT_CREATED" }
+    $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hashPath = if ([string]::IsNullOrWhiteSpace($ArchiveSha256Path)) { "$archive.sha256" } else { [IO.Path]::GetFullPath($ArchiveSha256Path) }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hashPath) | Out-Null
+    $hashRecord = [ordered]@{
+        algorithm = "SHA256"
+        path = [IO.Path]::GetFileName($archive)
+        sha256 = $archiveHash
+        createdAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $hashRecord | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $hashPath -Encoding utf8
     Write-Output $archive
+    Write-Output $hashPath
 }
 finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }

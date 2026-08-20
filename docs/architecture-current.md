@@ -116,3 +116,13 @@ Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для с
   `https://`, `PUBLIC_HOST`, `fullchain.pem`/`privkey.pem`, secure cookies и
   release images без `dev/dirty/latest`; Docker build-контексты и прямой API
   port в production не допускаются.
+- Backup/restore работает verify-first. `scripts/backup.ps1` сохраняет
+  PostgreSQL custom dump, manifest с SHA256 каждого файла и внешний
+  `*.zip.sha256`; секреты и токены в архив не попадают. `scripts/restore.ps1`
+  проверяет внешний hash, schema и безопасно распаковывает ZIP без path
+  traversal. Реальное применение разрешено только с `-Apply`; для drill
+  используется `scripts/e2e-backup-restore.ps1`, где по умолчанию выполняется
+  только plan, а apply требует изолированный `TestRoot`, явный флаг и отдельный
+  PostgreSQL container `whisperx-atom-drill-*`. Release gate принимает backup
+  только после отдельного подтверждения content checks (meetings, V1/V2,
+  summaries и playback), а не по одному успешному `pg_restore`.
