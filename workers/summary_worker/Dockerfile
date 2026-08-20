@@ -19,6 +19,7 @@ COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
 COPY workers/db_pool.py /srv/workers/db_pool.py
 COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py
 COPY workers/runtime_healthcheck.py /srv/workers/runtime_healthcheck.py
+COPY whisperx_atom /srv/whisperx_atom
 COPY workers/summary_worker/requirements.txt /srv/summary-requirements.txt
 RUN python3.12 -m pip install --break-system-packages --no-cache-dir -r /srv/summary-requirements.txt
 LABEL org.opencontainers.image.title="WhisperX Atom Summary Worker" \
