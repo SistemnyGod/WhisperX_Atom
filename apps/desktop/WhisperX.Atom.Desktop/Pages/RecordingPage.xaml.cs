@@ -220,6 +220,14 @@ public sealed partial class RecordingPage : Page
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
+    private void OpenPlayableTrackButton_Click(object sender, RoutedEventArgs e)
+    {
+        var role = (sender as Button)?.Tag?.ToString() ?? string.Empty;
+        var path = ViewModel?.GetPlayableAudioPath(role);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+    }
+
     private void RecordingPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         var mode = ResponsiveLayout.GetMode(e.NewSize.Width);

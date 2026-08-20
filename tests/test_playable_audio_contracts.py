@@ -52,3 +52,15 @@ def test_recording_fault_e2e_keeps_playable_gate_for_non_capture_failures():
     assert "playableAudioState" in script
     assert "E2E_PLAYABLE_AUDIO_NOT_READY" in script
     assert '"usb-loss", "host-crash"' in script
+
+
+def test_desktop_audio_playback_prefers_master_and_exposes_separate_tracks():
+    view_model = (ROOT / "apps" / "desktop" / "WhisperX.Atom.Desktop" / "ViewModels" / "RecordingViewModel.cs").read_text(encoding="utf-8")
+    page = (ROOT / "apps" / "desktop" / "WhisperX.Atom.Desktop" / "Pages" / "RecordingPage.xaml").read_text(encoding="utf-8")
+    code_behind = (ROOT / "apps" / "desktop" / "WhisperX.Atom.Desktop" / "Pages" / "RecordingPage.xaml.cs").read_text(encoding="utf-8")
+    assert "MasterAudioPath" in view_model
+    assert "PlayableAudioFilePath => MasterAudioPath ?? MicrophoneAudioPath ?? SystemAudioPath" in view_model
+    assert "CanOpenMicrophoneAudio" in page and 'Tag="microphone"' in page
+    assert "CanOpenSystemAudio" in page and 'Tag="system"' in page
+    assert 'Tag="master"' in page
+    assert "OpenPlayableTrackButton_Click" in code_behind

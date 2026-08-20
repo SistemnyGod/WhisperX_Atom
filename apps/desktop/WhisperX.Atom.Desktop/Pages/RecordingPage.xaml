@@ -207,7 +207,10 @@
                                     <TextBlock Text="{Binding PlayableAudioStatusLabel}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Открыть файл" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanOpenPlayableAudio}" Click="OpenPlayableAudioButton_Click" />
+                                    <Button Content="Открыть локальную дорожку" Style="{StaticResource CardButtonStyle}" IsEnabled="{Binding CanOpenPlayableAudio}" Click="OpenPlayableAudioButton_Click" />
+                                    <Button Content="Общая запись" Style="{StaticResource GhostButtonStyle}" IsEnabled="{Binding CanOpenMasterAudio}" Tag="master" Click="OpenPlayableTrackButton_Click" />
+                                    <Button Content="Микрофон" Style="{StaticResource GhostButtonStyle}" IsEnabled="{Binding CanOpenMicrophoneAudio}" Tag="microphone" Click="OpenPlayableTrackButton_Click" />
+                                    <Button Content="Системный звук" Style="{StaticResource GhostButtonStyle}" IsEnabled="{Binding CanOpenSystemAudio}" Tag="system" Click="OpenPlayableTrackButton_Click" />
                                     <Button Content="Открыть папку" Style="{StaticResource GhostButtonStyle}" IsEnabled="{Binding CanOpenLocalArchive}" Click="OpenArchiveButton_Click" />
                                 </StackPanel>
                             </Grid>

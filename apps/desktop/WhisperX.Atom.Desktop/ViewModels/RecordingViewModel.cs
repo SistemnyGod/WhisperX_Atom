@@ -178,7 +178,7 @@ public sealed class RecordingViewModel : ObservableObject
     public string WarningMessage { get => _warningMessage; private set { if (SetProperty(ref _warningMessage, value)) OnPropertyChanged(nameof(HasWarning)); } }
     public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
-    public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) OnPropertyChanged(nameof(CanOpenLocalArchive)); } }
+    public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) { OnPropertyChanged(nameof(CanOpenLocalArchive)); NotifyPlayableAudioSelectionChanged(); } } }
     public string LocalFinalizeState
     {
         get => _localFinalizeState;
@@ -207,7 +207,7 @@ public sealed class RecordingViewModel : ObservableObject
             }
         }
     }
-    public string? PlayableAudioPath { get => _playableAudioPath; private set { if (SetProperty(ref _playableAudioPath, value)) { OnPropertyChanged(nameof(CanOpenPlayableAudio)); OnPropertyChanged(nameof(CanOpenLocalArchive)); OnPropertyChanged(nameof(PlayableAudioFilePath)); } } }
+    public string? PlayableAudioPath { get => _playableAudioPath; private set { if (SetProperty(ref _playableAudioPath, value)) { OnPropertyChanged(nameof(CanOpenPlayableAudio)); OnPropertyChanged(nameof(CanOpenLocalArchive)); NotifyPlayableAudioSelectionChanged(); } } }
     public string? PlayableAudioError
     {
         get => _playableAudioError;
@@ -224,9 +224,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             if (SetProperty(ref _playableAudioFiles, value))
             {
-                OnPropertyChanged(nameof(CanOpenPlayableAudio));
-                OnPropertyChanged(nameof(CanOpenLocalArchive));
-                OnPropertyChanged(nameof(PlayableAudioFilePath));
+                NotifyPlayableAudioSelectionChanged();
             }
         }
     }
@@ -239,8 +237,52 @@ public sealed class RecordingViewModel : ObservableObject
         "FAILED" => $"Ошибка файла{(string.IsNullOrWhiteSpace(_playableAudioError) ? string.Empty : $": {_playableAudioError}")}",
         _ => "Файл не требуется"
     };
-    public bool CanOpenPlayableAudio => PlayableAudioFiles.Any(file => File.Exists(file.LocalPath));
-    public string? PlayableAudioFilePath => PlayableAudioFiles.FirstOrDefault(file => File.Exists(file.LocalPath))?.LocalPath;
+    public bool CanOpenPlayableAudio => PlayableAudioFilePath is not null;
+    public string? MasterAudioPath
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(_archivePath)) return null;
+            var candidate = File.Exists(_archivePath)
+                ? _archivePath
+                : Path.Combine(_archivePath, "export", "master.flac");
+            return File.Exists(candidate) ? candidate : null;
+        }
+    }
+    public bool CanOpenMasterAudio => MasterAudioPath is not null;
+    public string? MicrophoneAudioPath => FindPlayableTrack("microphone")?.LocalPath;
+    public bool CanOpenMicrophoneAudio => MicrophoneAudioPath is not null;
+    public string? SystemAudioPath => FindPlayableTrack("system")?.LocalPath;
+    public bool CanOpenSystemAudio => SystemAudioPath is not null;
+    public bool HasSeparatePlayableTracks => CanOpenMicrophoneAudio || CanOpenSystemAudio;
+    public string? PlayableAudioFilePath => MasterAudioPath ?? MicrophoneAudioPath ?? SystemAudioPath;
+
+    public string? GetPlayableAudioPath(string role) => role.Trim().ToLowerInvariant() switch
+    {
+        "master" => MasterAudioPath,
+        "microphone" => MicrophoneAudioPath,
+        "system" => SystemAudioPath,
+        _ => PlayableAudioFilePath
+    };
+
+    private PlayableAudioFile? FindPlayableTrack(string fragment) =>
+        PlayableAudioFiles.FirstOrDefault(file =>
+            File.Exists(file.LocalPath) &&
+            file.TrackType.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+
+    private void NotifyPlayableAudioSelectionChanged()
+    {
+        OnPropertyChanged(nameof(CanOpenPlayableAudio));
+        OnPropertyChanged(nameof(PlayableAudioFilePath));
+        OnPropertyChanged(nameof(MasterAudioPath));
+        OnPropertyChanged(nameof(CanOpenMasterAudio));
+        OnPropertyChanged(nameof(MicrophoneAudioPath));
+        OnPropertyChanged(nameof(CanOpenMicrophoneAudio));
+        OnPropertyChanged(nameof(SystemAudioPath));
+        OnPropertyChanged(nameof(CanOpenSystemAudio));
+        OnPropertyChanged(nameof(HasSeparatePlayableTracks));
+        OnPropertyChanged(nameof(CanOpenLocalArchive));
+    }
     public string LocalFinalizeStatusLabel => _localFinalizeState.ToUpperInvariant() switch
     {
         "FINALIZING_LOCAL" => "Локальный master собирается",
