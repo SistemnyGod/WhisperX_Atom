@@ -102,13 +102,18 @@ public static class UiStatusMapper
 
     public static bool IsQwenDisabled(DesktopProcessingReadiness? readiness)
     {
+        return string.Equals(ComponentStatus(readiness, "qwen"), "DISABLED", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string? ComponentStatus(DesktopProcessingReadiness? readiness, string component)
+    {
         if (readiness is null || readiness.Components.ValueKind != System.Text.Json.JsonValueKind.Object
-            || !readiness.Components.TryGetProperty("qwen", out var qwen)
-            || qwen.ValueKind != System.Text.Json.JsonValueKind.Object
-            || !qwen.TryGetProperty("status", out var status)
+            || !readiness.Components.TryGetProperty(component, out var value)
+            || value.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !value.TryGetProperty("status", out var status)
             || status.ValueKind != System.Text.Json.JsonValueKind.String)
-            return false;
-        return string.Equals(status.GetString(), "DISABLED", StringComparison.OrdinalIgnoreCase);
+            return null;
+        return status.GetString()?.Trim().ToUpperInvariant();
     }
 
     public const string SummaryDisabledMessage =

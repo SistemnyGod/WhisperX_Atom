@@ -501,11 +501,16 @@ public sealed class ServerApiClient : IDisposable
         finally { _refreshGate.Release(); }
     }
 
-    private async Task<HttpResponseMessage> SendAuthorizedAsync(HttpMethod method, string uri, object? payload, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendAuthorizedAsync(
+        HttpMethod method,
+        string uri,
+        object? payload,
+        CancellationToken cancellationToken,
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead)
     {
         var observedVersion = Interlocked.Read(ref _authVersion);
         HttpResponseMessage response;
-        try { response = await SendAsync(method, uri, payload, cancellationToken); }
+        try { response = await SendAsync(method, uri, payload, cancellationToken, completionOption); }
         catch (HttpRequestException) {
             _authState = DesktopAuthState.Offline;
             throw new DesktopApiException(0, "backend_unavailable", "API недоступен. Локальная запись продолжает работать.");
@@ -518,7 +523,7 @@ public sealed class ServerApiClient : IDisposable
         response.Dispose();
         if (!await RefreshAsync(observedVersion, cancellationToken))
             throw new DesktopApiException(401, "authentication_required", "Требуется повторный вход в API.");
-        try { response = await SendAsync(method, uri, payload, cancellationToken); }
+        try { response = await SendAsync(method, uri, payload, cancellationToken, completionOption); }
         catch (HttpRequestException) {
             _authState = DesktopAuthState.Offline;
             throw new DesktopApiException(0, "backend_unavailable", "API недоступен. Локальная запись продолжает работать.");
@@ -536,11 +541,16 @@ public sealed class ServerApiClient : IDisposable
         return response;
     }
 
-    private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string uri, object? payload, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendAsync(
+        HttpMethod method,
+        string uri,
+        object? payload,
+        CancellationToken cancellationToken,
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead)
     {
         using var request = new HttpRequestMessage(method, uri);
         if (payload is not null) request.Content = JsonContent.Create(payload, options: _json);
-        return await _http.SendAsync(request, cancellationToken);
+        return await _http.SendAsync(request, completionOption, cancellationToken);
     }
 
     private void ClearCookies()
@@ -735,13 +745,22 @@ public sealed class ServerApiClient : IDisposable
 
     public async Task<DesktopAssistantMessage?> WaitForAssistantMessageAsync(Guid conversationId, Guid messageId, CancellationToken cancellationToken = default)
     {
+        DesktopAssistantMessage? latest = null;
         try
         {
-            using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/assistant/conversations/{conversationId}/messages/{messageId}/events", null, cancellationToken);
+            // Qwen runs on demand and a cold model load can legitimately take
+            // longer than the ordinary 10-second request timeout. Complete
+            // this request when the SSE headers arrive; the page cancellation
+            // token owns the lifetime of the event stream itself.
+            using var response = await SendAuthorizedAsync(
+                HttpMethod.Get,
+                $"api/assistant/conversations/{conversationId}/messages/{messageId}/events",
+                null,
+                cancellationToken,
+                HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var reader = new StreamReader(stream);
-            DesktopAssistantMessage? latest = null;
             while (!cancellationToken.IsCancellationRequested)
             {
                 var line = await reader.ReadLineAsync(cancellationToken);
@@ -751,19 +770,47 @@ public sealed class ServerApiClient : IDisposable
                 catch (JsonException) { continue; }
                 if (latest is not null && IsTerminalAssistantStatus(latest.Status)) return latest;
             }
-            return latest;
         }
-        catch (HttpRequestException)
+        catch (DesktopApiException exception) when (exception.ErrorCode is "backend_unavailable" or "backend_timeout")
         {
-            for (var attempt = 0; attempt < 20 && !cancellationToken.IsCancellationRequested; attempt++)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(8, 1 + attempt / 3)), cancellationToken);
-                var messages = await GetAssistantMessagesAsync(conversationId, cancellationToken);
-                var message = messages.FirstOrDefault(item => item.Id.Equals(messageId.ToString(), StringComparison.OrdinalIgnoreCase));
-                if (message is not null && IsTerminalAssistantStatus(message.Status)) return message;
-            }
-            return null;
+            // The POST already created a durable message. Continue through
+            // polling instead of reporting a failed submission.
         }
+        catch (HttpRequestException) { }
+        catch (IOException) { }
+
+        return await PollAssistantMessageAsync(conversationId, messageId, latest, cancellationToken);
+    }
+
+    private async Task<DesktopAssistantMessage?> PollAssistantMessageAsync(
+        Guid conversationId,
+        Guid messageId,
+        DesktopAssistantMessage? latest,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(4);
+        var attempt = 0;
+        while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            if (latest is not null && IsTerminalAssistantStatus(latest.Status)) return latest;
+            if (attempt > 0)
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(5, 1 + attempt / 4)), cancellationToken);
+            attempt++;
+            try
+            {
+                var messages = await GetAssistantMessagesAsync(conversationId, cancellationToken);
+                latest = messages.FirstOrDefault(item => item.Id.Equals(messageId.ToString(), StringComparison.OrdinalIgnoreCase));
+            }
+            catch (DesktopApiException exception) when (exception.ErrorCode is "backend_unavailable" or "backend_timeout")
+            {
+                continue;
+            }
+            catch (HttpRequestException)
+            {
+                continue;
+            }
+        }
+        return latest is not null && IsTerminalAssistantStatus(latest.Status) ? latest : null;
     }
 
     public async Task<bool> UpdateAssistantConversationAsync(Guid conversationId, string? title = null, bool? archived = null, CancellationToken cancellationToken = default)

@@ -233,24 +233,46 @@ public sealed class AssistantViewModel : ObservableObject
         IsAsking = true;
         ErrorText = string.Empty;
         StatusText = "Запрос отправляется…";
+        var acceptedByServer = false;
         try
         {
             var result = await _services.Backend.CreateAssistantMessageAsync(Guid.Parse(SelectedConversation!.Id), question, retryOf, cancellationToken);
-            if (result is null) { ErrorText = "API не принял сообщение помощника."; return; }
+            if (result is null)
+            {
+                StatusText = "Запрос не принят";
+                ErrorText = "API не принял сообщение помощника.";
+                return;
+            }
+            acceptedByServer = true;
             Messages.Add(result.UserMessage);
             Messages.Add(result.AssistantMessage);
             Question = string.Empty;
             OnPropertyChanged(nameof(HasMessages));
             SelectedMessage = result.AssistantMessage;
+            StatusText = DisplayStatus(result.AssistantMessage.Status);
             var completed = await _services.Backend.WaitForAssistantMessageAsync(Guid.Parse(SelectedConversation.Id), Guid.Parse(result.AssistantMessage.Id), cancellationToken);
             if (completed is not null) ReplaceMessage(completed);
-            if (completed is null) { ErrorText = "Помощник временно недоступен. История сообщения сохранена."; return; }
+            if (completed is null)
+            {
+                StatusText = "Ответ продолжает обрабатываться на сервере";
+                ErrorText = "Ожидание ответа завершено, но запрос сохранён. Откройте чат позже или нажмите «Обновить».";
+                return;
+            }
             SelectedMessage = completed;
             StatusText = DisplayStatus(completed.Status);
             await LoadConversationsAsync(cancellationToken);
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { ErrorText = SafeError(ex); }
+        catch (OperationCanceledException)
+        {
+            if (acceptedByServer) StatusText = "Запрос сохранён; ожидание приостановлено";
+        }
+        catch (Exception ex)
+        {
+            StatusText = acceptedByServer ? "Запрос принят; связь при ожидании прервалась" : "Не удалось отправить запрос";
+            ErrorText = acceptedByServer
+                ? "Запрос сохранён на сервере. Обновите чат, чтобы получить готовый ответ."
+                : SafeError(ex);
+        }
         finally { IsAsking = false; OnPropertyChanged(nameof(CanAsk)); }
     }
 

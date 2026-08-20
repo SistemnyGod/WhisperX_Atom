@@ -233,11 +233,18 @@ public sealed partial class MainWindow : Window
             return;
         }
         var agentReady = authenticated && recorderAvailable && _services.AgentBootstrap.IsReady;
-        var processingReady = processingReadiness?.Ready == true;
+        var reportedProcessingReady = processingReadiness?.Ready == true;
+        var whisperXStatus = UiStatusMapper.ComponentStatus(processingReadiness, "whisperx");
+        var qwenStatus = UiStatusMapper.ComponentStatus(processingReadiness, "qwen");
+        var processingReady = whisperXStatus is "READY" or "BUSY"
+            || (whisperXStatus is null && reportedProcessingReady);
         var status = backendAvailable && !authenticated ? ("Требуется вход", "WarningBrush") :
             backendAvailable && recorderAvailable && !agentReady ? ("Recorder доступен; требуется привязка к пользователю", "WarningBrush") :
             backendAvailable && agentReady && processingReadiness is null ? ("WhisperX: readiness недоступна", "WarningBrush") :
             backendAvailable && agentReady && !processingReady ? ("WhisperX / GPU недоступны", "DangerBrush") :
+            backendAvailable && agentReady && qwenStatus == "BUSY" ? ("Запись и WhisperX готовы · ИИ обрабатывает запрос", "NeutralStatusBrush") :
+            backendAvailable && agentReady && qwenStatus is "UNAVAILABLE" or "DEGRADED" ? ("Запись и WhisperX готовы · ИИ временно недоступен", "WarningBrush") :
+            backendAvailable && agentReady && qwenStatus == "DISABLED" ? ("Запись и WhisperX готовы · ИИ отключён", "WarningBrush") :
             backendAvailable && agentReady ? ("Система готова", "SuccessBrush") :
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :

@@ -137,3 +137,26 @@ def test_desktop_exposes_persistent_chat_contracts_and_navigation():
     assert "GetAssistantConversationsAsync" in client
     assert "assistant" in window
     assert "Conversations" in vm and "Messages" in vm
+
+
+def test_assistant_wait_uses_streaming_http_and_never_leaves_sending_status_after_acceptance():
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+    vm = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/AssistantViewModel.cs")
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "HttpCompletionOption.ResponseHeadersRead" in client
+    assert "PollAssistantMessageAsync" in client
+    assert "DateTimeOffset.UtcNow.AddMinutes(4)" in client
+    assert "StatusText = DisplayStatus(result.AssistantMessage.Status)" in vm
+    assert "Ответ продолжает обрабатываться на сервере" in vm
+    assert "Запрос принят; связь при ожидании прервалась" in vm
+    assert "context.RequestAborted.IsCancellationRequested" in api
+
+
+def test_global_status_distinguishes_busy_or_unavailable_qwen_from_whisperx():
+    window = read("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs")
+    mapper = read("apps/desktop/WhisperX.Atom.Desktop/Services/UiStatusMapper.cs")
+    assert 'ComponentStatus(processingReadiness, "whisperx")' in window
+    assert 'ComponentStatus(processingReadiness, "qwen")' in window
+    assert "ИИ обрабатывает запрос" in window
+    assert "ИИ временно недоступен" in window
+    assert "public static string? ComponentStatus" in mapper

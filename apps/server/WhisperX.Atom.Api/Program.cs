@@ -1603,16 +1603,20 @@ app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{message
     var userId = CurrentUserId(context);
     if (userId is null) { response.StatusCode = StatusCodes.Status401Unauthorized; return; }
     if (await store.GetAssistantConversationAsync(conversationId, userId.Value) is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
-    for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+    try
     {
-        var messages = await store.ListAssistantMessagesAsync(conversationId, userId.Value);
-        var message = messages.FirstOrDefault(item => item.Id == messageId);
-        if (message is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
-        await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(message)}\n\n", cancellationToken);
-        await response.Body.FlushAsync(cancellationToken);
-        if (message.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
-        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+        {
+            var messages = await store.ListAssistantMessagesAsync(conversationId, userId.Value);
+            var message = messages.FirstOrDefault(item => item.Id == messageId);
+            if (message is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
+            await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(message)}\n\n", cancellationToken);
+            await response.Body.FlushAsync(cancellationToken);
+            if (message.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
     }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
 });
 // Unified entry point used by Desktop text chat and the managed Voice Host.
 // Voice never receives a server token: the Desktop broker forwards this call
