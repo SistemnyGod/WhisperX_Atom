@@ -37,6 +37,7 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
     _cleanup_old(temp_root)
     runtime: SileroRuntime | None = None
     for raw in sys.stdin:
+        operation: str | None = None
         if parent_pid:
             try:
                 if os.name == "nt":
@@ -48,6 +49,7 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
         try:
             payload = json.loads(raw)
             request = parse_request(payload)
+            operation = request.operation
             if request.operation == "ping":
                 if payload.get("buildIdentity") and BUILD_IDENTITY and payload["buildIdentity"] != BUILD_IDENTITY:
                     raise ProtocolError("TTS_BUILD_IDENTITY_MISMATCH")
@@ -69,7 +71,10 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
         except Exception as error:
             # Preserve privacy: report only the exception class, never its
             # message because synthesis failures can include request data.
-            _log(f"TTS_RUNTIME_ERROR:{type(error).__name__}")
+            # Ping contains no meeting/user text, so its sanitized exception
+            # message is safe and materially improves packaging diagnostics.
+            detail = f":{error}" if operation == "ping" else ""
+            _log(f"TTS_RUNTIME_ERROR:{type(error).__name__}{detail}")
             response = {"ok": False, "errorCode": "TTS_SYNTHESIS_FAILED"}
         print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
     return 0
