@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from workers.summary_worker.summarizer import (
+    LlamaCppClient,
     SummaryOrchestrator,
     TranscriptSegment,
     SUMMARY_SCHEMA,
@@ -45,6 +46,21 @@ from workers.summary_worker.protocol import (
 
 
 class SummaryWorkerTests(unittest.TestCase):
+    def test_llama_schema_drops_large_decoder_string_bounds_but_keeps_structure(self):
+        schema = {
+            "type": "object",
+            "required": ["answer"],
+            "properties": {
+                "answer": {"type": "string", "maxLength": 4000, "pattern": "[А-Яа-я]+"},
+                "items": {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 1200}},
+            },
+        }
+        compact = LlamaCppClient._llama_grammar_schema(schema)
+        self.assertNotIn("maxLength", str(compact))
+        self.assertNotIn("pattern", str(compact))
+        self.assertEqual(12, compact["properties"]["items"]["maxItems"])
+        self.assertEqual(4000, schema["properties"]["answer"]["maxLength"])
+
     def test_valid_v2_evidence_is_checked_without_being_marked_for_review(self):
         result = validate_evidence_v2(
             {

@@ -672,6 +672,32 @@ class LlamaCppClient:
         if client is not None:
             await client.aclose()
 
+    @staticmethod
+    def _llama_grammar_schema(schema: dict[str, Any]) -> dict[str, Any]:
+        """Return the JSON schema variant accepted by llama.cpp grammar.
+
+        llama.cpp translates JSON Schema string bounds into grammar repetitions
+        (for example ``char{0,4000}``).  Large bounds are rejected by the
+        grammar compiler before Qwen can generate anything.  Length limits are
+        still enforced by the local summary/grounding validators; they do not
+        need to be encoded in the decoder grammar.  Keep all other structural
+        constraints (required fields, arrays and enums) intact and never mutate
+        the shared contract object.
+        """
+        def strip_length_bounds(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: strip_length_bounds(item)
+                    for key, item in value.items()
+                    if key not in {"maxLength", "minLength", "pattern"}
+                }
+            if isinstance(value, list):
+                return [strip_length_bounds(item) for item in value]
+            return value
+
+        result = strip_length_bounds(schema)
+        return result if isinstance(result, dict) else {}
+
     async def invoke_json(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
         max_tokens = max(512, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "3072")))
         client = await self._get_client()
@@ -690,7 +716,9 @@ class LlamaCppClient:
                 "messages": request_messages,
                 "temperature": 0.1,
                 "max_tokens": min(4096, max_tokens * (attempt + 1)),
-                "response_format": {"type": "json_object", "schema": schema},
+                # Do not pass large maxLength/pattern constraints to the
+                # llama.cpp grammar compiler (see _llama_grammar_schema).
+                "response_format": {"type": "json_object", "schema": self._llama_grammar_schema(schema)},
             }
             response = await client.post(self._url, json=body)
             response.raise_for_status()
