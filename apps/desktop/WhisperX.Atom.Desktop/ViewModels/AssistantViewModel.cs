@@ -368,6 +368,7 @@ public sealed class AssistantViewModel : ObservableObject
         "ANSWERED" => "Ответ готов",
         "ANSWERED_WITH_WARNING" => "Ответ готов с предупреждением",
         "NO_EVIDENCE" => "В источниках нет подтверждённого ответа",
+        "LIVE_MEETING_NOT_READY" => "Свежий live-фрагмент ещё не готов",
         "GROUNDING_REJECTED" => "Ответ отклонён проверкой источников",
         "LLM_UNAVAILABLE" => "ИИ-помощник временно недоступен",
         "CLARIFICATION_REQUIRED" => "Нужно уточнить контекст вопроса",

@@ -14,6 +14,7 @@ from workers.db_pool import DatabaseConnectionPool
 from workers.gpu_lease import PostgresGpuLease
 from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
+from .hybrid_retrieval import HybridRetriever, RetrievalCandidate
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
 # Kept as a compatibility marker for older Desktop/Voice clients. New
@@ -68,6 +69,17 @@ _GROUNDING_STOPWORDS = {
     "будет", "есть", "для", "при", "или", "и", "в", "во", "на", "по", "из", "с", "со",
     "у", "к", "о", "об", "за", "не", "нет", "да", "так", "мы", "они", "он", "она", "их",
     "его", "её", "может", "можно", "нужно", "решили", "говорили", "сказал", "сказали",
+}
+
+# LIVE retrieval must fail closed when a question contains only conversational
+# filler (for example "что сейчас решили?").  Without this small second set,
+# the fallback to the latest twelve segments could turn unrelated speech into
+# apparent evidence. Domain words such as "ремонт", "насос" and names remain
+# eligible anchors.
+_LIVE_RETRIEVAL_STOPWORDS = _GROUNDING_STOPWORDS | {
+    "сейчас", "текущий", "текущая", "текущие", "назвали", "обсудили",
+    "решили", "решение", "ответственный", "отвечал", "отвечала", "отвечали",
+    "расскажите", "расскажи", "подскажи", "скажите", "пожалуйста",
 }
 
 _RU_INFLECTION_SUFFIXES = ("иями", "ами", "ями", "ого", "ему", "ому", "ов", "ев", "ам", "ям", "ах", "ях", "ы", "и", "а", "я", "у", "ю", "е", "о")
@@ -140,9 +152,14 @@ class AssistantRepository:
     def __init__(self) -> None:
         self.conninfo = os.getenv("DATABASE_URL", "host=postgres port=5432 dbname=whisperx_atom user=whisperx password=whisperx")
         self._db = DatabaseConnectionPool(self.conninfo, "assistant-worker")
+        self._hybrid = HybridRetriever()
+        self._last_retrieval_metadata: dict[str, Any] = {}
 
     def close(self) -> None:
         self._db.close()
+
+    def clear_retrieval_metadata(self) -> None:
+        self._last_retrieval_metadata = {}
 
     def claim(self, message_id: str, query_id: str) -> bool:
         with self._db.connection() as connection:
@@ -187,6 +204,119 @@ class AssistantRepository:
             return row is not None
 
     def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+        """Retrieve scope-safe evidence with Russian FTS + embeddings.
+
+        SQL remains responsible for RBAC, meeting boundaries and transcript
+        quality gates.  The local hybrid ranker only sees those rows, adds a
+        bounded embedding signal for paraphrases, then expands neighbours in
+        the same meeting/transcript before the immutable RETRIEVED snapshot.
+        """
+        candidate_limit = max(512, min(int(os.getenv("ASSISTANT_HYBRID_CANDIDATE_LIMIT", "12000")), 50000))
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                """
+                WITH base AS (
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,t.id AS transcript_id,t.version AS transcript_version,
+                           COALESCE(ms.display_name,s.speaker_label,'Спикер N') AS speaker,
+                           s.text,t.version_kind,s.ordinal,m.created_at AS meeting_created_at,
+                           to_tsvector('russian', COALESCE(s.text,'')) AS search_vector
+                    FROM transcript_segments s
+                    JOIN transcripts t ON t.id=s.transcript_id
+                    LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
+                    JOIN meetings m ON m.id=t.meeting_id
+                    WHERE (%s::uuid IS NULL OR t.meeting_id=%s::uuid)
+                      AND (%s OR m.owner_id=%s::uuid)
+                      AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                      AND t.status IN ('READY','PARTIAL_READY')
+                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
+                      AND COALESCE(s.is_hidden,false)=false
+                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-interval '90 days')
+                ), source AS (
+                    SELECT base.*,
+                           CASE WHEN base.search_vector @@ websearch_to_tsquery('russian', %s)
+                                THEN ts_rank_cd(base.search_vector, websearch_to_tsquery('russian', %s))
+                                ELSE 0.0 END AS rank
+                    FROM base
+                )
+                SELECT id,meeting_id,start_ms,end_ms,transcript_id,transcript_version,speaker,text,version_kind,
+                       ordinal,rank,meeting_created_at
+                FROM source
+                ORDER BY (rank > 0) DESC,rank DESC,meeting_created_at DESC,meeting_id,ordinal
+                LIMIT %s
+                """,
+                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query, query, candidate_limit),
+            ).fetchall()
+
+            candidates = [
+                RetrievalCandidate(
+                    segment_id=str(row[0]), meeting_id=str(row[1]), start_ms=int(row[2]), end_ms=int(row[3]),
+                    transcript_id=str(row[4]), transcript_version=int(row[5]), speaker=str(row[6]),
+                    text=str(row[7] or '').strip(), version_kind=str(row[8] or 'ASR_DRAFT').upper(),
+                    ordinal=int(row[9]), fts_rank=float(row[10] or 0.0), meeting_created_at=row[11],
+                )
+                for row in rows if str(row[7] or '').strip()
+            ]
+            ranked = self._hybrid.rank(query, candidates, limit=12)
+            if meeting_id is None and ranked:
+                # History mode is limited to five meetings *after* hybrid
+                # ranking, so a paraphrase can still select the relevant one.
+                allowed_meetings: list[str] = []
+                for item in ranked:
+                    value = item.candidate.meeting_id
+                    if value not in allowed_meetings and len(allowed_meetings) < 5:
+                        allowed_meetings.append(value)
+                candidates = [item for item in candidates if item.meeting_id in allowed_meetings]
+                ranked = self._hybrid.rank(query, candidates, limit=12)
+            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=36)
+            score_by_id = {item.candidate.segment_id: item.score for item in ranked}
+            selected.sort(key=lambda item: (-score_by_id.get(item.segment_id, 0.0), item.meeting_id, item.ordinal, item.segment_id))
+            rows = [
+                (item.segment_id, item.meeting_id, item.start_ms, item.end_ms, item.transcript_id,
+                 item.transcript_version, item.speaker, item.text, item.version_kind)
+                for item in selected
+            ]
+            self._last_retrieval_metadata = {
+                'method': 'HYBRID_FTS_EMBEDDING',
+                'embeddingProvider': self._hybrid.provider.name,
+                'candidateCount': len(candidates),
+                'ftsCandidateCount': sum(1 for item in candidates if item.fts_rank > 0),
+                'anchorCount': len(ranked),
+                'selectedCount': len(rows),
+                'neighboursIncluded': max(0, len(rows) - len(ranked)),
+                'scopeMeetingId': meeting_id,
+            }
+            low_quality = False
+            if not rows and meeting_id:
+                low_quality = bool(connection.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM transcripts t
+                        WHERE t.meeting_id=%s
+                          AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                          AND (t.status IN ('PARTIAL_READY','READY') AND (
+                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
+                               OR COALESCE(t.quality_score,0) < 0.45)))
+                    """,
+                    (meeting_id,),
+                ).fetchone()[0])
+        max_chars = min(36000, max(4000, int(os.getenv('ASSISTANT_MAX_CONTEXT_CHARS', '36000'))))
+        valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
+        lines: list[str] = []
+        kinds: set[str] = set()
+        for segment_id, meeting_id_value, start_ms, end_ms, transcript_id, transcript_version, speaker, text, version_kind in rows:
+            key = str(segment_id)
+            kind = str(version_kind or 'ASR_DRAFT').upper()
+            kinds.add(kind)
+            valid[key] = (str(meeting_id_value), int(start_ms), int(end_ms), str(text).strip(), kind, str(transcript_id), int(transcript_version))
+            lines.append(f'[SEG-{key} {int(start_ms)//1000}s {speaker}] {str(text).strip()}')
+        context = '\n'.join(lines)
+        if len(context) > max_chars:
+            context = context[:max_chars].rsplit('\n', 1)[0]
+            allowed = {line.split(' ', 1)[0].removeprefix('[SEG-') for line in context.splitlines()}
+            valid = {key: value for key, value in valid.items() if key in allowed}
+        return context, valid, ('ASR_DRAFT' if kinds and kinds <= {'ASR_DRAFT', 'V1'} else 'ENRICHED'), ('LOW_TRANSCRIPT_QUALITY' if low_quality else None)
+
+    def _legacy_fts_context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         # Retrieval is performed by PostgreSQL's Russian FTS instead of
         # loading an entire meeting and scoring it in Python. The CTE keeps
         # the twelve strongest hits and adds one neighbouring segment on each
@@ -272,6 +402,72 @@ class AssistantRepository:
             valid = {key: value for key, value in valid.items() if key in allowed}
         return context, valid, ("ASR_DRAFT" if kinds and kinds <= {"ASR_DRAFT", "V1"} else "ENRICHED"), ("LOW_TRANSCRIPT_QUALITY" if low_quality else None)
 
+    def live_context(self, meeting_id: str | None, query: str = "") -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+        """Read only fresh provisional segments for LIVE_MEETING.
+
+        This deliberately does not join transcripts and cannot see V1/V2.
+        The bounded in-memory ranking is sufficient for the short live window;
+        final retrieval remains the canonical Russian FTS path after STOP.
+        """
+        self._last_retrieval_metadata = {
+            "method": "LIVE_PROVISIONAL_LEXICAL",
+            "embeddingProvider": None,
+            "scopeMeetingId": meeting_id,
+        }
+        if not meeting_id:
+            return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT l.id,l.meeting_id,l.start_ms,l.end_ms,l.text,l.confidence
+                FROM live_meeting_segments l
+                JOIN recording_sessions r ON r.id=l.recording_session_id
+                WHERE l.meeting_id=%s AND l.expires_at>now()
+                  AND r.state IN ('RECORDING','PAUSED','STARTING','AWAITING_AGENT_RECONNECT')
+                ORDER BY start_ms,id
+                LIMIT 256
+                """,
+                (meeting_id,),
+            ).fetchall()
+        if not rows:
+            return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"
+        query_tokens = {
+            token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", (query or "").lower().replace("ё", "е"))
+            if token not in _LIVE_RETRIEVAL_STOPWORDS
+        }
+        scored: list[tuple[int, int, tuple[Any, ...]]] = []
+        for index, row in enumerate(rows):
+            text = str(row[4]).strip()
+            tokens = {
+                token for token in re.findall(r"[\wА-Яа-яЁё-]{2,}", text.lower().replace("ё", "е"))
+                if token not in _LIVE_RETRIEVAL_STOPWORDS
+            }
+            scored.append((len(query_tokens & tokens), index, row))
+        # Keep the strongest twelve hits and their immediate neighbours so a
+        # sentence split across provisional windows is not lost.
+        anchors = [index for score, index, _ in sorted(scored, key=lambda item: (-item[0], item[1]))[:12] if score > 0]
+        if not anchors:
+            # Do not use the most recent speech as a substitute for evidence.
+            # LIVE_MEETING is deliberately less capable than final retrieval,
+            # but it must remain honest when the question has no lexical
+            # connection to the provisional window.
+            return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"
+        selected = {index for anchor in anchors for index in (anchor - 1, anchor, anchor + 1) if 0 <= index < len(rows)}
+        selected_rows = [rows[index] for index in sorted(selected)][:36]
+        valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
+        lines: list[str] = []
+        for row in selected_rows:
+            segment_id, meeting_value, start_ms, end_ms, text, _confidence = row
+            key = str(segment_id)
+            valid[key] = (str(meeting_value), int(start_ms), int(end_ms), str(text).strip(), "LIVE_PROVISIONAL", "", 0)
+            lines.append(f"[SEG-{key} {int(start_ms)//1000}s] {str(text).strip()}")
+        context = "\n".join(lines)
+        if len(context) > 36000:
+            context = context[:36000].rsplit("\n", 1)[0]
+            allowed = {line.split(" ", 1)[0].removeprefix("[SEG-") for line in context.splitlines()}
+            valid = {key: value for key, value in valid.items() if key in allowed}
+        return context, valid, "LIVE_PROVISIONAL", None
+
     def history(self, conversation_id: str | None, current_user_message_id: str | None) -> list[dict[str, str]]:
         if not conversation_id:
             return []
@@ -304,15 +500,23 @@ class AssistantRepository:
             with connection.transaction():
                 for rank, (segment_id, value) in enumerate(valid.items(), start=1):
                     meeting_id, start_ms, end_ms, text, _, transcript_id, transcript_version = value
-                    connection.execute(
-                        """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
-                           VALUES(%s,%s,%s,%s,%s,'RETRIEVED',%s,%s,%s,%s)
-                           ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
-                        (query_id, segment_id, rank, transcript_id, transcript_version, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
-                    )
+                    if value[4] == "LIVE_PROVISIONAL":
+                        connection.execute(
+                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                               VALUES(%s,%s,%s,'RETRIEVED',%s,%s,%s,%s)
+                               ON CONFLICT(query_id,live_segment_id,snapshot_kind) DO NOTHING""",
+                            (query_id, segment_id, rank, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                        )
+                    else:
+                        connection.execute(
+                            """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                               VALUES(%s,%s,%s,%s,%s,'RETRIEVED',%s,%s,%s,%s)
+                               ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
+                            (query_id, segment_id, rank, transcript_id, transcript_version, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                        )
 
     def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None, expected_meeting_id: str | None = None) -> None:
-        if assistant_mode == "CURRENT_MEETING" and expected_meeting_id:
+        if assistant_mode in {"CURRENT_MEETING", "LIVE_MEETING"} and expected_meeting_id:
             if any(value[0] != expected_meeting_id for value in valid.values()):
                 valid = {}
                 reason = "ASSISTANT_SCOPE_VIOLATION"
@@ -344,9 +548,16 @@ class AssistantRepository:
             error_code = "LOW_TRANSCRIPT_QUALITY"
             answer = "Эта стенограмма требует проверки качества перед ответом."
             voice = "Сначала проверьте качество стенограммы."
+        elif reason == "LIVE_MEETING_NOT_READY":
+            status = "NO_EVIDENCE"
+            grounding_status = "NO_EVIDENCE"
+            error_code = "LIVE_MEETING_NOT_READY"
+            answer = "Свежий фрагмент текущего совещания пока не распознан."
+            voice = "Пока нет свежего фрагмента совещания для ответа."
         elif evidence_ids and answer and claims_are_semantically_grounded(result, valid, assistant_mode):
-            status = "ANSWERED_WITH_WARNING" if transcript_kind == "ASR_DRAFT" else "READY"
-            grounding_status = "WARNING" if transcript_kind == "ASR_DRAFT" else "GROUNDED"
+            provisional = transcript_kind in {"ASR_DRAFT", "LIVE_PROVISIONAL"}
+            status = "ANSWERED_WITH_WARNING" if provisional else "READY"
+            grounding_status = "WARNING" if provisional else "GROUNDED"
             error_code = None
         elif evidence_ids and answer:
             status = "GROUNDING_REJECTED"
@@ -365,17 +576,25 @@ class AssistantRepository:
         with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
-                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "claimsValidated": bool(claims), "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
+                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": bool(claims), "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
             ).fetchone()
             if evidence_ids:
                 for rank, segment_id in enumerate(evidence_ids, start=1):
                     meeting_value, start_ms, end_ms, text, _, transcript_id, transcript_version = valid[segment_id]
-                    connection.execute(
-                        """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
-                           VALUES(%s,%s,%s,%s,%s,'CITED',%s,%s,%s,%s)
-                           ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
-                        (query_id, segment_id, rank, transcript_id, transcript_version, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
-                    )
+                    if valid[segment_id][4] == "LIVE_PROVISIONAL":
+                        connection.execute(
+                            """INSERT INTO assistant_live_query_evidence(query_id,live_segment_id,rank,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                               VALUES(%s,%s,%s,'CITED',%s,%s,%s,%s)
+                               ON CONFLICT(query_id,live_segment_id,snapshot_kind) DO NOTHING""",
+                            (query_id, segment_id, rank, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                        )
+                    else:
+                        connection.execute(
+                            """INSERT INTO assistant_query_evidence(query_id,segment_id,rank,transcript_id,transcript_version,snapshot_kind,meeting_id,start_ms,end_ms,text_sha256)
+                               VALUES(%s,%s,%s,%s,%s,'CITED',%s,%s,%s,%s)
+                               ON CONFLICT(query_id,segment_id,snapshot_kind) DO NOTHING""",
+                            (query_id, segment_id, rank, transcript_id, transcript_version, meeting_value, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                        )
             if row and row[0]:
                 connection.execute(
                     "UPDATE assistant_messages SET status=%s,content=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,completed_at=now() WHERE id=%s",
@@ -416,8 +635,14 @@ class AssistantWorker:
         query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode, owner_user_id, role = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
+        # Keep a deterministic empty result for failure paths.  The finally
+        # block persists a terminal diagnostic even when the local LLM cannot
+        # start or invoke_json raises; without this initialization the cleanup
+        # path itself raised UnboundLocalError and hid the real failure.
+        result: dict[str, Any] = {}
         try:
             if assistant_mode == "GENERAL_CHAT":
+                self.repository.clear_retrieval_metadata()
                 context, valid, transcript_kind, context_error = "", {}, "GENERAL", None
                 system_prompt = (
                     "Отвечай по-русски как доброжелательный универсальный помощник. "
@@ -426,6 +651,18 @@ class AssistantWorker:
                     "Для обычного чата evidence_segment_ids и claims должны быть пустыми массивами."
                 )
                 user_content = f"Вопрос: {query}"
+            elif assistant_mode == "LIVE_MEETING":
+                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, query)
+                if not context:
+                    await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
+                    return
+                await asyncio.to_thread(self.repository.snapshot_evidence, query_id, valid)
+                system_prompt = (
+                    "Отвечай по-русски только по свежим provisional ASR-фрагментам текущего совещания. "
+                    "Это оперативный черновой контекст, не финальная стенограмма: не добавляй факты, которых нет в сегментах. "
+                    "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds."
+                )
+                user_content = f"Вопрос: {query}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
             else:
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)

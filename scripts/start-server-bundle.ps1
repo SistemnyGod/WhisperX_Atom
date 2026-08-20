@@ -105,7 +105,7 @@ try {
         $name = [string]$service.Service
         $image = [string]$service.Image
         if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($image)) { continue }
-        $rollbackLines.Add("  $name:")
+        $rollbackLines.Add("  ${name}:")
         $rollbackLines.Add("    image: $image")
         $rollbackLines.Add('    build: !reset null')
     }

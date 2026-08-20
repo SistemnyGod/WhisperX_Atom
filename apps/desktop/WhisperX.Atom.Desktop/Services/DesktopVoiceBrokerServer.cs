@@ -70,7 +70,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private async Task<BrokerResponse> HandleAsync(JsonElement root, CancellationToken cancellationToken)
     {
         if (!root.TryGetProperty("command", out var commandElement)
-            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT" and not "ASSISTANT_QUESTION" and not "ASSISTANT_RESULT" and not "ASSISTANT_PLAYBACK_FINISHED"))
+            || (commandElement.GetString() is not "EXECUTE_INTENT" and not "RECORD_EVENT" and not "LIVE_ASR_SEGMENTS" and not "ASSISTANT_QUESTION" and not "ASSISTANT_RESULT" and not "ASSISTANT_PLAYBACK_FINISHED"))
             return new(false, "VOICE_COMMAND_REJECTED", Detail: "unsupported_command");
 
         if (string.Equals(commandElement.GetString(), "ASSISTANT_PLAYBACK_FINISHED", StringComparison.OrdinalIgnoreCase))
@@ -85,6 +85,29 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             var delivery = _assistantDelivery.Get(playbackQueryId);
             AssistantResultAvailable?.Invoke(playbackQueryId, Guid.TryParse(delivery?.ConversationId, out var conversationId) ? conversationId : null);
             return new(true, RecorderState: "ASSISTANT_PLAYBACK_FINISHED", QueryId: playbackQuery);
+        }
+
+        if (string.Equals(commandElement.GetString(), "LIVE_ASR_SEGMENTS", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!_backend.HasSession) return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_api_session_missing");
+            var liveMeetingId = _activeMeeting.MeetingId;
+            if (liveMeetingId is null) return new(false, "LIVE_MEETING_REQUIRED", Detail: "active_meeting_missing");
+            if (!root.TryGetProperty("segments", out var segmentsElement) || segmentsElement.ValueKind != JsonValueKind.Array)
+                return new(false, "VOICE_COMMAND_REJECTED", Detail: "live_segments_missing");
+            List<DesktopLiveMeetingSegment>? segments;
+            try { segments = JsonSerializer.Deserialize<List<DesktopLiveMeetingSegment>>(segmentsElement.GetRawText(), _json); }
+            catch (JsonException) { segments = null; }
+            if (segments is null || segments.Count == 0 || segments.Count > 64)
+                return new(false, "VOICE_COMMAND_REJECTED", Detail: "live_segments_invalid");
+            Guid? recordingSessionId = null;
+            if (root.TryGetProperty("recordingSessionId", out var sessionElement)
+                && sessionElement.ValueKind == JsonValueKind.String
+                && Guid.TryParse(sessionElement.GetString(), out var parsedSession))
+                recordingSessionId = parsedSession;
+            var accepted = await _backend.PublishLiveMeetingSegmentsAsync(liveMeetingId.Value, recordingSessionId, segments, cancellationToken).ConfigureAwait(false);
+            return accepted
+                ? new(true, RecorderState: "LIVE_ASR_ACCEPTED", Detail: $"segments={segments.Count}")
+                : new(false, "LIVE_MEETING_NOT_ACTIVE", Detail: "live_asr_not_ready");
         }
 
         if (string.Equals(commandElement.GetString(), "ASSISTANT_QUESTION", StringComparison.OrdinalIgnoreCase))
@@ -112,31 +135,37 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             if (!_backend.HasSession)
                 return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_api_session_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
             var requestedMode = root.TryGetProperty("requestedMode", out var modeElement) ? modeElement.GetString() : "AUTO";
-            // A question must never compete with active capture. This applies
-            // to general chat as well: Voice Host shares the same microphone
-            // and TTS timeline as Recorder, while meeting answers must wait
-            // for a completed transcript in any case.
+            var activeMeetingId = _activeMeeting.MeetingId;
+            var captureActive = false;
             try
             {
                 var recorderStatus = await _commands.StatusAsync(cancellationToken).ConfigureAwait(false);
-                if (recorderStatus.State is "Recording" or "Paused" or "Starting" or "Finalizing"
-                    || recorderStatus.SessionStatus?.CaptureState is "RECORDING" or "PAUSED")
-                    return new(false, "ASSISTANT_RECORDING_ACTIVE", recorderStatus.State, TraceId: assistantTraceId, CommandId: assistantCommandId);
+                captureActive = recorderStatus.State is "Recording" or "Paused" or "Starting" or "Finalizing"
+                    || recorderStatus.SessionStatus?.CaptureState is "RECORDING" or "PAUSED";
             }
             catch (Exception ex)
             {
                 _log?.Invoke(ex);
                 return new(false, "VOICE_RECORDER_UNAVAILABLE", Detail: "recording_state_unavailable", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
+            // Do not simply remove the old active-recording guard. During
+            // capture questions use a separate LIVE_MEETING scope backed by
+            // fresh provisional ASR. If no such context exists, fail closed
+            // without falling back to canonical V1/V2 or general history.
+            if (captureActive)
+            {
+                if (activeMeetingId is null)
+                    return new(false, "LIVE_MEETING_REQUIRED", "Recording", Detail: "active_meeting_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
+                requestedMode = "LIVE_MEETING";
+            }
             var currentUser = await _backend.GetCurrentUserAsync(cancellationToken).ConfigureAwait(false);
             if (currentUser is null)
                 return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", Detail: "desktop_user_missing", TraceId: assistantTraceId, CommandId: assistantCommandId);
-            var activeMeetingId = _activeMeeting.MeetingId;
             var scopedMode = VoiceScopeFor(requestedMode, activeMeetingId);
-            var conversationId = _voiceConversations.Get(currentUser.Id, scopedMode, scopedMode == "CURRENT_MEETING" ? activeMeetingId : null);
+            var conversationId = _voiceConversations.Get(currentUser.Id, scopedMode, scopedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? activeMeetingId : null);
             var accepted = await _backend.CreateAssistantRequestAsync(question, requestedMode, activeMeetingId, conversationId, "VOICE", assistantCommandId, assistantTraceId, cancellationToken).ConfigureAwait(false);
             if (accepted is null)
-                return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+                return new(false, captureActive ? "LIVE_MEETING_NOT_READY" : "VOICE_ASSISTANT_UNAVAILABLE", Detail: captureActive ? "live_asr_not_ready" : "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
             if (Guid.TryParse(accepted.ConversationId, out var acceptedConversation))
                 _voiceConversations.Set(currentUser.Id, accepted.ResolvedMode, Guid.TryParse(accepted.MeetingId, out var acceptedMeeting) ? acceptedMeeting : null, acceptedConversation);
             if (Guid.TryParse(accepted.QueryId, out var queryId))
@@ -300,9 +329,18 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
         if (!terminal) return;
         AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var resultConversation) ? resultConversation : null);
-        var voiceAnswer = !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer)
-            ? query.VoiceAnswer ?? query.Answer
-            : AssistantErrorSpeech(query.ErrorCode ?? query.Status);
+        // A worker must never be able to turn a failed grounding decision
+        // into a confident spoken fact by populating VoiceAnswer.  For these
+        // terminal statuses the broker owns the wording and only emits the
+        // short, explicitly negative response below.  The full answer stays
+        // available in Desktop for diagnostics/review, but is not sent to
+        // Voice Host.
+        var groundingRejected = query.Status is not ("READY" or "ANSWERED" or "ANSWERED_WITH_WARNING");
+        var voiceAnswer = groundingRejected
+            ? AssistantErrorSpeech(query.ErrorCode ?? query.Status)
+            : !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer)
+                ? query.VoiceAnswer ?? query.Answer
+                : AssistantErrorSpeech(query.ErrorCode ?? query.Status);
         if (string.IsNullOrWhiteSpace(voiceAnswer))
         {
             _assistantDelivery.MarkCompletedWithoutSpeech(pending.QueryId);
@@ -358,8 +396,12 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private static string? AssistantErrorSpeech(string? errorCode) => errorCode switch
     {
         "NO_EVIDENCE" => "В стенограмме не найден подтверждённый ответ.",
+        "LIVE_MEETING_NOT_READY" => "Пока нет свежего фрагмента совещания для ответа.",
         "LOW_TRANSCRIPT_QUALITY" => "Сначала проверьте качество стенограммы.",
         "GROUNDING_REJECTED" => "Не удалось подтвердить ответ по стенограмме.",
+        "NEEDS_REVIEW" => "Ответ требует проверки по стенограмме.",
+        "LLM_UNAVAILABLE" => "Помощник временно недоступен.",
+        "FAILED" => "Не удалось получить подтверждённый ответ.",
         _ => null
     };
 
@@ -367,7 +409,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     {
         var mode = (requestedMode ?? "AUTO").Trim().ToUpperInvariant();
         if (mode == "MEETING_HISTORY") return "MEETING_MEMORY";
-        if (mode is "CURRENT_MEETING" or "GENERAL_CHAT" or "MEETING_MEMORY") return mode;
+        if (mode is "CURRENT_MEETING" or "LIVE_MEETING" or "GENERAL_CHAT" or "MEETING_MEMORY") return mode;
         return activeMeetingId.HasValue ? "CURRENT_MEETING" : "GENERAL_CHAT";
     }
 

@@ -28,6 +28,7 @@ public static class UiStatusMapper
             ["ANSWERED"] = new("ANSWERED", "Ответ готов", UiStatusKind.Success),
             ["ANSWERED_WITH_WARNING"] = new("ANSWERED_WITH_WARNING", "Ответ готов с предупреждением", UiStatusKind.Warning),
             ["NO_EVIDENCE"] = new("NO_EVIDENCE", "Нет подтверждённых источников", UiStatusKind.Warning),
+            ["LIVE_MEETING_NOT_READY"] = new("LIVE_MEETING_NOT_READY", "Свежий live-фрагмент ещё не готов", UiStatusKind.Warning),
             ["GROUNDING_REJECTED"] = new("GROUNDING_REJECTED", "Ответ не прошёл проверку источников", UiStatusKind.Error),
             ["LLM_UNAVAILABLE"] = new("LLM_UNAVAILABLE", "ИИ-помощник недоступен", UiStatusKind.Error),
             ["CLARIFICATION_REQUIRED"] = new("CLARIFICATION_REQUIRED", "Нужно уточнение контекста", UiStatusKind.Warning),

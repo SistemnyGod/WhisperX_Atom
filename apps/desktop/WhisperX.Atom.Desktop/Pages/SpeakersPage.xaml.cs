@@ -128,6 +128,9 @@ public sealed partial class SpeakersPage : Page
         DetailsKey.Text = item.StableKey;
         DetailsMeeting.Text = item.MeetingTitle;
         DetailsDate.Text = item.MeetingDateText;
+        DetailsMatch.Text = item.HasSuggestion && item.Speaker.ProfileConfidence is double confidence
+            ? $"{item.MatchStatus}. {item.Speaker.ProfileSuggestionName ?? "Профиль не назван"} · {confidence:P0}"
+            : item.MatchStatus;
     }
 
     private void SpeakersPage_SizeChanged(object sender, SizeChangedEventArgs e)

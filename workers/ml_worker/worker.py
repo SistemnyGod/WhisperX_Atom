@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,16 @@ LOGGER = logging.getLogger("whisperx.gpu-worker")
 RESIDENT_LLM_RETRY_DELAY_SECONDS = max(5, int(os.getenv("GPU_RESIDENT_LLM_RETRY_DELAY_SECONDS", "15")))
 
 
+def _optional_non_negative_float(value: Any) -> float | None:
+    """Parse diagnostic durations without allowing malformed payloads through."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def resolve_storage_path(storage_key: str) -> Path:
     """Translate a storage key below `/data` to the worker's local mount."""
     host_root = os.getenv("WHISPERX_DATA_HOST", "").strip() if os.name == "nt" else "/data"
@@ -69,7 +81,10 @@ def error_code_for(exc: Exception) -> str:
         return "CUDA_UNAVAILABLE"
     if isinstance(exc, FileNotFoundError):
         return "MEDIA_NOT_FOUND"
-    if "hf_token" in text or "huggingface" in text or "gated" in text:
+    if any(token in text for token in (
+        "hf_token", "huggingface", "hf_hub_offline", "gated", "pyannote",
+        "no module named 'pyannote", "cannot import name 'pyannote",
+    )):
         return "MODEL_ACCESS_ERROR"
     if "no_audio" in text or "no audio" in text:
         return "MEDIA_NO_AUDIO"
@@ -81,7 +96,12 @@ def error_code_for(exc: Exception) -> str:
 
 
 def is_retryable_error_code(code: str) -> bool:
-    return code in {"MEDIA_NOT_FOUND", "CUDA_UNAVAILABLE", "AUDIO_PROCESSING_ERROR"}
+    # CUDA_OOM is retryable at the job level after the worker has already
+    # cleared its resident pipeline and attempted one local retry.  Keeping
+    # the durable source asset and requeueing avoids forcing a new recording
+    # when memory pressure is transient (or another GPU workload releases
+    # memory after this process yields).
+    return code in {"MEDIA_NOT_FOUND", "CUDA_UNAVAILABLE", "CUDA_OOM", "AUDIO_PROCESSING_ERROR"}
 
 
 def retry_delay_seconds(attempt: int) -> float:
@@ -108,6 +128,7 @@ class GpuWorker:
         self._repository.close()
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        queued_at = time.perf_counter()
         async with self._scheduler.slot():
             job_id = str(message["job_id"])
             meeting_id = str(require_meeting_id(message))
@@ -158,6 +179,7 @@ class GpuWorker:
                 source_audio_hash=str(source_quality.get("asr_audio_hash") or "") or None,
                 acoustic_profile=str(message.get("acousticProfile") or message.get("acoustic_profile") or "AUTO").upper(),
                 technical_intervals=technical_intervals,
+                media_prepare_ms=_optional_non_negative_float(message.get("media_prepare_ms")),
             )
 
             def progress(stage: str, value: int) -> None:
@@ -176,6 +198,9 @@ class GpuWorker:
                 LOGGER.info("job=%s waiting for GPU lease path=%s", job_id, request.media_path)
                 async with self._gpu_lease:
                     LOGGER.info("job=%s acquired GPU lease", job_id)
+                    # Include both bounded local scheduler wait and the
+                    # cross-process PostgreSQL GPU lease wait in diagnostics.
+                    request = replace(request, queue_wait_ms=(time.perf_counter() - queued_at) * 1000.0)
                     oom_attempt = 0
                     while True:
                         try:

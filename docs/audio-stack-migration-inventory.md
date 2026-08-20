@@ -2,12 +2,15 @@
 
 Status: implementation inventory for the controlled AudioGraph migration.
 
-`LEGACY_WASAPI` remains the release default until gates A–E have real runtime artifacts. NAudio references in the optional Voice Host are intentionally outside the Recorder microphone migration.
+`LEGACY_WASAPI` remains the compatibility microphone fallback. The current-user
+Recorder Host uses AudioGraph for the room microphone and an isolated NAudio
+render-loopback adapter for the optional `system-audio` track; the two sources
+never share a PCM writer.
 
 | FILE | SYMBOL | CATEGORY | OLD_DEPENDENCY | NEW_OWNER | ACTION | GATE |
 |---|---|---|---|---|---|---|
 | `apps/recorder-agent/RecordingCoordinator.cs` | `StartAsync`, `CaptureTrack` | microphone, lifecycle | `MMDeviceEnumerator`, `WasapiCapture`, `IWaveIn`, `WaveFormat` | `IAudioCaptureEngineFactory` + neutral frame writer | REPLACE | A–E |
-| `apps/recorder-agent/RecordingCoordinator.cs` | system track creation | system loopback | `WasapiLoopbackCapture` | isolated `LegacySystemLoopbackCaptureEngine` | ADAPT | F |
+| `apps/recorder-host/SystemAudioCaptureEngine.cs` | system track creation | system loopback | `WasapiLoopbackCapture`, `MMDeviceEnumerator` | independent current-user render-loopback source | KEEP/ADAPT | P2 |
 | `apps/recorder-agent/DeviceHealth.cs` | `Collect` | discovery, health | `MMDeviceEnumerator`, `MMDevice` | `IAudioDeviceCatalog` + runtime probe | REPLACE | A–E |
 | `apps/recorder-agent/DeviceHealthMonitor.cs` | watcher/fallback | discovery, health | NAudio endpoint notifications | catalog event stream | REPLACE | A–E |
 | `apps/recorder-agent/AudioRuntimeProbe.cs` | source probe | diagnostics | `WasapiCapture`, `WasapiLoopbackCapture` | `IAudioDeviceProbe` implementations | ADAPT | A–E |
@@ -22,6 +25,7 @@ Status: implementation inventory for the controlled AudioGraph migration.
 | `apps/recorder-agent/AgentIpcProtocol.cs` | DTOs | IPC | Service-shaped health DTO | neutral runtime/device DTOs | ADAPT | A–E |
 | `apps/recorder-host/AudioGraphDeviceCatalog.cs` | watcher | discovery | none | `DeviceWatcher`, `DeviceInformation`, `MediaDevice` | KEEP | A |
 | `apps/recorder-host/AudioGraphCaptureEngine.cs` | graph capture | microphone, telemetry | none | AudioGraph/input/output nodes | ADAPT | A |
+| `apps/recorder-host/RecorderHostRuntime.cs` | two-track lifecycle | track orchestration | separate frame channels/writers | room + system independent durable tracks | ADAPT | P2 |
 | `apps/recorder-host/RecorderHostRuntime.cs` | session writer/runtime | lifecycle, local-first | duplicated writer and no lease | shared neutral writer + lease/recovery | REPLACE | A–E |
 | `apps/recorder-host/Program.cs` | host composition | lifecycle | no singleton/lease | Host runtime ownership | ADAPT | C/D/G |
 | `apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs` | `SendAsync` | IPC | implicit pipe/version | explicit v6 negotiation | ADAPT | A–E |

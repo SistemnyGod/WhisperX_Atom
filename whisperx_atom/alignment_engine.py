@@ -21,4 +21,7 @@ class WhisperXAlignmentEngine:
     """Compatibility adapter around the existing WhisperX aligner."""
 
     def align(self, pipeline: Any, context: Any, result: dict[str, Any]) -> dict[str, Any]:
+        align = getattr(pipeline, "align", None)
+        if callable(align):
+            return align(context, result) or result
         return pipeline._align_result(context, result) or result

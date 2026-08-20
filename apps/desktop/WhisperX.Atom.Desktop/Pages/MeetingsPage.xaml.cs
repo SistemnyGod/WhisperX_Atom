@@ -717,7 +717,10 @@ public sealed partial class MeetingsPage : Page
 
     private void OpenSummaryTabButton_Click(object sender, RoutedEventArgs e)
     {
-        WorkspaceTabs.SelectedIndex = 2;
+        // The summary/protocol tab follows the transcript tab. Keep this
+        // explicit so the compact inspector does not accidentally open the
+        // transcript when the user asks for the meeting summary.
+        WorkspaceTabs.SelectedIndex = 3;
     }
 
     private void MeetingsPage_SizeChanged(object sender, SizeChangedEventArgs e)

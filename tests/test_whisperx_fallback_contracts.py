@@ -16,10 +16,10 @@ def test_controlled_fallback_passes_distinct_vad_and_chunk_options():
     # The current processing boundary owns the ASR engine.  The legacy
     # pipeline call is intentionally gone; both primary and fallback passes
     # use the same large-v3 wrapper with explicit decoding options.
-    assert "self._asr_engine.transcribe(" in processing
+    assert "self._asr_engine.transcribe" in processing
     assert "vad_onset=config.vad_onset" in processing
     assert "vad_onset=thresholds.fallback_vad_onset" in processing
-    assert "thresholds.fallback_vad_onset, thresholds.fallback_chunk_size" in processing
+    assert "chunk_size=thresholds.fallback_chunk_size" in processing
     for field in ("primary_vad_onset", "primary_chunk_size", "fallback_vad_onset", "fallback_chunk_size", "fallback_effective"):
         assert field in processing
 

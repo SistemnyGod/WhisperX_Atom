@@ -115,6 +115,15 @@ def test_gpu_worker_reclaims_stale_inference_leases_after_restart():
     assert "WORKER_RESTART_RECOVERY" in persistence
     assert "await asyncio.to_thread(worker._repository.reset_stale_leases)" in worker
 
+def test_summary_worker_reclaims_only_stale_summary_leases_after_restart():
+    persistence = read(Path("workers/summary_worker/worker.py"))
+    assert "def reset_stale_leases(self)" in persistence
+    assert "SUMMARY_STALE_LEASE_SECONDS" in persistence
+    assert "job.type='SUMMARIZE'" in persistence
+    assert "stage='TRANSCRIPT_READY'" in persistence
+    assert "WORKER_RESTART_RECOVERY" in persistence
+    assert "recovered_summary = await asyncio.to_thread(summary_worker.repository.reset_stale_leases)" in persistence
+
 def test_media_worker_serializes_duplicate_delivery_per_job():
     worker = read(Path("workers/media_worker/worker.py"))
     assert "active_jobs: set[str] = set()" in worker
@@ -171,10 +180,15 @@ def test_finalize_is_idempotent_and_command_cursors_are_serialized():
     assert "ux_agent_commands_agent_cursor" in migration
 
 
-def test_outbox_recovery_only_requeues_media_ingest_jobs():
+def test_outbox_recovery_requeues_all_processing_stages_without_live_leases():
     relay = read(Path("workers/outbox_relay/worker.py"))
-    assert "j.type='TRANSCRIBE'" in relay
-    assert "j.stage IN ('INGEST','UPLOADED','VALIDATING','NORMALIZING')" in relay
+    assert "OUTBOX_STALE_LEASE_SECONDS" in relay
+    assert "j.type IN ('TRANSCRIBE','TRANSCRIBE_ASR')" in relay
+    assert "j.type='TRANSCRIPT_ENRICH'" in relay
+    assert "j.type='SUMMARIZE'" in relay
+    assert "NOT EXISTS" in relay and "inbox_messages" in relay
+    assert "published_at IS NULL" in relay
+    assert "j.status='QUEUED'" in relay and "WORKER_RESTART_RECOVERY" in relay
 
 
 def test_release_gate_requires_complete_correlation_and_explicit_live_evidence():

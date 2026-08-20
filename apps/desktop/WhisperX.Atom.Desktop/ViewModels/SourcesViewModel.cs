@@ -183,8 +183,8 @@ public sealed class SourcesViewModel : ObservableObject
         MicrophoneEmptyMessage = health.UserReselectRequired
             ? "Сохранённый микрофон недоступен — выберите устройство заново в разделе «Запись»."
             : "Активные микрофоны не обнаружены в Windows.";
-        SystemAudioEmptyMessage = string.Equals(health.Error, "AUDIO_SYSTEM_AUDIO_DEFERRED", StringComparison.OrdinalIgnoreCase)
-            ? "Захват системного звука отложен для текущего профиля записи. Микрофон продолжает работать отдельно."
+        SystemAudioEmptyMessage = string.Equals(health.Error, "AUDIO_SYSTEM_AUDIO_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+            ? "Системный звук недоступен — выберите активное устройство вывода или профиль только для микрофона."
             : "Активные устройства вывода не обнаружены в Windows.";
         OnPropertyChanged(nameof(HasMicrophones));
         OnPropertyChanged(nameof(HasSystemAudioDevices));

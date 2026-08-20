@@ -67,6 +67,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
+    private readonly VoskRecognizer? _liveRecognizer;
     private readonly ILogger<VoiceHostRuntime>? _logger;
     private readonly Channel<VoiceAudioBlock> _audioQueue = Channel.CreateBounded<VoiceAudioBlock>(new BoundedChannelOptions(20)
     {
@@ -79,6 +80,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly object _recognitionGate = new();
+    private readonly SemaphoreSlim _livePublishGate = new(1, 1);
     private readonly object _pttGate = new();
     private readonly MemoryStream _pttBuffer = new();
     private readonly VoiceActivityDetector _vad = new();
@@ -89,12 +91,17 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoiceRingBuffer _preRoll = new(64_000);
     private AudioPcmConverter? _converter;
     private Task? _audioWorker;
+    private Task? _liveStatusPollTask;
     private DateTimeOffset _wakeStartedAt;
     private DateTimeOffset _commandStartedAt;
     private DateTimeOffset _lastSpeechAt;
+    private DateTimeOffset _liveRecordingStartedAt;
     private string? _pendingRecognizedText;
+    private Guid? _liveRecordingSessionId;
 
     private bool _commandSession;
+    private int _liveRecordingActive;
+    private int _liveRecordingPaused;
     private bool _speechSeen;
     private double _pendingConfidenceSum;
     private int _pendingConfidenceSegments;
@@ -168,6 +175,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 _wakeRecognizer = new VoskRecognizer(modelPath, grammar: WakeGrammar);
                 _utteranceRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _cancelRecognizer = new VoskRecognizer(modelPath, grammar: CancelGrammar);
+                _liveRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _nativeRuntimeReady = true;
                 _modelReady = true;
             }
@@ -338,6 +346,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _state.BeginStartup();
         if (!_modelReady) _state.SetDegraded(_lastErrorCode ?? "VOICE_MODEL_MISSING");
         _audioWorker ??= Task.Run(AudioWorkerAsync);
+        if (_desktopBroker is not null) _liveStatusPollTask ??= Task.Run(LiveStatusPollAsync);
         try
         {
             _audio.Start(_microphoneDeviceId);
@@ -373,6 +382,50 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _microphoneReady = false;
             ResetRecognitionSessions();
             DrainAudioQueue();
+        }
+    }
+
+    private async Task LiveStatusPollAsync()
+    {
+        while (!_shutdown.IsCancellationRequested && _desktopBroker is not null)
+        {
+            try
+            {
+                var status = await _desktopBroker.ExecuteAsync(
+                    "GetStatus",
+                    "live-status",
+                    1,
+                    false,
+                    _shutdown.Token).ConfigureAwait(false);
+                if (status.Ok)
+                {
+                    var active = status.RecorderState is "Recording" or "Paused" or "Starting" or "Finalizing";
+                    if (active)
+                    {
+                        var wasActive = Volatile.Read(ref _liveRecordingActive) == 1;
+                        Interlocked.Exchange(ref _liveRecordingActive, 1);
+                        Interlocked.Exchange(ref _liveRecordingPaused, status.RecorderState == "Paused" ? 1 : 0);
+                        if (Guid.TryParse(status.LocalSessionId, out var sessionId)) _liveRecordingSessionId = sessionId;
+                        if (!wasActive || _liveRecordingStartedAt == default)
+                        {
+                            _liveRecordingStartedAt = DateTimeOffset.UtcNow;
+                            lock (_recognitionGate) _liveRecognizer?.ResetSession();
+                        }
+                    }
+                    else
+                    {
+                        Interlocked.Exchange(ref _liveRecordingActive, 0);
+                        Interlocked.Exchange(ref _liveRecordingPaused, 0);
+                        _liveRecordingSessionId = null;
+                        _liveRecordingStartedAt = default;
+                        lock (_recognitionGate) _liveRecognizer?.ResetSession();
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
+            catch (Exception ex) { _logger?.LogDebug(ex, "Live recording status poll failed"); }
+            try { await Task.Delay(TimeSpan.FromSeconds(2), _shutdown.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
         }
     }
 
@@ -684,6 +737,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
         if (snapshot.State == VoiceHostState.Cooldown) return;
 
+        // Provisional meeting ASR is isolated from the command recognizer.
+        // It is advisory only: failures and drops never affect Recorder or
+        // the canonical V1/V2 pipeline.
+        if (Volatile.Read(ref _liveRecordingActive) == 1 && Volatile.Read(ref _liveRecordingPaused) == 0)
+            await ProcessLiveAsrAsync(pcm, cancellationToken).ConfigureAwait(false);
+
         var now = DateTimeOffset.UtcNow;
         var speech = _vad.IsSpeech(pcm, _sensitivity);
         if (!_commandSession && speech && _wakeSpeechStartedAt == default)
@@ -817,6 +876,53 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }, cancellationToken).ConfigureAwait(false);
         _speech.CancelAll();
         _lastErrorCode = null;
+    }
+
+    private async Task ProcessLiveAsrAsync(byte[] pcm, CancellationToken cancellationToken)
+    {
+        if (_commandSession || _state.Snapshot.State is VoiceHostState.WakeDetected or VoiceHostState.Capturing or VoiceHostState.Recognizing)
+            return;
+        VoiceRecognitionResult result;
+        lock (_recognitionGate)
+            result = _liveRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
+        if (!result.IsEndpoint || string.IsNullOrWhiteSpace(result.Text)) return;
+
+        var text = result.Text.Trim();
+        lock (_recognitionGate) _liveRecognizer?.ResetSession();
+        if (text.Length < 2 || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)) return;
+
+        // Wake/command utterances are handled by the deterministic command
+        // path and must not become meeting evidence.
+        var normalized = text.ToLowerInvariant();
+        if (normalized.Contains("мифодий", StringComparison.Ordinal)
+            || normalized.Contains("мефодий", StringComparison.Ordinal)
+            || normalized.Contains("атом", StringComparison.Ordinal)) return;
+
+        var startedAt = _liveRecordingStartedAt == default ? DateTimeOffset.UtcNow : _liveRecordingStartedAt;
+        var endMs = Math.Max(100, (long)(DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
+        var startMs = Math.Max(0, endMs - 900);
+        var segment = new VoiceLiveAsrSegment(
+            Guid.NewGuid(),
+            startMs,
+            endMs,
+            text,
+            result.Confidence > 0 ? Math.Clamp(result.Confidence, 0, 1) : null);
+        _ = PublishLiveAsrSegmentAsync(segment, cancellationToken);
+    }
+
+    private async Task PublishLiveAsrSegmentAsync(VoiceLiveAsrSegment segment, CancellationToken cancellationToken)
+    {
+        if (_desktopBroker is null || Volatile.Read(ref _liveRecordingActive) == 0) return;
+        if (!await _livePublishGate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        try
+        {
+            await _desktopBroker.PublishLiveAsrSegmentsAsync(_liveRecordingSessionId, [segment], cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Live provisional ASR publish failed");
+        }
+        finally { _livePublishGate.Release(); }
     }
 
     private void BeginCommandSession()
@@ -1085,6 +1191,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             }
             _recorderPipeReady = true;
             _recorderPipeError = null;
+            UpdateLiveRecordingState(command, broker.LocalSessionId);
             return new VoiceResponse(broker.SpokenText ?? command switch
             {
                 "START" => "Запись начата",
@@ -1121,7 +1228,35 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             "STATUS" => $"Состояние записи: {result.State}",
             _ => "Команда выполнена"
         };
+        UpdateLiveRecordingState(command, result.SessionId);
         return new VoiceResponse(text, true, true, result.SessionId, commandId, traceId);
+    }
+
+    private void UpdateLiveRecordingState(string command, string? sessionId)
+    {
+        switch (command)
+        {
+            case "START":
+                Interlocked.Exchange(ref _liveRecordingActive, 1);
+                Interlocked.Exchange(ref _liveRecordingPaused, 0);
+                _liveRecordingSessionId = Guid.TryParse(sessionId, out var parsed) ? parsed : null;
+                _liveRecordingStartedAt = DateTimeOffset.UtcNow;
+                lock (_recognitionGate) _liveRecognizer?.ResetSession();
+                break;
+            case "PAUSE":
+                Interlocked.Exchange(ref _liveRecordingPaused, 1);
+                break;
+            case "RESUME":
+                Interlocked.Exchange(ref _liveRecordingPaused, 0);
+                break;
+            case "STOP":
+                Interlocked.Exchange(ref _liveRecordingActive, 0);
+                Interlocked.Exchange(ref _liveRecordingPaused, 0);
+                _liveRecordingSessionId = null;
+                _liveRecordingStartedAt = default;
+                lock (_recognitionGate) _liveRecognizer?.ResetSession();
+                break;
+        }
     }
 
     private static string VoiceErrorText(string code) => code switch
@@ -1141,7 +1276,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
         "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",
-        "ASSISTANT_RECORDING_ACTIVE" => "Ответы по совещанию будут доступны после завершения записи и обработки стенограммы.",
+        "ASSISTANT_RECORDING_ACTIVE" => "Свежий контекст совещания ещё не готов.",
+        "LIVE_MEETING_REQUIRED" => "Откройте текущее совещание, чтобы задать вопрос во время записи.",
+        "LIVE_MEETING_NOT_READY" => "Пока нет свежего фрагмента совещания для ответа.",
         "VOICE_ASSISTANT_UNAVAILABLE" => "Помощник временно недоступен.",
         "ASSISTANT_MEETING_REQUIRED" => "Откройте совещание, по которому нужен ответ.",
         "ASSISTANT_HISTORY_FORBIDDEN" => "История совещаний недоступна в текущем контексте.",
@@ -1169,7 +1306,24 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var result = await _desktopBroker.AskAssistantAsync(normalizedQuestion, requestedMode, false, cancellationToken, traceId, commandId);
         if (result.Ok && !string.IsNullOrWhiteSpace(result.QueryId))
         {
-            return await RespondAsync(result.SpokenText ?? "Вопрос принят, отвечу после обработки.", cancellationToken, true, commandId: commandId, traceId: traceId);
+            // Keep the server query identity on the immediate acceptance ACK.
+            // Desktop uses the same queryId for the later grounded result and
+            // the Voice Host tombstone, which lets the production gate verify
+            // the real Voice Host -> Desktop Broker path without relying on
+            // timing or parsing the spoken acknowledgement.
+            var acceptance = await RespondAsync(
+                result.SpokenText ?? "Вопрос принят, отвечу после обработки.",
+                cancellationToken,
+                true,
+                commandId: commandId,
+                traceId: traceId,
+                answerStatus: result.AssistantStatus);
+            // The acceptance acknowledgement is a local prompt, not the
+            // grounded answer. Keep the queryId in the IPC response so a
+            // production gate can correlate it, but do not put it into the
+            // playback tombstone: the later SPEAK_ASSISTANT_RESULT for the
+            // same query must still be allowed to play exactly once.
+            return acceptance with { QueryId = result.QueryId };
         }
         return new VoiceResponse(VoiceErrorText(result.ErrorCode ?? "VOICE_ASSISTANT_UNAVAILABLE"), true, false, CommandId: commandId, TraceId: traceId);
     }
@@ -1519,12 +1673,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audioQueue.Writer.TryComplete();
         _shutdown.Cancel();
         try { if (_audioWorker is not null) await _audioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        try { if (_liveStatusPollTask is not null) await _liveStatusPollTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         _utteranceRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
         _cancelRecognizer?.Dispose();
+        _liveRecognizer?.Dispose();
         _speech.Dispose();
         _executionGate.Dispose();
         _audioOperationGate.Dispose();
+        _livePublishGate.Dispose();
         _shutdown.Dispose();
         _pttBuffer.Dispose();
     }

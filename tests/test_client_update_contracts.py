@@ -50,6 +50,8 @@ def test_update_install_is_fail_closed_when_recorder_health_is_unknown():
     assert 'SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN")' in service
     assert "if (!response.IsReachable || response.Health is null)" in service
     assert "catch\n        {\n            // Never install while Recorder liveness is unknown." in service
+    assert "IsKnownRecorderState" in service
+    assert 'SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN")' in service
 
 
 def test_recording_e2e_script_covers_faults_without_implicit_destructive_actions():

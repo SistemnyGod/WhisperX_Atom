@@ -65,6 +65,7 @@
                                         <StackPanel>
                                             <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Text="{Binding StableKey}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding StableKey}" />
+                                            <TextBlock Text="{Binding MatchStatus}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MatchReason}" />
                                         </StackPanel>
                                         <TextBlock Grid.Column="1" Text="{Binding MeetingTitle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MeetingTitle}" />
                                         <TextBlock Grid.Column="2" Text="{Binding MeetingDateText}" Foreground="{StaticResource MutedTextBrush}" />
@@ -97,6 +98,10 @@
                             <StackPanel Spacing="3">
                                 <TextBlock Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                 <TextBlock x:Name="DetailsDate" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Сопоставление профиля" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsMatch" TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsMatch}" />
                             </StackPanel>
                             <Button x:Name="OpenMeetingButton" Content="Открыть совещание" Style="{StaticResource SecondaryButtonStyle}" Click="OpenMeetingButton_Click" HorizontalAlignment="Stretch" />
                         </StackPanel>

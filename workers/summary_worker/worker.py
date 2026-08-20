@@ -69,6 +69,57 @@ class SummaryRepository:
     def close(self) -> None:
         self._db.close()
 
+    def reset_stale_leases(self) -> int:
+        """Requeue summary jobs abandoned by a worker restart.
+
+        Summary generation is optional and can legitimately run for several
+        minutes, so an inbox lease cannot be treated as proof that a worker is
+        still alive.  The worker heartbeat is the ownership signal.  Only
+        SUMMARIZE jobs are touched here; assistant and transcript jobs have
+        their own recovery loops.
+        """
+        stale_seconds = max(30, int(os.getenv("SUMMARY_STALE_LEASE_SECONDS", "90")))
+        with self._db.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    f"""
+                    UPDATE inbox_messages AS inbox
+                    SET lease_expires_at=now() - interval '1 second', worker_id=NULL
+                    FROM jobs AS job
+                    WHERE inbox.job_id=job.id
+                      AND job.type='SUMMARIZE'
+                      AND job.status IN ('QUEUED','RUNNING')
+                      AND (
+                          job.status='QUEUED'
+                          OR job.last_heartbeat IS NULL
+                          OR job.last_heartbeat < now() - interval '{stale_seconds} seconds'
+                          OR job.lease_expires_at IS NULL
+                          OR job.lease_expires_at < now()
+                      )
+                    """
+                )
+                changed = connection.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status='QUEUED',
+                        stage='TRANSCRIPT_READY',
+                        worker_id=NULL,
+                        lease_expires_at=NULL,
+                        last_heartbeat=NULL,
+                        error_code='WORKER_RESTART_RECOVERY',
+                        updated_at=now()
+                    WHERE type='SUMMARIZE'
+                      AND status='RUNNING'
+                      AND (
+                          last_heartbeat IS NULL
+                          OR last_heartbeat < now() - interval '{stale_seconds} seconds'
+                          OR lease_expires_at IS NULL
+                          OR lease_expires_at < now()
+                      )
+                    """
+                )
+                return int(changed.rowcount)
+
     def claim(self, message_id: str, job_id: str) -> bool:
         with self._db.connection() as connection:
             row = connection.execute(
@@ -262,6 +313,7 @@ class SummaryRepository:
                 existing_status = str(existing_summary[1])
                 if existing_status in {"READY", "NEEDS_REVIEW"}:
                     connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    connection.execute("UPDATE recording_pipeline_runs SET summary_id=%s,summary_job_id=%s,updated_at=now() WHERE summary_job_id=%s", (existing_summary[0], job_id, job_id))
                     connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if existing_status == "READY" else "PARTIAL_READY", meeting_id))
                     return True
                 if existing_status != "FAILED":
@@ -360,6 +412,7 @@ class SummaryRepository:
                 else ("NEEDS_REVIEW" if needs_review else "READY")
             )
             connection.execute("UPDATE summaries SET status=%s WHERE id=%s", (summary_status, summary_id))
+            connection.execute("UPDATE recording_pipeline_runs SET summary_id=%s,summary_job_id=%s,updated_at=now() WHERE summary_job_id=%s", (summary_id, job_id, job_id))
             if summary_status == "FAILED":
                 connection.execute("UPDATE jobs SET status='FAILED',stage='FAILED',progress=100,error_message=%s,error_code='SUMMARY_PROTOCOL_QUALITY_FAILED',lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", ("Не удалось сформировать подтверждённый протокол", job_id))
             else:
@@ -536,6 +589,9 @@ async def run() -> None:
     assistant_subscription = await jetstream.pull_subscribe("llm.assistant", durable="assistant-worker")
     set_runtime_state()
     summary_worker = SummaryWorker()
+    recovered_summary = await asyncio.to_thread(summary_worker.repository.reset_stale_leases)
+    if recovered_summary:
+        LOGGER.warning("recovered stale summary jobs count=%s", recovered_summary)
     assistant_worker = AssistantWorker()
 
     async def consume_summary() -> None:

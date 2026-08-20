@@ -88,6 +88,10 @@ Broker и текущую пользовательскую сессию.
 - `IMPLEMENTED`: retrieval использует PostgreSQL Russian FTS, до 12 основных
   результатов, соседние сегменты, максимум 36 сегментов, пять встреч и 36 000
   символов.
+- `IMPLEMENTED`: поверх scope-filtered FTS добавлен hybrid rerank с локальными
+  embeddings, русской нормализацией/синонимами и соседями той же transcript.
+  Evidence snapshot по-прежнему фиксируется до Qwen; provider и размеры
+  candidate set сохраняются только в техническом `answer_metadata`.
 - `IMPLEMENTED`: скрытые технические сегменты и стенограммы с критическими
   quality warnings не передаются Qwen.
 - `IMPLEMENTED`: Qwen3-8B возвращает экранный `answer`, короткий
@@ -110,9 +114,37 @@ Broker и текущую пользовательскую сессию.
   блокируется для `NO_SPEECH_DETECTED`, `ASR_LANGUAGE_MISMATCH`,
   `AUDIO_SIGNAL_UNUSABLE` и стенограмм, требующих проверки.
 
+### LIVE-вопросы во время записи
+
+- `IMPLEMENTED`: вопросы во время `RECORDING`, `PAUSED`, `STARTING` и
+  `FINALIZING` не читают старую V1/V2. Broker направляет их в отдельный
+  `LIVE_MEETING` scope.
+- `IMPLEMENTED`: Voice Host ведёт отдельную unrestricted Vosk-сессию только
+  пока Recorder активен и публикует текстовые provisional-сегменты через
+  Desktop Broker. Канонический PCM этого контура не меняется.
+- `IMPLEMENTED`: live retrieval использует только свежие строки
+  `live_meeting_segments`, с лексическим якорем и соседними фрагментами;
+  отсутствие якоря даёт `LIVE_MEETING_NOT_READY`, без подстановки последних
+  произнесённых слов.
+- `IMPLEMENTED`: подтверждённый ответ live-помечается
+  `ANSWERED_WITH_WARNING`, `provisional=true`, `canonicalTranscript=false` и
+  не становится Transcript V1/V2 или основанием для Summary.
+- `IMPLEMENTED`: live-память имеет TTL пять минут, лимит 256 сегментов и
+  фоновую очистку recovery-задачей. Незавершённый запрос удерживает нужные
+  сегменты не более 15 минут; затем live evidence удаляется каскадно.
+- `RUNTIME_REQUIRED`: качество live ASR и задержка ответа ещё требуют
+  установленной проверки на реальном микрофоне в активной встрече.
+
 ## Что подтверждено автоматикой
 
 - `AUTOMATED_VERIFIED`: Voice Core и Voice Host self-test проходят.
+- `AUTOMATED_VERIFIED`: установленный Voice Host поддерживает безопасный
+  `--command-acceptance` gate для `START/PAUSE/RESUME/STOP` и прикладных
+  вопросов; режим имеет нулевые вызовы Recorder и Desktop Broker.
+- `AUTOMATED_VERIFIED`: установленный acceptance script имеет явный `-RunBroker`
+  режим для живого `TEXT → VoiceIntentParser → Desktop Broker → CURRENT_MEETING`
+  пути; он выполняется только при открытом Desktop/совещании и сохраняет в
+  acceptance JSON лишь query/status/evidence IDs.
 - `AUTOMATED_VERIFIED`: Release-сборки Voice Host, Desktop и API проходят без
   ошибок и предупреждений.
 - `AUTOMATED_VERIFIED`: целевые voice/assistant contract tests проходят.
@@ -181,9 +213,11 @@ Broker и текущую пользовательскую сессию.
 
 ### P2 — качество и сопровождение
 
-1. Russian FTS не находит смысловые переформулировки без общих слов. После
-   базового gate нужен hybrid retrieval: FTS + embeddings/синонимы с теми же
-   RBAC и meeting boundaries.
+1. Hybrid retrieval реализован как bounded offline-safe baseline. Для ещё более
+   сильной семантики можно отдельно подготовить локальную
+   sentence-transformers модель и включить её через
+   `ASSISTANT_EMBEDDING_PROVIDER=sentence-transformers`; RBAC и meeting
+   boundaries при этом не меняются.
 2. Legacy `VoiceAssistantClient` с server-token контрактом удалён: Voice Host
    получает Assistant-результаты только через Desktop Broker и пользовательскую
    API-сессию.

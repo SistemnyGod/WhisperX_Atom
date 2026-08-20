@@ -990,6 +990,17 @@ static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user
 static bool IsAdministrator(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
     string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase);
 
+static bool IsValidEmbeddingJson(JsonDocument? document)
+{
+    if (document is null || document.RootElement.ValueKind != JsonValueKind.Array)
+        return document is null;
+    var length = document.RootElement.GetArrayLength();
+    if (length is < 1 or > 2048) return false;
+    foreach (var item in document.RootElement.EnumerateArray())
+        if (item.ValueKind != JsonValueKind.Number || !item.TryGetDouble(out var value) || double.IsNaN(value) || double.IsInfinity(value)) return false;
+    return true;
+}
+
 async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
 {
     // Assistant access is always evaluated against the authenticated Desktop
@@ -1014,7 +1025,9 @@ static bool RoleAllows(string role, string method, PathString path)
     return HttpMethods.IsPost(method) &&
         (path == "/api/meetings" ||
          (path.StartsWithSegments("/api/meetings/") && path.Value?.EndsWith("/uploads", StringComparison.OrdinalIgnoreCase) == true) ||
-         path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/conversations") ||
+         path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/requests") || path.StartsWithSegments("/api/assistant/conversations") ||
+         path.StartsWithSegments("/api/assistant/live-segments") ||
+         path == "/api/speaker-profiles" || path.StartsWithSegments("/api/speaker-profiles/") ||
          path.Value?.Contains("/speakers/merge", StringComparison.OrdinalIgnoreCase) == true ||
          path.Value?.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) == true ||
          path.Value?.EndsWith("/transcript/reprocess", StringComparison.OrdinalIgnoreCase) == true);
@@ -1364,6 +1377,15 @@ app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/status", async (Guid ses
     return status is null ? Results.NotFound(new { error = "recording_session_not_found" }) : Results.Ok(status);
 });
 
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/pipeline", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var chain = await store.GetRecordingPipelineChainAsync(agentId, sessionId);
+    return chain is null
+        ? Results.NotFound(new { error = "recording_pipeline_not_found" })
+        : Results.Ok(chain);
+});
+
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
@@ -1387,6 +1409,11 @@ app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext contex
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
+});
+app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.GetMeetingPipelineChainsAsync(id));
 });
 app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store, Database database) =>
 {
@@ -1430,6 +1457,32 @@ app.MapGet("/api/speakers", async (int? page, int? pageSize, string? search, str
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
     return Results.Ok(await store.ListSpeakerRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
 });
+app.MapGet("/api/speaker-profiles", async (int? page, int? pageSize, string? search, string? status, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSpeakerProfilesAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, userId.Value, IsPrivileged(context)));
+});
+app.MapPost("/api/speaker-profiles", async (SpeakerProfileCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (!IsValidEmbeddingJson(request.EmbeddingCentroid)) return Results.BadRequest(new { error = "invalid_speaker_embedding" });
+    var profile = await store.CreateSpeakerProfileAsync(userId.Value, request.DisplayName ?? string.Empty, request.EmbeddingCentroid, request.EmbeddingModel);
+    return profile is null ? Results.BadRequest(new { error = "invalid_speaker_profile" }) : Results.Created($"/api/speaker-profiles/{profile.Id}", profile);
+});
+app.MapPatch("/api/speaker-profiles/{id:guid}", async (Guid id, SpeakerProfileRenameRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(request.DisplayName)) return Results.BadRequest(new { error = "display_name_required" });
+    var updated = await store.RenameSpeakerProfileAsync(id, userId.Value, IsPrivileged(context), request.DisplayName);
+    return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapPost("/api/speaker-profiles/{id:guid}/enroll", async (Guid id, SpeakerProfileEnrollRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (request.Embedding is null || !IsValidEmbeddingJson(request.Embedding)) return Results.BadRequest(new { error = "invalid_speaker_embedding" });
+    var updated = await store.EnrollSpeakerProfileAsync(id, userId.Value, IsPrivileged(context), request.Embedding, request.DurationMs);
+    return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
 app.MapGet("/api/action-items", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
@@ -1458,6 +1511,30 @@ app.MapGet("/api/assistant/conversations", async (HttpContext context, UnifiedPr
     return userId is null
         ? Results.Unauthorized()
         : Results.Ok(await store.ListAssistantConversationsAsync(userId.Value, includeArchived == true));
+});
+// Provisional ASR ingress for the active recording. This is intentionally
+// separate from transcript V1/V2: it is short-lived, text-only, and rejected
+// unless a matching recording session is currently active.
+app.MapPost("/api/assistant/live-segments/{meetingId:guid}", async (Guid meetingId, LiveMeetingSegmentsRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    var result = await store.AppendLiveMeetingSegmentsAsync(
+        meetingId,
+        userId.Value,
+        IsPrivileged(context),
+        request.RecordingSessionId,
+        request.Segments ?? Array.Empty<LiveMeetingSegmentRequest>());
+    return result is null
+        ? Results.Conflict(new { error = "LIVE_MEETING_NOT_ACTIVE", status = "LIVE_ASR_NOT_READY" })
+        : Results.Accepted($"/api/assistant/live-segments/{meetingId}", new { recordingSessionId = result.RecordingSessionId, acceptedCount = result.AcceptedCount, expiresInSeconds = 300 });
+});
+app.MapGet("/api/assistant/live-context/{meetingId:guid}", async (Guid meetingId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is null) return Results.Unauthorized();
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    return Results.Ok(new { meetingId, ready = await store.HasLiveMeetingContextAsync(meetingId), mode = "LIVE_MEETING", canonicalTranscript = false });
 });
 app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1539,20 +1616,35 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
     var route = UnifiedProductStore.RouteAssistantRequest(question, request.RequestedMode, request.ActiveMeetingId, IsPrivileged(context));
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
+    // Never answer from a stale canonical transcript while capture is active.
+    // If a provisional context exists, transparently move AUTO/CURRENT
+    // requests into the isolated LIVE_MEETING scope; otherwise fail closed.
+    if (route.ResolvedMode == "CURRENT_MEETING" && request.ActiveMeetingId is Guid recordingMeeting
+        && await store.HasActiveRecordingAsync(recordingMeeting))
+    {
+        if (!await store.HasLiveMeetingContextAsync(recordingMeeting))
+            return Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." });
+        route = route with { ResolvedMode = "LIVE_MEETING" };
+    }
+    if (route.ResolvedMode == "LIVE_MEETING")
+    {
+        if (request.ActiveMeetingId is not Guid liveMeeting || !await store.HasLiveMeetingContextAsync(liveMeeting))
+            return Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." });
+    }
 
     // Conversations are bound to a scope. Never reuse a user-owned chat for
     // another meeting or for general chat; create a fresh scoped conversation.
     if (request.ConversationId is Guid suppliedConversation)
     {
         var existing = await store.GetAssistantConversationAsync(suppliedConversation, userId.Value);
-        var expectedMeeting = route.ResolvedMode == "CURRENT_MEETING" ? request.ActiveMeetingId : null;
+        var expectedMeeting = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
         var expectedScope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
         if (existing is null || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase) || existing.MeetingId != expectedMeeting)
             request = request with { ConversationId = null };
     }
 
     var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
-    var resolvedMeetingId = route.ResolvedMode == "CURRENT_MEETING" ? request.ActiveMeetingId : null;
+    var resolvedMeetingId = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
     // Keep voice and text requests in the same scoped conversation. A caller
     // may provide an existing conversation; otherwise create one atomically
     // in the resolved scope so follow-up questions retain context.
@@ -1565,7 +1657,9 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
     }
     var query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, route.ResolvedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
     if (query is null)
-        return Results.Conflict(new { error = "assistant_context_not_ready", status = "TRANSCRIPT_NOT_READY" });
+        return route.ResolvedMode == "LIVE_MEETING"
+            ? Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." })
+            : Results.Conflict(new { error = "assistant_context_not_ready", status = "TRANSCRIPT_NOT_READY" });
     return Results.Accepted($"/api/assistant/queries/{query.Id}", new
     {
         queryId = query.Id,
@@ -1809,6 +1903,8 @@ public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocu
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantRequestRequest(string Question, string? RequestedMode = "AUTO", Guid? ActiveMeetingId = null, Guid? ConversationId = null, string? Source = "DESKTOP", string? CommandId = null, string? TraceId = null);
+public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0);
+public sealed record LiveMeetingSegmentsRequest(Guid? RecordingSessionId, IReadOnlyList<LiveMeetingSegmentRequest> Segments);
 public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
 public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
@@ -1834,9 +1930,12 @@ public record ImportRequest(
     [property: JsonPropertyName("size_bytes")] long SizeBytes,
     [property: JsonPropertyName("sha256")] string Sha256);
 public sealed record MediaAssetRow(Guid Id, Guid MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
-public sealed record SpeakerRow(Guid Id, string StableKey, string DisplayName);
+public sealed record SpeakerRow(Guid Id, string StableKey, string DisplayName, Guid? ProfileId = null, double? ProfileConfidence = null, string ProfileMatchStatus = "UNMATCHED", string? ProfileMatchReason = null, string? ProfileSuggestionName = null);
 public record SpeakerRenameRequest(string DisplayName);
 public record SpeakerMergeRequest(Guid SourceSpeakerId, Guid TargetSpeakerId);
+public record SpeakerProfileCreateRequest(string DisplayName, JsonDocument? EmbeddingCentroid = null, string? EmbeddingModel = null);
+public record SpeakerProfileRenameRequest(string DisplayName);
+public record SpeakerProfileEnrollRequest(JsonDocument Embedding, long DurationMs = 0);
 public record TranscriptSegmentEditRequest(string Text, string? Reason = null);
 public sealed record TranscriptVersionRow(Guid Id, Guid MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
 public sealed record TranscriptRegistryRow(Guid TranscriptId, Guid MeetingId, string MeetingTitle, DateTime MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTime CreatedAt);
@@ -2035,7 +2134,7 @@ public sealed class Database(IConfiguration configuration)
                 worker_id=NULL,
                 lease_expires_at=NULL,
                 last_heartbeat=now(),
-                error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
+                error_code='WORKER_RESTART_RECOVERY',
                 updated_at=now()
             WHERE status='RUNNING'
               AND lease_expires_at IS NOT NULL
@@ -2122,6 +2221,29 @@ public sealed class Database(IConfiguration configuration)
             """, connection, transaction))
         {
             await reviewMeetings.ExecuteNonQueryAsync(cancellationToken);
+        }
+        // LIVE_MEETING is provisional memory, never canonical transcript data.
+        // Expiry is enforced by the recovery loop as well as the ingest path so
+        // an idle server cannot retain live speech indefinitely. Keep a segment
+        // briefly while a non-terminal assistant query still references it;
+        // otherwise its FK evidence snapshot is allowed to cascade away.
+        await using (var liveMemory = new NpgsqlCommand("""
+            DELETE FROM live_meeting_segments AS segment
+            WHERE segment.expires_at <= now()
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM assistant_live_query_evidence AS evidence
+                  JOIN assistant_queries AS query ON query.id=evidence.query_id
+                  WHERE evidence.live_segment_id=segment.id
+                    AND query.status NOT IN (
+                        'READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED',
+                        'NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED',
+                        'LLM_UNAVAILABLE')
+                    AND query.created_at > now()-interval '15 minutes'
+              )
+            """, connection, transaction))
+        {
+            await liveMemory.ExecuteNonQueryAsync(cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
     }
@@ -2623,8 +2745,8 @@ public sealed class Database(IConfiguration configuration)
     public async Task<IReadOnlyList<SpeakerRow>> ListSpeakersAsync(Guid meetingId)
     {
         var result = new List<SpeakerRow>(); await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,stable_key,display_name FROM meeting_speakers WHERE meeting_id=@id ORDER BY stable_key", connection); command.Parameters.AddWithValue("id", meetingId);
-        await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new SpeakerRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2))); return result;
+        await using var command = new NpgsqlCommand("SELECT id,stable_key,display_name,speaker_profile_id,profile_confidence,COALESCE(profile_match_status,'UNMATCHED'),profile_match_reason,profile_suggestion_name FROM meeting_speakers WHERE meeting_id=@id ORDER BY stable_key", connection); command.Parameters.AddWithValue("id", meetingId);
+        await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new SpeakerRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetGuid(3), reader.IsDBNull(4) ? null : reader.GetDouble(4), reader.IsDBNull(5) ? "UNMATCHED" : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7))); return result;
     }
 
     public async Task<IReadOnlyList<MediaAssetRow>> ListMediaAsync(Guid meetingId)

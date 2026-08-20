@@ -7,8 +7,9 @@
 ## Поток данных
 
 ```text
-AudioGraph callback
-  → durable PCM (.part → .pcm)
+Room microphone AudioGraph callback       Render WASAPI loopback callback
+  → room-microphone durable PCM             → system-audio durable PCM
+  └──────────────────── separate SQLite tracks / FLAC files ─────────────┘
   → SQLite recording_raw_chunks
   → background FLAC encoder
   → recording_chunks / local archive
@@ -18,9 +19,32 @@ AudioGraph callback
   → Transcript V1 → V2 → Summary
 ```
 
+Для серверной части эта цепочка дополнительно фиксируется в
+`recording_pipeline_runs`:
+
+```text
+recording_session_id → meeting_id → media_asset_id → asr_job_id
+→ transcript_v1_id → enrichment_job_id → transcript_v2_id
+→ summary_job_id → summary_id
+```
+
+Lineage не зависит от очереди NATS и используется для восстановления после
+перезапуска. Полный безмикрофонный вертикальный gate запускается скриптом
+`scripts/e2e-vertical-pipeline.ps1`; он проверяет также отсутствие дубликатов
+ASR/enrichment/summary jobs и сохраняет в acceptance JSON только IDs/статусы.
+
 `recording_session_id` — локальный идентификатор. `meeting_id`, `media_asset_id`
 и `processing_job_id` появляются после binding с сервером и не заменяют
 локальную сессию.
+
+GPU-путь сохраняет отдельные diagnostic metrics в `pipeline_metrics`:
+`queue_wait_ms`, `media_prepare_ms`, `model_load_ms`, `normalize_ms`,
+`asr_ms`, `alignment_ms`, `diarization_ms`, `postprocess_ms`,
+`total_processing_ms`, `audio_duration_ms`, `rtf/RTF`, peak VRAM в bytes/MB,
+GPU utilization, CUDA OOM и reuse checkpoint. Эти поля служат для оптимизации
+resident `large-v3`; при одной RTX `GPU_CONCURRENCY=1` остаётся неизменным.
+Метрики не являются частью canonical audio и не меняют публичные
+worker/API-контракты.
 
 ## Модули
 
@@ -29,8 +53,33 @@ AudioGraph callback
 `AudioGraphCaptureEngine` открывает выбранный endpoint, принимает Float32
 AudioGraph frames и передаёт их в PCM writer. Callback не выполняет SQLite,
 FFmpeg, HTTP или тяжёлые операции: он только нормализует кадр и помещает его в
-bounded очередь. `RecorderHostRuntime` владеет IPC v6, lifecycle Host и
+bounded очередь. `SystemAudioCaptureEngine` независимо открывает выбранный
+render endpoint через `WasapiLoopbackCapture`, нормализует его в тот же 48 kHz
+mono PCM16 и передаёт в отдельный writer. Эти потоки никогда не складываются в
+один PCM на клиенте. `RecorderHostRuntime` владеет IPC v6, lifecycle Host и
 передачей команд в Core.
+
+Профиль `ONLINE` создаёт обе дорожки (`room-microphone` и `system-audio`),
+`SYSTEM_ONLY` — только render-loopback, `ROOM/MIC_ONLY` сохраняют прежний
+микрофонный путь. Для фиксированного render endpoint fallback запрещён;
+пропавшее устройство даёт `AUDIO_SYSTEM_AUDIO_UNAVAILABLE`. На сервере
+`LocalArchiveWriter` видит отдельные track metadata и лишь затем может собрать
+master/ASR-производную. Process-specific loopback Teams/Zoom пока использует
+выбранный системный render endpoint; изоляция отдельных процессов остаётся
+следующим этапом Windows Audio Session API.
+
+Media Worker после STOP создаёт отдельный `track-<track-id>.flac` для каждой
+дорожки и записывает `assembly-result.json` с `schema_version=1`. В manifest
+для каждой дорожки фиксируются `track_role` (`room_microphone` или
+`system_audio`), относительный путь и логический `storage_key`, фактический формат, длительность,
+смещение, drift, способ сборки и `selected_for_asr`. Поле
+`tracks_are_independent=true` является контрактом: эти файлы сохраняются для
+последующей нормализации, диагностики эха и определения удалённых спикеров.
+Для профиля `ONLINE` controlled mix создаётся только после успешной сборки и
+проверки обеих дорожек; его путь записывается отдельно в `asr_input`, а
+исходные track-файлы не заменяются и не помечаются выбранными. В quality
+metadata Media Worker переносит тот же список как `independent_tracks`, не
+выдавая абсолютные пути хоста.
 
 Перед записью каждого кадра `AudioFrameContinuityValidator` проверяет исходный
 sample cursor, размер payload и неизменность формата. Gap, overlap или
@@ -164,6 +213,14 @@ READY → UPLOADING → CONFIRMED
 - `LOCAL_FAILED` используется для противоречивой timeline, повреждённых байтов
   и отсутствия durable audio.
 - Ошибка archive не делает capture failed и не останавливает новый START.
+
+После `LOCAL_READY` серверный outbox и workers восстанавливаются независимо:
+потерянное событие `media.ingest`, `ml.transcribe` или `llm.summarize` повторно
+публикуется relay только для просроченного job без живого lease. Повторная
+доставка не создаёт новый media asset или transcript version. ASR callback
+сохраняет V1 до запуска enrichment; падение alignment, diarization, HF/
+pyannote или CUDA OOM оставляет исходный V1 доступным и переводит только
+последующую стадию в retry/`PARTIAL_READY`.
 
 ## Правила оптимизации
 

@@ -78,6 +78,36 @@ internal sealed class VoiceIntentBrokerClient
         }
     }
 
+    public async Task<VoiceBrokerResponse> PublishLiveAsrSegmentsAsync(
+        Guid? recordingSessionId,
+        IReadOnlyList<VoiceLiveAsrSegment> segments,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var pipe = await ConnectWithRetryAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(pipe);
+            await using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            var request = new
+            {
+                command = "LIVE_ASR_SEGMENTS",
+                recordingSessionId,
+                segments,
+                timestamp = DateTimeOffset.UtcNow
+            };
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, _json).AsMemory(), cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(line)
+                ? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: "empty_response")
+                : JsonSerializer.Deserialize<VoiceBrokerResponse>(line, _json)
+                    ?? new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: "invalid_response");
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException or OperationCanceledException)
+        {
+            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name);
+        }
+    }
+
     public async Task<VoiceBrokerResponse> GetAssistantResultAsync(Guid queryId, CancellationToken cancellationToken, string? traceId = null, string? commandId = null)
     {
         traceId ??= Guid.NewGuid().ToString("N");

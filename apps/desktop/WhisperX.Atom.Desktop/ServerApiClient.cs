@@ -32,7 +32,7 @@ public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long Start
     [JsonIgnore]
     public string TimeLabel => $"{TimeSpan.FromMilliseconds(StartMs):hh\\:mm\\:ss}";
 }
-public sealed record DesktopSpeaker(string Id, string StableKey, string DisplayName);
+public sealed record DesktopSpeaker(string Id, string StableKey, string DisplayName, string? ProfileId = null, double? ProfileConfidence = null, string ProfileMatchStatus = "UNMATCHED", string? ProfileMatchReason = null, string? ProfileSuggestionName = null);
 public sealed record DesktopSummary(string Id, string MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
 public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt)
 {
@@ -117,6 +117,7 @@ public sealed record DesktopJob(
 }
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
 public sealed record DesktopAssistantRequestAccepted(string QueryId, string? ConversationId, string ResolvedMode, string? MeetingId, string Status, string Source, double RouterConfidence, string PollUrl, string EventsUrl);
+public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0);
 
 public enum DesktopAuthState
 {
@@ -802,6 +803,12 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/requests", new { question, requestedMode, activeMeetingId, conversationId, source, commandId, traceId }, cancellationToken);
         if (!response.IsSuccessStatusCode) return null;
         return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
+    }
+
+    public async Task<bool> PublishLiveMeetingSegmentsAsync(Guid meetingId, Guid? recordingSessionId, IReadOnlyList<DesktopLiveMeetingSegment> segments, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/assistant/live-segments/{meetingId}", new { recordingSessionId, segments }, cancellationToken);
+        return response.IsSuccessStatusCode;
     }
     public async Task<DesktopTranscript?> GetTranscriptAsync(Guid meetingId, int? version = null, CancellationToken cancellationToken = default)
     {

@@ -114,9 +114,9 @@ def test_desktop_local_first_start_and_profile_migration_are_explicit():
     command_service = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecordingCommandService.cs")
     assert "localOnly: false" in command_service
     assert "CreateMeetingAsync" not in view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
-    assert 'normalized is "ONLINE" or "SYSTEM_ONLY"' in view_model
-    assert 'ErrorMessage = "AUDIO_SYSTEM_AUDIO_DEFERRED"' in view_model
-    assert 'SetRecordingProfileAsync("ROOM"' in host
+    assert 'normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY"' in view_model
+    assert 'new("ONLINE", "Онлайн — микрофон + система")' in view_model
+    assert 'SystemAudioCaptureEngine' in host
 
 
 def test_desktop_start_uses_host_preflight_default_and_background_delivery():
@@ -131,7 +131,8 @@ def test_desktop_start_uses_host_preflight_default_and_background_delivery():
     assert "SERVER_UNAVAILABLE_RECORDING_CAN_START_OFFLINE" in host
     assert "await _engine.SelectDeviceAsync(selectionMode, _storage.MicrophoneDeviceId" in host
     assert "EffectiveMicrophoneDeviceId" in protocol
-    assert "MicrophoneCaptureReady: ready" in host
+    assert "MicrophoneCaptureReady: microphoneReady" in host
+    assert "SystemAudioCaptureReady: systemReady" in host
     assert "health.DeviceWatcherReady && health.AudioGraphReady" in view_model
     assert 'health.CaptureEngine, "LEGACY_WASAPI"' in view_model
     start = view_model.split("public async Task<bool> StartRecordingAsync", 1)[1].split("public Task<bool> PauseAsync", 1)[0]
@@ -147,18 +148,16 @@ def test_legacy_naudio_selection_is_not_persisted_as_an_audiograph_device():
     assert "$existingDevice.StartsWith(" in user_config
     assert "userReselectRequired = $requiresReselect" in user_config
     assert "SetUserReselectRequired(true)" in runtime
-    assert "SetAudioDevices(null, null)" in runtime
+    assert "SetAudioDevices(null, _storage.SystemAudioDeviceId)" in runtime
     assert "PersistCurrentConfigurationAsync" in runtime
 
 
 def test_audiograph_microphone_selection_ignores_legacy_system_audio_field():
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
-    assert "RecorderRuntimeMode.IsAudioGraph ? null : _systemAudioDeviceId" in view_model
-    assert "AudioGraph accepts microphone selection" in runtime
-    assert 'Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED"' not in runtime.split(
-        "public Task<AgentIpcResponse> SetAudioDevicesAsync", 1
-    )[1].split("public async Task ReconcileBackgroundAsync", 1)[0]
+    assert "_systemAudioDeviceId = settings.SystemAudioDeviceId" in view_model
+    assert "SelectSystemDeviceAsync" in runtime
+    assert 'Error("AUDIOGRAPH_SYSTEM_AUDIO_DEFERRED"' not in runtime
 
 
 def test_audiograph_health_and_desktop_preserve_live_media_time():
@@ -166,7 +165,7 @@ def test_audiograph_health_and_desktop_preserve_live_media_time():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
     assert "public long CurrentMediaTimeMs" in engine
-    assert "MediaTimeMs: _sessionId is null ? null : _engine.CurrentMediaTimeMs" in runtime
+    assert "MediaTimeMs: _sessionId is null ? null : (_writer is not null ? _engine.CurrentMediaTimeMs : _systemEngine.CurrentMediaTimeMs)" in runtime
     assert "if (response.MediaTimeMs is long mediaTimeMs)" in view_model
     assert "resetting the timer to 00:00:00" in view_model
 

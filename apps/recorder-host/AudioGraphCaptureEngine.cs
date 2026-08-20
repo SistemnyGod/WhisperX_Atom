@@ -15,7 +15,7 @@ namespace WhisperX.Atom.Recorder.Host;
 /// User-session microphone engine. The graph is configured to emit the
 /// normalized Phase 1 format: 48 kHz, mono, PCM16.
 /// </summary>
-public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine
+public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureSource
 {
     private const int SampleRate = RecordingContract.MicrophoneSampleRate;
     private const int Channels = 1;

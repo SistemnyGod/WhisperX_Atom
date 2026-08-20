@@ -28,6 +28,13 @@ Managed process для локального микрофона и Windows TTS. �
 Desktop Broker, воспроизводит подтверждения и публикует technical timeline.
 При падении Voice Host Recorder не должен останавливаться.
 
+Во время активной записи вопросы не переводятся в канонический `CURRENT_MEETING`.
+Desktop Broker использует отдельный `LIVE_MEETING` scope, а сервер принимает
+только свежие text-only provisional-сегменты через
+`POST /api/assistant/live-segments/{meetingId}`. Если producer live-ASR ещё не
+публиковал сегменты, ответ завершается `LIVE_MEETING_NOT_READY`; V1/V2 и история
+не подмешиваются.
+
 ### `apps/desktop/Updater`
 
 Отдельный процесс staged update. Проверяет hash/identity, ждёт Desktop,
@@ -44,14 +51,17 @@ Inno Setup payload и pre/post-install PowerShell. Копирует только
 
 Подробный контракт см. в [recording-module-reference.md](recording-module-reference.md).
 
-Входной тракт использует один поток Windows AudioGraph.
-`AudioGraphCaptureEngine` владеет callback и sample-clock,
+Входной тракт поддерживает независимые потоки Windows AudioGraph и render
+loopback. `AudioGraphCaptureEngine` владеет callback и sample-clock для
+`room-microphone`, а `SystemAudioCaptureEngine` — отдельным WASAPI loopback
+sample-clock для `system-audio`.
 `AudioFrameContinuityValidator` до durable writer отклоняет gaps, overlaps,
 смену формата и несовпадение размера PCM, а `AudioGraphSessionWriter` сохраняет
 raw PCM без FFmpeg, SQLite-запросов и сети внутри callback. Ошибки capture и
 writer сходятся в один идемпотентный путь восстановления Recorder Host, который
 определяет `LOCAL_READY`, `RECOVERY_PENDING` или `LOCAL_FAILED` по фактически
-сохранённым данным.
+сохранённым данным. Сведение дорожек выполняется только после локальной
+записи и доставки, никогда внутри realtime callback.
 
 ### `apps/recorder-agent`
 
@@ -61,13 +71,46 @@ delivery. Offline-first: durable PCM создаётся до сетевых де
 
 ### `apps/recorder-host`
 
-Current-user AudioGraph Host и IPC endpoint. Владеет реальным capture device,
-health snapshot и process guard; не владеет серверными jobs.
+Current-user AudioGraph Host и IPC endpoint. Владеет реальным capture/render
+endpoint, двумя независимыми track writer-ами, health snapshot и process
+guard; не владеет серверными jobs и не смешивает microphone/system PCM.
 
 ### `apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj`
 
 Legacy Windows Service host. Оставлен для совместимости и диагностики; не
 запускается параллельно с current-user Recorder Host.
+
+## Серверная вертикальная обработка
+
+### `workers/media_worker`
+
+Собирает durable recorder chunks в FLAC/ASR derivatives и передаёт job в GPU
+через outbox. Переход `READY_FOR_ASR` идемпотентен: после сбоя между сменой
+стадии и публикацией следующая доставка восстанавливает отсутствующее событие
+по `payload.job_id`.
+
+### `workers/ml_worker`
+
+Сначала сохраняет `TRANSCRIPT_ENRICH` независимый V1 (`ASR_DRAFT`), затем
+создаёт отдельный enrichment job для alignment/diarization. Повторная доставка
+ищет V1/V2 по job/source transcript и не создаёт новую версию. Ошибка
+enrichment оставляет V1 доступным как `PARTIAL_READY`.
+
+Worker входит в pipeline через `whisperx_atom.core_pipeline` и
+`WhisperXRuntime`. `ProcessingService` получает `LegacyPipelineStageAdapter`
+для вызовов стадий (preprocessing, ASR, alignment, diarization и
+postprocessing); он не импортирует `app.transcription_pipeline` и не вызывает
+его private-методы. Adapter — временная compatibility boundary, принадлежащая
+runtime. Каждую стадию можно заменить native engine отдельно, не меняя NATS,
+API, database и контракты Transcript V1/V2.
+
+### `workers/summary_worker`
+
+Формирует Summary только из V2. `summaries.job_id` и lineage предотвращают
+дубли после рестарта; ошибка Summary не удаляет стенограмму.
+
+Подробная сквозная схема и контракты находятся в
+[vertical-pipeline.md](vertical-pipeline.md).
 
 ### `live_runtime.py` и legacy live UI в `app.py`
 
@@ -93,6 +136,11 @@ ASP.NET API: authentication/RBAC, meetings, imports, recording finalize,
 media/jobs, Transcript V1/V2, Summary, Assistant, updates и readiness.
 API проверяет scope пользователя до retrieval; `CURRENT_MEETING` не может
 получить evidence другой встречи.
+
+`LIVE_MEETING` хранит временные сегменты в `live_meeting_segments` с TTL и
+проверкой активной recording-сессии. Live evidence фиксируется отдельно от
+`assistant_query_evidence`, а после STOP канонический Assistant снова работает
+только по V1/V2.
 
 ### `workers/media_worker`
 
@@ -121,7 +169,13 @@ Summary запускается после качественного V2; `NEEDS_
 ### `workers/outbox_relay`
 
 Доставляет durable PostgreSQL outbox в NATS JetStream. Повторяет сообщения
-идемпотентно и не содержит бизнес-логики распознавания.
+идемпотентно и не содержит бизнес-логики распознавания. При старте relay
+восстанавливает просроченные `RUNNING` jobs стадий `TRANSCRIBE_ASR`,
+`TRANSCRIPT_ENRICH` и `SUMMARIZE`, если для них нет живого inbox lease. Он
+создаёт новое событие по тому же `job_id`; downstream использует job/transcript
+идентификаторы как ключи идемпотентности, поэтому повтор не создаёт второй
+asset, V1, V2 или Summary. Исходные media и Transcript V1 при этом не
+перезаписываются.
 
 ### `whisperx_atom/`
 
@@ -138,6 +192,27 @@ legacy WhisperX pipeline и не меняет содержимое исходн�
 alignment/diarization под media root и повторно использует их при совпадении
 provenance fingerprint. PostgreSQL job остаётся источником истины; повреждённый
 checkpoint игнорируется и пересчитывается, а canonical audio/V1 не изменяются.
+Подробные правила измерения и безопасной оптимизации описаны в
+[whisperx-pipeline-performance.md](whisperx-pipeline-performance.md).
+`runtime.py` — единственная совместимая граница с legacy
+`app.transcription_pipeline`: он создаёт конфигурацию/контекст, удерживает
+resident pipeline и безопасно освобождает его после idle/OOM. `processing.py`
+содержит orchestration и stage contracts, но не импортирует legacy напрямую.
+`metrics.py` собирает request-scoped `queue_wait_ms`, `media_prepare_ms`,
+`model_load_ms`, `normalize_ms`, `asr_ms`, `alignment_ms`, `diarization_ms`,
+`postprocess_ms`, `total_processing_ms`, `audio_duration_ms`, RTF, peak VRAM,
+GPU utilization, CUDA OOM и checkpoint hit-state/rate. Media Worker передаёт
+`media_prepare_ms` в GPU hand-off. Эти diagnostics попадают в
+`pipeline_metrics` metadata/quality без текста, аудио или секретов и не меняют
+внешние API/worker contracts. `ASR_BATCH_SIZE` ограничен
+`ASR_MAX_BATCH_SIZE` (по умолчанию 16), а `GPU_CONCURRENCY=1` остаётся
+обязательным до отдельного VRAM soak-test.
+`workers/ml_worker/speaker_registry.py` — чистая граница сопоставления
+диаризационных меток с owner-scoped профилями голоса. Он валидирует embedding,
+считает cosine similarity и требует одновременно порог и отрыв от второго
+кандидата; при недостаточной уверенности возвращает suggestion/unmatched и не
+переименовывает спикера. Профили не содержат аудио, а V1 остаётся неизменной;
+mapping записывается только во время enrichment/V2.
 Подмодуль `domain/` содержит identifier-only проекции графа
 `Meeting → Recording → ProcessingJob → Transcript`; он не импортирует БД,
 WhisperX, аудио или секреты. `storage.py` является единой границей разрешения

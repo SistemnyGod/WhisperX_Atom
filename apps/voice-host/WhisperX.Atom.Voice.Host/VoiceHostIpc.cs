@@ -22,6 +22,14 @@ public sealed record VoiceTelemetryPacket(
     string? DeviceId = null,
     string? DeviceName = null);
 
+internal sealed record VoiceLiveAsrSegment(
+    Guid Id,
+    long StartMs,
+    long EndMs,
+    string Text,
+    double? Confidence = null,
+    int Revision = 0);
+
 internal sealed record VoiceBrokerResponse(
     bool Ok,
     string? ErrorCode = null,

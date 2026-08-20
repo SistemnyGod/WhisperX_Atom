@@ -127,7 +127,13 @@ class PipelineConfig:
             language=language,
             device=device,
             compute_type=compute,
-            batch_size=_as_int("BATCH_SIZE", 8),
+            # Keep ASR throughput tunable without allowing an accidental
+            # unbounded batch to exhaust the single-GPU worker.  BATCH_SIZE
+            # remains the backwards-compatible alias.
+            batch_size=max(1, min(
+                _as_int("ASR_BATCH_SIZE", _as_int("BATCH_SIZE", 8)),
+                max(1, _as_int("ASR_MAX_BATCH_SIZE", 16)),
+            )),
             preprocess_asr=_preprocess_mode(os.getenv("PREPROCESS_ASR", "auto")),
             asr_beam_size=_as_int("BEAM_SIZE", 7),
             vad_onset=float(os.getenv("VAD_ONSET", "0.40")),
@@ -156,6 +162,7 @@ class ModelCacheManager:
         self._asr_weights = {}
         self._align = {}
         self._diarizer = {}
+        self._last_model_load_ms = 0.0
 
     def _asr_key(self, model: str, device: str, compute_type: str, backend: str) -> tuple:
         # Inference/VAD options must not be part of the weights cache key.
@@ -182,6 +189,7 @@ class ModelCacheManager:
     ):
         key = self._wrapper_key(model, device, compute_type, backend, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords)
         existing = self._asr.get(key)
+        started = time.perf_counter()
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
@@ -206,6 +214,12 @@ class ModelCacheManager:
                             self._asr[key].model = torch.compile(self._asr[key].model)
                     except Exception:
                         pass
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
+        else:
+            # A resident wrapper/weights hit is intentionally zero-cost in
+            # the model-load metric.  The caller can therefore distinguish a
+            # cold first request from a resident request without guessing.
+            pass
         return self._asr[key]
 
     @staticmethod
@@ -220,14 +234,25 @@ class ModelCacheManager:
     def get_align_model(self, language_code: str, device: str):
         key = (language_code, device)
         if key not in self._align:
+            started = time.perf_counter()
             self._align[key] = whisperx.load_align_model(language_code=language_code, device=device)
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._align[key]
 
     def get_diarizer(self, device: str, hf_token: str):
         key = (device, hf_token)
         if key not in self._diarizer:
+            started = time.perf_counter()
             self._diarizer[key] = WhisperXDiarizationPipeline(use_auth_token=hf_token, device=device)
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
+
+    def consume_model_load_ms(self) -> float:
+        """Return and clear load time accumulated since the previous stage."""
+
+        value = self._last_model_load_ms
+        self._last_model_load_ms = 0.0
+        return round(max(0.0, value), 3)
 
     def clear(self) -> None:
         """Release cached model references at the end of a GPU job."""
@@ -238,6 +263,7 @@ class ModelCacheManager:
         self._asr_weights.clear()
         self._align.clear()
         self._diarizer.clear()
+        self._last_model_load_ms = 0.0
 
 
 class TranscriptionPipeline:

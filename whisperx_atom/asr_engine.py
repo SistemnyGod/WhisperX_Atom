@@ -37,4 +37,7 @@ class WhisperXAsrEngine:
         chunk_size: int,
         beam_size: int,
     ) -> dict[str, Any]:
+        transcribe = getattr(pipeline, "transcribe", None)
+        if callable(transcribe):
+            return transcribe(context, vad_onset=vad_onset, chunk_size=chunk_size, beam_size=beam_size) or {}
         return pipeline.run_asr_pass(context, vad_onset, chunk_size, beam_size) or {}

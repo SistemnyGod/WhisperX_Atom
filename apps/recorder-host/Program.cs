@@ -48,6 +48,8 @@ builder.Services.AddSingleton<AudioGraphDeviceCatalog>();
 builder.Services.AddSingleton<IAudioDeviceCatalog>(services => services.GetRequiredService<AudioGraphDeviceCatalog>());
 builder.Services.AddSingleton<AudioGraphCaptureEngine>();
 builder.Services.AddSingleton<IAudioCaptureEngine>(services => services.GetRequiredService<AudioGraphCaptureEngine>());
+builder.Services.AddSingleton<SystemAudioDeviceCatalog>();
+builder.Services.AddSingleton<SystemAudioCaptureEngine>();
 builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
 builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
 builder.Services.AddSingleton<RecorderHostRuntime>();

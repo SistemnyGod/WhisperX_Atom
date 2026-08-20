@@ -85,7 +85,7 @@ Add the first missing domain capability on top of the existing transcript index:
 - validate restore manifests, file sizes and SHA-256 hashes before any data-changing action;
 - require explicit `-Apply` for `pg_restore` and optional media replacement, with a guarded target root;
 - emit JSON console logs, request timing and an `X-Trace-Id` response header from the API;
-- add `scripts/verify-backend-deployment.ps1` to validate required deployment files, migration numbering/order, migration packaging, Docker healthcheck and Compose configuration;
+- add `scripts/verify-backend-deployment.ps1` to validate required deployment files, immutable migration IDs/order (the numeric prefix is only an ordering hint), migration packaging, Docker healthcheck and Compose configuration; the API records a checksum for every applied migration;
 - keep the live restore drill and GPU/quality corpus operator-driven because they require real backup artifacts, secrets and running infrastructure.
 
 ### B7 — GPU execution guard — implemented

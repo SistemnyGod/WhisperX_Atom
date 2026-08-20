@@ -8,6 +8,59 @@ namespace WhisperX.Atom.Voice.Host;
 
 internal static class VoiceAcceptanceRunner
 {
+    /// <summary>
+    /// Validate the installed parser binary without opening a microphone or
+    /// sending a command to Recorder.  This is the safe production-gate
+    /// half: the installed Voice Host must classify recorder intents before a
+    /// separate microphone gate is allowed to exercise audio capture.
+    /// </summary>
+    public static Task<int> CommandAsync()
+    {
+        var parser = new VoiceIntentParser();
+        var cases = new[]
+        {
+            ("start", "Мифодий, начни запись", VoiceIntent.StartRecording),
+            ("pause", "Мифодий, пауза", VoiceIntent.PauseRecording),
+            ("resume", "Мифодий, продолжи запись", VoiceIntent.ResumeRecording),
+            ("stop", "Мифодий, останови запись", VoiceIntent.StopRecording),
+            ("question-repair", "Мифодий, кто отвечал за ремонт?", VoiceIntent.HistoryQuestion),
+            ("question-deadline", "Мифодий, какой срок назвали?", VoiceIntent.HistoryQuestion),
+            ("question-pump", "Мифодий, что решили по насосу?", VoiceIntent.HistoryQuestion),
+        };
+        var aliases = new[] { "Мифодий, начни запись", "Мефодий, начни запись", "Атом, начни запись" };
+        var results = cases.Select(item =>
+        {
+            var command = parser.Parse(item.Item2, 0.95);
+            return new
+            {
+                id = item.Item1,
+                text = item.Item2,
+                expectedIntent = item.Item3.ToString(),
+                actualIntent = command.Intent.ToString(),
+                hasWakeWord = parser.HasWakeWord(item.Item2),
+                parameterPresent = item.Item3 == VoiceIntent.HistoryQuestion && !string.IsNullOrWhiteSpace(command.Parameter),
+                accepted = parser.HasWakeWord(item.Item2) && command.Intent == item.Item3,
+            };
+        }).ToArray();
+        var aliasResults = aliases.Select(text =>
+        {
+            var command = parser.Parse(text, 0.95);
+            return new { text, intent = command.Intent.ToString(), accepted = parser.HasWakeWord(text) && command.Intent == VoiceIntent.StartRecording };
+        }).ToArray();
+        var passed = results.All(item => item.accepted && (item.expectedIntent != VoiceIntent.HistoryQuestion.ToString() || item.parameterPresent))
+            && aliasResults.All(item => item.accepted);
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "command-acceptance",
+            passed,
+            recorderInvocations = 0,
+            brokerInvocations = 0,
+            cases = results,
+            aliases = aliasResults,
+        }));
+        return Task.FromResult(passed ? 0 : 4);
+    }
+
     public static async Task<int> ReplayAsync(string audioPath, CancellationToken cancellationToken)
     {
         if (!File.Exists(audioPath))

@@ -112,9 +112,9 @@
                             <TextBlock Text="Аудио встречи" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                             <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10,9">
                                 <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
-                                    <Button Content="▶" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Width="34" Padding="0" AutomationProperties.Name="Воспроизвести аудио" />
+                                    <Button Content="Открыть" Style="{StaticResource SecondaryButtonStyle}" Click="OpenMeetingsButton_Click" Padding="10,5" AutomationProperties.Name="Открыть аудио в совещании" />
                                     <ProgressBar Grid.Column="1" Value="0" Minimum="0" Maximum="100" VerticalAlignment="Center" Height="6" />
-                                    <TextBlock Grid.Column="2" Text="Открыть в совещании" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="Плеер доступен в рабочем пространстве встречи" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                                 </Grid>
                             </Border>
                             <TextBlock Text="Выберите сегмент, чтобы перейти к его началу в совещании" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />

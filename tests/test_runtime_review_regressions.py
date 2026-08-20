@@ -28,8 +28,8 @@ def test_durable_writer_subscribes_before_audiograph_can_emit_frames():
     writer_start = runtime.split("public async Task StartAsync(CancellationToken", 1)[1].split(
         "public void BeginConsuming", 1
     )[0]
-    assert start.index("writer.BeginConsuming()") < start.index("await _engine.StartAsync")
-    assert start.index("writer.BeginConsuming()") < start.index("writer.FirstDurableBytes")
+    assert start.index("writer.BeginConsuming(_engine.PrepareFrameChannel())") < start.index("await _engine.StartAsync")
+    assert start.index("writer.BeginConsuming(_engine.PrepareFrameChannel())") < start.index("writer.FirstDurableBytes")
     assert "_worker = Task.Run(ProcessAsync)" not in writer_start
     engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
     engine_start = engine.split("public async Task StartAsync", 1)[1].split(
@@ -244,7 +244,7 @@ def test_failed_device_selection_restores_engine_and_confirmed_settings():
     assert "previousReselectRequired" in selection
     assert "configurationCommitted" in selection
     assert "await RestoreEngineSelectionAsync(previous)" in selection
-    assert "_storage.SetAudioDevices(previous, null)" in selection
+    assert "_storage.SetAudioDevices(previous, _storage.SystemAudioDeviceId)" in selection
 
 
 def test_runtime_snapshot_requires_authentication_and_preflight_uses_connected_state():

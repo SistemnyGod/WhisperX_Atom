@@ -46,6 +46,7 @@ public sealed partial class MainWindow : Window
             AppWindow.SetIcon(iconPath);
 
         _services = services;
+        AppSystemStatusControl.SetSummary("Система проверяется", "NeutralStatusBrush");
         _globalRecordingTimer = _uiDispatcherQueue.CreateTimer();
         _globalRecordingTimer.Interval = TimeSpan.FromSeconds(1);
         _globalRecordingTimer.Tick += GlobalRecordingTimer_Tick;
@@ -106,6 +107,7 @@ public sealed partial class MainWindow : Window
             "summaries" => "Саммари",
             "tasks" => "Задачи",
             "speakers" => "Спикеры",
+            "assistant" => "ИИ-помощник",
             "agents" => "Состояние системы",
             "settings" => "Настройки",
             _ => "Главная"
@@ -152,13 +154,15 @@ public sealed partial class MainWindow : Window
         // windows details remain available through one stable flyout button
         // instead of forcing the title bar to reflow every health refresh.
         var width = e.NewSize.Width;
-        var showPills = width >= 860;
-        var showVoice = width >= 1040;
-        RecorderStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
-        ServerStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
-        WhisperXStatusPill.Visibility = showPills ? Visibility.Visible : Visibility.Collapsed;
-        VoiceStatusPill.Visibility = showPills && showVoice ? Visibility.Visible : Visibility.Collapsed;
+        // Keep the title bar calm: individual component pills are retained
+        // only for compatibility with the status reducer and the flyout.
+        RecorderStatusPill.Visibility = Visibility.Collapsed;
+        ServerStatusPill.Visibility = Visibility.Collapsed;
+        WhisperXStatusPill.Visibility = Visibility.Collapsed;
+        VoiceStatusPill.Visibility = Visibility.Collapsed;
+        StatusDetailsButton.Visibility = Visibility.Collapsed;
         ProfileText.Visibility = width >= 1160 ? Visibility.Visible : Visibility.Collapsed;
+        AppSystemStatusControl.Visibility = width >= 560 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -234,7 +238,7 @@ public sealed partial class MainWindow : Window
             backendAvailable && recorderAvailable && !agentReady ? ("Recorder доступен; требуется привязка к пользователю", "WarningBrush") :
             backendAvailable && agentReady && processingReadiness is null ? ("WhisperX: readiness недоступна", "WarningBrush") :
             backendAvailable && agentReady && !processingReady ? ("WhisperX / GPU недоступны", "DangerBrush") :
-            backendAvailable && agentReady ? ("Система готова · Qwen отключена", "SuccessBrush") :
+            backendAvailable && agentReady ? ("Система готова", "SuccessBrush") :
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
@@ -361,7 +365,7 @@ public sealed partial class MainWindow : Window
         {
             var controllerError = _services.VoiceHost.LastErrorCode;
             VoiceStatusText.Text = controllerError is not null
-                ? $"Мифодий · {controllerError}"
+                ? FormatVoiceControllerError(controllerError)
                 : _services.VoiceHost.State == "NEEDS_SETUP" ? "Мифодий · требуется настройка" : "Мифодий · выключен";
             SetStatusPill(VoiceStatusPill, VoiceStatusText, controllerError is not null || _services.VoiceHost.State == "NEEDS_SETUP" ? "warning" : "neutral");
             return;
@@ -381,6 +385,16 @@ public sealed partial class MainWindow : Window
         VoiceStatusText.Text = voiceState;
         SetStatusPill(VoiceStatusPill, VoiceStatusText, stale || snapshot.State.Equals("DEGRADED", StringComparison.OrdinalIgnoreCase) ? "warning" : snapshot.State.Equals("LISTENING", StringComparison.OrdinalIgnoreCase) ? "success" : "neutral");
     }
+
+    private static string FormatVoiceControllerError(string code) => code.ToUpperInvariant() switch
+    {
+        "VOICE_HOST_BUILD_MISMATCH" => "Мифодий · требуется обновление",
+        "VOICE_MICROPHONE_UNAVAILABLE" => "Мифодий · микрофон недоступен",
+        "VOICE_HOST_PROCESS_UNINSPECTABLE" => "Мифодий · проверка процесса недоступна",
+        "VOICE_HOST_OWNER_MISMATCH" => "Мифодий · процесс другого пользователя",
+        "VOICE_HOST_BUSY" => "Мифодий · занят",
+        _ => "Мифодий · требуется проверка"
+    };
 
     private void QueueAgentRecovery(CancellationToken cancellationToken)
     {
@@ -418,6 +432,7 @@ public sealed partial class MainWindow : Window
         }
 
         SystemStatusText.Text = text;
+        AppSystemStatusControl.SetSummary(text, brushKey);
         if (Application.Current.Resources[brushKey] is Brush brush)
         {
             SystemStatusIndicator.Fill = brush;
@@ -528,6 +543,18 @@ public sealed partial class MainWindow : Window
         StatusFlyoutSummaryText.Text = backendAvailable && recorderAvailable && processingReady
             ? "Основной цикл готов: запись сохраняется локально, обработка выполняется отдельно."
             : "Есть компоненты, требующие внимания. Подробные коды доступны в настройках и состоянии системы.";
+
+        AppSystemStatusControl.Apply(
+            "Система проверяется",
+            "NeutralStatusBrush",
+            StatusFlyoutSummaryText.Text,
+            StatusFlyoutRecorderText.Text,
+            StatusFlyoutMicrophoneText.Text,
+            StatusFlyoutStorageText.Text,
+            StatusFlyoutServerText.Text,
+            StatusFlyoutWhisperText.Text,
+            VoiceStatusText.Text,
+            backendAvailable ? "Qwen · доступность зависит от включённого server runtime" : "Qwen · сервер недоступен");
     }
 
     private static string FormatBytes(long bytes)
@@ -543,6 +570,11 @@ public sealed partial class MainWindow : Window
         }
         while (value >= 1024 && index < units.Length - 1);
         return $"{value:0.#} {units[index]}";
+    }
+
+    private void AppSystemStatusControl_OpenSystemStatusRequested(object sender, EventArgs e)
+    {
+        NavigateTo("agents");
     }
 
     private static void SetStatusPill(Border pill, TextBlock text, string state)

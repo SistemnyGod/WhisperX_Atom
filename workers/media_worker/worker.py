@@ -104,8 +104,9 @@ async def run() -> None:
                         source = resolve_media_path(str(payload["storage_key"]), root)
                     prepare_started = time.monotonic()
                     derivatives = await asyncio.to_thread(prepare_media, source, root / "derived" / job_id)
+                    media_prepare_ms = max(0, int((time.monotonic() - prepare_started) * 1000))
                     if source_type == "recorder_session":
-                        await asyncio.to_thread(record_stage_timing, str(session_id), "media_prepare_ms", int((time.monotonic() - prepare_started) * 1000))
+                        await asyncio.to_thread(record_stage_timing, str(session_id), "media_prepare_ms", media_prepare_ms)
                     update_job(job_id, "RUNNING", "NORMALIZING", 15)
                     update_asset(payload["media_asset_id"], derivatives.sha256, str(derivatives.archive_flac), str(derivatives.preview_opus), str(derivatives.asr_wav), derivatives.duration_ms)
                     if source_type == "recorder_session":
@@ -119,6 +120,11 @@ async def run() -> None:
                         "preview_storage_key": str(derivatives.preview_opus),
                         "sha256": derivatives.sha256,
                         "duration_ms": derivatives.duration_ms,
+                        # Keep the timing in the hand-off message so the GPU
+                        # result/V1 carries one complete performance record.
+                        # It is numeric diagnostics only; no media or text is
+                        # copied into the message.
+                        "media_prepare_ms": media_prepare_ms,
                         "audio_quality": derivatives.quality_report,
                         "language": str(payload.get("language") or "ru"),
                         "acousticProfile": str(payload.get("acousticProfile") or payload.get("acoustic_profile") or "AUTO").upper(),

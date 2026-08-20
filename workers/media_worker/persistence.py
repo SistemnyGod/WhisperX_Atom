@@ -95,19 +95,34 @@ def schedule_media_retry(job_id: str, session_id: str | None, error: str, error_
 
 
 def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
-    """Atomically publish the READY_FOR_ASR state and its durable outbox event."""
+    """Repair/publish READY_FOR_ASR and its outbox event atomically.
+
+    The operation is deliberately safe to call more than once.  A worker can
+    crash after the job transition but before the outbox insert; a redelivery
+    must repair the missing event rather than treating the already-transitioned
+    job as a duplicate and silently losing the pipeline.
+    """
     with psycopg.connect(_conninfo()) as connection:
-        updated = connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-            (socket.gethostname(), job_id),
-        )
-        if updated.rowcount != 1:
-            return False
-        connection.execute(
-            "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),'ml.transcribe',%s::jsonb)",
-            (json.dumps(payload),),
-        )
-        return True
+        with connection.transaction():
+            state = connection.execute("SELECT status,stage FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            if state is None or str(state[0]) in {"CANCELLED", "FAILED", "READY"}:
+                return False
+            connection.execute(
+                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                (socket.gethostname(), job_id),
+            )
+            # Job id is the durable idempotency key; random outbox UUIDs are
+            # still fine because this predicate prevents a duplicate publish.
+            exists = connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='ml.transcribe' AND payload->>'job_id'=%s)",
+                (job_id,),
+            ).fetchone()[0]
+            if not exists:
+                connection.execute(
+                    "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),'ml.transcribe',%s::jsonb)",
+                    (json.dumps(payload),),
+                )
+            return True
 
 
 def update_job(job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:

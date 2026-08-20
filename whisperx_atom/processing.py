@@ -5,8 +5,6 @@ import os
 import copy
 import hashlib
 import subprocess
-import threading
-import time
 import wave
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +29,8 @@ from .transcript_quality import (
     quality_gate,
 )
 from .audio_signal import language_quality, mute_wav_intervals
+from .runtime import WhisperXRuntime
+from .metrics import PipelineMetrics
 from diarization_quality import choose_best_diarization_candidate, diarization_profiles_for_processing_profile, score_diarization_result
 
 
@@ -43,10 +43,16 @@ def _load_checkpoint_safely(
     job_id: str,
     stage: str,
     fingerprint: str,
+    metrics: PipelineMetrics | None = None,
 ):
     try:
-        return store.load(job_id, stage, fingerprint)
+        checkpoint = store.load(job_id, stage, fingerprint)
+        if metrics is not None:
+            metrics.checkpoint(checkpoint is not None)
+        return checkpoint
     except Exception:
+        if metrics is not None:
+            metrics.checkpoint(False)
         LOGGER.warning("checkpoint_load_failed job_id=%s stage=%s", job_id, stage, exc_info=True)
         return None
 
@@ -68,6 +74,33 @@ def _save_checkpoint_safely(
         return None
 
 
+def _run_measured(
+    metrics: PipelineMetrics,
+    stage: str,
+    callback: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run a stage while accumulating duration and CUDA-OOM diagnostics."""
+
+    with metrics.measure(stage):
+        return callback(*args, **kwargs)
+
+
+def _collect_model_load_ms(metrics: PipelineMetrics, pipeline: Any) -> None:
+    """Move lazy ASR/alignment/diarization load time into request metrics."""
+
+    cache = getattr(pipeline, "cache", None)
+    consume = getattr(cache, "consume_model_load_ms", None)
+    if not callable(consume):
+        return
+    try:
+        metrics.model_load_ms += float(consume() or 0.0)
+    except Exception:
+        # Metrics are advisory; a custom/fake pipeline must still process.
+        LOGGER.debug("model_load_metric_failed", exc_info=True)
+
+
 class ProcessingService:
     """Server-facing adapter around the proven legacy WhisperX pipeline."""
 
@@ -81,11 +114,9 @@ class ProcessingService:
         diarization_engine: DiarizationEngine | None = None,
         postprocessing_engine: PostprocessingEngine | None = None,
         checkpoint_store: PipelineCheckpointStore | None = None,
+        runtime: WhisperXRuntime | None = None,
     ) -> None:
-        self._pipeline: Any | None = None
-        self._pipeline_fingerprint: tuple[Any, ...] | None = None
-        self._last_used_monotonic = 0.0
-        self._lock = threading.Lock()
+        self._runtime = runtime or WhisperXRuntime(idle_cache_seconds=self.IDLE_CACHE_SECONDS)
         self._asr_engine = asr_engine or WhisperXAsrEngine()
         self._preprocessing_engine = preprocessing_engine or WhisperXPreprocessingEngine()
         self._alignment_engine = alignment_engine or WhisperXAlignmentEngine()
@@ -94,51 +125,19 @@ class ProcessingService:
         self._checkpoint_store = checkpoint_store or NullPipelineCheckpointStore()
 
     def _get_pipeline(self, config: Any) -> Any:
-        fingerprint = (
-            config.asr_model,
-            config.asr_backend,
-            config.device,
-            config.compute_type,
-        )
-        with self._lock:
-            if self._pipeline is None or self._pipeline_fingerprint != fingerprint:
-                self._clear_pipeline_locked(clear_cuda=self._pipeline is not None)
-                from app.transcription_pipeline import TranscriptionPipeline
-
-                self._pipeline = TranscriptionPipeline(config)
-                self._pipeline_fingerprint = fingerprint
-            self._last_used_monotonic = time.monotonic()
-            return self._pipeline
+        return self._runtime.get_pipeline(config)
 
     def release_idle(self, force: bool = False) -> bool:
-        with self._lock:
-            if self._pipeline is None:
-                return False
-            if not force and time.monotonic() - self._last_used_monotonic < self.IDLE_CACHE_SECONDS:
-                return False
-            self._clear_pipeline_locked(clear_cuda=True)
-            return True
+        return self._runtime.release_idle(force=force)
 
     def close(self) -> None:
-        self.release_idle(force=True)
+        self._runtime.close()
 
     def _clear_pipeline_locked(self, clear_cuda: bool) -> None:
-        pipeline, self._pipeline = self._pipeline, None
-        self._pipeline_fingerprint = None
-        self._last_used_monotonic = 0.0
-        if pipeline is not None:
-            try:
-                pipeline.cache.clear()
-            except Exception:
-                LOGGER.debug("pipeline_cache_cleanup_failed", exc_info=True)
-        if clear_cuda:
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                LOGGER.debug("cuda_cache_cleanup_failed", exc_info=True)
+        # Kept as a compatibility seam for callers/tests. Ownership lives in
+        # WhisperXRuntime so ProcessingService no longer imports the legacy
+        # pipeline implementation or manages its lifetime.
+        self._runtime.clear(clear_cuda=clear_cuda)
 
     def process(
         self,
@@ -149,13 +148,11 @@ class ProcessingService:
         if not request.media_path.is_file():
             raise FileNotFoundError(request.media_path)
 
-        from app.transcription_pipeline import PipelineContext, PipelineConfig
-
         def report(stage: str, value: int) -> None:
             if progress:
                 progress(stage, value)
 
-        config = PipelineConfig.from_env()
+        config = self._runtime.load_config()
         config.language = request.language or config.language
         config.min_speakers = max(1, request.min_speakers)
         config.max_speakers = max(config.min_speakers, request.max_speakers)
@@ -163,36 +160,53 @@ class ProcessingService:
         config.enable_alignment = not asr_only
         config.enable_diarization = not asr_only and os.getenv("DIARIZATION_MODE", "preferred").lower() != "disabled"
         thresholds = TranscriptQualityThresholds.from_env()
+        metrics = PipelineMetrics(
+            queue_wait_ms=float(request.queue_wait_ms or 0.0),
+            media_prepare_ms=request.media_prepare_ms,
+        )
+        # Reset peak VRAM before model acquisition so the metric includes both
+        # resident model load and request allocations. A reused model reports
+        # model_load_ms=0 while still exposing its current peak footprint.
         pipeline = self._get_pipeline(config)
+        # Runtime owns the resident implementation; stage engines receive only
+        # the explicit facade and therefore do not depend on private legacy
+        # method names.
+        stage_pipeline = self._runtime.get_stage_adapter(pipeline)
+        metrics.model_load_ms = self._runtime.last_model_load_ms
         # The resident object owns model caches, while request-scoped language
         # and speaker limits remain mutable per job.
-        pipeline.config.language = config.language
-        pipeline.config.min_speakers = config.min_speakers
-        pipeline.config.max_speakers = config.max_speakers
-        pipeline.config.enable_alignment = config.enable_alignment
-        pipeline.config.enable_diarization = config.enable_diarization
-        ctx = PipelineContext(job_id=request.job_id, audio_path=request.media_path)
+        self._runtime.configure_request(pipeline, config)
+        ctx = self._runtime.create_context(request.job_id, request.media_path)
         duration_seconds = _probe_duration_seconds(request.media_path)
 
         def emit_asr_ready(result: ProcessingResult) -> None:
             if asr_ready:
                 asr_ready(result.to_dict())
 
+        def attach_metrics(result: ProcessingResult) -> ProcessingResult:
+            performance = metrics.to_dict(duration_seconds)
+            result.metadata["pipeline_metrics"] = performance
+            result.quality["pipeline_metrics"] = performance
+            return result
+
         try:
             if str(request.profile or "").strip().lower() == "enrich":
-                return self._process_enrichment(request, pipeline, ctx, config, duration_seconds, report)
+                return self._process_enrichment(request, stage_pipeline, ctx, config, duration_seconds, report, metrics)
             report("NORMALIZING", 10)
-            source_audio_hash = _sha256_file(request.media_path)
+            source_audio_hash = _run_measured(metrics, "normalize", _sha256_file, request.media_path)
             asr_source = request.media_path
             # Technical TTS markers are muted only in a derived ASR copy.  The
             # canonical recording stays byte-for-byte intact for playback and
             # export, while the spoken assistant response cannot contaminate
             # Russian ASR in a distant microphone.
-            muted = mute_wav_intervals(request.media_path, request.technical_intervals)
+            muted = _run_measured(metrics, "normalize", mute_wav_intervals, request.media_path, request.technical_intervals)
             if muted is not None:
                 asr_source = ctx.register_temp(muted) or request.media_path
-            ctx.asr_audio_path, ctx.asr_preprocessing = self._preprocessing_engine.prepare_asr_input(
-                pipeline,
+            ctx.asr_audio_path, ctx.asr_preprocessing = _run_measured(
+                metrics,
+                "normalize",
+                self._preprocessing_engine.prepare_asr_input,
+                stage_pipeline,
                 asr_source,
                 request.acoustic_profile,
             )
@@ -205,7 +219,7 @@ class ProcessingService:
             # first transcript is emitted.
             if config.enable_diarization:
                 ctx.diar_audio_path = ctx.register_temp(
-                    self._preprocessing_engine.prepare_diarization_input(pipeline, request.media_path)
+                    _run_measured(metrics, "normalize", self._preprocessing_engine.prepare_diarization_input, stage_pipeline, request.media_path)
                 )
             else:
                 ctx.diar_audio_path = None
@@ -227,17 +241,18 @@ class ProcessingService:
                     ctx.audio_signal_metrics,
                     request.acoustic_profile,
                 )
-                emit_asr_ready(no_speech)
+                emit_asr_ready(attach_metrics(no_speech))
                 return no_speech
 
             report("TRANSCRIBING", 30)
-            primary_result = self._asr_engine.transcribe(
-                pipeline,
+            primary_result = _run_measured(metrics, "asr", self._asr_engine.transcribe,
+                stage_pipeline,
                 ctx,
                 vad_onset=config.vad_onset,
                 chunk_size=config.chunk_size,
                 beam_size=config.asr_beam_size,
             )
+            _collect_model_load_ms(metrics, stage_pipeline)
             primary_report = build_transcript_quality_report(primary_result, duration_seconds, thresholds)
             primary_gate = quality_gate(primary_report, thresholds)
             fallback_report = None
@@ -249,13 +264,14 @@ class ProcessingService:
             if thresholds.fallback_enabled and is_retryable_quality_failure(primary_gate):
                 fallback_attempted = True
                 fallback_reason = ",".join(primary_report.reasons) or "quality_gate_failed"
-                fallback_result = self._asr_engine.transcribe(
-                    pipeline,
+                fallback_result = _run_measured(metrics, "asr", self._asr_engine.transcribe,
+                    stage_pipeline,
                     ctx,
                     vad_onset=thresholds.fallback_vad_onset,
                     chunk_size=thresholds.fallback_chunk_size,
                     beam_size=config.asr_beam_size,
                 )
+                _collect_model_load_ms(metrics, stage_pipeline)
                 result, selected_pass, primary_report, fallback_report = compare_transcript_quality(
                     primary_result, fallback_result, duration_seconds, thresholds
                 )
@@ -272,7 +288,7 @@ class ProcessingService:
                     ctx.audio_signal_metrics,
                     request.acoustic_profile,
                 )
-                emit_asr_ready(no_speech)
+                emit_asr_ready(attach_metrics(no_speech))
                 return no_speech
             if not selected_gate["valid"]:
                 raise ValueError(selected_report.reasons[0] if selected_report.reasons else "TRANSCRIPT_EMPTY")
@@ -293,17 +309,18 @@ class ProcessingService:
             if language_report["mismatch"] and ctx.asr_preprocessing.get("preprocessing_profile") != "asr_far_field":
                 enhancement_attempted = True
                 enhancement_reason = "ASR_LANGUAGE_MISMATCH"
-                enhanced_path = self._preprocessing_engine.prepare_profile(pipeline, asr_source, "asr_far_field")
+                enhanced_path = _run_measured(metrics, "normalize", self._preprocessing_engine.prepare_profile, stage_pipeline, asr_source, "asr_far_field")
                 ctx.register_temp(enhanced_path)
                 original_path = ctx.asr_audio_path
                 ctx.asr_audio_path = enhanced_path
-                enhanced_result = self._asr_engine.transcribe(
-                    pipeline,
+                enhanced_result = _run_measured(metrics, "asr", self._asr_engine.transcribe,
+                    stage_pipeline,
                     ctx,
                     vad_onset=config.vad_onset,
                     chunk_size=config.chunk_size,
                     beam_size=config.asr_beam_size,
                 )
+                _collect_model_load_ms(metrics, stage_pipeline)
                 enhanced_text = " ".join(str(item.get("text", "")).strip() for item in enhanced_result.get("segments", []) if item.get("text")).strip()
                 enhanced_segments = enhanced_result.get("segments", []) or []
                 enhanced_confidence_values = [float(item.get("confidence")) for item in enhanced_segments if isinstance(item.get("confidence"), (int, float))]
@@ -348,6 +365,7 @@ class ProcessingService:
                     "asr_pass_count": 1 + int(enhancement_attempted),
                     "asr_selection_reason": "language_retry" if enhancement_attempted else "primary_quality",
                     "language_quality": language_report,
+                    "pipeline_metrics": metrics.to_dict(duration_seconds),
                 },
                 status="PARTIAL_READY",
                 error_code="ASR_LANGUAGE_MISMATCH" if language_report["mismatch"] else ("AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None),
@@ -355,12 +373,12 @@ class ProcessingService:
                 stage_outcomes=StageResults({"ASR": "SUCCEEDED", "ALIGNMENT": "PENDING", "DIARIZATION": "PENDING"}),
                 quality={**selected_report.to_dict(), "asr_audio_hash": source_audio_hash, "audio_signal_metrics": ctx.audio_signal_metrics, "language_quality": language_report, "asr_pass_count": 1 + int(enhancement_attempted)},
             )
-            emit_asr_ready(asr_draft)
+            emit_asr_ready(attach_metrics(asr_draft))
             if asr_only:
                 # V1 is the terminal result of TRANSCRIBE_ASR. Enrichment is
                 # a separate job and must not be able to turn a persisted V1
                 # into a failed ASR result after the user already has text.
-                return asr_draft
+                return attach_metrics(asr_draft)
             ctx.asr_result = result
             asr_recovery_result = copy.deepcopy(result)
             # ASR reasons drive fallback selection, but alignment can legitimately
@@ -372,7 +390,8 @@ class ProcessingService:
             report("ALIGNING", 55)
             if config.enable_alignment:
                 try:
-                    ctx.aligned_result = self._alignment_engine.align(pipeline, ctx, result)
+                    ctx.aligned_result = _run_measured(metrics, "alignment", self._alignment_engine.align, stage_pipeline, ctx, result)
+                    _collect_model_load_ms(metrics, stage_pipeline)
                     aligned = ctx.aligned_result or result
                     aligned_report = build_transcript_quality_report(aligned, duration_seconds, thresholds)
                     if quality_gate(aligned_report, thresholds)["valid"]:
@@ -395,24 +414,26 @@ class ProcessingService:
             if config.enable_diarization:
                 try:
                     candidates: list[dict[str, Any]] = []
-                    primary_diar_result = self._diarization_engine.diarize(
-                        pipeline,
+                    primary_diar_result = _run_measured(metrics, "diarization", self._diarization_engine.diarize,
+                        stage_pipeline,
                         ctx,
                         copy.deepcopy(result),
                         "diar",
                     )
+                    _collect_model_load_ms(metrics, stage_pipeline)
                     primary_score = score_diarization_result(primary_diar_result.get("segments", []), ctx.diar_segments or [], "diar", config.min_speakers, config.max_speakers)
                     candidates.append({"profile": "diar", "result": primary_diar_result, "score": primary_score, "is_primary": True})
                     retry_score = float(os.getenv("DIARIZATION_QUALITY_RETRY_SCORE", "60"))
                     profiles = diarization_profiles_for_processing_profile(request.profile, "diar")
                     if primary_score.score < retry_score and len(profiles) > 1:
                         alternate_profile = profiles[1]
-                        alternate_result = self._diarization_engine.diarize(
-                            pipeline,
+                        alternate_result = _run_measured(metrics, "diarization", self._diarization_engine.diarize,
+                            stage_pipeline,
                             ctx,
                             copy.deepcopy(result),
                             alternate_profile,
                         )
+                        _collect_model_load_ms(metrics, stage_pipeline)
                         alternate_score = score_diarization_result(alternate_result.get("segments", []), ctx.diar_segments or [], alternate_profile, config.min_speakers, config.max_speakers)
                         candidates.append({"profile": alternate_profile, "result": alternate_result, "score": alternate_score, "is_primary": False})
                     chosen = choose_best_diarization_candidate(candidates)
@@ -443,7 +464,7 @@ class ProcessingService:
                     segment["speaker"] = "UNKNOWN"
 
             report("QUALITY_CHECK", 90)
-            result = self._postprocessing_engine.postprocess(pipeline, ctx, result)
+            result = _run_measured(metrics, "postprocess", self._postprocessing_engine.postprocess, stage_pipeline, ctx, result)
             final_report = build_transcript_quality_report(result, duration_seconds, thresholds)
             final_gate = quality_gate(final_report, thresholds)
             if not final_gate["valid"]:
@@ -474,6 +495,7 @@ class ProcessingService:
                 "stage_outcomes": stage_outcomes.as_legacy_dict(),
                 "diarization": diarization_quality,
                 "asr_preprocessing": ctx.asr_preprocessing,
+                "pipeline_metrics": metrics.to_dict(duration_seconds),
             }
             metadata = {
                 "model": config.asr_model,
@@ -491,9 +513,10 @@ class ProcessingService:
                 "fallback_effective": fallback_attempted,
                 **ctx.asr_preprocessing,
                 "quality_thresholds": thresholds.to_dict(),
+                "pipeline_metrics": metrics.to_dict(duration_seconds),
             }
             report("PERSISTING", 100)
-            return ProcessingResult(
+            return attach_metrics(ProcessingResult(
                 job_id=request.job_id,
                 language=result.get("language"),
                 text=text.strip(),
@@ -504,21 +527,15 @@ class ProcessingService:
                 warnings=list(dict.fromkeys(warnings)),
                 stage_outcomes=stage_outcomes,
                 quality=quality,
-            )
+            ))
         except Exception as exc:
             if _is_cuda_oom(exc):
                 # Release only on a real OOM. Successful jobs retain the
                 # resident model cache for the next ASR request.
-                with self._lock:
-                    self._clear_pipeline_locked(clear_cuda=True)
+                self._clear_pipeline_locked(clear_cuda=True)
             raise
         finally:
-            with self._lock:
-                # Idle eviction starts after the job actually finishes, not
-                # when model acquisition began. Long ASR jobs must not be
-                # immediately treated as idle on the next worker tick.
-                self._last_used_monotonic = time.monotonic()
-            pipeline._cleanup_ctx(ctx)
+            self._runtime.cleanup_context(pipeline, ctx)
 
     def _process_enrichment(
         self,
@@ -528,27 +545,40 @@ class ProcessingService:
         config: Any,
         duration_seconds: float | None,
         report: Callable[[str, int], None],
+        metrics: PipelineMetrics | None = None,
     ) -> ProcessingResult:
         """Run alignment/diarization over persisted ASR V1 without ASR."""
+        metrics = metrics or PipelineMetrics()
         source = copy.deepcopy(request.input_transcript or {})
+        source_quality_metadata = source.get("quality_metadata") or {}
+        # Enrichment is a separate job, but its V2 diagnostics should retain
+        # the Media Worker preparation time measured for the canonical V1
+        # asset.  Queue/model/stage timings remain specific to this job.
+        source_pipeline_metrics = source_quality_metadata.get("pipeline_metrics") or {}
+        if metrics.media_prepare_ms is None and source_pipeline_metrics.get("media_prepare_ms") is not None:
+            try:
+                metrics.media_prepare_ms = max(0.0, float(source_pipeline_metrics["media_prepare_ms"]))
+                metrics.values["media_prepare_ms"] = metrics.media_prepare_ms
+            except (TypeError, ValueError):
+                pass
         result: dict[str, Any] = {
             "language": source.get("language") or config.language,
             "segments": source.get("segments", []),
             "word_segments": source.get("word_segments", []),
         }
-        expected_key = str((source.get("quality_metadata") or {}).get("asr_storage_key") or "").strip()
+        expected_key = str(source_quality_metadata.get("asr_storage_key") or "").strip()
         actual_key = str(request.source_storage_key or "").strip()
-        expected_hash = str((source.get("quality_metadata") or {}).get("asr_audio_hash") or "").strip().lower()
+        expected_hash = str(source_quality_metadata.get("asr_audio_hash") or "").strip().lower()
         # The worker-provided hash is an optimization/transport hint, not
         # proof of the bytes currently mounted at media_path. Re-hash the
         # canonical asset here so replacing a file behind the same storage key
         # cannot produce a V2 from different audio.
         actual_hash = _sha256_file(request.media_path).strip().lower()
         supplied_hash = str(request.source_audio_hash or "").strip().lower()
-        expected_rate = (source.get("quality_metadata") or {}).get("asr_sample_rate")
-        expected_channels = (source.get("quality_metadata") or {}).get("asr_channels")
-        expected_duration = (source.get("quality_metadata") or {}).get("asr_duration_seconds")
-        expected_preprocessing = (source.get("quality_metadata") or {}).get("asr_preprocessing")
+        expected_rate = source_quality_metadata.get("asr_sample_rate")
+        expected_channels = source_quality_metadata.get("asr_channels")
+        expected_duration = source_quality_metadata.get("asr_duration_seconds")
+        expected_preprocessing = source_quality_metadata.get("asr_preprocessing")
         # The enrichment job must use the exact canonical asset that produced
         # V1. Treat a missing key as a mismatch too; silently accepting it
         # would allow alignment/diarization to run against a different media
@@ -567,7 +597,10 @@ class ProcessingService:
             raise ValueError("ASR_INPUT_MISMATCH")
         # Canonical provenance compatibility marker: the legacy call was
         # prepare_asr_input(request.media_path); the profile is now explicit.
-        ctx.asr_audio_path, actual_preprocessing = self._preprocessing_engine.prepare_asr_input(
+        ctx.asr_audio_path, actual_preprocessing = _run_measured(
+            metrics,
+            "normalize",
+            self._preprocessing_engine.prepare_asr_input,
             pipeline,
             request.media_path,
             request.acoustic_profile,
@@ -580,10 +613,10 @@ class ProcessingService:
         ctx.asr_preprocessing = actual_preprocessing
         ctx.asr_result = result
         if config.enable_diarization:
-            diar_path = self._preprocessing_engine.prepare_diarization_input(pipeline, request.media_path)
+            diar_path = _run_measured(metrics, "normalize", self._preprocessing_engine.prepare_diarization_input, pipeline, request.media_path)
             ctx.diar_audio_path = ctx.register_temp(diar_path)
         stage_outcomes = StageResults({"ASR": "REUSED_V1"})
-        enrichment_metadata = source.get("quality_metadata") or {}
+        enrichment_metadata = source_quality_metadata
         warnings: list[str] = []
         if (enrichment_metadata.get("audio_signal_metrics") or {}).get("signal_state") == "WEAK":
             warnings.append("AUDIO_SIGNAL_WEAK")
@@ -610,6 +643,7 @@ class ProcessingService:
                 request.job_id,
                 "ALIGNMENT",
                 checkpoint_base,
+                metrics,
             )
             if alignment_checkpoint is not None:
                 result = copy.deepcopy(alignment_checkpoint.result)
@@ -626,7 +660,8 @@ class ProcessingService:
                 )
             else:
                 try:
-                    aligned = self._alignment_engine.align(pipeline, ctx, result)
+                    aligned = _run_measured(metrics, "alignment", self._alignment_engine.align, pipeline, ctx, result)
+                    _collect_model_load_ms(metrics, pipeline)
                     result = aligned or result
                     ctx.aligned_result = result
                     checkpoint = _save_checkpoint_safely(
@@ -665,6 +700,7 @@ class ProcessingService:
                 request.job_id,
                 "DIARIZATION",
                 diarization_fingerprint,
+                metrics,
             )
             if diarization_checkpoint is not None:
                 result = copy.deepcopy(diarization_checkpoint.result)
@@ -679,12 +715,13 @@ class ProcessingService:
                 )
             else:
                 try:
-                    result = self._diarization_engine.diarize(
+                    result = _run_measured(metrics, "diarization", self._diarization_engine.diarize,
                         pipeline,
                         ctx,
                         copy.deepcopy(result),
                         "diar",
                     )
+                    _collect_model_load_ms(metrics, pipeline)
                     checkpoint = _save_checkpoint_safely(
                         self._checkpoint_store,
                         request.job_id,
@@ -711,7 +748,7 @@ class ProcessingService:
         for segment in result.get("segments", []):
             if not segment.get("speaker"):
                 segment["speaker"] = "UNKNOWN"
-        result = self._postprocessing_engine.postprocess(pipeline, ctx, result)
+        result = _run_measured(metrics, "postprocess", self._postprocessing_engine.postprocess, pipeline, ctx, result)
         final_report = build_transcript_quality_report(result, duration_seconds, TranscriptQualityThresholds.from_env())
         # Preserve the canonical ASR provenance on V2 so diagnostics can prove
         # that enrichment reused the same preprocessing and storage asset.
@@ -747,11 +784,12 @@ class ProcessingService:
                 "audio_signal_metrics": enrichment_metadata.get("audio_signal_metrics"),
                 "acoustic_profile": enrichment_metadata.get("acoustic_profile", request.acoustic_profile),
                 "language_quality": enrichment_metadata.get("language_quality"),
+                "pipeline_metrics": metrics.to_dict(duration_seconds),
             },
             status="PARTIAL_READY" if warnings else "READY",
             warnings=list(dict.fromkeys(warnings)),
             stage_outcomes=stage_outcomes,
-            quality=final_report_dict,
+            quality={**final_report_dict, "pipeline_metrics": metrics.to_dict(duration_seconds)},
         )
 
 

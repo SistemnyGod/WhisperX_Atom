@@ -17,13 +17,30 @@ Assert-File "apps\server\WhisperX.Atom.Api\WhisperX.Atom.Api.csproj"
 
 $migrationFiles = @(Get-ChildItem "apps\server\WhisperX.Atom.Api\Migrations" -Filter "*.sql" -File | Sort-Object Name)
 if ($migrationFiles.Count -eq 0) { throw "No migrations found" }
-$migrationVersions = @($migrationFiles | ForEach-Object {
-    if ($_.BaseName -notmatch '^(\d{3})_') { throw "Migration has no numeric prefix: $($_.Name)" }
-    [int]$Matches[1]
+$migrationEntries = @($migrationFiles | ForEach-Object {
+    if ($_.BaseName -notmatch '^(\d{3})_([a-z0-9][a-z0-9_-]*)$') { throw "Migration has invalid immutable id: $($_.Name)" }
+    [pscustomobject]@{
+        Id = $_.BaseName
+        Prefix = [int]$Matches[1]
+        Path = $_.FullName
+    }
 })
-if (($migrationVersions | Select-Object -Unique).Count -ne $migrationVersions.Count) { throw "Duplicate migration version detected" }
-$sortedMigrationVersions = @($migrationVersions | Sort-Object)
-if (($migrationVersions -join ",") -ne ($sortedMigrationVersions -join ",")) { throw "Migration files are not lexically ordered" }
+
+# The complete filename stem is the migration identity.  A numeric prefix is
+# only an ordering hint, not a primary key: the repository already contains
+# two additive migrations under 025 and 026.  Rejecting duplicate prefixes
+# here made the release doctor fail even though the runtime's
+# schema_migrations/version + checksum history is safe and unambiguous.
+if (($migrationEntries.Id | Select-Object -Unique).Count -ne $migrationEntries.Count) {
+    throw "Duplicate migration identity detected"
+}
+$orderedEntries = @($migrationEntries | Sort-Object Prefix, Id)
+if (($migrationEntries.Id -join ",") -ne ($orderedEntries.Id -join ",")) {
+    throw "Migration files are not lexically ordered by numeric prefix and immutable id"
+}
+foreach ($entry in $migrationEntries) {
+    if ((Get-Item -LiteralPath $entry.Path).Length -eq 0) { throw "Migration is empty: $($entry.Id)" }
+}
 
 $dockerfile = Get-Content "apps\server\WhisperX.Atom.Api\Dockerfile" -Raw
 if ($dockerfile -notmatch "HEALTHCHECK") { throw "API Dockerfile has no HEALTHCHECK" }
@@ -36,4 +53,4 @@ if (-not $SkipDocker) {
     if ($LASTEXITCODE -ne 0) { throw "Compose config failed" }
 }
 
-Write-Host "Backend deployment verification passed. Migration count: $($migrationFiles.Count)" -ForegroundColor Green
+Write-Host "Backend deployment verification passed. Migration count: $($migrationFiles.Count); immutable ids and checksums are enforced by the runtime." -ForegroundColor Green

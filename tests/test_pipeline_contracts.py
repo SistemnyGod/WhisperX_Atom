@@ -18,6 +18,7 @@ from whisperx_atom.stage_result import StageResult, StageResultStatus, StageResu
 from whisperx_atom.contracts import ProcessingRequest, ProcessingResult
 from whisperx_atom.checkpoint_store import LocalPipelineCheckpointStore
 from whisperx_atom.processing import ProcessingService
+from whisperx_atom.runtime import LegacyPipelineStageAdapter, WhisperXRuntime
 from whisperx_atom.storage import LocalMediaStorage
 from whisperx_atom.domain import JobId, MeetingId, ProcessingJobRef, require_meeting_id
 from whisperx_atom.pipeline_contract import (
@@ -101,6 +102,57 @@ def test_core_pipeline_keeps_legacy_service_in_one_adapter():
     source = open("whisperx_atom/core_pipeline.py", encoding="utf-8").read()
     assert "ProcessingService" in source
     assert "class WhisperXCorePipeline" in source
+
+
+def test_runtime_stage_adapter_exposes_only_explicit_stage_operations():
+    class LegacyPipeline:
+        class Cache:
+            pass
+
+        def __init__(self):
+            self.cache = self.Cache()
+
+        def prepare_asr_input(self, path, profile):
+            return path, {"profile": profile}
+
+        def _preprocess_audio(self, path, asr):
+            assert asr is False
+            return path
+
+        def _preprocess_audio_profile(self, path, profile):
+            return path
+
+        def run_asr_pass(self, context, vad_onset, chunk_size, beam_size):
+            return {"segments": [], "options": (context, vad_onset, chunk_size, beam_size)}
+
+        def _align_result(self, context, result):
+            return {**result, "aligned": True}
+
+        def _apply_diarization(self, context, result, profile):
+            return {**result, "profile": profile}
+
+        def _apply_glossary(self, result):
+            return {**result, "postprocessed": True}
+
+    legacy = LegacyPipeline()
+    adapter = WhisperXRuntime.get_stage_adapter(legacy)
+    assert isinstance(adapter, LegacyPipelineStageAdapter)
+    assert WhisperXRuntime.get_stage_adapter(adapter) is adapter
+    assert adapter.prepare_asr_input(Path("a.wav"), "AUTO")[1] == {"profile": "AUTO"}
+    assert adapter.prepare_diarization_input(Path("a.wav")) == Path("a.wav")
+    assert adapter.prepare_profile(Path("a.wav"), "asr_far_field") == Path("a.wav")
+    assert adapter.transcribe("ctx", vad_onset=0.4, chunk_size=20, beam_size=5)["options"] == ("ctx", 0.4, 20, 5)
+    assert adapter.align("ctx", {})["aligned"] is True
+    assert adapter.diarize("ctx", {}, "diar_retry")["profile"] == "diar_retry"
+    assert adapter.postprocess({})["postprocessed"] is True
+
+
+def test_processing_service_keeps_legacy_imports_inside_runtime_boundary():
+    processing = Path("whisperx_atom/processing.py").read_text(encoding="utf-8")
+    runtime = Path("whisperx_atom/runtime.py").read_text(encoding="utf-8")
+    assert "from app.transcription_pipeline import" not in processing
+    assert "get_stage_adapter" in processing
+    assert "from app.transcription_pipeline import" in runtime
 
 
 def test_processing_service_accepts_an_injected_asr_engine():
@@ -270,6 +322,7 @@ def test_enrichment_reuses_alignment_and_diarization_checkpoints(workspace_tmp_p
             "asr_channels": 1,
             "asr_duration_seconds": 1.0,
             "asr_preprocessing": preprocessing,
+            "pipeline_metrics": {"media_prepare_ms": 345},
         },
     }
 
@@ -345,6 +398,7 @@ def test_enrichment_reuses_alignment_and_diarization_checkpoints(workspace_tmp_p
     assert first_alignment.calls == 1
     assert first_diarization.calls == 1
     assert first_result.segments[0]["speaker"] == "SPEAKER_00"
+    assert first_result.metadata["pipeline_metrics"]["media_prepare_ms"] == 345.0
 
     second_alignment, second_diarization = Alignment(), Diarization()
     second = ProcessingService(

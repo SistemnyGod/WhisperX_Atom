@@ -166,6 +166,13 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "derived_channels": 1,
         "warnings": [],
         "recording_tracks": recording_tracks,
+        # Keep the independent assembled files discoverable to later
+        # normalization/echo/remote-speaker stages. Paths come from the
+        # assembly manifest and are relative to the job storage root; no host
+        # filesystem paths are exposed in quality metadata.
+        "independent_tracks": assembly_result.get("track_files", []),
+        "asr_input": assembly_result.get("asr_input"),
+        "tracks_are_independent": bool(assembly_result.get("tracks_are_independent", False)),
         "assembly": assembly_result,
         "audio_signal_metrics": signal_metadata,
         **_measure_pcm_quality(asr),

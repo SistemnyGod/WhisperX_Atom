@@ -18,10 +18,10 @@
 
             <Grid x:Name="HomeContentGrid" ColumnDefinitions="*,280" ColumnSpacing="16">
                 <StackPanel x:Name="HomeMainColumn" Spacing="{StaticResource PageGap}">
-                    <Border x:Name="HeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" Padding="20">
+                    <Border x:Name="HeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderStrongBrush}" Padding="24,22">
                         <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="16">
                             <StackPanel Spacing="6">
-                                <TextBlock Text="Новая запись" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+                                <TextBlock Text="Готов к новой записи" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
                                 <StackPanel x:Name="HeroIdentityRow" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                                     <Border x:Name="RecordingBadge" Style="{StaticResource StatusBadgeStyle}" Padding="8,4">
                                         <StackPanel Orientation="Horizontal" Spacing="6">
@@ -57,6 +57,27 @@
                                     <TextBlock Grid.Column="2" Text="{Binding StorageText}" Foreground="{StaticResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding StorageText}" />
                                 </Grid>
                             </Border>
+                        </Grid>
+                    </Border>
+
+                    <Border x:Name="HomeSystemStrip" Style="{StaticResource InlineNoticeStyle}" Padding="12,10">
+                        <Grid ColumnDefinitions="*,*,*,Auto" ColumnSpacing="16">
+                            <StackPanel Orientation="Horizontal" Spacing="7">
+                                <Ellipse Width="8" Height="8" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" />
+                                <StackPanel Spacing="1"><TextBlock Text="Recorder" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="Готов к записи" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7">
+                                <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                <StackPanel Spacing="1"><TextBlock Text="Сервер" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="Доставка отдельно" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="7">
+                                <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+                                <StackPanel Spacing="1"><TextBlock Text="WhisperX" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="Обработка после записи" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                            </StackPanel>
+                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                <TextBlock Text="В очереди:" Style="{StaticResource CaptionStyle}" />
+                                <TextBlock Text="{Binding PendingUploadsText}" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" ToolTipService.ToolTip="Количество сессий, ожидающих доставки" />
+                            </StackPanel>
                         </Grid>
                     </Border>
 
@@ -121,9 +142,9 @@
                     <Border x:Name="QuickActionsCard" Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="9">
                             <TextBlock Text="Быстрые действия" Style="{StaticResource SectionTitleStyle}" />
-                            <Button Content="Новая запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" />
-                            <Button x:Name="QuickImportButton" Content="Импортировать аудио" Style="{StaticResource CardButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудиофайл" ToolTipService.ToolTip="Загрузить аудиофайл в API для обработки" />
-                            <TextBlock Text="Запись сначала сохраняется локально. Доставка выполняется отдельно." Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                            <Button x:Name="QuickImportButton" Content="Импортировать файл" Style="{StaticResource CardButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудио или видеофайл" ToolTipService.ToolTip="Загрузить аудио или видео для обработки" />
+                            <Button Content="Открыть совещания" Style="{StaticResource GhostButtonStyle}" Click="OpenMeetingsButton_Click" />
+                            <TextBlock Text="Для новой записи используйте основной пульт слева." Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Border>
                     <Border x:Name="AgentRailCard" Style="{StaticResource CardStyle}">

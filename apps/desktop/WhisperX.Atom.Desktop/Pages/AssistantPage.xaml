@@ -55,13 +55,7 @@
                     <ListView x:Name="MessagesList" Grid.Row="1" ItemsSource="{Binding Messages}" SelectionMode="Single" SelectionChanged="MessagesList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="10" Margin="0,0,0,8" Background="{StaticResource SurfaceBlueBrush}" CornerRadius="8">
-                                    <StackPanel Spacing="4">
-                                        <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
-                                        <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding TimingsText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </Border>
+                                <controls:AssistantMessageBubble Message="{Binding}" />
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>

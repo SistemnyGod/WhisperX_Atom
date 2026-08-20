@@ -68,7 +68,5 @@ class RecordingAssemblyTests(unittest.TestCase):
             with patch.object(recording_assembly, "_storage_path", return_value=path):
                 with self.assertRaisesRegex(ValueError, "sequence_gap"):
                     recording_assembly._concat_track(track, Path(directory) / "out.flac")
-
-
 if __name__ == "__main__":
     unittest.main()

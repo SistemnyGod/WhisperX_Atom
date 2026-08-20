@@ -18,6 +18,7 @@ public sealed partial class RecordingPage : Page
     private bool _updatingSelections;
     private PageLayoutMode? _lastLayoutMode;
     private bool? _lastActionCompact;
+    private RecordingState? _lastRecordedState;
 
     public RecordingPage()
     {
@@ -50,10 +51,14 @@ public sealed partial class RecordingPage : Page
         if (e.PropertyName is nameof(RecordingViewModel.RecordingProfile)) SyncRecordingProfile();
         if (e.PropertyName is nameof(RecordingViewModel.ErrorMessage) or nameof(RecordingViewModel.HasError)
             or nameof(RecordingViewModel.WarningMessage) or nameof(RecordingViewModel.HasWarning)) UpdateError();
+        if (e.PropertyName is nameof(RecordingViewModel.MicrophoneSignalLabel)
+            or nameof(RecordingViewModel.MicrophoneSignalState)
+            or nameof(RecordingViewModel.MicrophoneTelemetryStale)) UpdateSignalVisual();
         if (e.PropertyName is nameof(RecordingViewModel.LocalFinalizeState)
             or nameof(RecordingViewModel.LocalFinalizeStatusLabel)) UpdateFinalizeOutcomeVisual();
         if (e.PropertyName is nameof(RecordingViewModel.State))
         {
+            RecordSessionState(ViewModel?.State);
             UpdateStateIndicator();
             UpdateActionButtons();
             UpdateStateLayout();
@@ -90,6 +95,7 @@ public sealed partial class RecordingPage : Page
         UpdateActionButtons();
         UpdateStateLayout();
         UpdateFinalizeOutcomeVisual();
+        UpdateSignalVisual();
     }
 
     private async void CheckDevicesButton_Click(object sender, RoutedEventArgs e)
@@ -131,6 +137,8 @@ public sealed partial class RecordingPage : Page
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
+        ViewModel.SessionEvents.Clear();
+        _lastRecordedState = null;
         await ViewModel.StartRecordingAsync();
         UpdateError();
     }
@@ -143,9 +151,9 @@ public sealed partial class RecordingPage : Page
         UpdateError();
     }
 
-    private async void MarkerButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync(); UpdateError(); }
-    private async void DecisionButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync("DECISION"); UpdateError(); }
-    private async void TaskButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.AddMarkerAsync("ACTION_ITEM"); UpdateError(); }
+    private async void MarkerButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync()) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлена метка"); UpdateError(); }
+    private async void DecisionButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync("DECISION")) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлено решение"); UpdateError(); }
+    private async void TaskButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync("ACTION_ITEM")) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлено поручение"); UpdateError(); }
     private async void StopButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.StopRecordingAsync(); UpdateError(); }
     private async void RetryUploadButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.RetryUploadAsync(); UpdateError(); }
 
@@ -212,8 +220,30 @@ public sealed partial class RecordingPage : Page
         _lastLayoutMode = mode;
         _lastActionCompact = actionCompact;
         UpdateIdleSetupLayout(e.NewSize.Width < 900);
+        UpdateActiveRecordingLayout(mode == PageLayoutMode.Compact);
         RecordingActionsPanel.Orientation = actionCompact ? Orientation.Vertical : Orientation.Horizontal;
         UpdateActionButtons();
+    }
+
+    private void UpdateActiveRecordingLayout(bool compact)
+    {
+        ActiveRecordingGrid.ColumnDefinitions.Clear();
+        ActiveRecordingGrid.RowDefinitions.Clear();
+        if (compact)
+        {
+            ActiveRecordingGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            ActiveRecordingGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            ActiveRecordingGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(ActiveStatusRail, 0);
+            Grid.SetRow(ActiveStatusRail, 1);
+            return;
+        }
+
+        ActiveRecordingGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.55, GridUnitType.Star) });
+        ActiveRecordingGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        ActiveRecordingGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetColumn(ActiveStatusRail, 1);
+        Grid.SetRow(ActiveStatusRail, 0);
     }
 
     private void UpdateIdleSetupLayout(bool compact)
@@ -285,6 +315,47 @@ public sealed partial class RecordingPage : Page
         };
         if (Application.Current.Resources[surfaceKey] is Brush surfaceBrush) RecordingStateBadge.Background = surfaceBrush;
         if (Application.Current.Resources[borderKey] is Brush borderBrush) RecordingStateBadge.BorderBrush = borderBrush;
+    }
+
+    private void UpdateSignalVisual()
+    {
+        if (ViewModel is null || SignalStateBadge is null || SignalStateBadgeText is null) return;
+        var state = ViewModel.MicrophoneSignalState ?? string.Empty;
+        var stale = ViewModel.MicrophoneTelemetryStale;
+        var (brushKey, surfaceKey, label) = stale
+            ? ("MutedTextBrush", "SurfaceBrush", "Нет сигнала")
+            : state.Contains("Перегруз", StringComparison.OrdinalIgnoreCase)
+                ? ("DangerBrush", "DangerSurfaceBrush", "Перегрузка")
+                : state.Contains("Слаб", StringComparison.OrdinalIgnoreCase) || state.Contains("Тиш", StringComparison.OrdinalIgnoreCase)
+                    ? ("WarningBrush", "SurfaceOrangeBrush", "Слабый сигнал")
+                    : state.Contains("Голос", StringComparison.OrdinalIgnoreCase) || state.Contains("Норм", StringComparison.OrdinalIgnoreCase)
+                        ? ("SuccessBrush", "SurfaceGreenBrush", "Сигнал хороший")
+                        : ("AccentBrush", "InfoSurfaceBrush", "Проверка сигнала");
+        SignalStateBadgeText.Text = label;
+        if (Application.Current.Resources[brushKey] is Brush brush)
+        {
+            SignalStateBadgeText.Foreground = brush;
+            SignalStateBadge.BorderBrush = brush;
+        }
+        if (Application.Current.Resources[surfaceKey] is Brush surface)
+            SignalStateBadge.Background = surface;
+        ToolTipService.SetToolTip(SignalStateBadge, ViewModel.MicrophoneSignalLabel);
+    }
+
+    private void RecordSessionState(RecordingState? state)
+    {
+        if (ViewModel is null || state is null || state == _lastRecordedState) return;
+        _lastRecordedState = state;
+        var label = state.Value switch
+        {
+            RecordingState.Starting => "Подготовка записи",
+            RecordingState.Recording => "Запись начата",
+            RecordingState.Paused => "Запись приостановлена",
+            RecordingState.Finalizing => "Захват остановлен · сохранение продолжается",
+            RecordingState.Error => "Ошибка записи",
+            _ => null
+        };
+        if (!string.IsNullOrWhiteSpace(label)) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  {label}");
     }
 
     private void UpdateActionButtons()

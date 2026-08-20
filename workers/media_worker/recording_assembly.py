@@ -221,7 +221,15 @@ def _load_tracks(session_id: str) -> list[Track]:
 
 def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict:
     if not track.chunks:
-        return {"track_id": track.track_id, "expected_duration_ms": 0, "actual_duration_ms": 0, "start_offset_ms": 0, "drift_ms": 0}
+        return {
+            "track_id": track.track_id,
+            "expected_duration_ms": 0,
+            "actual_duration_ms": 0,
+            "start_offset_ms": 0,
+            "drift_ms": 0,
+            "sample_rate": track.sample_rate,
+            "channels": 1,
+        }
     first = track.chunks[0].start_sample
     end = track.chunks[-1].start_sample + track.chunks[-1].sample_count
     rate = max(1, track.sample_rate)
@@ -233,7 +241,68 @@ def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict
         "actual_duration_ms": actual,
         "start_offset_ms": round((first - base_start_sample) * 1000 / rate),
         "drift_ms": actual - expected,
+        "sample_rate": track.sample_rate,
+        "channels": 1,
     }
+
+
+def _track_role(track_type: str) -> str:
+    normalized = str(track_type or "").lower()
+    if "microphone" in normalized or "room" in normalized:
+        return "room_microphone"
+    if "system" in normalized or "loopback" in normalized or "render" in normalized:
+        return "system_audio"
+    return "auxiliary"
+
+
+def _relative_output_name(path: Path, output_dir: Path) -> str:
+    """Return a portable storage reference, never an absolute host path."""
+    return path.relative_to(output_dir).as_posix()
+
+
+def _media_storage_key(path: Path, output_dir: Path) -> str:
+    """Return a logical media-root key without leaking a host filesystem path."""
+    media_root = Path(os.getenv("MEDIA_ROOT", "/data"))
+    try:
+        return path.relative_to(media_root).as_posix()
+    except ValueError:
+        # Unit/fake-storage paths may live outside MEDIA_ROOT. Keep a stable
+        # job-local reference in that case; production uses the branch above.
+        return f"{output_dir.name}/{path.name}"
+
+
+def _build_track_files(
+    tracks: list[Track],
+    assembled: list[Path],
+    timeline: list[dict],
+    assembly_methods: list[dict],
+    output_dir: Path,
+    selected_path: Path | None,
+) -> list[dict]:
+    files: list[dict] = []
+    for track, path, item, method in zip(tracks, assembled, timeline, assembly_methods):
+        files.append(
+            {
+                "track_id": track.track_id,
+                "track_type": track.track_type,
+                "track_role": _track_role(track.track_type),
+                "device_id": track.device_id,
+                "device_name": track.device_name,
+                "selection_mode": track.selection_mode,
+                "recording_profile": track.recording_profile,
+                "relative_path": _relative_output_name(path, output_dir),
+                "storage_key": _media_storage_key(path, output_dir),
+                "sample_rate": int(track.sample_rate),
+                "channels": 1,
+                "duration_ms": int(item.get("actual_duration_ms", 0)),
+                "start_offset_ms": int(item.get("start_offset_ms", 0)),
+                "drift_ms": int(item.get("drift_ms", 0)),
+                "assembly_method": method.get("method"),
+                "selected_for_asr": selected_path == path,
+                "retained_for_diagnostics": True,
+            }
+        )
+    return files
 
 
 def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
@@ -277,6 +346,9 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
     elif len(assembled) == 1:
         source = assembled[0]
     assembly_result = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "tracks_are_independent": True,
         "recording_profile": profile,
         "track_count": len(tracks),
         "selected_asr_source": selected_asr_source,
@@ -288,6 +360,12 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
             {"track_id": track.track_id, **method}
             for track, method in zip(tracks, assembly_methods)
         ],
+        "track_files": _build_track_files(tracks, assembled, timeline, assembly_methods, output_dir, source),
+        "asr_input": None,
+        "manifest": {
+            "relative_path": "assembly-result.json",
+            "storage_key": _media_storage_key(output_dir / "assembly-result.json", output_dir),
+        },
     }
     if warnings and not high_drift_online:
         (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -311,5 +389,16 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
             temporary.replace(source)
         finally:
             temporary.unlink(missing_ok=True)
+    assembly_result["asr_input"] = {
+        "relative_path": _relative_output_name(source, output_dir),
+        "storage_key": _media_storage_key(source, output_dir),
+        "source_kind": "derived_mix" if source.name == "mixed.flac" else "independent_track",
+        "selected_asr_source": selected_asr_source,
+    }
+    # The mix (when required) is produced only after every independent track
+    # has been assembled and validated. Never mark source tracks as replaced.
+    if source.name == "mixed.flac":
+        for item in assembly_result["track_files"]:
+            item["selected_for_asr"] = False
     (output_dir / "assembly-result.json").write_text(json.dumps(assembly_result, ensure_ascii=False, indent=2), encoding="utf-8")
     return source

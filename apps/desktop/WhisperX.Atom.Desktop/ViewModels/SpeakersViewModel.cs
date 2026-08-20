@@ -18,6 +18,14 @@ public sealed class SpeakerRegistryItem
     public DesktopSpeaker Speaker { get; }
     public string DisplayName => string.IsNullOrWhiteSpace(Speaker.DisplayName) ? "Без имени" : Speaker.DisplayName;
     public string StableKey => string.IsNullOrWhiteSpace(Speaker.StableKey) ? "—" : Speaker.StableKey;
+    public string MatchStatus => Speaker.ProfileMatchStatus switch
+    {
+        "MATCHED" => "Профиль подтверждён",
+        "SUGGESTION" when Speaker.ProfileConfidence is double confidence => $"Возможно: {Speaker.ProfileSuggestionName ?? "профиль"} · {confidence:P0}",
+        _ => "Имя не подтверждено"
+    };
+    public string? MatchReason => Speaker.ProfileMatchReason;
+    public bool HasSuggestion => string.Equals(Speaker.ProfileMatchStatus, "SUGGESTION", StringComparison.OrdinalIgnoreCase);
     public string MeetingTitle => string.IsNullOrWhiteSpace(Meeting.Title) ? "Без названия" : Meeting.Title;
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
 }

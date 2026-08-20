@@ -22,5 +22,9 @@ class WhisperXPostprocessingEngine:
     """Compatibility adapter around the existing glossary implementation."""
 
     def postprocess(self, pipeline: Any, context: Any, result: dict[str, Any]) -> dict[str, Any]:
+        postprocess = getattr(pipeline, "postprocess", None)
+        if callable(postprocess):
+            processed = postprocess(result)
+            return processed if isinstance(processed, dict) else result
         processed = pipeline._apply_glossary(result)
         return processed if isinstance(processed, dict) else result

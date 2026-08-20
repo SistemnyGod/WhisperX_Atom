@@ -48,12 +48,46 @@ def test_assistant_retrieval_uses_russian_fts_and_fails_closed_without_evidence(
     assert "snapshot_kind" in snapshot and "RETRIEVED" in snapshot and "CITED" in snapshot
 
 
-def test_voice_questions_are_blocked_during_capture():
+def test_voice_questions_during_capture_use_live_meeting_context():
     broker = read("apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs")
-    voice = read("apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs")
-    assert "ASSISTANT_RECORDING_ACTIVE" in broker
-    assert "ASSISTANT_RECORDING_ACTIVE" in voice
-    assert "A question must never compete with active capture" in broker
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    worker = read("workers/summary_worker/assistant.py")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/033_live_meeting_memory.sql")
+    assert 'requestedMode = "LIVE_MEETING"' in broker
+    assert '"LIVE_MEETING_NOT_READY"' in broker
+    assert '"LIVE_ASR_SEGMENTS"' in broker
+    assert '"LIVE_MEETING"' in store and "HasLiveMeetingContextAsync" in store
+    assert "def live_context" in worker and '"LIVE_PROVISIONAL"' in worker
+    assert "live_meeting_segments" in migration and "assistant_live_query_evidence" in migration
+
+
+def test_live_mode_never_falls_back_to_canonical_transcript_or_history():
+    worker = read("workers/summary_worker/assistant.py")
+    assert "self.repository.live_context" in worker
+    assert "fresh provisional segments" in worker
+    assert "V1/V2" in worker
+
+
+def test_live_retrieval_fails_closed_without_a_domain_anchor():
+    worker = read("workers/summary_worker/assistant.py")
+    assert "_LIVE_RETRIEVAL_STOPWORDS" in worker
+    assert 'return "", {}, "LIVE_PROVISIONAL", "LIVE_MEETING_NOT_READY"' in worker
+    assert "most recent speech as a substitute for evidence" in worker
+
+
+def test_live_answer_is_explicitly_provisional_in_metadata_and_status():
+    worker = read("workers/summary_worker/assistant.py")
+    assert 'transcript_kind in {"ASR_DRAFT", "LIVE_PROVISIONAL"}' in worker
+    assert '"provisional": transcript_kind == "LIVE_PROVISIONAL"' in worker
+    assert '"canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL"' in worker
+
+
+def test_live_memory_has_bounded_background_cleanup_and_keeps_inflight_queries_briefly():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "DELETE FROM live_meeting_segments AS segment" in api
+    assert "assistant_live_query_evidence" in api
+    assert "query.created_at > now()-interval '15 minutes'" in api
+    assert "LIVE_MEETING is provisional memory" in api
 
 
 def test_gpu_lease_prioritizes_asr_over_assistant_over_summary():

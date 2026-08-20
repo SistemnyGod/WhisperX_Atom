@@ -4,8 +4,9 @@
 
 Until microphone and voice-to-answer acceptance are complete, the feature is
 marked **Experimental**. The Desktop Broker, Assistant API and grounded Qwen
-path are implemented, but unrestricted Vosk capture for arbitrary spoken
-questions is still a release blocker. See
+path are implemented. The runtime already creates a separate unrestricted Vosk
+session for the question after the wake word; only the installed microphone
+and voice-to-answer acceptance gate remains a release blocker. See
 [`docs/mifodiy-current-state.md`](../../docs/mifodiy-current-state.md).
 
 ## Local checks

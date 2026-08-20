@@ -291,6 +291,15 @@ public sealed class ClientUpdateService : IDisposable
             }
             var state = response.SessionStatus?.CaptureState
                 ?? (response.Health?.ActiveSessionId is not null ? "RECORDING" : response.State);
+            // A healthy pipe is not enough to authorize replacement of the
+            // recorder binaries.  Older hosts and partially initialized
+            // responses can carry a null/UNKNOWN state; treating that as idle
+            // would reopen the race this guard is meant to close.
+            if (!IsKnownRecorderState(state))
+            {
+                SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN");
+                return false;
+            }
             if (state is not null && (state.Equals("STARTING", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("RECORDING", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("PAUSED", StringComparison.OrdinalIgnoreCase)
@@ -309,6 +318,17 @@ public sealed class ClientUpdateService : IDisposable
             SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN");
             return false;
         }
+    }
+
+    private static bool IsKnownRecorderState(string? state)
+    {
+        if (string.IsNullOrWhiteSpace(state)) return false;
+        return state.Trim().ToUpperInvariant() switch
+        {
+            "IDLE" or "OFFLINE" or "ERROR" or "STOPPED" => true,
+            "STARTING" or "RECORDING" or "PAUSED" or "FINALIZING" or "RECOVERING" => true,
+            _ => false
+        };
     }
 
     private string GetStagingDirectory(string identity) => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhisperXAtom", "Updates", "staging", Sanitize(identity));

@@ -17,7 +17,7 @@ def test_phase_one_shell_prioritizes_recording_and_hides_secondary_routes():
 def test_recording_primary_actions_and_local_first_copy_are_visible():
     recording = (DESKTOP / "Pages" / "RecordingPage.xaml").read_text(encoding="utf-8")
     assert 'Content="Начать запись"' in recording
-    assert 'Content="Завершить"' in recording
+    assert 'Content="Остановить запись"' in recording
     assert 'Text="Локальное сохранение"' in recording
     assert 'Text="Системный звук"' in recording
 
@@ -27,7 +27,8 @@ def test_recording_controls_explain_local_first_flow_and_adapt_to_compact_widths
     codebehind = (DESKTOP / "Pages" / "RecordingPage.xaml.cs").read_text(encoding="utf-8")
     assert 'Text="Управление записью"' in recording
     assert 'ToolTipService.ToolTip="Запустить локальную запись"' in recording
-    assert 'Text="ПОЗЖЕ"' in recording
+    assert 'Text="ОТДЕЛЬНО"' in recording
+    assert 'Системный звук пишется отдельной дорожкой' in recording
     assert 'var actionCompact = e.NewSize.Width < 760' in codebehind
     assert 'RecordingActionsPanel.Orientation = actionCompact ? Orientation.Vertical : Orientation.Horizontal' in codebehind
     assert 'локальную запись' in codebehind
@@ -57,7 +58,7 @@ def test_sources_screen_surfaces_effective_endpoint_signal_and_recovery_actions(
     assert 'Content="Повторить проверку"' in page
     assert 'Text="{Binding EffectiveMicrophoneLabel}"' in page
     assert 'Text="{Binding MicrophoneSignal}"' in page
-    assert 'AUDIO_SYSTEM_AUDIO_DEFERRED' in view_model
+    assert 'AUDIO_SYSTEM_AUDIO_UNAVAILABLE' in view_model
     assert '"Сохранённое устройство недоступно"' in view_model
 
 

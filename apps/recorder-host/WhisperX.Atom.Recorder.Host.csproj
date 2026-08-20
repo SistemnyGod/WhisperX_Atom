@@ -36,7 +36,14 @@
     <Compile Include="..\recorder-agent\GlobalRawEncoderWorker.cs" Link="RecorderCore\GlobalRawEncoderWorker.cs" />
     <Compile Include="..\recorder-agent\RawEncoderRuntimeState.cs" Link="RecorderCore\RawEncoderRuntimeState.cs" />
     <Compile Include="..\recorder-agent\ExternalProcessRunner.cs" Link="RecorderCore\ExternalProcessRunner.cs" />
+    <!-- Use the same WASAPI subtype resolver for loopback and microphone
+         metadata. The Core project intentionally excludes this NAudio-bound
+         file, so Host compiles the shared resolver explicitly. -->
+    <Compile Include="..\recorder-agent\AudioSampleFormat.cs" Link="RecorderCore\AudioSampleFormat.cs" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
+    <!-- Render loopback is an independent P2 track. It is intentionally kept
+         in Host rather than mixed into AudioGraph microphone capture. -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 </Project>

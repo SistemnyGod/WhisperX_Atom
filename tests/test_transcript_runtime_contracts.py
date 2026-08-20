@@ -88,7 +88,11 @@ def test_host_worker_doctor_accepts_exact_python_path_when_commandline_is_unavai
 
 def test_processing_pipeline_queues_are_created_only_by_async_start():
     processing = read("whisperx_atom/processing.py")
-    assert "from app.transcription_pipeline import" in processing
+    # Legacy construction is isolated behind the runtime compatibility
+    # boundary; ProcessingService itself must not import the old module.
+    assert "from app.transcription_pipeline import" not in processing
+    runtime = read("whisperx_atom/runtime.py")
+    assert "from app.transcription_pipeline import" in runtime
     assert "def process" in processing
     pipeline = read("app/transcription_pipeline.py")
     assert "created lazily by start()" in pipeline

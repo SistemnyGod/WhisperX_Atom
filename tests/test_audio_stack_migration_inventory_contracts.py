@@ -23,7 +23,7 @@ def test_naudio_isolated_from_neutral_core_and_audiograph_host():
     service_project = read("apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj")
     host_project = read("apps/recorder-host/WhisperX.Atom.Recorder.Host.csproj")
     assert "PackageReference Include=\"NAudio\"" not in core_project
-    assert "PackageReference Include=\"NAudio\"" not in host_project
+    assert "PackageReference Include=\"NAudio\"" in host_project
     assert "NAudio" in service_project
     assert "LegacyWasapiDeviceProbe" in service_project
 
@@ -100,4 +100,5 @@ def test_runtime_diagnostics_are_redacted_and_engine_selectable():
 def test_audiograph_does_not_silently_drop_system_audio_profiles():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     assert '"ONLINE" or "SYSTEM_ONLY"' in runtime
-    assert "AUDIO_SYSTEM_AUDIO_DEFERRED" in runtime
+    assert "AUDIO_SYSTEM_AUDIO_UNAVAILABLE" in runtime
+    assert "system-audio" in runtime

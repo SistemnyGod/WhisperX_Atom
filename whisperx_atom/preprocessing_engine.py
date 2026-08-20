@@ -39,10 +39,21 @@ class WhisperXPreprocessingEngine:
         input_path: Path,
         acoustic_profile: str = "AUTO",
     ) -> tuple[Path, dict[str, Any]]:
+        prepare = getattr(pipeline, "prepare_asr_input", None)
+        if callable(prepare):
+            return prepare(input_path, acoustic_profile)
+        # Keep direct callers built against the old test seam working while
+        # production receives the explicit runtime stage adapter.
         return pipeline.prepare_asr_input(input_path, acoustic_profile)
 
     def prepare_diarization_input(self, pipeline: Any, input_path: Path) -> Path:
+        prepare = getattr(pipeline, "prepare_diarization_input", None)
+        if callable(prepare):
+            return prepare(input_path)
         return pipeline._preprocess_audio(input_path, asr=False)
 
     def prepare_profile(self, pipeline: Any, input_path: Path, profile: str) -> Path:
+        prepare = getattr(pipeline, "prepare_profile", None)
+        if callable(prepare):
+            return prepare(input_path, profile)
         return pipeline._preprocess_audio_profile(input_path, profile)

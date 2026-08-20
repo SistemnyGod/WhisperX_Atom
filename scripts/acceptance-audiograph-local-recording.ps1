@@ -14,13 +14,14 @@ param(
     [switch]$StopHost,
     [switch]$DevelopmentHost,
     [string]$DevelopmentDataRoot = "",
-    [string]$InstalledHostPath = "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe"
+    [string]$InstalledHostPath = "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe",
+    [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pipeName = "WhisperXAtomRecorderHost"
-$artifactRoot = Join-Path $repo "artifacts\acceptance\audiograph-local"
+$artifactRoot = if ([string]::IsNullOrWhiteSpace($OutputRoot)) { Join-Path $repo "artifacts\acceptance\audiograph-local" } else { [IO.Path]::GetFullPath($OutputRoot) }
 $reportPath = Join-Path $artifactRoot ("report-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".json")
 $env:AUDIO_CAPTURE_ENGINE = "AUDIOGRAPH"
 $hostWasStarted = $false
@@ -271,6 +272,7 @@ try {
             deliveryState = [string]$status.deliveryState
             errorCode = [string]$status.errorCode
             serverSessionId = [string]$status.serverSessionId
+            meetingId = [string]$status.meetingId
             mediaAssetId = [string]$status.mediaAssetId
             processingJobId = [string]$status.processingJobId
             traceId = [string]$status.traceId

@@ -28,8 +28,13 @@ Copy-Item .env.example .env
 | `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | Совместимость загрузки pyannote | `1` |
 | `HF_TOKEN` | Доступ к Hugging Face/diarization | Локальный секрет, можно оставить пустым для degraded |
 | `DIARIZATION_MODE` | Политика diarization | `preferred` |
-  | `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
-  | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
+| `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
+| `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
+| `ASSISTANT_EMBEDDING_PROVIDER` | Hybrid retrieval provider (`auto`, `sentence-transformers`, `hash`) | `auto` |
+| `ASSISTANT_EMBEDDING_MODEL` | Локальная sentence-transformers модель при доступном optional runtime | `paraphrase-multilingual-MiniLM-L12-v2` |
+| `ASSISTANT_HYBRID_CANDIDATE_LIMIT` | Максимум scope-filtered кандидатов перед rerank | `12000` |
+| `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.20` |
+| `ASSISTANT_HYBRID_EMBEDDING_MIN` | Минимальный embedding score для paraphrase-only hit | `0.60` |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
 

@@ -14,6 +14,10 @@ public static class AgentIpcProtocol
     public const string ConcurrentRequestsCapability = "CONCURRENT_REQUESTS";
     public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
     public const string AudioTelemetryStreamCapability = "AUDIO_TELEMETRY_STREAM_V1";
+    // The current-user Host can persist a render-loopback source as a second
+    // track without changing the v6 wire shape. Older clients simply ignore
+    // this additive capability and continue using the room microphone track.
+    public const string IndependentSystemAudioTrackCapability = "SYSTEM_AUDIO_TRACK_V1";
 
     public static string CurrentBuildIdentity
     {
@@ -97,7 +101,8 @@ public sealed record AgentIpcResponse(
 {
     /// <summary>
     /// True when the local IPC endpoint answered with a state payload. Health
-    /// may be accompanied by a warning (for example deferred system audio),
+    /// may be accompanied by a warning (for example an unavailable optional
+    /// system-audio endpoint),
     /// so command success must not be used as a liveness signal.
     /// </summary>
     public bool IsReachable => Health is not null || Ok;
@@ -178,6 +183,8 @@ public sealed record AgentIpcHealth(
     string? RuntimeBuildIdentity = null,
     IReadOnlyList<string>? Capabilities = null,
     string? EffectiveMicrophoneDeviceName = null,
+    string? EffectiveSystemAudioDeviceId = null,
+    string? EffectiveSystemAudioDeviceName = null,
     string MicrophoneSignalState = "UNKNOWN",
     AudioGraphAttemptDiagnostics? LastAudioGraphAttempt = null,
     string? RuntimeUser = null,

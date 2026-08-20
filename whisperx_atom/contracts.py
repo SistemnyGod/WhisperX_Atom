@@ -30,6 +30,13 @@ class ProcessingRequest:
     # TTS technical intervals are sample-derived server markers.  They are
     # applied only to the derived ASR input, never to the canonical recording.
     technical_intervals: tuple[tuple[int, int, str], ...] = ()
+    # Optional scheduler wait supplied by the worker.  It is diagnostic only
+    # and appended to preserve positional compatibility with existing callers.
+    queue_wait_ms: float | None = None
+    # Media Worker measures preparation before handing the canonical ASR
+    # asset to GPU Worker.  This optional field is append-only for IPC
+    # compatibility and is copied into pipeline_metrics only.
+    media_prepare_ms: float | None = None
 
 
 @dataclass

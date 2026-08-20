@@ -75,6 +75,7 @@ public interface IBackendService : IDisposable
     Task<DesktopAssistantQuery?> CreateAssistantQueryAsync(string query, Guid? meetingId = null, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, CancellationToken cancellationToken = default);
+    Task<bool> PublishLiveMeetingSegmentsAsync(Guid meetingId, Guid? recordingSessionId, IReadOnlyList<DesktopLiveMeetingSegment> segments, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
     Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
     Task<bool> EnsureAuthenticatedAsync(CancellationToken cancellationToken = default);
@@ -128,6 +129,7 @@ public sealed record DesktopAssistantConversation(string Id, string Title, strin
     {
         "GENERAL_CHAT" => "Обычный чат",
         "CURRENT_MEETING" => "Текущее совещание",
+        "LIVE_MEETING" => "Текущее совещание · live",
         _ when ScopeType.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase) => "Память совещаний",
         _ => "Совещание"
     };

@@ -24,6 +24,7 @@ ASSISTANT_PAGE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/AssistantPage
 SETTINGS_PAGE = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Pages/SettingsPage.xaml.cs").read_text(encoding="utf-8")
 SETTINGS_VM = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/SettingsViewModel.cs").read_text(encoding="utf-8")
 VOICE_UI_STATES = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/ViewModels/VoiceUiStates.cs").read_text(encoding="utf-8")
+VOICE_README = (ROOT / "apps/voice-host/README.md").read_text(encoding="utf-8")
 ML_PERSISTENCE = (ROOT / "workers/ml_worker/persistence.py").read_text(encoding="utf-8")
 TECHNICAL_EVENTS = (ROOT / "workers/ml_worker/technical_events.py").read_text(encoding="utf-8")
 
@@ -109,10 +110,12 @@ def test_broker_test_mode_does_not_call_recorder_and_returns_trace():
 def test_voice_questions_use_the_user_scoped_assistant_and_speak_safe_terminal_results():
     assert 'AskAssistantAsync(string question, string? requestedMode' in BROKER_CLIENT
     assert '"ASSISTANT_QUESTION"' in BROKER
-    assert '"ASSISTANT_RECORDING_ACTIVE"' in BROKER
+    assert 'requestedMode = "LIVE_MEETING"' in BROKER
+    assert '"LIVE_MEETING_NOT_READY"' in BROKER
     assert "ResolveAssistantQuestion" in VOICE_RUNTIME
     assert '"MEETING_HISTORY"' in VOICE_RUNTIME
     assert '"CURRENT_MEETING"' in VOICE_RUNTIME
+    assert '"LIVE_MEETING_NOT_READY"' in VOICE_RUNTIME
     assert '"GENERAL_CHAT"' in VOICE_RUNTIME
     # Voice Host never performs the old bounded 180-second polling loop.
     # Desktop owns durable query polling and sends a terminal response back
@@ -133,6 +136,22 @@ def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
     # Actions remain parser-controlled, therefore arbitrary text cannot call
     # Recorder before it is classified as an explicit intent.
     assert "var command = _parser.Parse(text, confidence);" in VOICE_RUNTIME
+
+
+def test_voice_documentation_matches_the_unrestricted_question_runtime():
+    assert "separate unrestricted Vosk" in VOICE_README
+    assert "unrestricted Vosk capture for arbitrary spoken\nquestions is still a release blocker" not in VOICE_README
+
+
+def test_live_meeting_has_a_separate_provisional_asr_producer():
+    assert "_liveRecognizer" in VOICE_RUNTIME
+    assert "ProcessLiveAsrAsync" in VOICE_RUNTIME
+    assert 'command = "LIVE_ASR_SEGMENTS"' in BROKER_CLIENT
+    assert "PublishLiveAsrSegmentAsync" in VOICE_RUNTIME
+    assert "_liveRecordingActive" in VOICE_RUNTIME
+    assert "_liveRecordingPaused" in VOICE_RUNTIME
+    assert "UpdateLiveRecordingState" in VOICE_RUNTIME
+    assert "Live provisional ASR publish failed" in VOICE_RUNTIME
 
 
 def test_voice_responder_never_uses_legacy_wav_replies():

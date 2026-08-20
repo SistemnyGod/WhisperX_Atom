@@ -9,11 +9,26 @@ import psycopg
 from psycopg.types.json import Jsonb
 from workers.db_pool import DatabaseConnectionPool
 from diarization_quality import normalize_speaker_label
+from .speaker_registry import default_display_label, match_profile, normalize_embedding
 from whisperx_atom.pipeline_contract import validate_stage_name
 from .technical_events import build_technical_intervals, segment_technical_flags
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
 ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
+
+
+def _speaker_embedding(result: dict[str, Any], label: str, segments: list[dict[str, Any]]) -> Any:
+    """Read an embedding only when the diarizer explicitly supplied one."""
+    embeddings = result.get("speaker_embeddings")
+    if isinstance(embeddings, dict) and label in embeddings:
+        return embeddings[label]
+    for segment in segments:
+        if normalize_speaker_label(segment.get("speaker")) != label:
+            continue
+        for key in ("speaker_embedding", "embedding"):
+            if segment.get(key) is not None:
+                return segment.get(key)
+    return None
 
 
 def _technical_intervals(connection: psycopg.Connection[Any], meeting_id: str) -> list[tuple[int, int, str]]:
@@ -79,7 +94,7 @@ class JobRepository:
                         worker_id=NULL,
                         lease_expires_at=NULL,
                         last_heartbeat=NULL,
-                        error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
+                        error_code='WORKER_RESTART_RECOVERY',
                         updated_at=now()
                     WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
                       AND status='RUNNING'
@@ -156,11 +171,21 @@ class JobRepository:
         # stage that is not part of the shared pipeline contract.
         stage = validate_stage_name(stage)
         with self._db.connection() as connection:
+            job_type = connection.execute("SELECT type,meeting_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             connection.execute(
                 "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, error_code, socket.gethostname(), status, job_id),
             )
             if status == "FAILED":
+                if job_type is not None and str(job_type[0]) == ENRICHMENT_JOB_TYPE:
+                    # V1 is an independently durable product.  Enrichment is
+                    # optional and must never turn a usable V1 into a failed
+                    # meeting when alignment/diarization crashes.
+                    connection.execute(
+                        "UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND EXISTS (SELECT 1 FROM transcripts WHERE meeting_id=%s AND version_kind='ASR_DRAFT' AND status IN ('READY','PARTIAL_READY'))",
+                        (job_type[1], job_type[1]),
+                    )
+                    return
                 connection.execute(
                     """
                     UPDATE meetings AS meeting
@@ -282,13 +307,41 @@ class JobRepository:
                     (meeting_id, job_id),
                 ).fetchone()
                 if existing:
+                    # A crash can occur after V1 commit but before the
+                    # enrichment job/outbox transaction. Reconcile that
+                    # boundary on every retry instead of returning a V1 that
+                    # can never reach V2.
+                    if str(job[1]) == "TRANSCRIBE_ASR":
+                        existing_meta = connection.execute(
+                            "SELECT warnings,quality_metadata FROM transcripts WHERE id=%s",
+                            (existing[0],),
+                        ).fetchone()
+                        warning_values = {str(item).upper() for item in (existing_meta[0] or [])} if existing_meta else set()
+                        quality_meta = existing_meta[1] if existing_meta and isinstance(existing_meta[1], dict) else {}
+                        blocked = warning_values & {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}
+                        if not blocked:
+                            media = connection.execute(
+                                "SELECT a.asr_storage_key FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
+                                (job_id,),
+                            ).fetchone()
+                            self._ensure_enrichment_job_and_outbox(
+                                connection,
+                                meeting_id,
+                                str(existing[0]),
+                                job_id,
+                                str(media[0]) if media and media[0] else None,
+                                str(quality_meta.get("language") or "ru"),
+                                str(quality_meta.get("acoustic_profile") or "AUTO"),
+                                str(job[2]) if job[2] else None,
+                            )
+                    connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (existing[0], job_id))
                     return str(existing[0])
                 version_row = connection.execute("SELECT COALESCE(MAX(version),0)+1 FROM transcripts WHERE meeting_id=%s", (meeting_id,)).fetchone()
                 version = int(version_row[0])
                 quality = dict(draft.get("quality") or {})
                 quality["processing_job_id"] = job_id
                 metadata = dict(draft.get("metadata") or {})
-                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash", "audio_signal_metrics", "acoustic_profile", "language_quality", "asr_pass_count", "asr_selection_reason"):
+                for key in ("asr_preprocessing", "asr_storage_key", "asr_sample_rate", "asr_channels", "asr_duration_seconds", "asr_audio_hash", "audio_signal_metrics", "acoustic_profile", "language_quality", "asr_pass_count", "asr_selection_reason", "pipeline_metrics"):
                     if key in metadata:
                         quality[key] = metadata[key]
                 warnings = list(draft.get("warnings") or [])
@@ -297,6 +350,7 @@ class JobRepository:
                     "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,'PARTIAL_READY',%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,NULL,'ASR_DRAFT') RETURNING id",
                     (meeting_id, version, draft.get("language"), metadata.get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), metadata.get("processing_profile"), metadata.get("selected_asr_pass")),
                 ).fetchone()[0]
+                connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (transcript_id, job_id))
                 technical_intervals = _technical_intervals(connection, meeting_id)
                 for ordinal, segment in enumerate(draft.get("segments", [])):
                     start_ms = int(float(segment.get("start", 0)) * 1000)
@@ -318,34 +372,80 @@ class JobRepository:
                         (job_id,),
                     ).fetchone()
                     storage_key = str(media[0]) if media and media[0] else None
-                    enrichment = connection.execute(
-                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'TRANSCRIPT_ENRICH','QUEUED','ASR_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id",
-                        (meeting_id, transcript_id, job[2]),
-                    ).fetchone()
-                    if enrichment:
-                        message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
-                        payload = json.dumps({
-                            "message_id": str(message_id),
-                            "job_id": str(enrichment[0]),
-                            "meeting_id": meeting_id,
-                            "transcript_id": str(transcript_id),
-                            "stage": "ASR_READY",
-                            "storage_key": storage_key,
-                            # Carry the exact request choices forward.  AUTO
-                            # here would let enrichment select a different
-                            # preprocessing profile after a user explicitly
-                            # chose LARGE_ROOM, causing a false provenance
-                            # mismatch or (worse) a V2 from different input.
-                            "language": draft.get("language") or quality.get("language") or "ru",
-                            "acousticProfile": quality.get("acoustic_profile") or "AUTO",
-                            "correlation_id": str(job[2]) if job[2] else None,
-                        })
-                        connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'ml.transcribe',%s::jsonb)", (message_id, payload))
+                    self._ensure_enrichment_job_and_outbox(
+                        connection,
+                        meeting_id,
+                        str(transcript_id),
+                        job_id,
+                        storage_key,
+                        str(draft.get("language") or quality.get("language") or "ru"),
+                        str(quality.get("acoustic_profile") or "AUTO"),
+                        str(job[2]) if job[2] else None,
+                    )
                     connection.execute(
                         "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
                         ("PARTIAL_READY" if "AUDIO_SIGNAL_WEAK" in {str(item).upper() for item in warnings} else "TRANSCRIPT_READY", meeting_id),
                     )
                 return str(transcript_id)
+
+    @staticmethod
+    def _ensure_enrichment_job_and_outbox(
+        connection: psycopg.Connection[Any],
+        meeting_id: str,
+        transcript_id: str,
+        asr_job_id: str,
+        storage_key: str | None,
+        language: str,
+        acoustic_profile: str,
+        correlation_id: str | None,
+    ) -> str | None:
+        """Repair the V1→enrichment handoff without creating a second job.
+
+        The meeting row is already locked by the caller. The job lookup is
+        therefore serialized with a concurrent retry, and the outbox check
+        closes the crash window between job creation and event publication.
+        FAILED/CANCELLED jobs are left for the explicit retry endpoint.
+        """
+        enrichment = connection.execute(
+            "SELECT id,status FROM jobs WHERE input_transcript_id=%s AND type='TRANSCRIPT_ENRICH' ORDER BY CASE WHEN status IN ('QUEUED','RUNNING') THEN 0 WHEN status IN ('READY','ENRICHED_READY') THEN 1 ELSE 2 END, created_at LIMIT 1 FOR UPDATE",
+            (transcript_id,),
+        ).fetchone()
+        if enrichment is None:
+            enrichment = connection.execute(
+                "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'TRANSCRIPT_ENRICH','QUEUED','ASR_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id,status",
+                (meeting_id, transcript_id, correlation_id),
+            ).fetchone()
+            if enrichment is None:
+                enrichment = connection.execute(
+                    "SELECT id,status FROM jobs WHERE input_transcript_id=%s AND type='TRANSCRIPT_ENRICH' ORDER BY CASE WHEN status IN ('QUEUED','RUNNING') THEN 0 WHEN status IN ('READY','ENRICHED_READY') THEN 1 ELSE 2 END, created_at LIMIT 1 FOR UPDATE",
+                    (transcript_id,),
+                ).fetchone()
+        enrichment_id, status = str(enrichment[0]), str(enrichment[1])
+        connection.execute(
+            "UPDATE recording_pipeline_runs SET enrichment_job_id=%s,updated_at=now() WHERE asr_job_id=%s",
+            (enrichment_id, asr_job_id),
+        )
+        if status in {"READY", "ENRICHED_READY", "FAILED", "CANCELLED"}:
+            return enrichment_id
+        exists = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='ml.transcribe' AND payload->>'job_id'=%s)",
+            (enrichment_id,),
+        ).fetchone()[0]
+        if not exists:
+            message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
+            payload = json.dumps({
+                "message_id": str(message_id),
+                "job_id": enrichment_id,
+                "meeting_id": meeting_id,
+                "transcript_id": transcript_id,
+                "stage": "ASR_READY",
+                "storage_key": storage_key,
+                "language": language or "ru",
+                "acousticProfile": acoustic_profile or "AUTO",
+                "correlation_id": correlation_id,
+            })
+            connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'ml.transcribe',%s::jsonb)", (message_id, payload))
+        return enrichment_id
 
     def persist_result(self, job_id: str, meeting_id: str, result: dict[str, Any]) -> bool:
         with self._db.connection() as connection:
@@ -353,9 +453,21 @@ class JobRepository:
             meeting = connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
             if meeting is None or str(meeting[0]) == "CANCELLED":
                 return False
-            job = connection.execute("SELECT status,type,pipeline_correlation_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+            job = connection.execute("SELECT status,type,pipeline_correlation_id,input_transcript_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if job is None or str(job[0]) == "CANCELLED":
                 return False
+            # Enrichment is a retried, idempotent transformation of V1.  If a
+            # process died after committing V2 but before acknowledging NATS,
+            # return the existing version and never append a second one.
+            if str(job[1]) == ENRICHMENT_JOB_TYPE:
+                existing_enriched = connection.execute(
+                    "SELECT id FROM transcripts WHERE meeting_id=%s AND version_kind='ENRICHED' AND (quality_metadata->>'processing_job_id'=%s OR source_transcript_id=%s) ORDER BY version DESC LIMIT 1",
+                    (meeting_id, job_id, job[3]),
+                ).fetchone()
+                if existing_enriched:
+                    connection.execute("UPDATE recording_pipeline_runs SET transcript_v2_id=%s,updated_at=now() WHERE enrichment_job_id=%s", (existing_enriched[0], job_id))
+                    connection.execute("UPDATE jobs SET status='READY',stage='ENRICHED_READY',progress=100,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    return True
             correlation_id = result.get("correlation_id") or (str(job[2]) if job[2] else None)
             if not correlation_id:
                 fallback = connection.execute(
@@ -375,7 +487,7 @@ class JobRepository:
             transcript_status = result.get("status", "READY")
             result_error_code = str(result.get("error_code") or "").strip().upper() or None
             warnings = list(result.get("warnings") or [])
-            quality = result.get("quality", {})
+            quality = result.get("quality") or {}
             no_speech_detected = result_error_code == "NO_SPEECH_DETECTED" or "NO_SPEECH_DETECTED" in {str(item).upper() for item in warnings}
             if no_speech_detected and result_error_code is None:
                 result_error_code = "NO_SPEECH_DETECTED"
@@ -394,18 +506,62 @@ class JobRepository:
                 "INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id",
                 (meeting_id, version, transcript_status, result.get("language"), result.get("metadata", {}).get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), result.get("metadata", {}).get("processing_profile"), quality.get("selected_pass"), source_transcript_id, version_kind),
             ).fetchone()[0]
+            if version_kind == "ENRICHED":
+                connection.execute("UPDATE recording_pipeline_runs SET transcript_v2_id=%s,updated_at=now() WHERE enrichment_job_id=%s", (transcript_id, job_id))
+            segments = [segment for segment in result.get("segments", []) if isinstance(segment, dict)]
             speakers: dict[str, str] = {}
-            for segment in result.get("segments", []):
+            speaker_registry: dict[str, Any] = {"status": "UNMATCHED", "reason": "DIARIZATION_EMBEDDINGS_UNAVAILABLE", "speakers": {}}
+            profiles: list[dict[str, Any]] = []
+            owner_row = connection.execute("SELECT owner_id FROM meetings WHERE id=%s", (meeting_id,)).fetchone()
+            if owner_row and owner_row[0]:
+                profile_rows = connection.execute(
+                    "SELECT id,embedding_centroid,display_name FROM speaker_profiles WHERE owner_user_id=%s AND status='ACTIVE'",
+                    (owner_row[0],),
+                ).fetchall()
+                for profile_id, centroid, display_name in profile_rows:
+                    try:
+                        centroid_value = centroid if isinstance(centroid, (list, dict)) else json.loads(centroid or "[]")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        centroid_value = []
+                    profiles.append({"id": str(profile_id), "embedding_centroid": centroid_value, "display_name": display_name})
+            for segment in segments:
                 label = normalize_speaker_label(segment.get("speaker"))
                 if not label or label in speakers:
                     continue
+                embedding = _speaker_embedding(result, label, segments)
+                match = match_profile(embedding, profiles)
+                display_name = default_display_label(label)
+                if match.status == "MATCHED":
+                    profile = next((item for item in profiles if item["id"] == match.profile_id), None)
+                    display_name = str(profile["display_name"]) if profile else display_name
+                    speaker_registry["status"] = "MATCHED"
+                elif match.status == "SUGGESTION":
+                    speaker_registry["status"] = "SUGGESTION"
+                candidate_profile = next((item for item in profiles if item["id"] == (match.profile_id or match.suggestion_profile_id)), None)
+                suggestion_name = candidate_profile.get("display_name") if candidate_profile and match.status == "SUGGESTION" else None
+                speaker_registry["speakers"][label] = {
+                    "status": match.status,
+                    "confidence": match.confidence,
+                    "profile_id": match.profile_id or match.suggestion_profile_id,
+                    "display_name": candidate_profile.get("display_name") if candidate_profile else None,
+                    "reason": match.reason,
+                }
+                if match.status == "MATCHED" and match.profile_id:
+                    # Stats are updated only after a confident match.  The
+                    # existence check keeps retries/reprocessing idempotent.
+                    connection.execute(
+                        "UPDATE speaker_profiles SET meetings_count=meetings_count + CASE WHEN EXISTS (SELECT 1 FROM meeting_speakers WHERE meeting_id=%s AND speaker_profile_id=%s) THEN 0 ELSE 1 END, confidence=GREATEST(COALESCE(confidence,0),%s), last_seen_at=now(), updated_at=now() WHERE id=%s",
+                        (meeting_id, match.profile_id, match.confidence, match.profile_id),
+                    )
                 speaker_id = connection.execute(
-                    "INSERT INTO meeting_speakers(id,meeting_id,stable_key,display_name,confidence) VALUES(gen_random_uuid(),%s,%s,%s,NULL) ON CONFLICT(meeting_id,stable_key) DO UPDATE SET stable_key=excluded.stable_key RETURNING id",
-                    (meeting_id, label, label.replace("SPEAKER_", "Спикер ")),
+                    "INSERT INTO meeting_speakers(id,meeting_id,stable_key,display_name,confidence,speaker_profile_id,profile_confidence,profile_match_status,profile_match_reason,profile_suggestion_name) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(meeting_id,stable_key) DO UPDATE SET display_name=excluded.display_name,confidence=excluded.confidence,speaker_profile_id=excluded.speaker_profile_id,profile_confidence=excluded.profile_confidence,profile_match_status=excluded.profile_match_status,profile_match_reason=excluded.profile_match_reason,profile_suggestion_name=excluded.profile_suggestion_name RETURNING id",
+                    (meeting_id, label, display_name, match.confidence, match.profile_id, match.confidence, match.status, match.reason, suggestion_name),
                 ).fetchone()[0]
                 speakers[label] = str(speaker_id)
+            quality["speaker_registry"] = speaker_registry
+            connection.execute("UPDATE transcripts SET quality_metadata=%s::jsonb WHERE id=%s", (json.dumps(quality), transcript_id))
             technical_intervals = _technical_intervals(connection, meeting_id)
-            for ordinal, segment in enumerate(result.get("segments", [])):
+            for ordinal, segment in enumerate(segments):
                 label = normalize_speaker_label(segment.get("speaker"))
                 start_ms = int(float(segment.get("start", 0)) * 1000)
                 end_ms = int(float(segment.get("end", 0)) * 1000)
@@ -417,33 +573,23 @@ class JobRepository:
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not summary_blocked:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
                 prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v1")
-                summary_job = connection.execute(
-                    "SELECT id FROM jobs WHERE input_transcript_id=%s AND type='SUMMARIZE' AND status IN ('QUEUED','RUNNING') LIMIT 1",
-                    (transcript_id,),
-                ).fetchone()
-                if summary_job is None:
-                    summary_job_id = connection.execute(
-                        "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id",
-                        (meeting_id, transcript_id, correlation_id),
-                    ).fetchone()
-                    if summary_job_id is None:
-                        connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))
-                    else:
-                        summary_job_id = summary_job_id[0]
-                        message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
-                        payload = json.dumps({
-                            "message_id": str(message_id),
-                            "job_id": str(summary_job_id),
-                            "meeting_id": meeting_id,
-                            "transcript_id": str(transcript_id),
-                            "source_hash": result.get("source_hash"),
-                            "summary_profile": summary_profile,
-                            "prompt_version": prompt_version,
-                            "meeting_context": {},
-                            "correlation_id": result.get("correlation_id"),
-                        })
-                        connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)", (message_id, payload))
-                connection.execute("UPDATE meetings SET status='SUMMARIZING' WHERE id=%s", (meeting_id,))
+                summary_job_id = self._ensure_summary_job_and_outbox(
+                    connection,
+                    meeting_id,
+                    str(transcript_id),
+                    str(result.get("source_hash") or ""),
+                    summary_profile,
+                    prompt_version,
+                    str(result.get("correlation_id") or correlation_id) if (result.get("correlation_id") or correlation_id) else None,
+                )
+                if summary_job_id is None:
+                    connection.execute("UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s", (meeting_id,))
+                else:
+                    summary_state = connection.execute("SELECT status FROM jobs WHERE id=%s", (summary_job_id,)).fetchone()
+                    connection.execute(
+                        "UPDATE meetings SET status=%s WHERE id=%s",
+                        ("READY" if summary_state and str(summary_state[0]) == "READY" else "SUMMARIZING", meeting_id),
+                    )
             else:
                 connection.execute(
                     "UPDATE meetings SET status=%s WHERE id=%s",
@@ -454,3 +600,62 @@ class JobRepository:
             final_stage = "ENRICHED_READY" if version_kind == "ENRICHED" else "ASR_READY"
             connection.execute("UPDATE jobs SET status='READY',stage=%s,progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (final_stage, result_error_message, result_error_code, job_id))
             return True
+
+    @staticmethod
+    def _ensure_summary_job_and_outbox(
+        connection: psycopg.Connection[Any],
+        meeting_id: str,
+        transcript_id: str,
+        source_hash: str,
+        summary_profile: str,
+        prompt_version: str,
+        correlation_id: str | None,
+    ) -> str | None:
+        """Reconcile the V2→Summary handoff after a worker restart.
+
+        The meeting lock held by ``persist_result`` serializes this lookup.
+        Existing queued/running jobs are reused and their outbox event is
+        repaired if the process died between the two commits. Terminal jobs
+        are not silently duplicated; the explicit rebuild endpoint owns that
+        transition.
+        """
+        summary_job = connection.execute(
+            "SELECT id,status FROM jobs WHERE input_transcript_id=%s AND type='SUMMARIZE' ORDER BY CASE WHEN status IN ('QUEUED','RUNNING') THEN 0 WHEN status='READY' THEN 1 ELSE 2 END, created_at LIMIT 1 FOR UPDATE",
+            (transcript_id,),
+        ).fetchone()
+        if summary_job is None:
+            summary_job = connection.execute(
+                "INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(gen_random_uuid(),%s,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,%s,%s) ON CONFLICT DO NOTHING RETURNING id,status",
+                (meeting_id, transcript_id, correlation_id),
+            ).fetchone()
+            if summary_job is None:
+                summary_job = connection.execute(
+                    "SELECT id,status FROM jobs WHERE input_transcript_id=%s AND type='SUMMARIZE' ORDER BY CASE WHEN status IN ('QUEUED','RUNNING') THEN 0 WHEN status='READY' THEN 1 ELSE 2 END, created_at LIMIT 1 FOR UPDATE",
+                    (transcript_id,),
+                ).fetchone()
+        summary_job_id, status = str(summary_job[0]), str(summary_job[1])
+        connection.execute(
+            "UPDATE recording_pipeline_runs SET summary_job_id=%s,updated_at=now() WHERE transcript_v2_id=%s",
+            (summary_job_id, transcript_id),
+        )
+        if status in {"READY", "FAILED", "CANCELLED"}:
+            return None if status in {"FAILED", "CANCELLED"} else summary_job_id
+        exists = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='llm.summarize' AND payload->>'job_id'=%s)",
+            (summary_job_id,),
+        ).fetchone()[0]
+        if not exists:
+            message_id = connection.execute("SELECT gen_random_uuid()").fetchone()[0]
+            payload = json.dumps({
+                "message_id": str(message_id),
+                "job_id": summary_job_id,
+                "meeting_id": meeting_id,
+                "transcript_id": transcript_id,
+                "source_hash": source_hash,
+                "summary_profile": summary_profile,
+                "prompt_version": prompt_version,
+                "meeting_context": {},
+                "correlation_id": correlation_id,
+            })
+            connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'llm.summarize',%s::jsonb)", (message_id, payload))
+        return summary_job_id

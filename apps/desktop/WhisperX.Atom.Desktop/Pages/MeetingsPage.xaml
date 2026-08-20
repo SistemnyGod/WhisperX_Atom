@@ -92,9 +92,9 @@
                             <controls:StatusBadge x:Name="WorkspaceStatusBadge" Text="Ожидает выбора встречи" Status="" HorizontalAlignment="Left" Margin="0,4,0,0" />
                         </StackPanel>
                         <StackPanel x:Name="WorkspaceActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                            <Button x:Name="OpenWorkspaceButton" Content="Открыть совещание" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" />
+                            <Button x:Name="OpenWorkspaceButton" Content="Открыть" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" ToolTipService.ToolTip="Открыть рабочее пространство встречи" AutomationProperties.Name="Открыть совещание" />
                             <Button x:Name="RefreshWorkspaceButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
-                            <Button x:Name="RetryButton" Content="Повторить обработку" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" />
+                            <Button x:Name="RetryButton" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" ToolTipService.ToolTip="Запустить обработку ещё раз" />
                             <Button x:Name="WorkspaceMoreButton" Content="⋯" Style="{StaticResource IconButtonStyle}" IsEnabled="False" AutomationProperties.Name="Дополнительные действия совещания" ToolTipService.ToolTip="Отменить, экспортировать или удалить">
                             <Button.Flyout>
                                 <MenuFlyout>

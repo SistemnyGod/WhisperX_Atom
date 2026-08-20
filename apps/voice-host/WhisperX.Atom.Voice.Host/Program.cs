@@ -35,6 +35,11 @@ if (args.Any(argument => string.Equals(argument, "--replay", StringComparison.Or
     Environment.ExitCode = await VoiceAcceptanceRunner.ReplayAsync(args[replayIndex + 1], CancellationToken.None);
     return;
 }
+if (args.Any(argument => string.Equals(argument, "--command-acceptance", StringComparison.OrdinalIgnoreCase)))
+{
+    Environment.ExitCode = VoiceAcceptanceRunner.CommandAsync().GetAwaiter().GetResult();
+    return;
+}
 if (args.Any(argument => string.Equals(argument, "--mic-acceptance", StringComparison.OrdinalIgnoreCase)))
 {
     var acceptanceIndex = Array.FindIndex(args, argument => string.Equals(argument, "--mic-acceptance", StringComparison.OrdinalIgnoreCase));

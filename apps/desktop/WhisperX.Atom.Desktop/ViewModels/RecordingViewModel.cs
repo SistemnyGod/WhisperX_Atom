@@ -110,11 +110,10 @@ public sealed class RecordingViewModel : ObservableObject
         var settings = services.Settings.Load();
         _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
         _microphoneDeviceId = settings.MicrophoneDeviceId;
-        // AudioGraph does not expose Process Loopback yet. Do not carry a
-        // legacy system-audio endpoint into a microphone-only SET_AUDIO_DEVICES
-        // request: the Host would reject the whole transaction even though the
-        // microphone selection itself is valid.
-        _systemAudioDeviceId = RecorderRuntimeMode.IsAudioGraph ? null : settings.SystemAudioDeviceId;
+        // AudioGraph Host now exposes render-loopback as an independent
+        // system-audio track. Keep the configured endpoint across runtime
+        // changes; it is never mixed into the microphone PCM.
+        _systemAudioDeviceId = settings.SystemAudioDeviceId;
         _confirmedMicrophoneDeviceId = settings.MicrophoneDeviceId;
         _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
         _recordingProfile = NormalizeRecordingProfile(settings.RecordingProfile);
@@ -235,6 +234,7 @@ public sealed class RecordingViewModel : ObservableObject
         _ => $"Хранилище: нормально · свободно {_storageFreePercent:F1}%"
     };
     public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
+    public ObservableCollection<string> SessionEvents { get; } = [];
     public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
     public int ProcessingProgress { get => _processingProgress; private set => SetProperty(ref _processingProgress, value); }
     public string ProcessingStatus
@@ -691,11 +691,6 @@ public sealed class RecordingViewModel : ObservableObject
     {
         if (!CanSelectRecordingProfile) return;
         var requested = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
-        if (RecorderRuntimeMode.IsAudioGraph && requested is "ONLINE" or "SYSTEM_ONLY")
-        {
-            ErrorMessage = "AUDIO_SYSTEM_AUDIO_DEFERRED";
-            return;
-        }
         var normalized = NormalizeRecordingProfile(profile);
         if (string.Equals(_recordingProfile, normalized, StringComparison.Ordinal)) return;
         try
@@ -852,7 +847,7 @@ public sealed class RecordingViewModel : ObservableObject
         {
             response = await _services.Recorder.SetAudioDevicesAsync(
                 _microphoneDeviceId,
-                RecorderRuntimeMode.IsAudioGraph ? null : _systemAudioDeviceId);
+                _systemAudioDeviceId);
             if (!response.Ok) throw new InvalidOperationException(response.Error ?? "Agent не подтвердил устройства.");
             ApplyResponse(response);
             await RefreshAsync();
@@ -1411,21 +1406,7 @@ public sealed class RecordingViewModel : ObservableObject
                 WarningMessage = "Выберите или подтвердите микрофон Windows по умолчанию перед следующей записью.";
             }
             _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
-            if (RecorderRuntimeMode.IsAudioGraph)
-            {
-                // Clear a legacy WASAPI render endpoint as soon as the Host
-                // confirms AudioGraph. This keeps later microphone changes
-                // independent from the deferred system-audio feature.
-                if (_systemAudioDeviceId is not null || _confirmedSystemAudioDeviceId is not null)
-                {
-                    _systemAudioDeviceId = null;
-                    _confirmedSystemAudioDeviceId = null;
-                    SaveSettings();
-                    OnPropertyChanged(nameof(SelectedSystemAudioId));
-                }
-            }
-            else
-                _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
+            _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
             if (_confirmedMicrophoneDeviceId is null) _confirmedMicrophoneDeviceId = health.SelectedMicrophoneDeviceId;
             if (_confirmedSystemAudioDeviceId is null) _confirmedSystemAudioDeviceId = health.SelectedSystemAudioDeviceId;
             _deviceListRefreshInProgress = true;
@@ -1747,7 +1728,6 @@ public sealed class RecordingViewModel : ObservableObject
     private static string NormalizeRecordingProfile(string? profile)
     {
         var normalized = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
-        if (RecorderRuntimeMode.IsAudioGraph && normalized is "ONLINE" or "SYSTEM_ONLY") return "ROOM";
         return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
     }
     private static string NormalizeAcousticProfile(string? profile)
