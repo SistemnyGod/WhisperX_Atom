@@ -62,7 +62,10 @@ if (-not $SkipBuild) {
     $servicesToBuild = @()
     foreach ($service in $appServices) {
         $image = "whisperx-atom-$($service):$tag"
-        & docker image inspect $image 2>$null | Out-Null
+        # `docker image inspect` uses stderr for the expected "not found"
+        # result.  Invoke through cmd so PowerShell's Stop preference does not
+        # turn that probe into a terminating NativeCommandError.
+        & cmd.exe /d /s /c "docker image inspect `"$image`" >NUL 2>NUL"
         if ($LASTEXITCODE -ne 0) { $servicesToBuild += $service }
     }
     if ($servicesToBuild.Count -gt 0) {

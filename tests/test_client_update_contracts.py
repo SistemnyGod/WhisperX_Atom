@@ -110,6 +110,7 @@ def test_clean_runtime_gate_requires_one_identity_and_excludes_legacy_python_pay
     assert "2>NUL" in bundle
     assert "servicesToBuild" in bundle
     assert "RELEASE_IMAGES_ALREADY_BUILT" in bundle
+    assert 'docker image inspect `"$image`" >NUL 2>NUL' in bundle
 
 
 def test_runtime_documentation_declares_single_supported_production_path():
