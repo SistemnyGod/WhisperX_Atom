@@ -24,8 +24,14 @@ class SileroRuntime:
         torch.set_num_threads(self.cpu_threads)
         importer = torch.package.PackageImporter(str(self.model_path))
         model = importer.load_pickle("tts_models", "model")
-        model = model.to(torch.device("cpu"))
-        model.eval()
+        # Silero's packaged TTSModelMultiAcc_v3 mutates itself and returns
+        # None from ``to`` (unlike a regular torch.nn.Module). Preserve the
+        # original object while still accepting conventional return values.
+        moved = model.to(torch.device("cpu"))
+        if moved is not None:
+            model = moved
+        if hasattr(model, "eval"):
+            model.eval()
         self.torch = torch
         self.model = model
         # Warm-up is deliberately short and deterministic; it avoids first
