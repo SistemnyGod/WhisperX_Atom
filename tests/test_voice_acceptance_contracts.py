@@ -13,6 +13,13 @@ def test_microphone_acceptance_reports_aliases_and_safety_metrics():
     assert "audioQueueDrops" in RUNNER
 
 
+def test_microphone_acceptance_uses_intent_specific_confidence_policy():
+    assert "requiredConfidence = command.Intent switch" in RUNNER
+    assert "VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence" in RUNNER
+    assert "VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70" in RUNNER
+    assert "result.Confidence >= 0.65" not in RUNNER
+
+
 def test_sanitized_voice_to_transcript_artifact_requires_one_correlated_chain():
     for field in (
         "voiceTraceId",

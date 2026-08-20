@@ -240,8 +240,22 @@ internal static class VoiceAcceptanceRunner
             RecognizedEndpoints++;
             var hasWake = _parser.HasWakeWord(result.Text);
             var command = _parser.Parse(result.Text, result.Confidence);
+            // Keep the microphone acceptance gate aligned with the runtime
+            // policy: conversational questions may pass at the recognition
+            // floor, while recorder mutations use their action-specific
+            // safety thresholds.  A single fixed 0.65 floor made HIGH
+            // sensitivity paradoxically reject valid questions and did not
+            // model the stricter STOP confirmation boundary.
+            var requiredConfidence = command.Intent switch
+            {
+                VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70,
+                VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => 0.60,
+                VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.55,
+                VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence,
+                _ => VoiceIntentParser.DefaultMinimumConfidence
+            };
             var accepted = hasWake && !result.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
-                && result.Confidence >= 0.65 && command.Intent != VoiceIntent.Unknown;
+                && result.Confidence >= requiredConfidence && command.Intent != VoiceIntent.Unknown;
             if (hasWake && command.Intent == VoiceIntent.Unknown) FalseActivations++;
             if (accepted)
             {
