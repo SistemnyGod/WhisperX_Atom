@@ -112,13 +112,16 @@ def test_lan_start_recovers_inherited_runnable_work_before_gpu_workers():
     assert 'media-worker", "gpu-worker' in startup
 
 
-def test_existing_bootstrap_does_not_rotate_agent_token():
+def test_existing_bootstrap_does_not_rotate_a_healthy_agent_token():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     bootstrap = store.split("public async Task<AgentBootstrapResult?> BootstrapAgentAsync", 1)[1].split("public async Task<bool> AgentUserLinkedAsync", 1)[0]
     assert "if (existing is null)" in bootstrap
     assert "enrollment_hash" in bootstrap
-    assert "repeat bootstrap is a link refresh, not token rotation" in bootstrap
-    assert "return new AgentBootstrapResult(result, existing is null ? token : null)" in bootstrap
+    assert "repeat bootstrap is normally a link refresh" in bootstrap
+    assert "replaceMismatchedLocalCredential" in bootstrap
+    assert "requested != existing.Id" in bootstrap
+    assert "CASE WHEN @replaceCredential THEN @hash ELSE enrollment_hash END" in bootstrap
+    assert "existing is null || replaceMismatchedLocalCredential ? token : null" in bootstrap
     assert "enrollment_hash=excluded.enrollment_hash" not in bootstrap
 
 

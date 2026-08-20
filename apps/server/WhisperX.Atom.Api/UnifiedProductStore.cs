@@ -197,6 +197,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
 
         agentId ??= Guid.NewGuid();
+        // A Host can retain the machine InstallationId while its local AgentId
+        // belongs to an older installation (for example after a restore or
+        // failed enrollment). The canonical server Agent is the one already
+        // bound to this InstallationId. In that narrow case issue a replacement
+        // token so Desktop can atomically repair the local Host identity.
+        // Healthy matching Agents retain their DPAPI-protected token.
+        var replaceMismatchedLocalCredential = existing is not null
+            && existing.InstallationId == installationId
+            && requestedAgentId is { } requested
+            && requested != existing.Id;
         if (existing is null)
         {
             await using var insert = new NpgsqlCommand("""
@@ -213,11 +223,14 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
         else
         {
-            // A repeat bootstrap is a link refresh, not token rotation. The
-            // Recorder may still be using the original DPAPI-protected token.
+            // A repeat bootstrap is normally a link refresh, not token
+            // rotation. The explicit mismatched-installation case above is
+            // the only exception because the local token cannot authenticate
+            // as the canonical Agent.
             await using var update = new NpgsqlCommand("""
                 UPDATE recorder_agents
                 SET installation_id=@installation,name=@name,version=@version,
+                    enrollment_hash=CASE WHEN @replaceCredential THEN @hash ELSE enrollment_hash END,
                     status='ONLINE',last_seen_at=now(),capabilities=@capabilities::jsonb
                 WHERE id=@id
                 """, connection, transaction);
@@ -225,6 +238,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             update.Parameters.AddWithValue("installation", installationId);
             update.Parameters.AddWithValue("name", name.Trim());
             update.Parameters.AddWithValue("version", version);
+            update.Parameters.AddWithValue("replaceCredential", replaceMismatchedLocalCredential);
+            update.Parameters.AddWithValue("hash", Hash(token));
             update.Parameters.AddWithValue("capabilities", capabilities.RootElement.GetRawText());
             await update.ExecuteNonQueryAsync();
         }
@@ -241,7 +256,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var result = ReadAgent(resultReader);
         await resultReader.CloseAsync();
         await transaction.CommitAsync();
-        return new AgentBootstrapResult(result, existing is null ? token : null);
+        return new AgentBootstrapResult(result,
+            existing is null || replaceMismatchedLocalCredential ? token : null);
     }
 
     public async Task<bool> AgentUserLinkedAsync(Guid agentId, Guid userId)
