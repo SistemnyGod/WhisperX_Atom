@@ -17,7 +17,13 @@ function Invoke-Git([string[]]$Arguments) {
     return ($value | Out-String).Trim()
 }
 
-$status = @(git status --porcelain --untracked-files=all)
+# Generated and ignored runtime directories can be inaccessible to the Windows
+# shell account used for release work.  Do not turn that into a false "dirty"
+# result, but fail closed if Git itself cannot determine the worktree status.
+$status = @(cmd.exe /d /s /c "git -C `"$repo`" status --porcelain --untracked-files=normal 2>NUL")
+if ($LASTEXITCODE -ne 0) {
+    throw "GIT_STATUS_FAILED: cannot determine release cleanliness"
+}
 if ($status.Count -gt 0) {
     throw "RELEASE_REQUIRES_CLEAN_COMMIT: $($status.Count) changed paths"
 }

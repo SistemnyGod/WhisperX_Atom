@@ -91,6 +91,7 @@ def test_installer_release_manifest_rejects_dirty_or_mixed_runtime():
 def test_clean_runtime_gate_requires_one_identity_and_excludes_legacy_python_payload():
     script = read("scripts/verify-clean-runtime.ps1")
     publish = read("scripts/publish-desktop.ps1")
+    bundle = read("scripts/build-server-bundle.ps1")
     assert "RUNTIME_RELEASE_IDENTITY_INVALID" in script
     assert "RUNTIME_ARTIFACT_IDENTITY_MISMATCH" in script
     assert "RUNTIME_INSTALLED_IDENTITY_MISMATCH" in script
@@ -104,6 +105,9 @@ def test_clean_runtime_gate_requires_one_identity_and_excludes_legacy_python_pay
     assert "2>NUL" in publish
     assert "PRODUCTION_PAYLOAD_CONTAINS_LEGACY_PYTHON" in publish
     assert "RELEASE_COMPONENT_IDENTITY_MISMATCH" in publish
+    assert "--untracked-files=normal" in bundle
+    assert "GIT_STATUS_FAILED" in bundle
+    assert "2>NUL" in bundle
 
 
 def test_runtime_documentation_declares_single_supported_production_path():
