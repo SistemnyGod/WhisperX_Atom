@@ -19,6 +19,8 @@ from workers.summary_worker.contracts import (
     MeetingContext,
     MeetingProtocolRuResult,
     normalize_summary_payload,
+    SummaryContentError,
+    validate_summary_content,
     profile_for,
 )
 from workers.summary_worker.extraction import (
@@ -64,7 +66,7 @@ class SummaryWorkerTests(unittest.TestCase):
     def test_protocol_profile_is_versioned_and_has_no_responsible_field(self):
         self.assertEqual(MEETING_PROTOCOL_RU, profile_for(MEETING_PROTOCOL_RU).name)
         self.assertEqual("meeting-protocol-ru-v1", PROTOCOL_RU_SCHEMA_VERSION)
-        self.assertEqual(PROTOCOL_RU_SCHEMA_VERSION, PROTOCOL_RU_PROMPT_VERSION)
+        self.assertEqual("meeting-protocol-ru-v2", PROTOCOL_RU_PROMPT_VERSION)
         self.assertIn("questions_and_decisions", MEETING_PROTOCOL_RU_SCHEMA["required"])
         self.assertIn("tasks", MEETING_PROTOCOL_RU_SCHEMA["required"])
         self.assertNotIn("responsible", str(MEETING_PROTOCOL_RU_SCHEMA))
@@ -316,6 +318,24 @@ class SummaryWorkerTests(unittest.TestCase):
         })
         self.assertEqual(1, len(result["decisions"]))
         self.assertEqual(["1", "2"], result["decisions"][0]["evidence_segment_ids"])
+
+    def test_nested_summary_object_is_repaired_without_python_dict_repr(self):
+        result = normalize_summary_payload({
+            "summary": {
+                "overview": "Обсудили ремонт насосной.",
+                "topics": [{"topic": "Ремонт", "context": "Проверить насос", "SEG-ID": ["SEG-1"]}],
+                "decisions": [{"decision": "Проверить насос", "SEG-ID": ["SEG-1"]}],
+            },
+        })
+        self.assertEqual("Обсудили ремонт насосной.", result["overview"])
+        self.assertEqual("Ремонт", result["topics"][0]["title"])
+        self.assertNotIn("{'", result["overview"])
+        validate_summary_content(result, {"1"})
+
+    def test_structural_summary_text_is_rejected_before_persistence(self):
+        result = normalize_summary_payload({"summary": "{'topics': [{'SEG-ID': 'SEG-1'}]}"})
+        with self.assertRaises(SummaryContentError):
+            validate_summary_content(result, {"1"})
 
     def test_meeting_context_is_prompt_safe_and_optional(self):
         context = MeetingContext.from_mapping({"title": "Оперативка", "participants": ["Анна", "Борис"]})

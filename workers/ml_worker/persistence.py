@@ -572,7 +572,7 @@ class JobRepository:
                 )
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not summary_blocked:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
-                prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v1")
+                prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v2")
                 summary_job_id = self._ensure_summary_job_and_outbox(
                     connection,
                     meeting_id,

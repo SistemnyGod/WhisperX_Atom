@@ -64,7 +64,8 @@ public sealed record RecordingPipelineChain(
     string? SummaryStatus,
     string? PipelineCorrelationId);
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
-public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
+public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt,
+    string? ContentValidity = null, string? GenerationState = null, string? ErrorCode = null);
 public sealed record SummaryEligibility(bool HasTranscript, bool Allowed, string? Reason = null);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
@@ -1345,7 +1346,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             var meeting = new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));
             SummaryRow? summary = null;
             if (!reader.IsDBNull(5))
-                summary = new SummaryRow(reader.GetGuid(5), reader.GetGuid(6), reader.IsDBNull(7) ? null : reader.GetGuid(7), reader.GetInt32(8), reader.GetString(9), reader.GetString(10), reader.GetString(11), reader.GetString(12), reader.GetFieldValue<JsonDocument>(13), reader.GetDateTime(14));
+            {
+                var content = reader.GetFieldValue<JsonDocument>(13);
+                summary = ReadSummary(reader, 5, content);
+            }
             items.Add(new SummaryRegistryRow(meeting, summary));
         }
         return new RegistryPage<SummaryRegistryRow>(items, total, offset + items.Count < total);
@@ -1774,7 +1778,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             meeting_id = meetingId,
             transcript_id = transcriptGuid,
             summary_profile = string.IsNullOrWhiteSpace(options?.Profile) ? (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant() : options.Profile.Trim().ToUpperInvariant(),
-            prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "meeting-protocol-ru-v1" : options.PromptVersion.Trim(),
+            prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "meeting-protocol-ru-v2" : options.PromptVersion.Trim(),
             reason = options?.Reason?.Trim(),
             meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { }),
             source_hash = (string?)null,
@@ -1881,7 +1885,25 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("meeting", meetingId);
         return await command.ExecuteScalarAsync() as string;
     }
-    private static SummaryRow ReadSummary(NpgsqlDataReader r) => new(r.GetGuid(0),r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetInt32(3),r.GetString(4),r.GetString(5),r.GetString(6),r.GetString(7),r.GetFieldValue<JsonDocument>(8),r.GetDateTime(9));
+    private static SummaryRow ReadSummary(NpgsqlDataReader r)
+    {
+        var content = r.GetFieldValue<JsonDocument>(8);
+        return ReadSummary(r, 0, content);
+    }
+
+    private static SummaryRow ReadSummary(NpgsqlDataReader r, int offset, JsonDocument content)
+    {
+        string? Optional(string name)
+        {
+            if (!content.RootElement.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String) return null;
+            return value.GetString();
+        }
+        return new SummaryRow(
+            r.GetGuid(offset), r.GetGuid(offset + 1), r.IsDBNull(offset + 2) ? null : r.GetGuid(offset + 2),
+            r.GetInt32(offset + 3), r.GetString(offset + 4), r.GetString(offset + 5), r.GetString(offset + 6),
+            r.GetString(offset + 7), content, r.GetDateTime(offset + 9),
+            Optional("contentValidity"), Optional("generationState"), Optional("errorCode"));
+    }
 }
 public sealed record MissingRecordingChunks(Guid TrackId, IReadOnlyList<int> Sequences);
 public sealed record FinalizeRecordingResult(bool Found, bool Accepted, Guid? MeetingId, Guid? JobId, Guid? MediaAssetId, IReadOnlyList<MissingRecordingChunks> Missing, string? ErrorCode);

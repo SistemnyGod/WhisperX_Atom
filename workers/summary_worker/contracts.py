@@ -8,8 +8,20 @@ from typing import Any, Mapping
 SUMMARY_SCHEMA_VERSION = "summary-v2"
 SUMMARY_PROMPT_VERSION = "summary-v2"
 PROTOCOL_RU_SCHEMA_VERSION = "meeting-protocol-ru-v1"
-PROTOCOL_RU_PROMPT_VERSION = "meeting-protocol-ru-v1"
+# Keep the persisted protocol schema compatible while making the repaired
+# generation distinguishable from the pre-validation prompt.
+PROTOCOL_RU_PROMPT_VERSION = "meeting-protocol-ru-v2"
 MEETING_PROTOCOL_RU = "MEETING_PROTOCOL_RU"
+
+
+class SummaryContentError(ValueError):
+    """A deterministic content/schema failure which must never be persisted."""
+
+    code = "SUMMARY_SCHEMA_INVALID"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"{self.code}:{reason}")
 
 
 def _evidence_schema(max_items: int = 8) -> dict[str, Any]:
@@ -419,59 +431,67 @@ def profile_for(value: str | None) -> SummaryProfile:
 def normalize_summary_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Convert v1 or partially formed Qwen output into bounded Summary v2."""
 
+    # Qwen occasionally wraps the known protocol collections below an
+    # ``overview``/``summary`` object.  Repair that *known* shape without ever
+    # stringifying arbitrary mappings (the old behaviour produced Python dict
+    # reprs in user-visible summaries).
+    source = _repair_nested_summary_payload(payload)
+
     def items(name: str, limit: int) -> list[dict[str, Any]]:
-        value = payload.get(name, [])
+        value = source.get(name, [])
         return [item for item in value if isinstance(item, Mapping)][:limit] if isinstance(value, list) else []
 
     topics: list[dict[str, Any]] = []
-    raw_topics = payload.get("topics", [])
+    raw_topics = source.get("topics", [])
     if isinstance(raw_topics, list):
         for item in raw_topics[:20]:
             if isinstance(item, Mapping):
+                title = _text_value(item.get("title", item.get("topic", item.get("name", item.get("summary", "")))))
+                summary = _text_value(item.get("summary", item.get("context", title)))
                 topics.append({
-                    "title": str(item.get("title", item.get("summary", ""))).strip(),
-                    "summary": str(item.get("summary", item.get("title", ""))).strip(),
-                    "evidence_segment_ids": list(item.get("evidence_segment_ids", []))[:8],
+                    "title": title,
+                    "summary": summary,
+                    "evidence_segment_ids": _evidence_ids(item)[:8],
                 })
-            elif str(item).strip():
-                text = str(item).strip()
+            elif isinstance(item, str) and item.strip():
+                text = item.strip()
                 topics.append({"title": text[:220], "summary": text[:1200], "evidence_segment_ids": []})
 
     decisions = []
     for item in items("decisions", 30):
-        decision = str(item.get("decision", item.get("text", ""))).strip()
+        decision = _text_value(item.get("decision", item.get("text", item.get("summary", ""))))
         if decision:
             decisions.append({
-                "subject": str(item.get("subject", "")).strip(),
+                "subject": _text_value(item.get("subject", item.get("topic", ""))),
                 "decision": decision,
-                "evidence_segment_ids": list(item.get("evidence_segment_ids", []))[:8],
+                "evidence_segment_ids": _evidence_ids(item)[:8],
             })
 
     action_items = []
     for item in items("action_items", 40):
-        task = str(item.get("task", "")).strip()
+        task = _text_value(item.get("task", item.get("text", item.get("summary", ""))))
         if task:
             deadline_text = item.get("deadline_text", item.get("deadline"))
             action_items.append({
                 "task": task,
-                "responsible": _nullable_text(item.get("responsible")),
+                "responsible": _nullable_text(item.get("responsible", item.get("owner"))),
                 "deadline_text": _nullable_text(deadline_text),
-                "deadline_iso": _nullable_text(item.get("deadline_iso")) if item.get("deadline_iso") else None,
-                "evidence_segment_ids": list(item.get("evidence_segment_ids", []))[:8],
+                "deadline_iso": _nullable_text(item.get("deadline_iso")) if isinstance(item.get("deadline_iso"), str) else None,
+                "evidence_segment_ids": _evidence_ids(item)[:8],
             })
 
     def text_collection(name: str, limit: int, include_severity: bool = False) -> list[dict[str, Any]]:
         result = []
         for item in items(name, limit):
-            text = str(item.get("text", "")).strip()
+            text = _text_value(item.get("text", item.get("summary", item.get("fact", item.get("topic", "")))))
             if text:
-                value = {"text": text, "evidence_segment_ids": list(item.get("evidence_segment_ids", []))[:8]}
+                value = {"text": text, "evidence_segment_ids": _evidence_ids(item)[:8]}
                 if include_severity:
-                    value["severity"] = str(item.get("severity", "unknown")).strip() or "unknown"
+                    value["severity"] = _text_value(item.get("severity")) or "unknown"
                 result.append(value)
         return result
 
-    overview = str(payload.get("overview", payload.get("summary", ""))).strip()
+    overview = _text_value(source.get("overview", source.get("summary", "")))
     topics = _deduplicate_items(topics, ("title", "summary"), 20)
     decisions = _deduplicate_items(decisions, ("subject", "decision"), 30)
     action_items = _deduplicate_items(action_items, ("task",), 40)
@@ -488,6 +508,91 @@ def normalize_summary_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         notable_facts=tuple(notable_facts),
     ).to_dict()
     return result
+
+
+def _text_value(value: Any) -> str:
+    """Accept user text only when the model returned a scalar string."""
+
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _evidence_ids(item: Mapping[str, Any]) -> list[str]:
+    raw = item.get("evidence_segment_ids")
+    if raw is None:
+        raw = item.get("evidence", item.get("SEG-ID", item.get("segment_ids", [])))
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [value.strip() for value in raw if isinstance(value, str) and value.strip()]
+
+
+def _repair_nested_summary_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    source = dict(payload)
+    nested: list[Mapping[str, Any]] = []
+    for key in ("overview", "summary", "result", "protocol"):
+        value = source.get(key)
+        if isinstance(value, Mapping):
+            nested.append(value)
+            scalar = value.get("text", value.get("overview", value.get("summary", "")))
+            source[key] = _text_value(scalar)
+    aliases = {
+        "topics": ("topics", "themes"),
+        "decisions": ("decisions", "resolutions"),
+        "action_items": ("action_items", "tasks", " поручения".strip()),
+        "risks": ("risks", "risk"),
+        "open_questions": ("open_questions", "questions"),
+        "notable_facts": ("notable_facts", "facts"),
+    }
+    for canonical, names in aliases.items():
+        current = source.get(canonical)
+        if isinstance(current, list) and current:
+            continue
+        for candidate in nested:
+            for name in names:
+                value = candidate.get(name)
+                if isinstance(value, list):
+                    source[canonical] = value
+                    break
+            if isinstance(source.get(canonical), list):
+                break
+    return source
+
+
+_STRUCTURAL_ARTIFACT_PATTERNS = (
+    "{'", "\"SEG-ID\"", "'SEG-ID'", "evidence_segment_ids", "__class__",
+)
+
+
+def validate_summary_content(payload: Mapping[str, Any], valid_ids: set[str] | None = None) -> None:
+    """Reject malformed/user-visible structural output before persistence."""
+
+    overview = payload.get("overview")
+    if not isinstance(overview, str) or not overview.strip():
+        raise SummaryContentError("overview_empty_or_not_text")
+    collections = ("topics", "decisions", "action_items", "risks", "open_questions", "notable_facts")
+    for collection in collections:
+        value = payload.get(collection)
+        if not isinstance(value, list):
+            raise SummaryContentError(f"{collection}_not_array")
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise SummaryContentError(f"{collection}_item_not_object")
+            for field in ("title", "summary", "subject", "decision", "task", "text", "responsible", "deadline_text", "deadline_iso"):
+                field_value = item.get(field)
+                if field_value is not None and not isinstance(field_value, str):
+                    raise SummaryContentError(f"{collection}.{field}_not_text")
+                if isinstance(field_value, str) and any(token in field_value for token in _STRUCTURAL_ARTIFACT_PATTERNS):
+                    raise SummaryContentError(f"{collection}.{field}_contains_structural_artifact")
+            evidence = item.get("evidence_segment_ids", [])
+            if not isinstance(evidence, list) or not all(isinstance(value, str) for value in evidence):
+                raise SummaryContentError(f"{collection}.evidence_not_array")
+            if valid_ids is not None:
+                normalized = {value.removeprefix("SEG-") for value in valid_ids}
+                if any(value.removeprefix("SEG-") not in normalized for value in evidence):
+                    raise SummaryContentError(f"{collection}.evidence_unknown")
+    if any(token in overview for token in _STRUCTURAL_ARTIFACT_PATTERNS):
+        raise SummaryContentError("overview_contains_structural_artifact")
 
 
 def _deduplicate_items(items: list[dict[str, Any]], key_fields: tuple[str, ...], limit: int) -> list[dict[str, Any]]:

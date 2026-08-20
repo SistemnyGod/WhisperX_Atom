@@ -33,7 +33,8 @@ public sealed record DesktopTranscriptSegment(string Id, int Ordinal, long Start
     public string TimeLabel => $"{TimeSpan.FromMilliseconds(StartMs):hh\\:mm\\:ss}";
 }
 public sealed record DesktopSpeaker(string Id, string StableKey, string DisplayName, string? ProfileId = null, double? ProfileConfidence = null, string ProfileMatchStatus = "UNMATCHED", string? ProfileMatchReason = null, string? ProfileSuggestionName = null);
-public sealed record DesktopSummary(string Id, string MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt);
+public sealed record DesktopSummary(string Id, string MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt,
+    string? ContentValidity = null, string? GenerationState = null, string? ErrorCode = null);
 public sealed record DesktopDecision(string Id, string MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt)
 {
     [JsonIgnore]

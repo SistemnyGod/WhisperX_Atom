@@ -30,6 +30,9 @@ $allowHttp = Read-EnvValue "ALLOW_INSECURE_LAN_HTTP"
 $gpuMode = Read-EnvValue "GPU_WORKER_MODE"
 $autoSummary = Read-EnvValue "AUTO_SUMMARY_ENABLED"
 $assistantEnabled = Read-EnvValue "ASSISTANT_ENABLED"
+$enableDiarization = Read-EnvValue "ENABLE_DIARIZATION"
+$diarizationMode = Read-EnvValue "DIARIZATION_MODE"
+$hfToken = Read-EnvValue "HF_TOKEN"
 if ([string]::IsNullOrWhiteSpace($assistantEnabled)) { $assistantEnabled = "true" }
 if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($serverOrigin)) { throw "LAN_CONFIG_INVALID: LAN_BIND_ADDRESS and SERVER_ORIGIN are required." }
 if ($allowHttp -ne "true") { throw "LAN_HTTP_EXPLICIT_REQUIRED: set ALLOW_INSECURE_LAN_HTTP=true only for the isolated LAN profile." }
@@ -40,6 +43,19 @@ if ($gpuMode -ne "container") { throw "LAN_GPU_MODE_REQUIRED: set GPU_WORKER_MOD
 # behaviour.
 if ($autoSummary -notin @("true", "false", "")) { throw "LAN_QWEN_FLAG_INVALID: AUTO_SUMMARY_ENABLED must be true or false." }
 if ($autoSummary -eq "true") { $EnableQwen = $true }
+if ([string]::IsNullOrWhiteSpace($enableDiarization)) { $enableDiarization = "true" }
+if ($enableDiarization -notin @("true", "false")) { throw "LAN_DIARIZATION_FLAG_INVALID: ENABLE_DIARIZATION must be true or false." }
+if ([string]::IsNullOrWhiteSpace($diarizationMode)) { $diarizationMode = "preferred" }
+if ($diarizationMode -notin @("preferred", "required", "disabled")) { throw "LAN_DIARIZATION_MODE_INVALID: use preferred, required or disabled." }
+if ($enableDiarization -eq "true" -and $diarizationMode -ne "disabled") {
+    # Never start a LAN runtime that advertises diarization while the worker
+    # cannot authenticate to the gated pyannote repositories.  The token is
+    # read from the operator-owned env file and is never logged.
+    if ([string]::IsNullOrWhiteSpace($hfToken) -or $hfToken -notmatch '^hf_[A-Za-z0-9]{20,}$') {
+        throw "LAN_DIARIZATION_TOKEN_REQUIRED: ENABLE_DIARIZATION=true requires a valid HF_TOKEN in .env.lan."
+    }
+    $env:HF_TOKEN = $hfToken
+}
 # Exporting the value for this Compose invocation is important: compose.lan.yml
 # otherwise expands the .env.lan default and may start a worker that never
 # queues automatic summaries.

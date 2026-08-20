@@ -100,9 +100,21 @@ public static class MeetingProtocolParser
     private static string ReadFallback(JsonElement root)
     {
         if (root.TryGetProperty("summary", out var summary) && summary.ValueKind == JsonValueKind.String)
-            return summary.GetString() ?? "Саммари готово, но текст отсутствует.";
+            return SafeFallback(summary.GetString());
         if (root.TryGetProperty("overview", out var overview) && overview.ValueKind == JsonValueKind.String)
-            return overview.GetString() ?? "Саммари готово, но текст отсутствует.";
+            return SafeFallback(overview.GetString());
         return "Саммари готово в общем формате.";
+    }
+
+    private static string SafeFallback(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "Саммари готово, но текст отсутствует.";
+        var text = value.Trim();
+        if (text.Contains("{'", StringComparison.Ordinal)
+            || text.Contains("SEG-ID", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("evidence_segment_ids", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("__class__", StringComparison.OrdinalIgnoreCase))
+            return "Саммари требует пересборки: формат результата не подтверждён.";
+        return text;
     }
 }

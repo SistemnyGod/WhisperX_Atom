@@ -15,9 +15,11 @@ from .contracts import (
     SUMMARY_SCHEMA_V2,
     SUMMARY_SCHEMA_VERSION,
     MeetingContext,
+    SummaryContentError,
     normalize_summary_payload,
     profile_for,
     SummaryProfile,
+    validate_summary_content,
 )
 from .extraction import (
     BLOCK_EXTRACTION_SCHEMA,
@@ -285,6 +287,53 @@ class SummaryOrchestrator:
         if self._progress is not None:
             await self._progress(stage, progress)
 
+    async def _invoke_final_summary(
+        self,
+        messages: list[dict[str, str]],
+        valid_ids: set[str],
+        segment_texts: dict[str, str],
+    ) -> dict[str, Any]:
+        """Generate the final summary with one deterministic schema retry.
+
+        JSON parsing is already retried by the llama client.  This second gate
+        is intentionally local and catches a syntactically valid response
+        whose fields contain a dict/list repr or otherwise unsafe types.
+        """
+
+        last_error: SummaryContentError | None = None
+        for attempt in range(2):
+            request = messages
+            if attempt:
+                request = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Предыдущий результат не прошёл content-gate. Повтори строго JSON: overview — обычная русская строка, "
+                            "все коллекции — массивы объектов, без Python dict repr, SEG-ID в тексте и служебных токенов. "
+                            "Сохраняй только существующие evidence_segment_ids."
+                        ),
+                    },
+                ]
+            try:
+                payload = await self._invoke_json(request, SUMMARY_SCHEMA)
+                result = normalize_summary_payload(payload)
+                result = resolve_summary_action_items(result, self._context)
+                result = validate_evidence_v2(result, valid_ids, segment_texts)
+                validate_summary_content(result, valid_ids)
+                # Keep rejected claims in validation.review_reasons for
+                # diagnostics, but never expose them as user-facing summary
+                # items or persist them as decisions/tasks.
+                for collection in ("topics", "decisions", "action_items", "risks", "open_questions", "notable_facts"):
+                    result[collection] = [item for item in result.get(collection, []) if not item.get("needs_review")]
+                return result
+            except SummaryContentError as exc:
+                last_error = exc
+                if attempt == 0:
+                    continue
+                raise
+        raise last_error or SummaryContentError("unknown")
+
     async def summarize(self, segments: list[TranscriptSegment]) -> dict[str, Any]:
         if not segments:
             raise ValueError("transcript_has_no_segments")
@@ -536,10 +585,7 @@ class SummaryOrchestrator:
             },
         ]
         await self._report_progress("GENERATING_SUMMARY", 85)
-        result = await self._invoke_json(final_messages, SUMMARY_SCHEMA)
-        result = normalize_summary_payload(result)
-        result = resolve_summary_action_items(result, self._context)
-        result = validate_evidence_v2(result, valid_ids, segment_texts)
+        result = await self._invoke_final_summary(final_messages, valid_ids, segment_texts)
         validation = result.setdefault("validation", {})
         validation["extraction_candidates"] = len(extracted)
         validation["rejected_facts"] = len(rejected)
@@ -568,6 +614,9 @@ class SummaryOrchestrator:
         result["source_hash"] = transcript_source_hash(segments)
         result["block_count"] = len(blocks)
         result["schema_version"] = SUMMARY_SCHEMA_VERSION
+        result["contentValidity"] = "NEEDS_REVIEW" if reviewed else "VALID"
+        result["generationState"] = "READY_WITH_WARNINGS" if reviewed else "READY"
+        result["errorCode"] = None
         return result
 
 

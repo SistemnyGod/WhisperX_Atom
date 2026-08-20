@@ -43,6 +43,7 @@ def is_retryable_summary_error(exc: BaseException) -> bool:
         "transcript_has_no_segments",
         "transcript_not_found",
         "cancelled",
+        "summary_schema_invalid",
         "schema_validation",
         "invalid_json",
         "evidence_invalid",
@@ -494,6 +495,12 @@ class SummaryWorker:
                     if profile_name == MEETING_PROTOCOL_RU:
                         result["profile"] = MEETING_PROTOCOL_RU
                         result["schema_version"] = PROTOCOL_RU_SCHEMA_VERSION
+                    if "contentValidity" not in result:
+                        quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+                        needs_review = str(quality.get("status", "")).upper() in {"NEEDS_REVIEW", "FAILED"} or bool(quality.get("review_items"))
+                        result["contentValidity"] = "NEEDS_REVIEW" if needs_review else "VALID"
+                        result["generationState"] = "READY_WITH_WARNINGS" if needs_review else "READY"
+                        result["errorCode"] = None
                     if correlation_id:
                         result["correlation_id"] = correlation_id
                 finally:
