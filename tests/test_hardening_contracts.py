@@ -252,6 +252,7 @@ def test_summary_and_assistant_workers_extend_long_job_leases():
 
 def test_outbox_requeues_starved_queued_jobs_without_stealing_active_leases():
     relay = read(Path("workers/outbox_relay/worker.py"))
+    migration = read(Path("apps/server/WhisperX.Atom.Api/Migrations/037_outbox_watchdog_backoff.sql"))
     assert "recover_starved_queued" in relay
     assert "OUTBOX_QUEUED_WATCHDOG_SECONDS" in relay
     assert "j.status='QUEUED'" in relay
@@ -264,6 +265,10 @@ def test_outbox_requeues_starved_queued_jobs_without_stealing_active_leases():
     assert "j.updated_at < now() - interval '{stale_seconds} seconds'" in relay
     assert "message id is intentional" in relay
     assert "def _watchdog_seconds" in relay
+    assert "def _watchdog_backoff_seconds" in relay
+    assert "watchdog_requeue_count" in relay and "last_watchdog_requeue_at" in relay
+    assert "2/5/15/30" in relay
+    assert "watchdog_requeue_count" in migration and "last_watchdog_requeue_at" in migration
 
 
 def test_recorder_delivery_wake_interrupts_idle_command_poll():

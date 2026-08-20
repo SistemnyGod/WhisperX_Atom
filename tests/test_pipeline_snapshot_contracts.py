@@ -82,8 +82,12 @@ def test_recorder_events_feed_server_owned_pipeline_timeline_without_changing_li
 def test_vertical_gate_persists_snapshot_and_benchmark_supports_warm_runs():
     vertical = read("scripts/e2e-vertical-pipeline.ps1")
     benchmark = read("scripts/e2e-transcription-benchmark.ps1")
+    matrix = read("scripts/e2e-transcription-matrix.ps1")
     assert "pipelineSnapshot = $chain.snapshot" in vertical
     assert "pipelineOverallStatus" in vertical
     assert "for ($index = 1; $index -le $Runs; $index++)" in benchmark
     assert "stageTimings = $report.stageTimings" in benchmark
     assert "audioIncluded = $false" in benchmark
+    assert '"10x10"' in matrix and '"30x5"' in matrix and '"60x5"' in matrix and '"600x3"' in matrix
+    assert "e2e-transcription-benchmark.ps1" in matrix
+    assert "credentialsIncluded = $false" in matrix

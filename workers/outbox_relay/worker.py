@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 from workers.nats_utils import ensure_stream
@@ -17,21 +18,30 @@ def _watchdog_seconds(name: str, default: int, minimum: int) -> int:
     return max(minimum, configured)
 
 
+def _watchdog_backoff_seconds(requeue_count: int, base_seconds: int) -> int:
+    """Return the bounded 2/5/15/30 minute watchdog schedule."""
+    schedule = (base_seconds, 300, 900, 1800)
+    index = min(max(int(requeue_count), 0), len(schedule) - 1)
+    return max(base_seconds, schedule[index])
+
+
 def recover_starved_queued(connection) -> int:
     """Re-emit one durable event for a QUEUED job no worker has claimed.
 
     A published outbox row only proves that the relay handed a message to
     JetStream. If NATS or a consumer disappeared immediately afterwards, the
-    job can otherwise remain QUEUED forever. The watchdog is deliberately
-    one-shot per queue stall (the marker is cleared by normal retry/claim
-    transitions), and never steals a job with an active inbox lease.
+    job can otherwise remain QUEUED forever. Re-emission uses a bounded
+    2/5/15/30 minute backoff per durable job and never steals a job with an
+    active inbox lease. A worker claim or normal retry can still move the job
+    out of QUEUED; the counter only limits repeated recovery of the same stall.
     """
     stale_seconds = _watchdog_seconds("OUTBOX_QUEUED_WATCHDOG_SECONDS", 120, 60)
     rows = connection.execute(f"""
         SELECT j.id,j.meeting_id,j.type,j.stage,j.attempt,j.media_asset_id,
                a.storage_key,a.asr_storage_key,a.source_type,
                j.input_transcript_id,t.language,t.quality_metadata,
-               j.pipeline_correlation_id
+               j.pipeline_correlation_id,j.watchdog_requeue_count,
+               j.last_watchdog_requeue_at
         FROM jobs j
         LEFT JOIN media_assets a ON a.id=j.media_asset_id
         LEFT JOIN transcripts t ON t.id=j.input_transcript_id
@@ -40,8 +50,9 @@ def recover_starved_queued(connection) -> int:
           -- The marker is only a debounce window, not a terminal state.  A
           -- relay can mark the job and crash after the original outbox row
           -- was marked published but before JetStream made it visible to a
-          -- consumer.  Allow another emission once the watchdog interval has
-          -- elapsed; otherwise the job would remain QUEUED forever.
+          -- consumer. Allow another emission once the watchdog interval has
+          -- elapsed; the Python backoff then applies the longer recovery
+          -- window for jobs that have already been re-emitted repeatedly.
           AND (
               COALESCE(j.error_code,'') <> 'QUEUED_WATCHDOG_REQUEUED'
               OR j.updated_at < now() - interval '{stale_seconds} seconds'
@@ -59,7 +70,15 @@ def recover_starved_queued(connection) -> int:
         job_id, meeting_id, job_type, stage, attempt, asset_id,
         storage_key, asr_storage_key, source_type,
         transcript_id, language, quality_metadata, correlation_id,
+        watchdog_requeue_count, last_watchdog_requeue_at,
     ) in rows:
+        if last_watchdog_requeue_at is not None:
+            last = last_watchdog_requeue_at
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            wait_seconds = _watchdog_backoff_seconds(watchdog_requeue_count or 0, stale_seconds)
+            if datetime.now(timezone.utc) - last < timedelta(seconds=wait_seconds):
+                continue
         metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
         normalized_type = str(job_type)
         normalized_stage = str(stage or "")
@@ -96,7 +115,15 @@ def recover_starved_queued(connection) -> int:
                 "correlation_id": str(correlation_id) if correlation_id else None,
             }
         connection.execute(
-            "UPDATE jobs SET error_code='QUEUED_WATCHDOG_REQUEUED',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='QUEUED'",
+            """
+            UPDATE jobs
+            SET error_code='QUEUED_WATCHDOG_REQUEUED',
+                watchdog_requeue_count=COALESCE(watchdog_requeue_count,0)+1,
+                last_watchdog_requeue_at=now(),
+                last_heartbeat=now(),
+                updated_at=now()
+            WHERE id=%s AND status='QUEUED'
+            """,
             (job_id,),
         )
         pending = connection.execute(
