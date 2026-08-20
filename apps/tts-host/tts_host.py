@@ -77,7 +77,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--parent-pid", type=int, default=None)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parent
+    # In a PyInstaller onedir build module files live below ``_internal``,
+    # while release assets are installed beside TtsHost.exe. Resolve assets
+    # from the executable directory in frozen mode so the same layout works
+    # in staging, the installer and rollback copies.
+    root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
     model = root / "Models" / "silero-v5_5_ru" / "v5_5_ru.pt"
     temp = Path(os.environ.get("ATOM_TTS_TEMP_ROOT", Path.home() / "AppData" / "Local" / "WhisperXAtom" / "TTS" / "Temp"))
     return run(model, temp, args.parent_pid, 4)
