@@ -10,7 +10,7 @@ never share a PCM writer.
 | FILE | SYMBOL | CATEGORY | OLD_DEPENDENCY | NEW_OWNER | ACTION | GATE |
 |---|---|---|---|---|---|---|
 | `apps/recorder-agent/RecordingCoordinator.cs` | `StartAsync`, `CaptureTrack` | microphone, lifecycle | `MMDeviceEnumerator`, `WasapiCapture`, `IWaveIn`, `WaveFormat` | `IAudioCaptureEngineFactory` + neutral frame writer | REPLACE | A–E |
-| `apps/recorder-host/SystemAudioCaptureEngine.cs` | system track creation | system loopback | `WasapiLoopbackCapture`, `MMDeviceEnumerator` | independent current-user render-loopback source | KEEP/ADAPT | P2 |
+| `apps/recorder-host/SystemAudioCaptureEngine.cs` | system track creation | system loopback | `WasapiLoopbackCapture`, `MMDeviceEnumerator` | independent current-user render-loopback source | KEEP/ADAPT | IMPLEMENTED; runtime acceptance remains |
 | `apps/recorder-agent/DeviceHealth.cs` | `Collect` | discovery, health | `MMDeviceEnumerator`, `MMDevice` | `IAudioDeviceCatalog` + runtime probe | REPLACE | A–E |
 | `apps/recorder-agent/DeviceHealthMonitor.cs` | watcher/fallback | discovery, health | NAudio endpoint notifications | catalog event stream | REPLACE | A–E |
 | `apps/recorder-agent/AudioRuntimeProbe.cs` | source probe | diagnostics | `WasapiCapture`, `WasapiLoopbackCapture` | `IAudioDeviceProbe` implementations | ADAPT | A–E |
@@ -25,7 +25,7 @@ never share a PCM writer.
 | `apps/recorder-agent/AgentIpcProtocol.cs` | DTOs | IPC | Service-shaped health DTO | neutral runtime/device DTOs | ADAPT | A–E |
 | `apps/recorder-host/AudioGraphDeviceCatalog.cs` | watcher | discovery | none | `DeviceWatcher`, `DeviceInformation`, `MediaDevice` | KEEP | A |
 | `apps/recorder-host/AudioGraphCaptureEngine.cs` | graph capture | microphone, telemetry | none | AudioGraph/input/output nodes | ADAPT | A |
-| `apps/recorder-host/RecorderHostRuntime.cs` | two-track lifecycle | track orchestration | separate frame channels/writers | room + system independent durable tracks | ADAPT | P2 |
+| `apps/recorder-host/RecorderHostRuntime.cs` | two-track lifecycle | track orchestration | separate frame channels/writers | room + system independent durable tracks | ADAPT | IMPLEMENTED; runtime acceptance remains |
 | `apps/recorder-host/RecorderHostRuntime.cs` | session writer/runtime | lifecycle, local-first | duplicated writer and no lease | shared neutral writer + lease/recovery | REPLACE | A–E |
 | `apps/recorder-host/Program.cs` | host composition | lifecycle | no singleton/lease | Host runtime ownership | ADAPT | C/D/G |
 | `apps/desktop/WhisperX.Atom.Desktop/AgentPipeClient.cs` | `SendAsync` | IPC | implicit pipe/version | explicit v6 negotiation | ADAPT | A–E |

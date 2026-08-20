@@ -54,6 +54,20 @@ dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --n
 4. Перезапустить NATS/media/GPU worker: PostgreSQL job и локальная очередь должны сохраниться.
 5. Выполнить `stop-whisperx.ps1` и затем `run-whisperx.ps1`: незавершённая очередь не удаляется.
 
+## Progressive upload во время записи
+
+Для длинной записи используйте отдельный gate, который не ждёт `STOP` перед
+первой проверкой доставки:
+
+```powershell
+.\scripts\acceptance-progressive-upload.ps1 -Seconds 600 -ProbeAfterSeconds 300
+```
+
+В середине записи скрипт требует уже созданный `serverSessionId` и хотя бы один
+подтверждённый chunk (`confirmedChunkCount > 0`). После `STOP` проверяется, что
+счётчик подтверждённых chunks не уменьшился и хвост дошёл до `CONFIRMED` или
+`COMPLETED`. Отчёт не содержит аудио, токены или credentials.
+
 ## Известные границы
 
 - Полный diarization acceptance требует реальной двухспикерной записи.

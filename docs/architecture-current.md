@@ -54,7 +54,9 @@ Host снимает выбранный microphone через AudioGraph, пре�
 PCM16, пишет 30-секундные raw-сегменты и регистрирует их в SQLite. После STOP raw
 становится `LOCAL_READY`; отдельный SQLite-driven encoder строит FLAC с retry,
 после чего delivery coordinator загружает готовые чанки и выполняет server finalize.
-Системный loopback и новые дорожки не входят в Phase 1.
+Для ONLINE доступны независимые дорожки `room-microphone` и `system-audio` с общей
+временной шкалой; они не смешиваются на границе захвата. Live ASR получает их через
+неблокирующий tap, а каноническая V1/V2 всегда строится из исходных дорожек.
 
 ### Desktop
 
