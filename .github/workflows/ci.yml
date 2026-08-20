@@ -41,6 +41,19 @@ jobs:
       - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj --no-restore -c Release
       - run: dotnet build apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj --no-restore -c Release
       - run: dotnet publish apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore -c Release -r win-x64 -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -o artifacts/ci/desktop
+      - name: Run .NET tests when test projects are present
+        shell: pwsh
+        run: |
+          $projects = @(Get-ChildItem -Path . -Recurse -Filter '*Tests.csproj' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]|[\\/]bin[\\/]' })
+          if ($projects.Count -eq 0) {
+            Write-Host 'No .NET test project is currently part of the repository; Python contract tests remain mandatory.'
+            exit 0
+          }
+          foreach ($project in $projects) {
+            dotnet test $project.FullName -c Release --no-restore --verbosity minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-validation
