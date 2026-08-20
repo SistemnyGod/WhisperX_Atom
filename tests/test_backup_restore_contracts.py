@@ -16,6 +16,13 @@ def test_backup_manifest_is_traceable_and_excludes_secrets():
     assert "POSTGRES_PASSWORD" in backup
 
 
+def test_backup_resolves_bundle_root_before_source_tree_parent():
+    backup = read("scripts/backup.ps1")
+    assert "$repo = $PSScriptRoot" in backup
+    assert "Join-Path $repo '.env.example'" in backup
+    assert "$repo = Split-Path -Parent $PSScriptRoot" in backup
+
+
 def test_restore_validates_hash_schema_and_requires_force_for_nonempty_target():
     restore = read("scripts/restore.ps1")
     for guard in ("BACKUP_HASH_MISMATCH", "BACKUP_SCHEMA_NEWER_THAN_RUNTIME", "RESTORE_TARGET_NOT_EMPTY_FORCE_REQUIRED"):

@@ -12,7 +12,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repo = Split-Path -Parent $PSScriptRoot
+# The source script lives under <repo>\scripts, whereas the Server Bundle
+# intentionally places it directly beside compose files and .env.example.
+# Resolve the bundle layout first and keep the source-tree parent fallback.
+$repo = $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $repo '.env.example') -PathType Leaf)) {
+    $repo = Split-Path -Parent $PSScriptRoot
+}
 Set-Location $repo
 
 function Get-EnvValue([string]$Name, [string]$Default) {
