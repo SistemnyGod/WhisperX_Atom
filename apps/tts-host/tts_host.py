@@ -47,6 +47,10 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
             except Exception:
                 pass
         try:
+            # Windows PowerShell 5.1's redirected StreamWriter emits an
+            # UTF-8 BOM before the first line. Accept it without relaxing
+            # JSON parsing for the remainder of the protocol stream.
+            raw = raw.lstrip("\ufeff")
             payload = json.loads(raw)
             request = parse_request(payload)
             operation = request.operation
