@@ -66,8 +66,10 @@ $smokeStart.RedirectStandardInput = $true
 $smokeStart.RedirectStandardOutput = $true
 $smokeStart.RedirectStandardError = $true
 $smokeProcess = [Diagnostics.Process]::Start($smokeStart)
-$smokeProcess.StandardInput.WriteLine($smokeRequest)
-$smokeProcess.StandardInput.Close()
+$smokeBytes = [Text.UTF8Encoding]::new($false).GetBytes($smokeRequest + "`n")
+$smokeProcess.StandardInput.BaseStream.Write($smokeBytes, 0, $smokeBytes.Length)
+$smokeProcess.StandardInput.BaseStream.Flush()
+$smokeProcess.StandardInput.BaseStream.Close()
 $smokeStdout = $smokeProcess.StandardOutput.ReadToEnd()
 $smokeStderr = $smokeProcess.StandardError.ReadToEnd()
 if (-not $smokeProcess.WaitForExit(120000)) {

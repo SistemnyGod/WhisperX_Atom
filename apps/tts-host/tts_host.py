@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import sys
@@ -85,6 +86,13 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
 
 
 def main() -> int:
+    # JSONL is UTF-8 by contract. Do not inherit the Windows console codepage
+    # in a frozen process; utf-8-sig accepts both normal UTF-8 and the BOM
+    # emitted by Windows PowerShell 5.1 redirected input.
+    if hasattr(sys.stdin, "buffer"):
+        sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8-sig", newline=None)
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n", write_through=True)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--parent-pid", type=int, default=None)
     args = parser.parse_args()
