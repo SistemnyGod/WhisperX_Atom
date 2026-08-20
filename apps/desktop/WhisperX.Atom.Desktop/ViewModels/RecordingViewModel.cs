@@ -1487,8 +1487,21 @@ public sealed class RecordingViewModel : ObservableObject
         };
         var blocked = string.IsNullOrWhiteSpace(snapshot.BlockedBy) ? string.Empty : $" · ожидание: {snapshot.BlockedBy}";
         var error = snapshot.Retryable && !string.IsNullOrWhiteSpace(snapshot.ErrorCode) ? $" · {snapshot.ErrorCode}" : string.Empty;
-        return $"{status} · {stage}{blocked}{error}";
+        var recording = DisplayRecordingState(snapshot.Recording?.Status);
+        var recordingPrefix = string.IsNullOrWhiteSpace(recording) ? string.Empty : $" · запись: {recording}";
+        return $"{status} · {stage}{recordingPrefix}{blocked}{error}";
     }
+
+    private static string DisplayRecordingState(string? state) => state?.ToUpperInvariant() switch
+    {
+        "RECORDING" => "идёт",
+        "PAUSED" => "пауза",
+        "STARTING" => "запускается",
+        "FINALIZING" => "сохраняется",
+        "FINALIZED" => "завершена",
+        "FAILED" => "ошибка",
+        _ => string.Empty
+    };
 
     private static string DisplayStage(string stage) => stage.ToUpperInvariant() switch
     {

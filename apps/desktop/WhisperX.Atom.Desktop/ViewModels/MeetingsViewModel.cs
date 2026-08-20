@@ -616,12 +616,26 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     private static string FormatPipelineSnapshot(DesktopPipelineSnapshot snapshot)
     {
         var text = $"{DisplayPipelineStatus(snapshot.OverallStatus)} · {DisplayPipelineStage(snapshot.CurrentStage)}";
+        var recording = DisplayRecordingState(snapshot.Recording?.Status);
+        if (!string.IsNullOrWhiteSpace(recording))
+            text += $" · запись: {recording}";
         if (!string.IsNullOrWhiteSpace(snapshot.BlockedBy))
             text += $" · ожидание: {DisplayBlockedBy(snapshot.BlockedBy)}";
         if (snapshot.Retryable && !string.IsNullOrWhiteSpace(snapshot.ErrorCode))
             text += $" · {snapshot.ErrorCode}";
         return text;
     }
+
+    private static string DisplayRecordingState(string? state) => state?.ToUpperInvariant() switch
+    {
+        "RECORDING" => "идёт",
+        "PAUSED" => "пауза",
+        "STARTING" => "запускается",
+        "FINALIZING" => "сохраняется",
+        "FINALIZED" => "завершена",
+        "FAILED" => "ошибка",
+        _ => string.Empty
+    };
 
     private static string DisplayPipelineStatus(string status) => status.ToUpperInvariant() switch
     {
