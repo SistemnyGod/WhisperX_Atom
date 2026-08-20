@@ -144,7 +144,13 @@ if (Test-Path -LiteralPath $migrationSource -PathType Container) {
     })
 }
 
-$allImages = @($imageRecords.Values | ForEach-Object { $_.reference }) + @($infrastructure.Values | ForEach-Object { $_.reference })
+$allImages = [System.Collections.Generic.List[string]]::new()
+foreach ($reference in @($imageRecords.Values | ForEach-Object { $_.reference }) + @($infrastructure.Values | ForEach-Object { $_.reference })) {
+    # `docker compose config --images` includes application images too.  Save
+    # each reference once: duplicate entries needlessly double the export time
+    # and can make a GPU release bundle prohibitively large.
+    if (-not $allImages.Contains([string]$reference)) { $allImages.Add([string]$reference) }
+}
 & docker save $allImages -o (Join-Path $stage 'docker-images.tar')
 if ($LASTEXITCODE -ne 0) { throw "RELEASE_DOCKER_SAVE_FAILED" }
 $dockerTarHash = (Get-FileHash -LiteralPath (Join-Path $stage 'docker-images.tar') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -172,7 +178,12 @@ Move-Item -LiteralPath $stage -Destination $finalRoot
 $archive = [IO.Path]::GetFullPath((Join-Path $repo $ArchivePath))
 $archiveParent = Split-Path -Parent $archive
 New-Item -ItemType Directory -Force -Path $archiveParent | Out-Null
-Compress-Archive -Path (Join-Path $finalRoot '*') -DestinationPath $archive -CompressionLevel Optimal -Force
+# The image tar includes CUDA layers and regularly exceeds the 2 GB limit of
+# Compress-Archive on Windows PowerShell.  bsdtar writes a Zip64 archive while
+# preserving the bundle as a portable directory layout.
+if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+& tar.exe -a -c -f $archive -C $finalRoot .
+if ($LASTEXITCODE -ne 0) { throw "RELEASE_SERVER_ARCHIVE_CREATE_FAILED" }
 if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "RELEASE_SERVER_ARCHIVE_MISSING" }
 Write-Host "SERVER_BUNDLE_READY=$finalRoot"
 Write-Host "SERVER_BUNDLE_ARCHIVE=$archive"
