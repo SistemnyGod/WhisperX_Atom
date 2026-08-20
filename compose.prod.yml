@@ -7,6 +7,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       DOTNET_ENVIRONMENT: Production
       COOKIE_SECURE: "true"
+      CORS_ALLOWED_ORIGINS: "${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN for production}"
       ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB for production};Username=${POSTGRES_USER:?Set POSTGRES_USER for production};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}"
       POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB for production};Username=${POSTGRES_USER:?Set POSTGRES_USER for production};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}"
       BOOTSTRAP_ADMIN_USERNAME: "${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME for production}"

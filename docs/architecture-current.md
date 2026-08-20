@@ -111,3 +111,8 @@ Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для с
   `recording_sessions`. Поздний `FinalizeRecordingAsync` повторно проверяет
   статус встречи до idempotent job lookup и возвращает `MEETING_CANCELLED`;
   GPU/Summary persistence также отбрасывают результат отменённой встречи.
+- Pilot LAN запускается отдельным HTTP-профилем. Production запускается только
+  через `scripts/start-whisperx-production.ps1`: он требует `PUBLIC_ORIGIN` с
+  `https://`, `PUBLIC_HOST`, `fullchain.pem`/`privkey.pem`, secure cookies и
+  release images без `dev/dirty/latest`; Docker build-контексты и прямой API
+  port в production не допускаются.

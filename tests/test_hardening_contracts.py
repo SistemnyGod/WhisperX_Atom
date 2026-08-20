@@ -282,6 +282,18 @@ def test_cancel_and_finalize_close_the_race_without_resurrecting_pipeline():
     assert "if meeting is None or str(meeting[0]) == \"CANCELLED\"" in summary
 
 
+def test_production_launcher_requires_https_tls_secure_cookies_and_release_images():
+    launcher = read(Path("scripts/start-whisperx-production.ps1"))
+    compose = read(Path("compose.prod.yml"))
+    assert "PRODUCTION_HTTPS_REQUIRED" in launcher
+    assert "PRODUCTION_INSECURE_HTTP_FORBIDDEN" in launcher
+    assert "PRODUCTION_TLS_FILE_MISSING" in launcher
+    assert "PRODUCTION_BUILD_CONTEXT_PRESENT" in launcher
+    assert "--no-build" in launcher
+    assert "CORS_ALLOWED_ORIGINS" in compose
+    assert "PUBLIC_ORIGIN" in compose
+
+
 def test_summary_and_assistant_workers_extend_long_job_leases():
     worker = read(Path("workers/summary_worker/worker.py"))
     assistant = read(Path("workers/summary_worker/assistant.py"))
