@@ -54,8 +54,31 @@ Copy-Item -LiteralPath $model -Destination (Join-Path $built 'Models\silero-v5_5
 Copy-Item -LiteralPath $modelManifest -Destination (Join-Path $built 'Models\silero-v5_5_ru\model-manifest.json') -Force
 Copy-Item -LiteralPath (Join-Path $source 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $built 'THIRD_PARTY_NOTICES.txt') -Force
 $env:WHISPERX_BUILD_IDENTITY = $identity
-$smokeLines = @(('{"schemaVersion":1,"id":"publish-smoke","op":"ping","buildIdentity":"' + $identity + '"}') | & (Join-Path $built 'TtsHost.exe') --parent-pid $PID)
-if ($LASTEXITCODE -ne 0 -or $smokeLines.Count -eq 0) { throw 'TTS_HOST_SMOKE_FAILED' }
+$smokeRequest = [ordered]@{ schemaVersion=1; id='publish-smoke'; op='ping'; buildIdentity=$identity } | ConvertTo-Json -Compress
+$smokeStart = [Diagnostics.ProcessStartInfo]::new()
+$smokeStart.FileName = Join-Path $built 'TtsHost.exe'
+$smokeStart.ArgumentList.Add('--parent-pid')
+$smokeStart.ArgumentList.Add([string]$PID)
+$smokeStart.UseShellExecute = $false
+$smokeStart.CreateNoWindow = $true
+$smokeStart.RedirectStandardInput = $true
+$smokeStart.RedirectStandardOutput = $true
+$smokeStart.RedirectStandardError = $true
+$smokeStart.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+$smokeStart.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+$smokeProcess = [Diagnostics.Process]::Start($smokeStart)
+$smokeProcess.StandardInput.WriteLine($smokeRequest)
+$smokeProcess.StandardInput.Close()
+$smokeStdout = $smokeProcess.StandardOutput.ReadToEnd()
+$smokeStderr = $smokeProcess.StandardError.ReadToEnd()
+if (-not $smokeProcess.WaitForExit(120000)) {
+    try { $smokeProcess.Kill($true) } catch { }
+    throw 'TTS_HOST_SMOKE_TIMEOUT'
+}
+if ($smokeProcess.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($smokeStdout)) {
+    throw "TTS_HOST_SMOKE_FAILED: $smokeStderr"
+}
+$smokeLines = @($smokeStdout -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 try { $smoke = $smokeLines[-1] | ConvertFrom-Json } catch { throw 'TTS_HOST_SMOKE_PROTOCOL_INVALID' }
 if (-not $smoke.ok -or $smoke.state -ne 'READY' -or $smoke.buildIdentity -ne $identity) { throw "TTS_HOST_SMOKE_FAILED: $($smoke.errorCode)" }
 if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
