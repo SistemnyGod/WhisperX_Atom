@@ -629,15 +629,93 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             await using var command = new NpgsqlCommand("INSERT INTO recording_events(id,session_id,event_type,media_time_ms,payload,created_at) VALUES(@id,@session,@type,@time,@payload::jsonb,COALESCE(@created,now())) ON CONFLICT(id) DO NOTHING", connection, tx);
             command.Parameters.AddWithValue("id", item.Id);
             command.Parameters.AddWithValue("session", sessionId);
-            command.Parameters.AddWithValue("type", item.EventType.Trim().ToUpperInvariant());
+            var eventType = item.EventType.Trim().ToUpperInvariant();
+            command.Parameters.AddWithValue("type", eventType);
             command.Parameters.AddWithValue("time", (object?)item.MediaTimeMs ?? DBNull.Value);
             command.Parameters.AddWithValue("payload", item.Payload?.RootElement.GetRawText() ?? "{}");
-            command.Parameters.AddWithValue("created", (object?)item.CreatedAt?.UtcDateTime ?? DBNull.Value);
-            accepted += await command.ExecuteNonQueryAsync();
+            var createdAt = item.CreatedAt?.ToUniversalTime() ?? DateTimeOffset.UtcNow;
+            command.Parameters.AddWithValue("created", createdAt.UtcDateTime);
+            var inserted = await command.ExecuteNonQueryAsync();
+            accepted += inserted;
+            if (inserted > 0)
+                await RecordPipelineEventTimingAsync(connection, tx, sessionId, eventType, createdAt);
         }
         await tx.CommitAsync();
         return accepted;
-    }    public async Task<FinalizeRecordingResult> FinalizeRecordingAsync(Guid agentId, Guid sessionId, JsonDocument? manifest = null, DateTime? finishedAt = null)
+    }
+
+    private static readonly IReadOnlyDictionary<string, (string StartEvent, string DurationKey)> PipelineEventDurations =
+        new Dictionary<string, (string StartEvent, string DurationKey)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PIPELINE_FLAC_READY"] = ("PIPELINE_LOCAL_READY", "local_ready_to_flac_ms"),
+            ["PIPELINE_UPLOAD_STARTED"] = ("PIPELINE_FLAC_READY", "flac_to_upload_started_ms"),
+            ["PIPELINE_UPLOAD_READY"] = ("PIPELINE_UPLOAD_STARTED", "upload_ms"),
+            ["PIPELINE_FINALIZE_ACCEPTED"] = ("PIPELINE_UPLOAD_READY", "finalize_ms"),
+            ["PIPELINE_MEDIA_READY"] = ("PIPELINE_FINALIZE_ACCEPTED", "media_assembly_ms")
+        };
+
+    /// <summary>
+    /// Folds the idempotent recorder event stream into bounded diagnostic
+    /// timestamps. A missing or late event can never change job state; an
+    /// accepted event simply makes the server-owned snapshot explain where
+    /// time was spent.
+    /// </summary>
+    private static async Task RecordPipelineEventTimingAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid sessionId,
+        string eventType,
+        DateTimeOffset createdAt)
+    {
+        var createdText = createdAt.ToUniversalTime().ToString("O");
+        await using (var marker = new NpgsqlCommand("""
+            UPDATE recording_sessions
+            SET stage_timings=jsonb_set(
+                COALESCE(stage_timings,'{}'::jsonb),
+                ARRAY['pipelineEvents',@eventType]::text[],
+                to_jsonb(@createdText::text),
+                true)
+            WHERE id=@session
+            """, connection, transaction))
+        {
+            marker.Parameters.AddWithValue("eventType", eventType);
+            marker.Parameters.AddWithValue("createdText", createdText);
+            marker.Parameters.AddWithValue("session", sessionId);
+            await marker.ExecuteNonQueryAsync();
+        }
+
+        if (!PipelineEventDurations.TryGetValue(eventType, out var duration)) return;
+
+        string? startText;
+        await using (var lookup = new NpgsqlCommand("""
+            SELECT stage_timings #>> ARRAY['pipelineEvents',@startEvent]::text[]
+            FROM recording_sessions
+            WHERE id=@session
+            """, connection, transaction))
+        {
+            lookup.Parameters.AddWithValue("startEvent", duration.StartEvent);
+            lookup.Parameters.AddWithValue("session", sessionId);
+            startText = await lookup.ExecuteScalarAsync() as string;
+        }
+
+        if (!DateTimeOffset.TryParse(startText, out var startAt)) return;
+        var elapsedMs = Math.Max(0L, (long)Math.Round((createdAt - startAt).TotalMilliseconds));
+        await using var timing = new NpgsqlCommand("""
+            UPDATE recording_sessions
+            SET stage_timings=jsonb_set(
+                COALESCE(stage_timings,'{}'::jsonb),
+                ARRAY['pipelineDurations',@durationKey]::text[],
+                to_jsonb(@elapsedMs::bigint),
+                true)
+            WHERE id=@session
+            """, connection, transaction);
+        timing.Parameters.AddWithValue("durationKey", duration.DurationKey);
+        timing.Parameters.AddWithValue("elapsedMs", elapsedMs);
+        timing.Parameters.AddWithValue("session", sessionId);
+        await timing.ExecuteNonQueryAsync();
+    }
+
+    public async Task<FinalizeRecordingResult> FinalizeRecordingAsync(Guid agentId, Guid sessionId, JsonDocument? manifest = null, DateTime? finishedAt = null)
     {
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();

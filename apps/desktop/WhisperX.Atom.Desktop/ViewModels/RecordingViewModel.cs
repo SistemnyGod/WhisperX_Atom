@@ -74,6 +74,7 @@ public sealed class RecordingViewModel : ObservableObject
     private string _processingStatus = "После остановки здесь появится статус WhisperX.";
     private string _transcriptStatus = "Стенограмма ещё не запущена.";
     private string _processingError = string.Empty;
+    private DesktopPipelineSnapshot? _pipelineSnapshot;
     private string _warningMessage = string.Empty;
     private AgentIpcResponse? _lastAgentResponse;
     private string? _archivePath;
@@ -335,6 +336,16 @@ public sealed class RecordingViewModel : ObservableObject
             if (!SetProperty(ref _processingStatus, value)) return;
             OnPropertyChanged(nameof(ProcessingStageIndex));
         }
+    }
+    /// <summary>
+    /// Server-owned processing state. Jobs are still queried for the SSE
+    /// compatibility path, but the displayed stage comes from this snapshot
+    /// whenever the current API supports it.
+    /// </summary>
+    public DesktopPipelineSnapshot? PipelineSnapshot
+    {
+        get => _pipelineSnapshot;
+        private set => SetProperty(ref _pipelineSnapshot, value);
     }
     public IReadOnlyList<string> ProcessingSteps { get; } = ["ASR", "Выравнивание", "Диаризация", "Стенограмма"];
     public int ProcessingStageIndex => ProcessingStatus.Contains("стенограм", StringComparison.OrdinalIgnoreCase) ? 3
@@ -1059,6 +1070,7 @@ public sealed class RecordingViewModel : ObservableObject
         await StopProcessingPollingAsync();
         ProcessingError = string.Empty;
         ProcessingProgress = 0;
+        PipelineSnapshot = null;
         ProcessingStatus = "Ожидаю подтверждение записи и постановку WhisperX в очередь…";
         TranscriptStatus = "Стенограмма ожидает обработки.";
         _processingObservedJobKey = null;
@@ -1306,9 +1318,17 @@ public sealed class RecordingViewModel : ObservableObject
         }
 
         var jobsTask = _services.Backend.GetJobsAsync(meetingId, cancellationToken);
+        var pipelineTask = _services.Backend.GetMeetingPipelineAsync(meetingId, cancellationToken);
         var transcriptTask = _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
-        await Task.WhenAll(jobsTask, transcriptTask);
+        await Task.WhenAll(jobsTask, pipelineTask, transcriptTask);
         var jobs = await jobsTask;
+        PipelineSnapshot = (await pipelineTask)?.LastOrDefault()?.Snapshot;
+        if (PipelineSnapshot is not null)
+        {
+            ProcessingProgress = CurrentPipelineProgress(PipelineSnapshot);
+            ProcessingStatus = FormatPipelineSnapshot(PipelineSnapshot);
+            ProcessingError = PipelineSnapshot.Retryable ? PipelineSnapshot.ErrorCode ?? string.Empty : string.Empty;
+        }
         var asrJob = jobs.Where(IsTranscriptJob).Where(IsAsrJob)
             .OrderByDescending(item => item.Attempt)
             .ThenByDescending(item => item.Progress)
@@ -1335,12 +1355,15 @@ public sealed class RecordingViewModel : ObservableObject
                 && observedFor >= TimeSpan.FromMinutes(2);
             var runningStalled = string.Equals(job.Status, "RUNNING", StringComparison.OrdinalIgnoreCase)
                 && observedFor >= TimeSpan.FromMinutes(30);
-            ProcessingStatus = queuedStalled
-                ? "Задача в очереди дольше 2 минут · Worker не подтвердил получение"
-                : runningStalled
-                    ? "WhisperX не сообщает прогресс более 30 минут · проверяю Worker"
-                    : $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
-            if (!queuedStalled && !runningStalled && string.IsNullOrWhiteSpace(job.Error))
+            if (PipelineSnapshot is null)
+            {
+                ProcessingStatus = queuedStalled
+                    ? "Задача в очереди дольше 2 минут · Worker не подтвердил получение"
+                    : runningStalled
+                        ? "WhisperX не сообщает прогресс более 30 минут · проверяю Worker"
+                        : $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            }
+            if (PipelineSnapshot is null && !queuedStalled && !runningStalled && string.IsNullOrWhiteSpace(job.Error))
                 ProcessingError = string.Empty;
             if (queuedStalled)
             {
@@ -1423,6 +1446,49 @@ public sealed class RecordingViewModel : ObservableObject
         "FAILED" => "Ошибка",
         _ => status
     };
+
+    private static int CurrentPipelineProgress(DesktopPipelineSnapshot snapshot)
+    {
+        var progress = snapshot.CurrentStage.ToUpperInvariant() switch
+        {
+            "MEDIA" => snapshot.Media.Progress,
+            "ASR" => snapshot.Asr.Progress,
+            "TRANSCRIPT_V1" => snapshot.TranscriptV1.Progress,
+            "ENRICHMENT" => snapshot.Enrichment.Progress,
+            "TRANSCRIPT_V2" => snapshot.TranscriptV2.Progress,
+            "SUMMARY" => snapshot.Summary.Progress,
+            _ => 100
+        };
+        return Math.Clamp(progress ?? 0, 0, 100);
+    }
+
+    private static string FormatPipelineSnapshot(DesktopPipelineSnapshot snapshot)
+    {
+        var status = snapshot.OverallStatus.ToUpperInvariant() switch
+        {
+            "READY" => "Готово",
+            "PARTIAL_READY" => "Частично готово",
+            "WAITING" => "Ожидает обработки",
+            "PROCESSING" => "Обрабатывается",
+            "DEGRADED" => "С предупреждением",
+            "FAILED" => "Ошибка обработки",
+            _ => snapshot.OverallStatus
+        };
+        var stage = snapshot.CurrentStage.ToUpperInvariant() switch
+        {
+            "MEDIA" => "подготовка медиа",
+            "ASR" => "распознавание речи",
+            "TRANSCRIPT_V1" => "стенограмма V1",
+            "ENRICHMENT" => "выравнивание и диаризация",
+            "TRANSCRIPT_V2" => "стенограмма V2",
+            "SUMMARY" => "саммари",
+            "COMPLETE" => "все этапы завершены",
+            _ => snapshot.CurrentStage
+        };
+        var blocked = string.IsNullOrWhiteSpace(snapshot.BlockedBy) ? string.Empty : $" · ожидание: {snapshot.BlockedBy}";
+        var error = snapshot.Retryable && !string.IsNullOrWhiteSpace(snapshot.ErrorCode) ? $" · {snapshot.ErrorCode}" : string.Empty;
+        return $"{status} · {stage}{blocked}{error}";
+    }
 
     private static string DisplayStage(string stage) => stage.ToUpperInvariant() switch
     {
