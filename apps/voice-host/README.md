@@ -25,7 +25,19 @@ dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voic
 
 # Long-recording false-activation check
 dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj -c Release -- --replay "C:\path\meeting.wav" --dry-run
+
+# Far-field matrix (0.5/1/2/3 m × quiet/office/ventilation/conversation)
+pwsh -NoProfile -File scripts/e2e-far-field-voice.ps1 -Mode Installed `
+  -FixtureRoot "C:\path\far-field-fixtures" `
+  -OutputPath artifacts/acceptance/far-field-voice-v1.json
 ```
+
+The matrix expects explicit replay fixtures named
+`<distance>\<condition>.wav`. It reports recall, recognized endpoints and
+false activations without writing recorder data or forwarding commands. A
+missing fixture, dirty Voice Host identity, timeout or false activation keeps
+the gate `BLOCKED`; the contract-only mode writes the matrix description
+without opening the microphone.
 
 ## Trusted offline Vosk import
 

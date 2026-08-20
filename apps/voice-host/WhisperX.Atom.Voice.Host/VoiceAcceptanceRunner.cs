@@ -97,8 +97,20 @@ internal static class VoiceAcceptanceRunner
             await Task.Yield();
         }
         detections += analyzer.FinalizeStream();
-        Console.WriteLine(JsonSerializer.Serialize(new { mode = "replay-dry-run", audioPath, detections }));
-        return 0;
+        // Keep replay output machine-readable so the far-field acceptance
+        // matrix can compare recall and false activations for each distance /
+        // room condition.  The acceptance script deliberately strips the
+        // source path before writing its sanitized artifact.
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode = "replay-dry-run",
+            audioPath,
+            detections,
+            recognizedEndpoints = analyzer.RecognizedEndpoints,
+            falseActivations = analyzer.FalseActivations,
+            aliases = analyzer.AcceptedByAlias,
+        }));
+        return analyzer.FalseActivations == 0 ? 0 : 4;
     }
 
     public static async Task<int> MicrophoneAsync(int targetDetections, TimeSpan timeout, CancellationToken cancellationToken, string? microphoneDeviceId = null)

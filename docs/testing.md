@@ -74,3 +74,20 @@ dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --n
 - GPU E2E зависит от локального CUDA/WhisperX окружения и HF доступа.
 - Qwen Summary/Assistant не является условием готовности Transcript MVP, если `AUTO_SUMMARY_ENABLED=false`.
 - Исторические contract tests могут проверять структуру кода; для критических изменений приоритет имеют behavioral tests и реальный E2E.
+### Far-field voice acceptance
+
+The installed replay gate uses explicit WAV fixtures for every distance and
+room condition. It never opens Recorder or sends a command to the Desktop
+Broker:
+
+```powershell
+pwsh -NoProfile -File scripts/e2e-far-field-voice.ps1 -Mode Contract
+pwsh -NoProfile -File scripts/e2e-far-field-voice.ps1 -Mode Installed `
+  -FixtureRoot "C:\path\far-field-fixtures"
+```
+
+Fixtures are named `<distance>\<condition>.wav` for `0.5m`, `1m`, `2m`, `3m`
+and `quiet`, `office`, `ventilation`, `conversation`. The gate is fail-closed
+on missing fixtures, dirty builds, replay timeouts, low recall or false
+activations. The result contains metrics only; audio paths and recognized
+text are not written to the acceptance JSON.
