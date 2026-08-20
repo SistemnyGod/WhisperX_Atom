@@ -48,7 +48,7 @@ public sealed class BackendService : IBackendService
             && !string.IsNullOrWhiteSpace(current.ProtectedSessionCookie))
             return;
         DesktopSettings.Save(ApiUrl, current.Username, SessionCookie, current.ArchiveRoot,
-            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed, current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel);
+            current.MicrophoneDeviceId, current.SystemAudioDeviceId, SessionExpiresAtUtc, current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed, current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel, current.TtsEngine, current.TtsVoice, current.TtsSampleRate, current.TtsCpuThreads, current.TtsFallbackEnabled, current.WindowsFallbackVoice);
     }
 
     public Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default) => _client.CheckReadyAsync(cancellationToken);
@@ -117,7 +117,7 @@ public sealed class BackendService : IBackendService
                 currentSettings.RecordingProfile, currentUser?.Id,
                 currentUser?.Id == currentSettings.OwnerUserId && currentSettings.AgentBootstrapConfirmed,
                 currentSettings.VoiceAlwaysListening, currentSettings.VoiceQuietMode, currentSettings.VoiceSensitivity,
-                currentSettings.AcousticProfile, currentSettings.VoiceName, currentSettings.VoiceRate, currentSettings.VoiceVolume, currentSettings.UpdateChannel);
+                currentSettings.AcousticProfile, currentSettings.VoiceName, currentSettings.VoiceRate, currentSettings.VoiceVolume, currentSettings.UpdateChannel, currentSettings.TtsEngine, currentSettings.TtsVoice, currentSettings.TtsSampleRate, currentSettings.TtsCpuThreads, currentSettings.TtsFallbackEnabled, currentSettings.WindowsFallbackVoice);
 
             return true;
         }

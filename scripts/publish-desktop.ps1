@@ -69,6 +69,12 @@ Invoke-Publish $voiceHostPublishArgs
 Invoke-Publish $updaterPublishArgs
 Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Destination (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") -Force
 
+# Silero is a build-time dependency. It is staged outside Git and frozen into
+# an onedir host; a release must fail closed when the model/runtime is absent.
+$ttsPublisher = Join-Path $repoRoot "scripts\publish-tts-host.ps1"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ttsPublisher -OutputRoot (Join-Path $output "TtsHost")
+if ($LASTEXITCODE -ne 0) { throw "TtsHost publish failed with exit code $LASTEXITCODE" }
+
 # The supported Windows runtime is .NET Desktop + AudioGraph Host + Voice
 # Host.  The legacy Python app.py is kept in the repository for compatibility,
 # but must never leak into an installed payload or become a second production
@@ -119,7 +125,7 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
     commit = $gitCommit
     dirty = $dirtyFiles.Count -gt 0
     runtimeEntrypoint = "WhisperX.Atom.Desktop.exe"
-    supportedWindowsRuntime = @("Desktop", "AudioGraphRecorderHost", "VoiceHost")
+    supportedWindowsRuntime = @("Desktop", "AudioGraphRecorderHost", "VoiceHost", "SileroTtsHost")
     legacyService = [ordered]@{ path = "Service\\WhisperX.Atom.Recorder.Service.exe"; supported = $false; mode = "manual-fallback-only" }
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     components = @(
@@ -127,7 +133,8 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
         @{ name = "RecorderService"; path = (Join-Path $serviceOut "WhisperX.Atom.Recorder.Service.exe") },
         @{ name = "RecorderHost"; path = (Join-Path $recorderHostOut "WhisperX.Atom.Recorder.Host.exe") },
         @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") },
-        @{ name = "Updater"; path = (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") }
+        @{ name = "Updater"; path = (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") },
+        @{ name = "TtsHost"; path = (Join-Path $output "TtsHost\TtsHost.exe") }
     ) | ForEach-Object {
         if (-not (Test-Path -LiteralPath $_.path -PathType Leaf)) { throw "RELEASE_COMPONENT_MISSING: $($_.name)" }
         $actualIdentity = [string](Get-Item -LiteralPath $_.path).VersionInfo.ProductVersion

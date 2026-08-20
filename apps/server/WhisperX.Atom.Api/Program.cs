@@ -2195,25 +2195,42 @@ public sealed class Database(IConfiguration configuration)
             await failedMeetings.ExecuteNonQueryAsync(cancellationToken);
         }
         await using (var sessions = new NpgsqlCommand("""
+            -- Recovered rows use session.state='AWAITING_AGENT_RECONNECT'
+            -- unless the zero-sample START is already safe to quarantine.
             UPDATE recording_sessions AS session
-            SET state='AWAITING_AGENT_RECONNECT'
+            SET state=CASE
+                        WHEN COALESCE(session.total_samples, 0) = 0
+                             AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+                          THEN 'ADMIN_REVIEW'
+                        ELSE 'AWAITING_AGENT_RECONNECT'
+                      END
             FROM recorder_agents AS agent
             WHERE session.agent_id=agent.id
               AND session.state='RECORDING'
-              AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
               AND (session.local_session_id IS NULL
                    OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
                       <> session.local_session_id::text)
+              AND (
+                    COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+                    -- A live heartbeat is not proof that capture is active.
+                    -- Hosts publish activeSessionId while they own AudioGraph;
+                    -- a zero-sample row without that lease is a recoverable
+                    -- interrupted START and must not block the next recording.
+                    OR (
+                      COALESCE(session.total_samples, 0) = 0
+                      AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+                    )
+                  )
             """, connection, transaction))
         {
             await sessions.ExecuteNonQueryAsync(cancellationToken);
         }
         await using (var interruptedMeetings = new NpgsqlCommand("""
             UPDATE meetings AS meeting
-            SET status='RECORDING_INTERRUPTED'
+            SET status=CASE WHEN session.state='ADMIN_REVIEW' THEN 'ADMIN_REVIEW' ELSE 'RECORDING_INTERRUPTED' END
             FROM recording_sessions AS session
             WHERE session.meeting_id=meeting.id
-              AND session.state='AWAITING_AGENT_RECONNECT'
+              AND session.state IN ('AWAITING_AGENT_RECONNECT','ADMIN_REVIEW')
               AND meeting.status='RECORDING'
             """, connection, transaction))
         {

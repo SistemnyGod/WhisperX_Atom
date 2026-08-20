@@ -22,7 +22,13 @@ public sealed record DesktopSettings(
     string VoiceName = "Microsoft Irina",
     int VoiceRate = 0,
     int VoiceVolume = 90,
-    string UpdateChannel = "stable")
+    string UpdateChannel = "stable",
+    string TtsEngine = "SILERO",
+    string TtsVoice = "aidar",
+    int TtsSampleRate = 48000,
+    int TtsCpuThreads = 4,
+    bool TtsFallbackEnabled = true,
+    string WindowsFallbackVoice = "Microsoft Irina")
 {
     private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -36,8 +42,12 @@ public sealed record DesktopSettings(
         try
         {
             if (!File.Exists(FilePath)) return CreateDefault();
-            var loaded = JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(FilePath), JsonOptions)
+            var raw = File.ReadAllText(FilePath);
+            var loaded = JsonSerializer.Deserialize<DesktopSettings>(raw, JsonOptions)
                 ?? CreateDefault();
+            using var document = JsonDocument.Parse(raw);
+            if (!document.RootElement.TryGetProperty("windowsFallbackVoice", out _))
+                loaded = loaded with { WindowsFallbackVoice = string.IsNullOrWhiteSpace(loaded.VoiceName) ? "Microsoft Irina" : loaded.VoiceName };
             return MigrateApiUrl(loaded);
         }
         catch (IOException) { return CreateDefault(); }
@@ -48,7 +58,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? UnconfiguredApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90, string? updateChannel = null)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90, string? updateChannel = null, string ttsEngine = "SILERO", string ttsVoice = "aidar", int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string windowsFallbackVoice = "Microsoft Irina")
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -68,7 +78,13 @@ public sealed record DesktopSettings(
             string.IsNullOrWhiteSpace(voiceName) ? "Microsoft Irina" : voiceName.Trim(),
             Math.Clamp(voiceRate, -10, 10),
             Math.Clamp(voiceVolume, 0, 100),
-            NormalizeUpdateChannel(updateChannel));
+            NormalizeUpdateChannel(updateChannel),
+            string.Equals(ttsEngine?.Trim(), "WINDOWS", StringComparison.OrdinalIgnoreCase) ? "WINDOWS" : "SILERO",
+            string.IsNullOrWhiteSpace(ttsVoice) ? "aidar" : ttsVoice.Trim().ToLowerInvariant(),
+            ttsSampleRate is 24000 or 48000 ? ttsSampleRate : 48000,
+            Math.Clamp(ttsCpuThreads, 1, 32),
+            ttsFallbackEnabled,
+            string.IsNullOrWhiteSpace(windowsFallbackVoice) ? "Microsoft Irina" : windowsFallbackVoice.Trim());
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -146,7 +162,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity, migrated.AcousticProfile, migrated.VoiceName, migrated.VoiceRate, migrated.VoiceVolume);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity, migrated.AcousticProfile, migrated.VoiceName, migrated.VoiceRate, migrated.VoiceVolume, migrated.UpdateChannel, migrated.TtsEngine, migrated.TtsVoice, migrated.TtsSampleRate, migrated.TtsCpuThreads, migrated.TtsFallbackEnabled, migrated.WindowsFallbackVoice);
             }
         }
         catch

@@ -276,7 +276,7 @@ public sealed class VoiceHostController : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
     }
 
-    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90)
+    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90, string? ttsEngine = null, string? ttsVoice = null, int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string? windowsFallbackVoice = null)
     {
         if (!enabled && (_process is null || _process.HasExited))
         {
@@ -299,7 +299,13 @@ public sealed class VoiceHostController : IAsyncDisposable
                 sensitivity,
                 voiceName,
                 voiceRate,
-                voiceVolume
+                voiceVolume,
+                ttsEngine,
+                ttsVoice,
+                ttsSampleRate,
+                ttsCpuThreads,
+                ttsFallbackEnabled,
+                windowsFallbackVoice
             }, cancellationToken).ConfigureAwait(false);
             if (!response.Ok)
             {

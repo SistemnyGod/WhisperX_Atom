@@ -26,6 +26,12 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.VoiceName,
             settings.VoiceRate,
             settings.VoiceVolume,
-            settings.UpdateChannel);
+            settings.UpdateChannel,
+            settings.TtsEngine,
+            settings.TtsVoice,
+            settings.TtsSampleRate,
+            settings.TtsCpuThreads,
+            settings.TtsFallbackEnabled,
+            settings.WindowsFallbackVoice);
     }
 }

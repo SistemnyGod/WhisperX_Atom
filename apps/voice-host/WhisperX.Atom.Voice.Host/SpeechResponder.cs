@@ -1,213 +1,113 @@
-using System.Speech.Synthesis;
-using System.Globalization;
+using System.Diagnostics;
 using System.Threading.Channels;
+using WhisperX.Atom.Voice.Host.Tts;
 
 namespace WhisperX.Atom.Voice.Host;
 
-public enum SpeechPlaybackState
-{
-    Accepted,
-    Played,
-    Cancelled,
-    Failed
-}
+public enum SpeechPlaybackState { Accepted, Played, Cancelled, Failed }
 
-public sealed record SpeechPlaybackResult(SpeechPlaybackState State, bool Started, string? ErrorCode = null);
+public sealed record SpeechPlaybackResult(
+    SpeechPlaybackState State, bool Started, string? ErrorCode = null,
+    string? Engine = null, string? Model = null, string? Voice = null,
+    bool FallbackUsed = false, long QueueWaitMs = 0, long SynthesisMs = 0, long PlaybackMs = 0);
 
 internal sealed record SpeechRequest(
-    string Text,
-    TaskCompletionSource<SpeechPlaybackResult> Completion,
-    long Generation,
-    Func<Task>? PlaybackStarted);
+    string Text, TaskCompletionSource<SpeechPlaybackResult> Completion,
+    long Generation, long AcceptedAt, Func<Task>? PlaybackStarted);
 
+/// Owns the bounded speech queue and playback lifecycle. Synthesis is delegated
+/// to the local Silero router; Windows Speech is only a Russian fallback.
 public sealed class SpeechResponder : IDisposable
 {
-    private readonly SpeechSynthesizer _synthesizer = new();
     private readonly object _gate = new();
     private readonly Channel<SpeechRequest> _queue = Channel.CreateBounded<SpeechRequest>(new BoundedChannelOptions(8)
     {
-        SingleReader = true,
-        SingleWriter = false,
-        FullMode = BoundedChannelFullMode.Wait
+        SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait
     });
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly TtsEngineRouter _router;
+    private readonly SpeechAudioPlayer _player;
     private readonly Task _worker;
     private bool _disposed;
     private int _busy;
     private int _speaking;
-    private bool _russianVoiceAvailable;
-    private string? _requestedVoiceName;
     private int _queueDepth;
     private long _queueDrops;
     private long _cancelGeneration;
-    private TaskCompletionSource<SpeechPlaybackResult>? _activePlayback;
+    private int _lastCancelHadPlayback;
+    private int _volume = 90;
+    private int _rate;
+    private string _requestedSileroVoice = "aidar";
+    private string _requestedWindowsVoice = "Microsoft Irina";
+    private int _sampleRate = 48000;
+    private int _cpuThreads = 4;
+    private bool _fallbackEnabled = true;
 
-    public SpeechResponder()
-    {
-        // Always synthesize with the installed Russian Windows voice. The
-        // legacy WAV bundle can contain mojibake and must never override a
-        // configured live voice, even if an old environment variable remains
-        // on a machine after an upgrade.
-        // Prefer the deterministic Russian voice requested by the product.
-        // Windows often exposes both "Microsoft Irina" and "Microsoft Irina
-        // Desktop"; the desktop variant is a safe fallback, never an English
-        // voice.  An explicit ATOM_VOICE_NAME remains useful for diagnostics.
-        try
-        {
-            var installed = _synthesizer.GetInstalledVoices()
-                .Where(voice => voice.Enabled)
-                .Select(voice => voice.VoiceInfo)
-                .ToArray();
-            var requestedName = Environment.GetEnvironmentVariable("ATOM_VOICE_NAME");
-            _requestedVoiceName = requestedName;
-            var russianVoice = installed.FirstOrDefault(voice => !string.IsNullOrWhiteSpace(requestedName)
-                    && string.Equals(voice.Name, requestedName, StringComparison.OrdinalIgnoreCase)
-                    && voice.Culture.Name.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
-                ?? installed.FirstOrDefault(voice => string.Equals(voice.Name, "Microsoft Irina", StringComparison.OrdinalIgnoreCase))
-                ?? installed.FirstOrDefault(voice => string.Equals(voice.Name, "Microsoft Irina Desktop", StringComparison.OrdinalIgnoreCase))
-                ?? installed.FirstOrDefault(voice => voice.Culture.Name.StartsWith("ru", StringComparison.OrdinalIgnoreCase));
-            if (russianVoice is not null)
-            {
-                _synthesizer.SelectVoice(russianVoice.Name);
-                _russianVoiceAvailable = true;
-            }
-        }
-        catch (InvalidOperationException) { }
-        catch (ArgumentException) { }
-        _synthesizer.Rate = ReadIntEnvironment("ATOM_VOICE_RATE", 0, -10, 10);
-        _synthesizer.Volume = ReadIntEnvironment("ATOM_VOICE_VOLUME", 90, 0, 100);
-        _worker = Task.Run(ProcessAsync);
-    }
+    public SpeechResponder() : this(CreateDefaultRouter(string.Empty)) { }
+    internal SpeechResponder(string expectedBuildIdentity) : this(CreateDefaultRouter(expectedBuildIdentity)) { }
+    internal SpeechResponder(TtsEngineRouter router) { _router = router; _player = router.Player; _worker = Task.Run(ProcessAsync); }
 
     public bool QuietMode { get; set; }
-    public string? RequestedVoiceName => _requestedVoiceName;
-    public bool IsRussianVoiceAvailable => _russianVoiceAvailable;
-    public int QueueDepth => Volatile.Read(ref _queueDepth);
-    public long QueueDrops => Interlocked.Read(ref _queueDrops);
-    public bool VoiceFallbackUsed => !string.IsNullOrWhiteSpace(_requestedVoiceName)
-        && !string.Equals(_requestedVoiceName, VoiceName, StringComparison.OrdinalIgnoreCase);
     public bool UsesPreRecordedResponses => false;
-    public string VoiceName
-    {
-        get
-        {
-            try { return _synthesizer.Voice.Name; }
-            catch (InvalidOperationException) { return "Windows default"; }
-        }
-    }
-    public string VoiceCulture
-    {
-        get
-        {
-            try { return _synthesizer.Voice.Culture.Name; }
-            catch (InvalidOperationException) { return CultureInfo.CurrentUICulture.Name; }
-        }
-    }
-    public bool ConfigureVoice(string? requestedName, int? rate, int? volume)
-    {
-        lock (_gate)
-        {
-            try
-            {
-                var installed = _synthesizer.GetInstalledVoices()
-                    .Where(voice => voice.Enabled && voice.VoiceInfo.Culture.Name.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
-                    .Select(voice => voice.VoiceInfo)
-                    .ToArray();
-                var selected = !string.IsNullOrWhiteSpace(requestedName)
-                    ? installed.FirstOrDefault(voice => string.Equals(voice.Name, requestedName.Trim(), StringComparison.OrdinalIgnoreCase))
-                    : null;
-                selected ??= installed.FirstOrDefault(voice => string.Equals(voice.Name, "Microsoft Irina", StringComparison.OrdinalIgnoreCase));
-                selected ??= installed.FirstOrDefault(voice => string.Equals(voice.Name, "Microsoft Irina Desktop", StringComparison.OrdinalIgnoreCase));
-                selected ??= installed.FirstOrDefault();
-                if (selected is null)
-                {
-                    _russianVoiceAvailable = false;
-                    return false;
-                }
-                _synthesizer.SelectVoice(selected.Name);
-                _requestedVoiceName = string.IsNullOrWhiteSpace(requestedName) ? _requestedVoiceName : requestedName.Trim();
-                _synthesizer.Rate = Math.Clamp(rate ?? _synthesizer.Rate, -10, 10);
-                _synthesizer.Volume = Math.Clamp(volume ?? _synthesizer.Volume, 0, 100);
-                _russianVoiceAvailable = true;
-                return true;
-            }
-            catch (InvalidOperationException) { _russianVoiceAvailable = false; return false; }
-            catch (ArgumentException) { _russianVoiceAvailable = false; return false; }
-        }
-    }
-    public IReadOnlyList<string> GetRussianVoiceNames()
-    {
-        lock (_gate)
-        {
-            try
-            {
-                return _synthesizer.GetInstalledVoices()
-                    .Where(voice => voice.Enabled && voice.VoiceInfo.Culture.Name.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
-                    .Select(voice => voice.VoiceInfo.Name)
-                    .OrderBy(name => string.Equals(name, "Microsoft Irina", StringComparison.OrdinalIgnoreCase) ? 0
-                        : string.Equals(name, "Microsoft Irina Desktop", StringComparison.OrdinalIgnoreCase) ? 1 : 2)
-                    .ThenBy(name => name, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-            }
-            catch (InvalidOperationException) { return []; }
-        }
-    }
+    public bool IsRussianVoiceAvailable => _router.IsReady;
     public bool IsSpeaking => Volatile.Read(ref _speaking) != 0;
     public bool IsBusy => Volatile.Read(ref _busy) != 0;
+    public int QueueDepth => Volatile.Read(ref _queueDepth);
+    public long QueueDrops => Interlocked.Read(ref _queueDrops);
+    public bool LastCancelHadPlayback => Volatile.Read(ref _lastCancelHadPlayback) != 0;
+    public string? RequestedVoiceName => _router.FallbackUsed ? _requestedWindowsVoice : _requestedSileroVoice;
+    public string VoiceName => _router.VoiceName;
+    public string VoiceCulture => _router.VoiceCulture;
+    public bool VoiceFallbackUsed => _router.FallbackUsed;
+    public string TtsEngine => _router.EngineName;
+    public string TtsModel => _router.ModelName;
+    public bool TtsReady => _router.IsReady;
+    public bool TtsFallbackEnabled => _fallbackEnabled;
+    public string? TtsFallbackReason => _router.FallbackReason;
+    public int? TtsHostProcessId => _router.ProcessId;
+    public long TtsLastSynthesisMs => _router.LastSynthesisMs;
+    public long TtsModelLoadMs => _router.LastModelLoadMs;
+    public int TtsRestartCount => _router.RestartCount;
+    public int TtsSampleRate => _sampleRate;
+    public int TtsCpuThreads => _cpuThreads;
     public event Action<Exception>? Error;
 
-    public bool TryEnqueue(string text)
-        => TryEnqueue(text, out _);
-
-    public bool TryEnqueue(string text, out Task completion)
+    public bool ConfigureVoice(string? requestedName, int? rate, int? volume)
     {
-        var accepted = TryEnqueueDetailed(text, out var detailed);
-        completion = detailed;
-        return accepted;
+        _requestedWindowsVoice = string.IsNullOrWhiteSpace(requestedName) ? "Microsoft Irina" : requestedName.Trim();
+        _rate = Math.Clamp(rate ?? _rate, -10, 10); _volume = Math.Clamp(volume ?? _volume, 0, 100); return true;
     }
 
-    /// <summary>Queues speech without conflating queue acceptance with playback completion.</summary>
-    public bool TryEnqueueDetailed(string text, out Task<SpeechPlaybackResult> completion)
-        => TryEnqueueDetailed(text, playbackStarted: null, out completion);
+    public async Task<bool> ConfigureAsync(string? windowsFallbackVoice, int? rate, int? volume, string? sileroVoice,
+        int? sampleRate, int? cpuThreads, bool fallbackEnabled, CancellationToken cancellationToken = default, string? ttsEngine = null)
+    {
+        _requestedWindowsVoice = string.IsNullOrWhiteSpace(windowsFallbackVoice) ? "Microsoft Irina" : windowsFallbackVoice.Trim();
+        _requestedSileroVoice = string.IsNullOrWhiteSpace(sileroVoice) ? "aidar" : sileroVoice.Trim();
+        _rate = Math.Clamp(rate ?? 0, -10, 10); _volume = Math.Clamp(volume ?? 90, 0, 100);
+        _sampleRate = sampleRate is 24000 or 48000 ? sampleRate.Value : 48000; _cpuThreads = Math.Clamp(cpuThreads ?? 4, 1, 32); _fallbackEnabled = fallbackEnabled;
+        return await _router.ConfigureAsync(_requestedWindowsVoice, _rate, _volume, _fallbackEnabled, _requestedSileroVoice, _sampleRate, _cpuThreads, cancellationToken, ttsEngine).ConfigureAwait(false);
+    }
 
-    /// <summary>
-    /// Queues speech and invokes <paramref name="playbackStarted"/> immediately
-    /// before the synthesizer starts emitting audio.  Keeping this callback on
-    /// the queue item (rather than in the caller) is important: a response may
-    /// wait behind another response and must not open its technical interval
-    /// while it is merely queued.
-    /// </summary>
+    public IReadOnlyList<string> GetRussianVoiceNames() => _router.GetRussianVoiceNames();
+    public IReadOnlyList<object> GetTtsVoices() => _router.GetTtsVoices();
+    public bool TryEnqueue(string text) => TryEnqueue(text, out _);
+    public bool TryEnqueue(string text, out Task completion) { var ok = TryEnqueueDetailed(text, null, out var task); completion = task; return ok; }
+    public bool TryEnqueueDetailed(string text, out Task<SpeechPlaybackResult> completion) => TryEnqueueDetailed(text, null, out completion);
+
     public bool TryEnqueueDetailed(string text, Func<Task>? playbackStarted, out Task<SpeechPlaybackResult> completion)
     {
-        var completed = new TaskCompletionSource<SpeechPlaybackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        completion = completed.Task;
-        if (_disposed || QuietMode || !_russianVoiceAvailable || string.IsNullOrWhiteSpace(text))
+        var source = new TaskCompletionSource<SpeechPlaybackResult>(TaskCreationOptions.RunContinuationsAsynchronously); completion = source.Task;
+        if (_disposed || QuietMode || string.IsNullOrWhiteSpace(text) || text.Length > 600)
         {
-            var errorCode = _disposed
-                ? "VOICE_HOST_STOPPED"
-                : QuietMode
-                    ? "VOICE_QUIET_MODE"
-                    : string.IsNullOrWhiteSpace(text)
-                        ? "VOICE_ASSISTANT_EMPTY_ANSWER"
-                        : "VOICE_RUSSIAN_VOICE_UNAVAILABLE";
-            completed.TrySetResult(new SpeechPlaybackResult(
-                QuietMode ? SpeechPlaybackState.Cancelled : SpeechPlaybackState.Failed,
-                false,
-                errorCode));
-            return false;
+            source.TrySetResult(new SpeechPlaybackResult(QuietMode ? SpeechPlaybackState.Cancelled : SpeechPlaybackState.Failed, false,
+                _disposed ? "VOICE_HOST_STOPPED" : QuietMode ? "VOICE_QUIET_MODE" : string.IsNullOrWhiteSpace(text) ? "VOICE_ASSISTANT_EMPTY_ANSWER" : "TTS_SYNTHESIS_FAILED")); return false;
         }
         lock (_gate)
         {
             Volatile.Write(ref _busy, 1);
-            if (_queue.Writer.TryWrite(new SpeechRequest(text, completed, Volatile.Read(ref _cancelGeneration), playbackStarted)))
-            {
-                Interlocked.Increment(ref _queueDepth);
-                return true;
-            }
-            if (!_queue.Reader.TryPeek(out _)) Volatile.Write(ref _busy, 0);
-            Interlocked.Increment(ref _queueDrops);
-            completed.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Failed, false, "VOICE_ASSISTANT_QUEUE_FULL"));
-            return false;
+            if (_queue.Writer.TryWrite(new SpeechRequest(text.Trim(), source, Volatile.Read(ref _cancelGeneration), Stopwatch.GetTimestamp(), playbackStarted))) { Interlocked.Increment(ref _queueDepth); return true; }
+            Interlocked.Increment(ref _queueDrops); source.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Failed, false, "VOICE_ASSISTANT_QUEUE_FULL"));
+            if (!_queue.Reader.TryPeek(out _)) Volatile.Write(ref _busy, 0); return false;
         }
     }
 
@@ -215,155 +115,76 @@ public sealed class SpeechResponder : IDisposable
     {
         try
         {
-            await foreach (var request in _queue.Reader.ReadAllAsync(_shutdown.Token))
+            await foreach (var request in _queue.Reader.ReadAllAsync(_shutdown.Token).ConfigureAwait(false))
             {
                 Interlocked.Decrement(ref _queueDepth);
+                if (QuietMode || request.Generation != Volatile.Read(ref _cancelGeneration)) { request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false)); UpdateBusy(); continue; }
+                Volatile.Write(ref _speaking, 1);
                 try
                 {
-                    if (QuietMode)
+                    var queueWait = ElapsedMs(request.AcceptedAt);
+                    var synthesized = await _router.SynthesizeAsync(request.Text, new TtsOptions(_requestedSileroVoice, _sampleRate, _rate, _volume, _cpuThreads), _shutdown.Token).ConfigureAwait(false);
+                    if (!synthesized.Success || synthesized.AudioPath is null)
+                    { request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Failed, false, synthesized.ErrorCode ?? "VOICE_TTS_UNAVAILABLE", synthesized.Engine, synthesized.Model, synthesized.Voice, _router.FallbackUsed, queueWait, synthesized.SynthesisMs)); continue; }
+                    try
                     {
-                        request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false, "VOICE_QUIET_MODE"));
-                        continue;
+                        if (request.Generation != Volatile.Read(ref _cancelGeneration)) { request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false, "TTS_AUDIO_CANCELLED", synthesized.Engine, synthesized.Model, synthesized.Voice, _router.FallbackUsed, queueWait, synthesized.SynthesisMs)); continue; }
+                        var started = false;
+                        var playback = await _player.PlayAsync(synthesized.AudioPath, _volume, async () =>
+                        {
+                            started = true;
+                            if (request.PlaybackStarted is null) return;
+                            try { await request.PlaybackStarted().ConfigureAwait(false); }
+                            catch (Exception callbackError) { Error?.Invoke(callbackError); }
+                        }, _shutdown.Token).ConfigureAwait(false);
+                        request.Completion.TrySetResult(new SpeechPlaybackResult(playback.Played ? SpeechPlaybackState.Played : playback.Cancelled ? SpeechPlaybackState.Cancelled : SpeechPlaybackState.Failed, started, playback.ErrorCode, synthesized.Engine, synthesized.Model, synthesized.Voice, _router.FallbackUsed, queueWait, synthesized.SynthesisMs, playback.PlaybackMs));
                     }
-                    if (request.Generation != Volatile.Read(ref _cancelGeneration))
-                    {
-                        request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false));
-                        continue;
-                    }
-                    Volatile.Write(ref _speaking, 1);
-                    // SpeakAsync invokes the callback immediately after the
-                    // synthesizer accepts the text. This is the first point
-                    // at which playback can actually begin; queued items do
-                    // not create a technical interval while waiting.
-                    var playback = await SpeakAsync(request.Text, request.Generation, request.PlaybackStarted, _shutdown.Token).ConfigureAwait(false);
-                    request.Completion.TrySetResult(playback);
+                    finally { WindowsTtsEngine.TryDelete(synthesized.AudioPath); }
                 }
                 catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { break; }
-                catch (OperationCanceledException)
-                {
-                    request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, true));
-                }
-                catch (Exception ex)
-                {
-                    Error?.Invoke(ex);
-                    request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Failed, true, "VOICE_TTS_FAILED"));
-                }
-                finally
-                {
-                    Volatile.Write(ref _speaking, 0);
-                    request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false));
-                    lock (_gate)
-                    {
-                        if (!_queue.Reader.TryPeek(out _)) Volatile.Write(ref _busy, 0);
-                    }
-                }
+                catch (OperationCanceledException) { request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false, "TTS_AUDIO_CANCELLED")); }
+                catch (Exception ex) { Error?.Invoke(ex); request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Failed, false, "VOICE_TTS_FAILED")); }
+                finally { Volatile.Write(ref _speaking, 0); UpdateBusy(); }
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
     }
 
-    private async Task<SpeechPlaybackResult> SpeakAsync(string text, long generation, Func<Task>? playbackStarted, CancellationToken cancellationToken)
+    public bool Test() => TryEnqueue("Здравствуйте. Я Мифодий. Голосовой помощник готов к работе.");
+    public async Task<SpeechPlaybackResult> TestAsync(CancellationToken cancellationToken = default)
     {
-        var completed = new TaskCompletionSource<SpeechPlaybackResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        EventHandler<SpeakCompletedEventArgs>? handler = null;
-        handler = (_, args) => completed.TrySetResult(
-            args.Cancelled
-                ? new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, true)
-                : args.Error is null
-                    ? new SpeechPlaybackResult(SpeechPlaybackState.Played, true)
-                    : new SpeechPlaybackResult(SpeechPlaybackState.Failed, true, "VOICE_TTS_FAILED"));
-        lock (_gate)
-        {
-            if (generation != Volatile.Read(ref _cancelGeneration))
-                return new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false);
-            _synthesizer.SpeakCompleted += handler;
-            try
-            {
-                _activePlayback = completed;
-                _synthesizer.SpeakAsync(text);
-            }
-            catch
-            {
-                _activePlayback = null;
-                _synthesizer.SpeakCompleted -= handler;
-                throw;
-            }
-        }
-        if (playbackStarted is not null)
-        {
-            try { await playbackStarted().ConfigureAwait(false); }
-            catch (Exception ex)
-            {
-                // Timeline/diagnostic persistence must never prevent
-                // the accepted speech from completing.
-                Error?.Invoke(ex);
-            }
-        }
-        return await AwaitPlaybackAsync(completed, handler, cancellationToken).ConfigureAwait(false);
+        if (!TryEnqueueDetailed("Здравствуйте. Я Мифодий. Голосовой помощник готов к работе.", out var completion))
+            return await completion.ConfigureAwait(false);
+        return await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
-
-    private async Task<SpeechPlaybackResult> AwaitPlaybackAsync(TaskCompletionSource<SpeechPlaybackResult> playbackSource, EventHandler<SpeakCompletedEventArgs> handler, CancellationToken cancellationToken)
-    {
-        var playback = playbackSource.Task;
-        try { return await playback.WaitAsync(cancellationToken).ConfigureAwait(false); }
-        catch (OperationCanceledException)
-        {
-            lock (_gate)
-            {
-                try { _synthesizer.SpeakAsyncCancelAll(); } catch (InvalidOperationException) { }
-            }
-            return new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, true);
-        }
-        finally
-        {
-            lock (_gate)
-            {
-                if (ReferenceEquals(_activePlayback, playbackSource)) _activePlayback = null;
-                _synthesizer.SpeakCompleted -= handler;
-            }
-        }
-    }
-
-    private static int ReadIntEnvironment(string name, int fallback, int minimum, int maximum)
-        => int.TryParse(Environment.GetEnvironmentVariable(name), out var value)
-            ? Math.Clamp(value, minimum, maximum)
-            : fallback;
-
-    public bool Test() => TryEnqueue("Голосовой помощник готов");
 
     public void CancelAll()
     {
         lock (_gate)
         {
             Interlocked.Increment(ref _cancelGeneration);
-            var playbackWasActive = _activePlayback is not null || Volatile.Read(ref _speaking) != 0;
-            _activePlayback?.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, true));
-            try { _synthesizer.SpeakAsyncCancelAll(); } catch (InvalidOperationException) { }
-            while (_queue.Reader.TryRead(out var request))
-            {
-                Interlocked.Decrement(ref _queueDepth);
-                request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false));
-            }
-            // Keep microphone frames on the dedicated cancel recognizer until
-            // the playback worker has observed cancellation. Otherwise the
-            // normal wake recognizer can consume the acoustic tail of TTS.
-            Volatile.Write(ref _busy, playbackWasActive ? 1 : 0);
+            var playbackWasActive = Volatile.Read(ref _speaking) != 0;
+            Volatile.Write(ref _lastCancelHadPlayback, playbackWasActive ? 1 : 0);
+            _player.Stop();
+            while (_queue.Reader.TryRead(out var request)) { Interlocked.Decrement(ref _queueDepth); request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false, "TTS_AUDIO_CANCELLED")); }
+            Volatile.Write(ref _busy, 0);
         }
+    }
+
+    private void UpdateBusy() { lock (_gate) if (Volatile.Read(ref _queueDepth) == 0 && Volatile.Read(ref _speaking) == 0) Volatile.Write(ref _busy, 0); }
+    private static long ElapsedMs(long started) => (long)(Stopwatch.GetTimestamp() - started) * 1000 / Stopwatch.Frequency;
+
+    private static TtsEngineRouter CreateDefaultRouter(string expectedBuildIdentity)
+    {
+        var root = AppContext.BaseDirectory; var executable = Path.Combine(root, "TtsHost", OperatingSystem.IsWindows() ? "TtsHost.exe" : "TtsHost"); var modelRoot = Path.Combine(root, "TtsHost", "Models", "silero-v5_5_ru");
+        var identity = string.IsNullOrWhiteSpace(expectedBuildIdentity) ? Environment.GetEnvironmentVariable("WHISPERX_BUILD_IDENTITY") ?? string.Empty : expectedBuildIdentity;
+        var silero = new SileroTtsEngine(executable, modelRoot, Environment.GetEnvironmentVariable("ATOM_TTS_MODEL_SHA256") ?? string.Empty, identity);
+        return new TtsEngineRouter(silero, new WindowsTtsEngine(), new SpeechAudioPlayer());
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        Interlocked.Increment(ref _cancelGeneration);
-        _queue.Writer.TryComplete();
-        _shutdown.Cancel();
-        lock (_gate)
-        {
-            try { _synthesizer.SpeakAsyncCancelAll(); } catch (InvalidOperationException) { }
-        }
-        try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        lock (_gate) _synthesizer.Dispose();
-        _shutdown.Dispose();
+        if (_disposed) return; _disposed = true; CancelAll(); _queue.Writer.TryComplete(); _shutdown.Cancel();
+        try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { } _shutdown.Dispose(); _router.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }

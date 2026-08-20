@@ -1557,7 +1557,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         // older than five minutes. The current-user Host advertises the
         // active local session in its heartbeat; only sessions without that
         // confirmation are surfaced as interrupted.
-        var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions s LEFT JOIN recorder_agents a ON a.id=s.agent_id WHERE s.state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND s.created_at < now()-interval '5 minutes' AND (s.local_session_id IS NULL OR a.id IS NULL OR COALESCE(a.capabilities->'deviceHealth'->>'activeSessionId','') <> s.local_session_id::text)");
+        var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions s LEFT JOIN recorder_agents a ON a.id=s.agent_id WHERE s.state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND (s.local_session_id IS NULL OR a.id IS NULL OR COALESCE(a.capabilities->'deviceHealth'->>'activeSessionId','') <> s.local_session_id::text) AND (COALESCE(a.last_seen_at,s.created_at) < now()-interval '5 minutes' OR (COALESCE(s.total_samples,0)=0 AND COALESCE(s.started_at,s.created_at) < now()-interval '5 minutes'))");
         return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
     }
 

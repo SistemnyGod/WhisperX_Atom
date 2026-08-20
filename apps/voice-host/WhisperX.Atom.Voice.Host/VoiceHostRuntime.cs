@@ -63,7 +63,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoiceIntentParser _parser = new();
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
-    private readonly SpeechResponder _speech = new();
+    private readonly SpeechResponder _speech = new(BuildIdentity);
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
@@ -271,6 +271,19 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 LiveAudioDrops = Interlocked.Read(ref _liveAudioDrops) + _liveAudio.Drops,
                 LiveSegmentsPublished = Interlocked.Read(ref _liveSegmentsPublished),
                 LiveSegmentsSuppressed = Interlocked.Read(ref _liveSegmentsSuppressed),
+                TtsEngine = _speech.TtsEngine,
+                TtsModel = _speech.TtsModel,
+                TtsReady = _speech.TtsReady,
+                TtsVoice = _speech.VoiceName,
+                TtsCulture = _speech.VoiceCulture,
+                TtsSampleRate = _speech.TtsEngine == "SILERO" ? _speech.TtsSampleRate : null,
+                TtsCpuThreads = _speech.TtsEngine == "SILERO" ? _speech.TtsCpuThreads : null,
+                TtsHostProcessId = _speech.TtsHostProcessId,
+                TtsModelLoadMs = _speech.TtsModelLoadMs,
+                TtsLastSynthesisMs = _speech.TtsLastSynthesisMs,
+                TtsFallbackUsed = _speech.VoiceFallbackUsed,
+                TtsFallbackReason = _speech.TtsFallbackReason,
+                TtsRestartCount = _speech.TtsRestartCount,
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
         }
@@ -307,17 +320,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var sensitivity = ReadString(payload, "sensitivity");
             if (!string.IsNullOrWhiteSpace(sensitivity)) SetSensitivity(sensitivity);
             var voiceName = ReadString(payload, "voiceName");
+            var windowsFallbackVoice = ReadString(payload, "windowsFallbackVoice") ?? voiceName;
             var voiceRate = ReadNullableInt(payload, "voiceRate");
             var voiceVolume = ReadNullableInt(payload, "voiceVolume");
-            if (!_speech.ConfigureVoice(voiceName, voiceRate, voiceVolume))
-            {
-                _lastErrorCode = "VOICE_RUSSIAN_VOICE_UNAVAILABLE";
-                // Never report a healthy listening host when the configured
-                // response voice is unavailable.  Continuing here used to
-                // make CONFIGURE succeed while the first command silently
-                // had no safe Russian TTS response.
-                return new VoiceHostResponse(false, Snapshot, _lastErrorCode);
-            }
+            var ttsVoice = ReadString(payload, "ttsVoice");
+            var ttsEngine = ReadString(payload, "ttsEngine");
+            var ttsSampleRate = ReadNullableInt(payload, "ttsSampleRate");
+            var ttsCpuThreads = ReadNullableInt(payload, "ttsCpuThreads");
+            var ttsFallbackEnabled = ReadBool(payload, "ttsFallbackEnabled", true);
+            var ttsReady = await _speech.ConfigureAsync(windowsFallbackVoice, voiceRate, voiceVolume, ttsVoice, ttsSampleRate, ttsCpuThreads, ttsFallbackEnabled, cancellationToken, ttsEngine).ConfigureAwait(false);
+            if (!ttsReady) _lastErrorCode = "VOICE_TTS_UNAVAILABLE";
 
             var normalized = string.IsNullOrWhiteSpace(requestedDevice) ? _microphoneDeviceId : requestedDevice.Trim();
             if (!string.Equals(normalized, _microphoneDeviceId, StringComparison.OrdinalIgnoreCase) || !_audio.IsRunning)
@@ -518,10 +530,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             case "QUIET_MODE": QuietMode = ReadBool(payload, "enabled", false); return new VoiceHostResponse(true, Snapshot);
             case "TEST_TTS":
                 if (_speech.QuietMode) return new VoiceHostResponse(false, Error: "VOICE_QUIET_MODE");
-                return _speech.Test()
-                    ? new VoiceHostResponse(true, new { ok = true })
-                    : new VoiceHostResponse(false, Error: _speech.IsRussianVoiceAvailable ? "VOICE_HOST_BUSY" : "VOICE_RUSSIAN_VOICE_UNAVAILABLE");
+                var ttsTest = await _speech.TestAsync(cancellationToken).ConfigureAwait(false);
+                return new VoiceHostResponse(ttsTest.State is SpeechPlaybackState.Played or SpeechPlaybackState.Accepted,
+                    new { ok = ttsTest.State is SpeechPlaybackState.Played or SpeechPlaybackState.Accepted, playbackState = ttsTest.State.ToString().ToUpperInvariant(), errorCode = ttsTest.ErrorCode, engine = ttsTest.Engine, model = ttsTest.Model, voice = ttsTest.Voice, fallbackUsed = ttsTest.FallbackUsed });
             case "LIST_RUSSIAN_VOICES": return new VoiceHostResponse(true, new { voices = _speech.GetRussianVoiceNames(), selectedVoice = _speech.VoiceName });
+            case "LIST_TTS_VOICES": return new VoiceHostResponse(true, new { voices = _speech.GetTtsVoices(), selectedVoice = _speech.RequestedVoiceName, engine = _speech.TtsEngine });
             case "SPEAK_ASSISTANT_RESULT":
             {
                 var answer = ReadString(payload, "voiceAnswer") ?? string.Empty;
@@ -1441,6 +1454,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_MODEL_INTEGRITY_FAILED" => "Модель распознавания повреждена.",
         "VOICE_NATIVE_RUNTIME_UNAVAILABLE" => "Не доступен native runtime Vosk.",
         "VOICE_RUSSIAN_VOICE_UNAVAILABLE" => "Не найден установленный русский голос Windows (например, Microsoft Irina).",
+        "VOICE_TTS_UNAVAILABLE" => "Локальный голосовой движок недоступен; запись и команды продолжают работать без озвучки.",
+        "TTS_MODEL_MISSING" => "Локальная модель Silero не установлена; используется голос Windows.",
+        "TTS_MODEL_INTEGRITY_FAILED" => "Проверка локальной модели Silero не пройдена; используется голос Windows.",
+        "TTS_BUILD_IDENTITY_MISMATCH" => "Версия локального голосового движка не совпадает с Voice Host.",
+        "TTS_HOST_TIMEOUT" => "Локальный голосовой движок не ответил вовремя.",
         "VOICE_MICROPHONE_UNAVAILABLE" => "Микрофон недоступен или запрещён Windows.",
         "VOICE_HOST_OWNER_MISMATCH" => "Voice Host запущен от другого пользователя Windows.",
         "VOICE_HOST_PROCESS_UNINSPECTABLE" => "Не удалось проверить владельца или путь Voice Host.",

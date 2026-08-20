@@ -1,0 +1,9 @@
+{
+  "modelId": "silero-v5_5_ru",
+  "fileName": "v5_5_ru.pt",
+  "officialUrl": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt",
+  "speakers": ["aidar", "eugene", "baya", "kseniya", "xenia"],
+  "sampleRates": [24000, 48000],
+  "license": "Internal non-commercial pilot; verify current Silero licensing before commercial distribution",
+  "sha256": ""
+}

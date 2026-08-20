@@ -42,6 +42,7 @@ $required = [ordered]@{
     RecorderHost = "RecorderHost\WhisperX.Atom.Recorder.Host.exe"
     VoiceHost = "VoiceHost\WhisperX.Atom.Voice.Host.exe"
     Updater = "Desktop\WhisperX.Atom.Updater.exe"
+    TtsHost = "TtsHost\TtsHost.exe"
 }
 $artifactResults = [ordered]@{}
 foreach ($entry in $required.GetEnumerator()) {
@@ -78,8 +79,11 @@ if ($installedPresent) {
 
 $runningResults = @()
 if ($CheckRunningProcesses) {
-    $processNames = @("WhisperX.Atom.Desktop", "WhisperX.Atom.Recorder.Host", "WhisperX.Atom.Voice.Host")
-    foreach ($process in @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)) {
+    $processNames = @("WhisperX.Atom.Desktop", "WhisperX.Atom.Recorder.Host", "WhisperX.Atom.Voice.Host", "TtsHost")
+    $runningProcesses = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
+    $ttsProcesses = @($runningProcesses | Where-Object { $_.ProcessName -ieq "TtsHost" })
+    if ($ttsProcesses.Count -gt 1) { Fail "RUNTIME_MULTIPLE_TTS_HOSTS" "count=$($ttsProcesses.Count)" }
+    foreach ($process in $runningProcesses) {
         try { $path = [IO.Path]::GetFullPath($process.MainModule.FileName) }
         catch { Fail "RUNTIME_PROCESS_UNINSPECTABLE" "PID=$($process.Id) Name=$($process.ProcessName)" }
         if (-not $path.StartsWith($installed + "\", [StringComparison]::OrdinalIgnoreCase)) {

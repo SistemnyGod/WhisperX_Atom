@@ -95,7 +95,20 @@ public sealed record VoiceHostSnapshot(
     string LiveSystemTrackState = "WAITING",
     long LiveAudioDrops = 0,
     long LiveSegmentsPublished = 0,
-    long LiveSegmentsSuppressed = 0);
+    long LiveSegmentsSuppressed = 0,
+    string TtsEngine = "SILERO",
+    string TtsModel = "v5_5_ru",
+    bool TtsReady = false,
+    string? TtsVoice = null,
+    string? TtsCulture = null,
+    int? TtsSampleRate = 48000,
+    int? TtsCpuThreads = 4,
+    int? TtsHostProcessId = null,
+    long TtsModelLoadMs = 0,
+    long TtsLastSynthesisMs = 0,
+    bool TtsFallbackUsed = false,
+    string? TtsFallbackReason = null,
+    int TtsRestartCount = 0);
 
 public sealed record VoiceResponse(
     string Text,

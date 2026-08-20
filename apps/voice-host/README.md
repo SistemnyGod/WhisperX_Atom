@@ -55,8 +55,13 @@ installed Russian Windows voice.
 - Stop executes immediately at confidence >= 0.70; otherwise it requires a separate `Мифодий, подтверждаю` within 10 seconds.
 - Managed startup validates the installed path, build identity, PID and parent process. `STATUS` remains available while startup is in progress; commands return `VOICE_HOST_NOT_INITIALIZED` until the runtime is ready.
 - `TEST_SPEECH` is parse-only and never calls Recorder. The latest microphone telemetry contains RMS, peak, clipping, signal state and effective endpoint; pre-wake audio is discarded.
-- Every response uses live Windows TTS. The default is Microsoft Irina, then
+- Responses use `SpeechResponder` → `TtsEngineRouter` → local Silero
+  `v5_5_ru` on CPU by default. The host returns a temporary WAV to the
+  `SpeechAudioPlayer`; it never receives model/output paths from the caller.
+  After repeated Silero failures the router uses Microsoft Irina, then
   Microsoft Irina Desktop, then another installed `ru-RU` voice. English
-  voices and the legacy WAV bundle are not fallbacks.
+  voices and the legacy WAV bundle are not fallbacks. See
+  [`apps/tts-host/README.md`](../tts-host/README.md) for the JSONL protocol,
+  model staging and non-commercial pilot licensing.
 - Voice audio is not persisted by the fixed-command path.
 - Missing model, microphone, native runtime, or Recorder IPC places SessionHost in `DEGRADED` instead of crashing.

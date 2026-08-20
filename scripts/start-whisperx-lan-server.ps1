@@ -154,19 +154,44 @@ WHERE status='RUNNING'
   AND attempt >= 1;
 
 UPDATE recording_sessions AS session
-SET state='AWAITING_AGENT_RECONNECT'
+SET state=CASE
+            WHEN COALESCE(session.total_samples, 0) = 0
+                 AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+              THEN 'ADMIN_REVIEW'
+            ELSE 'AWAITING_AGENT_RECONNECT'
+          END
 FROM recorder_agents AS agent
 WHERE session.agent_id=agent.id
   AND session.state='RECORDING'
-  AND COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
   AND (session.local_session_id IS NULL
        OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
-          <> session.local_session_id::text);
+          <> session.local_session_id::text)
+  AND (
+        COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+        OR (
+          COALESCE(session.total_samples, 0) = 0
+          AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+        )
+      );
+
+UPDATE meetings AS meeting
+SET status=CASE WHEN session.state='ADMIN_REVIEW' THEN 'ADMIN_REVIEW' ELSE 'RECORDING_INTERRUPTED' END
+FROM recording_sessions AS session
+WHERE session.meeting_id=meeting.id
+  AND session.state IN ('AWAITING_AGENT_RECONNECT','ADMIN_REVIEW')
+  AND meeting.status='RECORDING';
 
 UPDATE recording_sessions
 SET state='ADMIN_REVIEW'
 WHERE state='AWAITING_AGENT_RECONNECT'
   AND created_at < now() - interval '24 hours';
+
+UPDATE meetings AS meeting
+SET status='ADMIN_REVIEW'
+FROM recording_sessions AS session
+WHERE session.meeting_id=meeting.id
+  AND session.state='ADMIN_REVIEW'
+  AND meeting.status IN ('RECORDING','RECORDING_INTERRUPTED');
 COMMIT;
 '@
     $recoveryCompose = $composeBase + @("--profile", "core", "exec", "-T", "postgres", "psql", "-U", "whisperx", "-d", "whisperx_atom", "-v", "ON_ERROR_STOP=1", "-At")

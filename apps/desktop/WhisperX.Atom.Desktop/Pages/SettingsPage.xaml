@@ -200,10 +200,31 @@
                                     </ComboBox>
                                     <TextBlock Text="Голос ответа" Style="{StaticResource CaptionStyle}" />
                                     <ComboBox ItemsSource="{Binding VoiceOptions}" SelectedItem="{Binding VoiceName, Mode=TwoWay}" PlaceholderText="Выберите русский голос" AutomationProperties.Name="Голос ответов Мифодия" />
+                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="Движок" Style="{StaticResource CaptionStyle}" />
+                                            <ComboBox SelectedValue="{Binding TtsEngine, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Движок синтеза речи">
+                                                <ComboBoxItem Content="Локальный Silero" Tag="SILERO" />
+                                                <ComboBoxItem Content="Windows fallback" Tag="WINDOWS" />
+                                            </ComboBox>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Spacing="2">
+                                            <TextBlock Text="Голос Silero" Style="{StaticResource CaptionStyle}" />
+                                            <ComboBox SelectedValue="{Binding TtsVoice, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Голос Silero">
+                                                <ComboBoxItem Content="Айдар" Tag="aidar" />
+                                                <ComboBoxItem Content="Евгений" Tag="eugene" />
+                                                <ComboBoxItem Content="Байя" Tag="baya" />
+                                                <ComboBoxItem Content="Ксения" Tag="kseniya" />
+                                                <ComboBoxItem Content="Ксения (Xenia)" Tag="xenia" />
+                                            </ComboBox>
+                                        </StackPanel>
+                                    </Grid>
+                                    <CheckBox Content="Разрешить Windows fallback при недоступности Silero" IsChecked="{Binding TtsFallbackEnabled, Mode=TwoWay}" />
                                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Height="20">
                                         <TextBlock Text="{Binding VoiceVoiceStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceVoiceStatus}" />
                                         <TextBlock Grid.Column="1" Text="{Binding VoiceSpeechQueue}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSpeechQueue}" />
                                     </Grid>
+                                    <TextBlock Text="{Binding VoiceTtsStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceTtsStatus}" />
                                     <TextBlock Text="{Binding VoiceLiveMode}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveMode}" />
                                     <TextBlock Text="{Binding VoiceLiveTracks}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveTracks}" />
                                     <TextBlock Text="{Binding VoiceLiveStats}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveStats}" />
