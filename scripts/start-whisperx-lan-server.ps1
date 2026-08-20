@@ -32,6 +32,7 @@ $autoSummary = Read-EnvValue "AUTO_SUMMARY_ENABLED"
 $assistantEnabled = Read-EnvValue "ASSISTANT_ENABLED"
 $enableDiarization = Read-EnvValue "ENABLE_DIARIZATION"
 $diarizationMode = Read-EnvValue "DIARIZATION_MODE"
+$diarizationRevision = Read-EnvValue "DIARIZATION_MODEL_REVISION"
 $hfToken = Read-EnvValue "HF_TOKEN"
 if ([string]::IsNullOrWhiteSpace($assistantEnabled)) { $assistantEnabled = "true" }
 if ([string]::IsNullOrWhiteSpace($lanAddress) -or [string]::IsNullOrWhiteSpace($serverOrigin)) { throw "LAN_CONFIG_INVALID: LAN_BIND_ADDRESS and SERVER_ORIGIN are required." }
@@ -48,6 +49,12 @@ if ($enableDiarization -notin @("true", "false")) { throw "LAN_DIARIZATION_FLAG_
 if ([string]::IsNullOrWhiteSpace($diarizationMode)) { $diarizationMode = "preferred" }
 if ($diarizationMode -notin @("preferred", "required", "disabled")) { throw "LAN_DIARIZATION_MODE_INVALID: use preferred, required or disabled." }
 if ($enableDiarization -eq "true" -and $diarizationMode -ne "disabled") {
+    # A floating or placeholder model revision makes a rebuild non-reproducible.
+    # Fail before Docker starts rather than advertising a diarization-capable
+    # runtime that may silently pull a different gated model later.
+    if ([string]::IsNullOrWhiteSpace($diarizationRevision) -or $diarizationRevision -match "^(replace-with|latest|main|master|dev|dirty)" -or $diarizationRevision -notmatch '^[0-9a-fA-F]{7,64}$') {
+        throw "LAN_DIARIZATION_REVISION_REQUIRED: DIARIZATION_MODEL_REVISION must be an immutable model revision (commit/SHA)."
+    }
     # Never start a LAN runtime that advertises diarization while the worker
     # cannot authenticate to the gated pyannote repositories.  The token is
     # read from the operator-owned env file and is never logged.

@@ -20,6 +20,13 @@ def test_release_manifest_has_pinned_release_identity_and_models():
     assert "onnxRuntime = $onnxVersion" in manifest
 
 
+def test_lan_launcher_fails_closed_for_unpinned_diarization_revision():
+    launcher = read("scripts/start-whisperx-lan-server.ps1")
+    assert 'Read-EnvValue "DIARIZATION_MODEL_REVISION"' in launcher
+    assert "LAN_DIARIZATION_REVISION_REQUIRED" in launcher
+    assert "immutable model revision" in launcher
+
+
 def test_llm_download_fails_before_replacing_mismatched_production_model():
     script = read("scripts/llm-download.ps1")
     assert "refusing to replace existing file" in script

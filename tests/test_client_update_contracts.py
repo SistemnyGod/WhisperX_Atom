@@ -48,6 +48,16 @@ def test_update_install_is_fail_closed_when_recorder_health_is_unknown():
     service = read("apps/desktop/WhisperX.Atom.Desktop/Services/ClientUpdateService.cs")
     assert "UpdateBlocked" in service
     assert 'SetState(ClientUpdateState.UpdateBlocked, "RECORDER_STATE_UNKNOWN")' in service
+
+
+def test_desktop_surfaces_server_protocol_and_minimum_version_mismatch():
+    service = read("apps/desktop/WhisperX.Atom.Desktop/Services/ClientUpdateService.cs")
+    window = read("apps/desktop/WhisperX.Atom.Desktop/MainWindow.xaml.cs")
+    assert "GetServerCompatibilityError" in service
+    assert "API_VERSION_MISMATCH" in service
+    assert "VERSION_MISMATCH" in service
+    assert "GetServerCompatibilityError(serverVersion)" in window
+    assert "Требуется обновление Desktop для этого сервера" in window
     assert "if (!response.IsReachable || response.Health is null)" in service
     assert "catch\n        {\n            // Never install while Recorder liveness is unknown." in service
     assert "IsKnownRecorderState" in service

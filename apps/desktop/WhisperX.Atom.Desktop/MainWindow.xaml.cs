@@ -227,6 +227,19 @@ public sealed partial class MainWindow : Window
         var authenticated = backendAvailable && await _services.Backend.EnsureAuthenticatedAsync(cancellationToken);
         if (authenticated && recorderAvailable)
             QueueAgentRecovery(cancellationToken);
+        if (serverVersion is not null && _services.Updates.GetServerCompatibilityError(serverVersion) is { } compatibilityError)
+        {
+            // Do not reduce a protocol/version mismatch to a generic readiness
+            // failure.  The user must see an actionable gate before recording
+            // or delivery is trusted against this server.
+            SetRuntimeStatus(backendAvailable, authenticated, recorderAvailable, false, recorderHealth);
+            SetSystemStatus(
+                compatibilityError == "API_VERSION_MISMATCH"
+                    ? "Сервер и Desktop используют несовместимый API"
+                    : "Требуется обновление Desktop для этого сервера",
+                "DangerBrush");
+            return;
+        }
         if (serverVersion is not null && Math.Abs((serverVersion.ServerTimeUtc - DateTimeOffset.UtcNow).TotalMinutes) > 5)
         {
             SetSystemStatus("Время ПК отличается от времени сервера более чем на 5 минут", "WarningBrush");

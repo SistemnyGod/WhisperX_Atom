@@ -56,6 +56,24 @@ public sealed class ClientUpdateService : IDisposable
     public string CurrentBuildIdentity => typeof(ClientUpdateService).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "dev";
     public event Action? StateChanged;
 
+    /// <summary>
+    /// Validates the server's compatibility contract before the Desktop starts
+    /// treating readiness failures as a transient network problem.  A server
+    /// may be newer than this client during a rolling upgrade, but it must
+    /// explicitly advertise a protocol version and minimum Desktop version
+    /// that this binary can satisfy.
+    /// </summary>
+    public string? GetServerCompatibilityError(DesktopSystemVersion server)
+    {
+        if (server.ApiVersion != 1)
+            return "API_VERSION_MISMATCH";
+        if (!TryVersion(server.MinDesktopVersion, out var minimumDesktop)
+            || !TryVersion(CurrentVersion, out var currentDesktop)
+            || currentDesktop < minimumDesktop)
+            return "VERSION_MISMATCH";
+        return null;
+    }
+
     public void CancelDownload() => _downloadCts?.Cancel();
 
     public void StartMonitoring()

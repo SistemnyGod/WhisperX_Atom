@@ -85,3 +85,16 @@ legacy pipeline несогласованными состояниями. Под�
 
 Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для совместимости, но не
 образуют второй поддерживаемый server pipeline.
+
+## Эксплуатационные safety-gates
+
+- `scripts/start-whisperx-lan-server.ps1` запускает диаризацию только при
+  заданном immutable `DIARIZATION_MODEL_REVISION` и валидном `HF_TOKEN`.
+  Placeholder, `latest`, `main`, `dev` и `dirty` блокируют запуск до старта
+  Docker; это предотвращает непредсказуемую замену gated-модели.
+- Desktop проверяет `apiVersion` и `minDesktopVersion` из `/api/system/version`.
+  Несовместимый сервер получает явный `API_VERSION_MISMATCH` или
+  `VERSION_MISMATCH`, а не маскируется под обычную ошибку readiness.
+- `scripts/export-diagnostics.ps1` формирует безопасный ZIP только из
+  operational metadata. В него не попадают `.env`, токены, cookies, аудио,
+  текст стенограммы и содержимое саммари.
