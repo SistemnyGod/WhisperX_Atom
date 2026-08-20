@@ -9,10 +9,12 @@ param(
     [string]$VoiceHostPath,
     [string]$DesktopPath,
     [string]$OutputPath,
+    [string]$RecordingSessionId,
     [ValidateRange(1, 500)][int]$VoiceTarget = 50,
     [ValidateRange(30, 1800)][int]$TimeoutSeconds = 240,
     [switch]$RunMicrophone,
     [switch]$RunBroker,
+    [switch]$RunLive,
     [switch]$RestartDesktop
 )
 
@@ -305,18 +307,30 @@ function Select-Meeting([string]$requestedId) {
     throw "MIFODIY_READY_MEETING_NOT_FOUND"
 }
 
-function Get-QueryOutcome([string]$CaseId, [string]$Question, [string]$RequestedMode, [string]$ActiveMeetingId) {
+function Get-QueryOutcome(
+    [string]$CaseId,
+    [string]$Question,
+    [string]$RequestedMode = "AUTO",
+    [string]$ActiveMeetingId,
+    [string]$ConversationId,
+    [string]$RecordingSessionId,
+    [string]$CaptureState
+) {
     $startedAt = [DateTimeOffset]::UtcNow
     $commandId = [guid]::NewGuid().ToString("N")
     $traceId = [guid]::NewGuid().ToString("N")
-    $request = Invoke-Api POST "/api/assistant/requests" @{
+    $requestBody = [ordered]@{
         question = $Question
         requestedMode = $RequestedMode
         activeMeetingId = if ($ActiveMeetingId) { $ActiveMeetingId } else { $null }
+        recordingSessionId = if ($RecordingSessionId) { $RecordingSessionId } else { $null }
+        captureState = if ($CaptureState) { $CaptureState } else { $null }
+        conversationId = if ($ConversationId) { $ConversationId } else { $null }
         source = "VOICE"
         commandId = $commandId
         traceId = $traceId
     }
+    $request = Invoke-Api POST "/api/assistant/requests" $requestBody
     if ($request.StatusCode -ne 202 -or $null -eq $request.Body) { throw "MIFODIY_ASSISTANT_REQUEST_REJECTED:$CaseId" }
     $queryId = [string]$request.Body.queryId
     $conversationId = [string]$request.Body.conversationId
@@ -343,7 +357,7 @@ function Get-QueryOutcome([string]$CaseId, [string]$Question, [string]$Requested
         case = $CaseId
         queryId = $queryId
         conversationId = $conversationId
-        requestedMode = $RequestedMode
+        requestedMode = if ($query.PSObject.Properties.Name -contains "requestedMode" -and $query.requestedMode) { [string]$query.requestedMode } else { $RequestedMode }
         resolvedMode = [string]$query.assistantMode
         meetingId = [string]$query.meetingId
         status = $status
@@ -383,7 +397,8 @@ function Get-QueryOutcomeById([string]$CaseId, [string]$QueryId, [string]$Expect
     return [ordered]@{
         case = $CaseId
         queryId = $QueryId
-        requestedMode = 'CURRENT_MEETING'
+        conversationId = [string]$query.conversationId
+        requestedMode = if ($query.PSObject.Properties.Name -contains 'requestedMode' -and $query.requestedMode) { [string]$query.requestedMode } else { 'AUTO' }
         resolvedMode = [string]$query.assistantMode
         meetingId = [string]$query.meetingId
         expectedMeetingId = $ExpectedMeetingId
@@ -494,6 +509,12 @@ try {
     if ($Mode -eq "Installed" -or -not [string]::IsNullOrWhiteSpace($MeetingId)) {
         if ([string]::IsNullOrWhiteSpace($Password)) { throw "MIFODIY_AUTH_PASSWORD_REQUIRED" }
         Login $Username $Password | Out-Null
+
+        # Prove that a voice/text request can use the server-owned AUTO
+        # resolver without a selected meeting.  This must remain GENERAL_CHAT
+        # even when the server has a previous meeting conversation.
+        $general = Get-QueryOutcome "general-auto" "Сколько киловатт в мегаватте?" "AUTO" $null $null $null $null
+
         $meeting = Select-Meeting $MeetingId
         $effectiveMeetingId = [string]$meeting.id
         if ([string]::IsNullOrWhiteSpace($OtherMeetingId)) {
@@ -504,32 +525,74 @@ try {
             } catch { }
         }
 
-        $known = Get-QueryOutcome "known-answer" "Какой подтверждённый итог или решение обсуждалось на этом совещании?" "CURRENT_MEETING" $effectiveMeetingId
+        # AUTO is deliberately used here: capture/selection is context, not
+        # a Desktop-side mode decision.  A strong retrieval hit should route
+        # this to CURRENT_MEETING (or LIVE_MEETING only when live evidence is
+        # actually present).
+        $known = Get-QueryOutcome "known-answer" "Какой подтверждённый итог или решение обсуждалось на этом совещании?" "AUTO" $effectiveMeetingId $null $null $null
         if ($Mode -eq "Installed" -and $RunBroker) {
             $voiceBrokerGate = Get-VoiceBrokerGate $VoiceHostPath $effectiveMeetingId
             if (-not $voiceBrokerGate.passed) { $errors.Add([string]($voiceBrokerGate.errorCode ?? "VOICE_BROKER_GATE_NOT_READY")) }
         }
-        $repairQuestion = Get-QueryOutcome "question-repair" "Кто отвечал за ремонт?" "CURRENT_MEETING" $effectiveMeetingId
-        $deadlineQuestion = Get-QueryOutcome "question-deadline" "Какой срок назвали?" "CURRENT_MEETING" $effectiveMeetingId
-        $pumpQuestion = Get-QueryOutcome "question-pump" "Что решили по насосу?" "CURRENT_MEETING" $effectiveMeetingId
-        $noEvidence = Get-QueryOutcome "no-evidence" "Назови номер паспорта человека, которого не было на этом совещании." "CURRENT_MEETING" $effectiveMeetingId
-        $numberDate = Get-QueryOutcome "number-date" "Какие даты, сроки или числа подтверждённо упоминались на совещании?" "CURRENT_MEETING" $effectiveMeetingId
+        $repairQuestion = Get-QueryOutcome "question-repair" "Кто отвечал за ремонт?" "AUTO" $effectiveMeetingId $null $null $null
+        $deadlineQuestion = Get-QueryOutcome "question-deadline" "Какой срок назвали?" "AUTO" $effectiveMeetingId $null $null $null
+        $pumpQuestion = Get-QueryOutcome "question-pump" "Что решили по насосу?" "AUTO" $effectiveMeetingId $null $null $null
+        $noEvidence = Get-QueryOutcome "no-evidence" "Назови номер паспорта человека, которого не было на этом совещании." "AUTO" $effectiveMeetingId $null $null $null
+        $numberDate = Get-QueryOutcome "number-date" "Какие даты, сроки или числа подтверждённо упоминались на совещании?" "AUTO" $effectiveMeetingId $null $null $null
         $crossQuestion = if (-not [string]::IsNullOrWhiteSpace($OtherMeetingId)) {
             "Ответь по встрече $OtherMeetingId, хотя активное совещание другое: что там решили?"
         } else {
             "Что решили на другой встрече, не открывая её стенограмму?"
         }
-        $cross = Get-QueryOutcome "cross-meeting" $crossQuestion "CURRENT_MEETING" $effectiveMeetingId
+        $cross = Get-QueryOutcome "cross-meeting" $crossQuestion "AUTO" $effectiveMeetingId $null $null $null
         $longQuestion = ("Сформулируй подтверждённый ответ по текущему совещанию: " + ("какие решения, сроки, риски и ответственные зафиксированы; " * 18)).Substring(0, 1450)
-        $long = Get-QueryOutcome "long-question" $longQuestion "CURRENT_MEETING" $effectiveMeetingId
+        $long = Get-QueryOutcome "long-question" $longQuestion "AUTO" $effectiveMeetingId $null $null $null
+
+        # Follow-up must reuse the persisted conversation scope, not the
+        # previous assistant answer as evidence.  The API resolver will only
+        # inherit CURRENT_MEETING after a scope-safe conversation lookup.
+        $followUp = $null
+        if (-not [string]::IsNullOrWhiteSpace([string]$known.conversationId)) {
+            $followUp = Get-QueryOutcome "follow-up" "А кто отвечает?" "AUTO" $effectiveMeetingId ([string]$known.conversationId) $null $null
+        }
+
+        # History is intentionally sent without an active meeting.  It is an
+        # AUTO routing probe; the result may be MEETING_MEMORY or a safe
+        # current scope recovered from the user's latest conversation, but it
+        # must never fall back to GENERAL_CHAT with meeting-shaped wording.
+        $history = Get-QueryOutcome "history-auto" "Когда раньше обсуждали насос?" "AUTO" $null $null $null $null
+
+        $live = $null
+        if ($RunLive) {
+            if ([string]::IsNullOrWhiteSpace($RecordingSessionId)) {
+                $errors.Add("MIFODIY_LIVE_SESSION_REQUIRED")
+            }
+            else {
+                $live = Get-QueryOutcome "live-auto" "Что сейчас решили по насосу?" "AUTO" $effectiveMeetingId $null $RecordingSessionId "RECORDING"
+            }
+        }
         $knownOk = $known.status -in @("READY", "ANSWERED", "ANSWERED_WITH_WARNING") -and $known.evidenceCount -gt 0
         $questionCases = @($repairQuestion, $deadlineQuestion, $pumpQuestion)
         $questionCasesOk = $questionCases.Count -eq 3 -and ($questionCases | Where-Object {
-            $_.resolvedMode -ne "CURRENT_MEETING" -or $_.status -notin $terminalStatuses
+            $_.resolvedMode -notin @("CURRENT_MEETING", "LIVE_MEETING") -or $_.status -notin $terminalStatuses
         }).Count -eq 0
         $noEvidenceOk = $noEvidence.status -in @("NO_EVIDENCE", "GROUNDING_REJECTED", "LOW_TRANSCRIPT_QUALITY", "NEEDS_REVIEW") -and $noEvidence.safeNoConfirmedFact
         $crossScopeOk = ([string]$cross.meetingId -eq $effectiveMeetingId) -and (@($cross.evidenceMeetingIds | Where-Object { $_ -ne $effectiveMeetingId }).Count -eq 0)
-        $assistantPassed = $knownOk -and $questionCasesOk -and $noEvidenceOk -and $crossScopeOk -and $long.status -in $terminalStatuses
+        $generalOk = $general.resolvedMode -eq "GENERAL_CHAT" -and $general.status -in $terminalStatuses
+        $followUpOk = $null -ne $followUp -and $followUp.requestedMode -eq "AUTO" -and
+            $followUp.resolvedMode -in @("CURRENT_MEETING", "LIVE_MEETING") -and
+            [string]$followUp.conversationId -eq [string]$known.conversationId -and
+            $followUp.status -in $terminalStatuses -and
+            (@($followUp.evidenceMeetingIds | Where-Object { $_ -ne $effectiveMeetingId }).Count -eq 0)
+        $historyOk = $history.resolvedMode -in @("MEETING_MEMORY", "CURRENT_MEETING", "LIVE_MEETING") -and
+            $history.status -in $terminalStatuses -and
+            $history.resolvedMode -ne "GENERAL_CHAT"
+        $liveOk = -not $RunLive -or ($null -ne $live -and $live.requestedMode -eq "AUTO" -and
+            $live.resolvedMode -eq "LIVE_MEETING" -and [string]$live.meetingId -eq $effectiveMeetingId -and
+            $live.status -in $terminalStatuses -and $live.evidenceCount -gt 0 -and
+            (@($live.evidenceMeetingIds | Where-Object { $_ -ne $effectiveMeetingId }).Count -eq 0))
+        $assistantPassed = $generalOk -and $knownOk -and $questionCasesOk -and $noEvidenceOk -and $crossScopeOk -and
+            $long.status -in $terminalStatuses -and $followUpOk -and $historyOk -and $liveOk
 
         $logout = Invoke-Api POST "/api/auth/logout" $null -AllowError
         $afterLogout = Invoke-Api GET "/api/auth/me" $null -AllowError
@@ -588,7 +651,7 @@ $artifact = [ordered]@{
     voice = $voiceGate
     voiceCommands = $voiceCommandGate
     voiceBroker = $voiceBrokerGate
-    assistant = [ordered]@{ cases = @($assistantResults); passed = $assistantPassed; currentMeetingId = if ($meeting) { [string]$meeting.id } else { $null }; otherMeetingIdProvided = -not [string]::IsNullOrWhiteSpace($OtherMeetingId) }
+    assistant = [ordered]@{ cases = @($assistantResults); passed = $assistantPassed; autoRouting = $true; followUpRequired = $true; liveRequested = [bool]$RunLive; currentMeetingId = if ($meeting) { [string]$meeting.id } else { $null }; otherMeetingIdProvided = -not [string]::IsNullOrWhiteSpace($OtherMeetingId) }
     logout = $logoutCheck
     duplicateDelivery = $duplicateDelivery
     errors = @($errors)

@@ -47,12 +47,15 @@ def test_production_gate_can_exercise_voice_host_to_desktop_broker_path():
 
 
 def test_assistant_acceptance_covers_scoped_and_negative_questions_without_text_artifacts():
-    for marker in ("CURRENT_MEETING", "known-answer", "no-evidence", "number-date", "cross-meeting", "long-question"):
+    for marker in ("AUTO", "GENERAL_CHAT", "CURRENT_MEETING", "known-answer", "general-auto", "follow-up", "history-auto", "no-evidence", "number-date", "cross-meeting", "long-question"):
         assert marker in SCRIPT
     assert "evidenceMeetingIds" in SCRIPT
     assert "safeNoConfirmedFact" in SCRIPT
     assert "elapsedMs" in SCRIPT
     assert "NO_EVIDENCE" in SCRIPT and "GROUNDING_REJECTED" in SCRIPT
+    assert "conversationId" in SCRIPT and "followUpOk" in SCRIPT
+    assert 'requestedMode -eq "AUTO"' in SCRIPT
+    assert "RunLive" in SCRIPT and "MIFODIY_LIVE_SESSION_REQUIRED" in SCRIPT
     assert "answerTextIncluded = $false" in SCRIPT
     assert "questionsIncluded = $false" in SCRIPT
 

@@ -5,7 +5,8 @@
 ## Что проверяется
 
 ```text
-Мифодий → Desktop Broker → CURRENT_MEETING → Russian FTS → Qwen
+Мифодий → Desktop Broker → requestedMode=AUTO → AssistantModeResolver
+        → GENERAL/LIVE/CURRENT/MEMORY → Russian FTS → Qwen
         → claims/evidence → grounding → Microsoft Irina
 ```
 
@@ -16,14 +17,20 @@
   решили по насосу`); этот шаг не открывает Recorder и не вызывает Desktop
   Broker;
 - 50 (или указанное число) wake/command тестов через установленный Voice Host;
-- вопрос с ожидаемым evidence;
+- общий вопрос без встречи (`AUTO → GENERAL_CHAT`);
+- вопрос с ожидаемым evidence (`AUTO → CURRENT_MEETING` или `LIVE_MEETING`
+  только при наличии live evidence);
 - три прикладных вопроса по текущему совещанию: ответственный за ремонт,
   названный срок и решение по насосу;
+- follow-up «А кто отвечает?» с тем же серверным `conversationId` и scope;
+- исторический вопрос без активной встречи (`AUTO`, без разрешения в
+  `GENERAL_CHAT`);
 - вопрос, для которого evidence не должно существовать;
 - вопрос с датами/числами;
 - проверку границы `CURRENT_MEETING`;
 - опциональный production-path через установленный Voice Host control pipe:
-  `TEXT → VoiceIntentParser → Desktop Broker → CURRENT_MEETING`. Для него
+  `TEXT → VoiceIntentParser → Desktop Broker → AUTO → AssistantModeResolver`.
+  Для него
   используется `-RunBroker`; три вопроса должны вернуть `queryId`, быть приняты
   в playback и завершиться только по текущей встрече. Этот режим требует
   открытого Desktop с выбранной встречей и может произнести короткое
@@ -77,6 +84,19 @@ pwsh -NoProfile -File scripts/e2e-mifodiy.ps1 `
 Recorder: он отправляет только три вопроса через Voice Host `TEXT`, ожидает
 серверные `queryId/status/evidence` и фиксирует в JSON только идентификаторы,
 статусы и количество evidence.
+
+Для отдельного live-контекста во время реальной записи можно явно передать
+идентификатор сессии и включить `-RunLive`:
+
+```powershell
+pwsh -NoProfile -File scripts/e2e-mifodiy.ps1 `
+  -Mode Installed -RunLive -MeetingId '<meeting-id>' `
+  -RecordingSessionId '<recording-session-id>'
+```
+
+Этот шаг считается успешным только при `AUTO → LIVE_MEETING`, совпадающем
+`meetingId`, непустом evidence и terminal-статусе. Без `-RunLive` он не
+блокирует обычную acceptance.
 
 Контролируемый перезапуск Desktop не выполняется по умолчанию. Его можно включить отдельно после проверки отсутствия активной записи:
 
