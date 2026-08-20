@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -63,7 +64,16 @@ public sealed record RecordingPipelineChain(
     Guid? SummaryId,
     string? SummaryStatus,
     string? PipelineCorrelationId,
-    JsonDocument? StageTimings = null);
+    JsonDocument? StageTimings = null,
+    DateTime? CreatedAt = null,
+    DateTime? UpdatedAt = null)
+{
+    /// <summary>Canonical server-owned state used by all clients.</summary>
+    [JsonIgnore]
+    public RecordingPipelineSnapshot? SnapshotOverride { get; init; }
+
+    public RecordingPipelineSnapshot Snapshot => SnapshotOverride ?? RecordingPipelineSnapshotResolver.Resolve(this);
+};
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt,
     string? ContentValidity = null, string? GenerationState = null, string? ErrorCode = null);
@@ -806,7 +816,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                    r.enrichment_job_id,ej.status,ej.stage,
                    r.transcript_v2_id,v2.status,
                    r.summary_job_id,sj.status,sj.stage,
-                   r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings
+                   r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings,r.created_at,r.updated_at
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -832,7 +842,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             reader.IsDBNull(14) ? null : reader.GetGuid(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16),
             reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18),
             reader.IsDBNull(19) ? null : reader.GetString(19),
-            reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20)));
+            reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20)),
+            reader.GetDateTime(21), reader.GetDateTime(22));
     }
 
     public async Task<IReadOnlyList<RecordingPipelineChain>> GetMeetingPipelineChainsAsync(Guid meetingId)
@@ -842,7 +853,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             SELECT r.recording_session_id,r.meeting_id,r.media_asset_id,a.status,
                    r.asr_job_id,aj.status,aj.stage,r.transcript_v1_id,v1.status,
                    r.enrichment_job_id,ej.status,ej.stage,r.transcript_v2_id,v2.status,
-                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings
+                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id,rs.stage_timings,r.created_at,r.updated_at
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -867,9 +878,38 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 reader.IsDBNull(12) ? null : reader.GetGuid(12), reader.IsDBNull(13) ? null : reader.GetString(13),
                 reader.IsDBNull(14) ? null : reader.GetGuid(14), reader.IsDBNull(15) ? null : reader.GetString(15), reader.IsDBNull(16) ? null : reader.GetString(16),
                 reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetString(19),
-                reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20))));
+                reader.IsDBNull(20) ? null : JsonDocument.Parse(reader.GetString(20)),
+                reader.GetDateTime(21), reader.GetDateTime(22)));
         }
         return result;
+    }
+
+    /// <summary>
+    /// Returns a short-lived readiness view for pipeline workers.  It is
+    /// deliberately derived from the same heartbeat rows as system
+    /// readiness, so a queued stage can explain whether it is waiting for a
+    /// worker rather than merely waiting on an opaque timeout.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, bool>> GetPipelineWorkerReadinessAsync(string? expectedIdentity = null)
+    {
+        var now = DateTime.UtcNow;
+        var rows = await ListWorkerRuntimeAsync();
+        return rows
+            .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group =>
+                {
+                    var item = group.OrderByDescending(value => value.LastSeenAt).First();
+                    var fresh = now - item.LastSeenAt.ToUniversalTime() <= TimeSpan.FromSeconds(60)
+                        && now - item.LastSeenAt.ToUniversalTime() >= TimeSpan.Zero;
+                    var active = item.Status is "READY" or "BUSY" or "DEGRADED";
+                    var identityMatches = string.IsNullOrWhiteSpace(expectedIdentity)
+                        || string.Equals(expectedIdentity, "dev", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(expectedIdentity, item.Version, StringComparison.Ordinal);
+                    return fresh && active && identityMatches;
+                },
+                StringComparer.OrdinalIgnoreCase);
     }
 
     private static async Task EnsurePipelineLineageAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid sessionId, Guid meetingId, Guid? mediaAssetId, Guid? asrJobId, string? correlationId)

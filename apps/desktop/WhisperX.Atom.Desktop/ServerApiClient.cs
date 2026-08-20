@@ -116,6 +116,56 @@ public sealed record DesktopJob(
             || errorCode.Equals("TRANSCRIPT_INVALID_TIMECODE", StringComparison.OrdinalIgnoreCase)
             || errorCode.Equals("AUDIO_PROCESSING_ERROR", StringComparison.OrdinalIgnoreCase));
 }
+public sealed record DesktopPipelineStage(
+    string Status,
+    string? Stage = null,
+    int? Progress = null,
+    Guid? Id = null,
+    string? ErrorCode = null);
+public sealed record DesktopPipelineSnapshot(
+    Guid RecordingSessionId,
+    Guid MeetingId,
+    string? PipelineCorrelationId,
+    string OverallStatus,
+    string CurrentStage,
+    string? BlockedBy,
+    bool Retryable,
+    string? ErrorCode,
+    DesktopPipelineStage Delivery,
+    DesktopPipelineStage Media,
+    DesktopPipelineStage Asr,
+    DesktopPipelineStage TranscriptV1,
+    DesktopPipelineStage Enrichment,
+    DesktopPipelineStage TranscriptV2,
+    DesktopPipelineStage Summary,
+    JsonDocument? StageTimings = null,
+    DateTime? CreatedAt = null,
+    DateTime? UpdatedAt = null);
+public sealed record DesktopPipelineRun(
+    Guid RecordingSessionId,
+    Guid MeetingId,
+    Guid? MediaAssetId,
+    string? MediaStatus,
+    Guid? AsrJobId,
+    string? AsrJobStatus,
+    string? AsrJobStage,
+    Guid? TranscriptV1Id,
+    string? TranscriptV1Status,
+    Guid? EnrichmentJobId,
+    string? EnrichmentJobStatus,
+    string? EnrichmentJobStage,
+    Guid? TranscriptV2Id,
+    string? TranscriptV2Status,
+    Guid? SummaryJobId,
+    string? SummaryJobStatus,
+    string? SummaryJobStage,
+    Guid? SummaryId,
+    string? SummaryStatus,
+    string? PipelineCorrelationId,
+    JsonDocument? StageTimings = null,
+    DesktopPipelineSnapshot? Snapshot = null,
+    DateTime? CreatedAt = null,
+    DateTime? UpdatedAt = null);
 public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null);
 public sealed record DesktopAssistantRequestAccepted(
     string QueryId,
@@ -660,6 +710,13 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/jobs", null, cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<List<DesktopJob>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<IReadOnlyList<DesktopPipelineRun>> GetMeetingPipelineAsync(Guid meetingId, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/pipeline", null, cancellationToken);
+        if (!response.IsSuccessStatusCode) return [];
+        return await response.Content.ReadFromJsonAsync<List<DesktopPipelineRun>>(_json, cancellationToken) ?? [];
     }
 
     public async Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default)

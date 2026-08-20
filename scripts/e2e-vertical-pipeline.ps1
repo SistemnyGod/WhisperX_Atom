@@ -108,6 +108,9 @@ try {
     summaryJobId = [string]$chain.summaryJobId
     summaryId = [string]$chain.summaryId
     pipelineCorrelationId = [string]$chain.pipelineCorrelationId
+    pipelineSnapshot = $chain.snapshot
+    pipelineOverallStatus = [string]$chain.snapshot.overallStatus
+    pipelineCurrentStage = [string]$chain.snapshot.currentStage
     stageTimings = $chain.stageTimings
     checkpoints = [ordered]@{
       mediaReadyAtUtc = $mediaReadyAtUtc

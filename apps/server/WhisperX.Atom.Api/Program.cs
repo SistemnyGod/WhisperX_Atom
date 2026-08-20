@@ -1394,13 +1394,13 @@ app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/status", async (Guid ses
     return status is null ? Results.NotFound(new { error = "recording_session_not_found" }) : Results.Ok(status);
 });
 
-app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/pipeline", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/pipeline", async (Guid sessionId, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
     var chain = await store.GetRecordingPipelineChainAsync(agentId, sessionId);
     return chain is null
         ? Results.NotFound(new { error = "recording_pipeline_not_found" })
-        : Results.Ok(chain);
+        : Results.Ok(await AddPipelineReadinessAsync(chain, store, configuration));
 });
 
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
@@ -1427,10 +1427,12 @@ app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext contex
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
 });
-app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
-    return Results.Ok(await store.GetMeetingPipelineChainsAsync(id));
+    var chains = await store.GetMeetingPipelineChainsAsync(id);
+    var readiness = await TryGetPipelineReadinessAsync(store, configuration);
+    return Results.Ok(chains.Select(chain => chain with { SnapshotOverride = RecordingPipelineSnapshotResolver.Resolve(chain, readiness) }).ToList());
 });
 app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store, Database database) =>
 {
@@ -1930,6 +1932,32 @@ app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
 });
 
 app.Run();
+
+static async Task<RecordingPipelineChain> AddPipelineReadinessAsync(
+    RecordingPipelineChain chain,
+    UnifiedProductStore store,
+    IConfiguration configuration)
+{
+    var readiness = await TryGetPipelineReadinessAsync(store, configuration);
+    return chain with { SnapshotOverride = RecordingPipelineSnapshotResolver.Resolve(chain, readiness) };
+}
+
+static async Task<IReadOnlyDictionary<string, bool>?> TryGetPipelineReadinessAsync(
+    UnifiedProductStore store,
+    IConfiguration configuration)
+{
+    try
+    {
+        return await store.GetPipelineWorkerReadinessAsync(
+            configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"]);
+    }
+    catch
+    {
+        // Lineage remains useful during a heartbeat table outage; a null
+        // readiness map makes the resolver rely on durable stage rows.
+        return null;
+    }
+}
 
 internal static class ClientUpdateJsonExtensions
 {

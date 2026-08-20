@@ -199,6 +199,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     private DesktopTranscript? _transcript;
     private DesktopSummary? _summary;
     private DesktopJob? _latestJob;
+    private DesktopPipelineSnapshot? _pipelineSnapshot;
 
     public MeetingWorkspaceViewModel(FrontendServices services) => _services = services;
 
@@ -252,6 +253,17 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             if (!SetProperty(ref _latestJob, value)) return;
             OnPropertyChanged(nameof(CanRetryLatestJob));
         }
+    }
+
+    /// <summary>
+    /// Canonical server-owned pipeline state.  Jobs remain available for
+    /// detailed diagnostics and rolling compatibility, but the user-facing
+    /// status is derived from this snapshot whenever the API provides it.
+    /// </summary>
+    public DesktopPipelineSnapshot? PipelineSnapshot
+    {
+        get => _pipelineSnapshot;
+        private set => SetProperty(ref _pipelineSnapshot, value);
     }
 
     public bool IsLoading
@@ -357,6 +369,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             }
 
             var jobsTask = LoadPartAsync(() => _services.Backend.GetJobsAsync(meetingId, cancellationToken), "pipeline", errors);
+            var pipelineTask = LoadPartAsync(() => _services.Backend.GetMeetingPipelineAsync(meetingId, cancellationToken), "состояние конвейера", errors);
             var transcriptTask = LoadPartAsync(() => _services.Backend.GetTranscriptAsync(meetingId, cancellationToken), "стенограмму", errors);
             var speakersTask = LoadPartAsync(() => _services.Backend.GetSpeakersAsync(meetingId, cancellationToken), "спикеров", errors);
             var mediaTask = LoadPartAsync(() => _services.Backend.GetMediaAsync(meetingId, cancellationToken), "файлы", errors);
@@ -365,14 +378,17 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             var tasksTask = LoadPartAsync(() => _services.Backend.GetTasksAsync(meetingId, cancellationToken), "поручения", errors);
             var versionsTask = LoadPartAsync(() => _services.Backend.GetTranscriptVersionsAsync(meetingId, cancellationToken), "версии стенограммы", errors);
 
-            await Task.WhenAll(jobsTask, transcriptTask, speakersTask, mediaTask, summaryTask, decisionsTask, tasksTask, versionsTask);
+            await Task.WhenAll(jobsTask, pipelineTask, transcriptTask, speakersTask, mediaTask, summaryTask, decisionsTask, tasksTask, versionsTask);
 
             var jobs = await jobsTask;
             foreach (var job in jobs ?? []) Jobs.Add(job);
             LatestJob = Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault() ?? Jobs.LastOrDefault();
-            PipelineText = LatestJob is null
-                ? "Обработка ещё не запущена"
-                : $"{DisplayStatus(LatestJob.Status)} · {DisplayStage(LatestJob.Stage)} · {LatestJob.Progress}%";
+            PipelineSnapshot = (await pipelineTask)?.LastOrDefault()?.Snapshot;
+            PipelineText = PipelineSnapshot is not null
+                ? FormatPipelineSnapshot(PipelineSnapshot)
+                : LatestJob is null
+                    ? "Обработка ещё не запущена"
+                    : $"{DisplayStatus(LatestJob.Status)} · {DisplayStage(LatestJob.Stage)} · {LatestJob.Progress}%";
 
             var transcript = await transcriptTask;
             Transcript = transcript;
@@ -561,6 +577,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         Transcript = null;
         Summary = null;
         LatestJob = null;
+        PipelineSnapshot = null;
         DurationText = "—";
         PipelineText = "Загрузка состояния обработки…";
         SummaryText = "Саммари пока не готово.";
@@ -595,6 +612,50 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
     };
 
     private static string DisplayStatus(string status) => string.IsNullOrWhiteSpace(status) ? "—" : UiStatusMapper.Text(status);
+
+    private static string FormatPipelineSnapshot(DesktopPipelineSnapshot snapshot)
+    {
+        var text = $"{DisplayPipelineStatus(snapshot.OverallStatus)} · {DisplayPipelineStage(snapshot.CurrentStage)}";
+        if (!string.IsNullOrWhiteSpace(snapshot.BlockedBy))
+            text += $" · ожидание: {DisplayBlockedBy(snapshot.BlockedBy)}";
+        if (snapshot.Retryable && !string.IsNullOrWhiteSpace(snapshot.ErrorCode))
+            text += $" · {snapshot.ErrorCode}";
+        return text;
+    }
+
+    private static string DisplayPipelineStatus(string status) => status.ToUpperInvariant() switch
+    {
+        "READY" => "Готово",
+        "PARTIAL_READY" => "Частично готово",
+        "WAITING" => "Ожидает обработки",
+        "PROCESSING" => "Обрабатывается",
+        "DEGRADED" => "С предупреждением",
+        "FAILED" => "Ошибка обработки",
+        _ => DisplayStatus(status)
+    };
+
+    private static string DisplayPipelineStage(string stage) => stage.ToUpperInvariant() switch
+    {
+        "MEDIA" => "Подготовка медиа",
+        "ASR" => "Распознавание речи",
+        "TRANSCRIPT_V1" => "Стенограмма V1",
+        "ENRICHMENT" => "Выравнивание и диаризация",
+        "TRANSCRIPT_V2" => "Стенограмма V2",
+        "SUMMARY" => "Саммари",
+        "COMPLETE" => "Все этапы завершены",
+        _ => DisplayStage(stage)
+    };
+
+    private static string DisplayBlockedBy(string blockedBy) => blockedBy.ToUpperInvariant() switch
+    {
+        "MEDIA_WORKER" => "Media Worker",
+        "GPU_WORKER" => "GPU Worker",
+        "ENRICHMENT_WORKER" => "Enrichment Worker",
+        "SUMMARY_WORKER" => "Summary Worker",
+        "ASR" => "ASR",
+        "ENRICHMENT" => "обогащение стенограммы",
+        _ => blockedBy
+    };
 
     private static string DisplayStage(string stage)
     {

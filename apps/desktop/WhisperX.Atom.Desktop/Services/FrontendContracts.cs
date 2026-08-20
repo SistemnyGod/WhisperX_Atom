@@ -91,6 +91,7 @@ public interface IBackendService : IDisposable
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopPipelineRun>> GetMeetingPipelineAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> RetryJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopMeetingCancellation?> CancelMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> DeleteMeetingAsync(Guid meetingId, CancellationToken cancellationToken = default);
