@@ -734,7 +734,9 @@ class AssistantRepository:
 class AssistantWorker:
     def __init__(self) -> None:
         self.repository = AssistantRepository()
-        self.lease = PostgresGpuLease(self.repository.conninfo, priority=50)
+        # Assistant is interactive and must wait behind V1 ASR, but ahead of
+        # optional enrichment and automatic Summary work.
+        self.lease = PostgresGpuLease(self.repository.conninfo, priority=30)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None

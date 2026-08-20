@@ -19,7 +19,8 @@ class PostgresGpuLease:
         self._conninfo = conninfo or os.getenv("DATABASE_URL", "")
         self._key = key or os.getenv("GPU_LEASE_KEY", "whisperx-atom-gpu-0")
         self._wait_seconds = wait_seconds if wait_seconds is not None else int(os.getenv("GPU_LEASE_WAIT_SECONDS", "1800"))
-        # Lower values have precedence: ASR (10) > Assistant (50) > Summary (100).
+        # Lower values have precedence: ASR (10) > Assistant (30) >
+        # enrichment/V2 (50) > Summary (100).
         self._priority = max(0, int(priority))
         self._connection: psycopg.Connection[Any] | None = None
 
@@ -38,14 +39,14 @@ class PostgresGpuLease:
             """
             SELECT EXISTS(
                 SELECT 1 FROM jobs
-                WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
+                WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS')
                   AND (status='QUEUED' OR (status='RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at > now()))
             )
             """,
         ).fetchone()[0]
         if asr_pending:
             return True
-        return self._priority > 50 and bool(connection.execute(
+        return self._priority > 30 and bool(connection.execute(
             "SELECT EXISTS(SELECT 1 FROM assistant_queries WHERE status='QUEUED')",
         ).fetchone()[0])
 

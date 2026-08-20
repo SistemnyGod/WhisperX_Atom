@@ -37,3 +37,18 @@ def test_assistant_retry_metadata_is_additive_in_api_contract():
     client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
     assert "RetryCount" in store and "retry_count" in store
     assert "RetryCount" in client and "NextRetryAt" in client
+
+
+def test_gpu_priority_order_keeps_v1_ahead_of_assistant_enrichment_and_summary():
+    lease = read("workers/gpu_lease.py")
+    gpu = read("workers/ml_worker/worker.py")
+    assistant = read("workers/summary_worker/assistant.py")
+    summary = read("workers/summary_worker/worker.py")
+    assert "ASR (10)" in lease and "Assistant (30)" in lease
+    assert "priority=10" in gpu and "priority=50" in gpu
+    assert "self._enrichment_gpu_lease if enrichment_job else self._asr_gpu_lease" in gpu
+    assert "priority=30" in assistant
+    assert "priority=100" in summary
+    # Enrichment must not make itself look like pending V1 work.
+    asr_gate = lease.split("WHERE type IN", 1)[1].split("AND (status", 1)[0]
+    assert "TRANSCRIPT_ENRICH" not in asr_gate

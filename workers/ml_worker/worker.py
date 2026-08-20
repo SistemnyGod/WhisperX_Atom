@@ -120,7 +120,11 @@ class GpuWorker:
             checkpoint_store=checkpoint_store_from_env(),
         )
         self._repository = JobRepository()
-        self._gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
+        # ASR has precedence over optional enrichment.  Both leases use the
+        # same advisory-lock key, so this changes only queue ordering and
+        # never permits concurrent CUDA inference.
+        self._asr_gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
+        self._enrichment_gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=50)
         self._heartbeat = heartbeat
 
     def close(self) -> None:
@@ -196,7 +200,8 @@ class GpuWorker:
                 if await resident_llm_detected():
                     raise ResidentLlmConflict("resident_llama_server_must_be_stopped_before_transcription")
                 LOGGER.info("job=%s waiting for GPU lease path=%s", job_id, request.media_path)
-                async with self._gpu_lease:
+                gpu_lease = self._enrichment_gpu_lease if enrichment_job else self._asr_gpu_lease
+                async with gpu_lease:
                     LOGGER.info("job=%s acquired GPU lease", job_id)
                     # Include both bounded local scheduler wait and the
                     # cross-process PostgreSQL GPU lease wait in diagnostics.

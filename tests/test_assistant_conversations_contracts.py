@@ -209,7 +209,8 @@ def test_gpu_lease_prioritizes_asr_over_assistant_over_summary():
     assert "Lower values have precedence" in lease
     assert "TRANSCRIBE_ASR" in lease and "assistant_queries" in lease
     assert "priority=10" in ml
-    assert "priority=50" in assistant
+    assert "priority=30" in assistant
+    assert "priority=50" in ml
     assert "priority=100" in summary
 
 
