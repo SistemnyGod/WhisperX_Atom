@@ -34,7 +34,10 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     public bool IsReady => _useFallback ? _windows.IsReady : _silero.IsReady;
     public string EngineName => _useFallback ? _windows.EngineName : _silero.EngineName;
     public string ModelName => _useFallback ? _windows.ModelName : _silero.ModelName;
-    public string VoiceName => _useFallback ? _windows.VoiceName : "aidar";
+    // Report the configured/effective Silero speaker instead of the old
+    // hard-coded default.  This keeps STATUS/diagnostics truthful when the
+    // user selected eugene, baya, kseniya or xenia.
+    public string VoiceName => _useFallback ? _windows.VoiceName : _options.Voice;
     public string VoiceCulture => _useFallback ? _windows.VoiceCulture : "ru-RU";
     public bool FallbackUsed => _useFallback && !_explicitWindows;
     public string? FallbackReason => _fallbackReason;

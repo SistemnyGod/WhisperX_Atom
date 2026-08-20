@@ -1519,6 +1519,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_RUSSIAN_VOICE_UNAVAILABLE" => "Не найден установленный русский голос Windows (например, Microsoft Irina).",
         "VOICE_TTS_UNAVAILABLE" => "Локальный голосовой движок недоступен; запись и команды продолжают работать без озвучки.",
         "TTS_MODEL_MISSING" => "Локальная модель Silero не установлена; используется голос Windows.",
+        "TTS_MODEL_HASH_MISSING" => "Для локальной модели Silero отсутствует обязательный SHA256; используется голос Windows.",
         "TTS_MODEL_INTEGRITY_FAILED" => "Проверка локальной модели Silero не пройдена; используется голос Windows.",
         "TTS_BUILD_IDENTITY_MISMATCH" => "Версия локального голосового движка не совпадает с Voice Host.",
         "TTS_HOST_TIMEOUT" => "Локальный голосовой движок не ответил вовремя.",

@@ -75,6 +75,9 @@ def test_updater_never_forces_reboot_and_installer_carries_helper():
     assert "UPDATER_POST_INSTALL_IDENTITY_MISMATCH" in updater
     assert "UPDATER_ROLLBACK_SNAPSHOT_FAILED" in updater
     assert "TryRestoreDirectory" in updater
+    assert "RemoveFilesNotInSnapshot" in updater
+    assert "File.Delete(file)" in updater
+    assert "Directory.Delete(directory, true)" in updater
     assert "WhisperX.Atom.Updater.exe" in publish
     # Desktop wildcard payload includes the helper without adding a second
     # installer source that could diverge from the published identity.

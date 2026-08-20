@@ -118,14 +118,24 @@ public sealed class SileroTtsEngine : ITtsEngine
     {
         var modelPath = Path.Combine(_modelRoot, "v5_5_ru.pt");
         if (!File.Exists(modelPath)) { LastErrorCode = "TTS_MODEL_MISSING"; return false; }
-        if (string.IsNullOrWhiteSpace(_expectedModelSha256)) return true;
+        if (string.IsNullOrWhiteSpace(_expectedModelSha256))
+        {
+            LastErrorCode = "TTS_MODEL_HASH_MISSING";
+            return false;
+        }
         try
         {
             using var sha = SHA256.Create();
             using var stream = File.OpenRead(modelPath);
-            return string.Equals(Convert.ToHexString(sha.ComputeHash(stream)), _expectedModelSha256, StringComparison.OrdinalIgnoreCase);
+            var valid = string.Equals(Convert.ToHexString(sha.ComputeHash(stream)), _expectedModelSha256, StringComparison.OrdinalIgnoreCase);
+            if (!valid) LastErrorCode = "TTS_MODEL_INTEGRITY_FAILED";
+            return valid;
         }
-        catch { return false; }
+        catch
+        {
+            LastErrorCode = "TTS_MODEL_INTEGRITY_FAILED";
+            return false;
+        }
     }
 
     private static string ReadManifestHash(string root)

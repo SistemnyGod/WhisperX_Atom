@@ -161,10 +161,45 @@ static bool TryRestoreDirectory(string snapshot, string destination, string excl
 {
     try
     {
+        // A copy-only restore is not a rollback: files introduced by the
+        // failed package would survive and create a mixed runtime. Remove
+        // only managed files/directories absent from the snapshot; user data
+        // lives outside this Program Files install root.
+        RemoveFilesNotInSnapshot(snapshot, destination, excludedFile);
         CopyDirectory(snapshot, destination, excludedFile);
         return true;
     }
     catch { return false; }
+}
+
+static void RemoveFilesNotInSnapshot(string snapshot, string destination, string excludedFile)
+{
+    var snapshotRoot = Path.GetFullPath(snapshot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    var destinationRoot = Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    var excluded = Path.GetFullPath(excludedFile);
+    if (!Directory.Exists(destinationRoot)) return;
+
+    foreach (var file in Directory.EnumerateFiles(destinationRoot, "*", SearchOption.AllDirectories).ToArray())
+    {
+        if (string.Equals(Path.GetFullPath(file), excluded, StringComparison.OrdinalIgnoreCase)) continue;
+        var relative = Path.GetRelativePath(destinationRoot, file);
+        var snapshotFile = Path.Combine(snapshotRoot, relative);
+        if (!File.Exists(snapshotFile)) File.Delete(file);
+    }
+
+    foreach (var directory in Directory.EnumerateDirectories(destinationRoot, "*", SearchOption.AllDirectories)
+                 .OrderByDescending(path => path.Length).ToArray())
+    {
+        var relative = Path.GetRelativePath(destinationRoot, directory);
+        var snapshotDirectory = Path.Combine(snapshotRoot, relative);
+        if (Directory.Exists(snapshotDirectory)) continue;
+        // The updater is running from this root and its binary is locked until
+        // exit, so preserve only the directory containing that excluded file.
+        var normalizedDirectory = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var containsExcluded = string.Equals(Path.GetFullPath(directory), Path.GetDirectoryName(excluded), StringComparison.OrdinalIgnoreCase)
+            || excluded.StartsWith(normalizedDirectory, StringComparison.OrdinalIgnoreCase);
+        if (!containsExcluded && Directory.Exists(directory)) Directory.Delete(directory, true);
+    }
 }
 
 static void PruneRollbackSnapshots(string root)

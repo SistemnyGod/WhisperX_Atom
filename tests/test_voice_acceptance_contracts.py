@@ -4,6 +4,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAcceptanceRunner.cs").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "scripts/acceptance-voice-to-transcript.ps1").read_text(encoding="utf-8")
+TTS_ROUTER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/Tts/TtsEngineRouter.cs").read_text(encoding="utf-8")
+TTS_ENGINE = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/Tts/SileroTtsEngine.cs").read_text(encoding="utf-8")
 FAR_FIELD_SCRIPT = (ROOT / "scripts/e2e-far-field-voice.ps1").read_text(encoding="utf-8")
 
 
@@ -39,6 +41,13 @@ def test_sanitized_voice_to_transcript_artifact_requires_one_correlated_chain():
     assert "backgroundFalseActivations" in SCRIPT
     assert "recognized text" in SCRIPT
     assert "audio paths" in SCRIPT
+
+
+def test_silero_diagnostics_use_selected_voice_and_require_model_hash():
+    assert '_options.Voice' in TTS_ROUTER
+    assert 'VoiceName => _useFallback ? _windows.VoiceName : "aidar"' not in TTS_ROUTER
+    assert "TTS_MODEL_HASH_MISSING" in TTS_ENGINE
+    assert "if (string.IsNullOrWhiteSpace(_expectedModelSha256)) return true" not in TTS_ENGINE
 
 
 def test_far_field_acceptance_has_distance_condition_matrix_and_fail_closed_gate():
