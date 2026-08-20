@@ -1,9 +1,16 @@
 [CmdletBinding()]
 param(
-    [string]$ModelPath = (Join-Path $PSScriptRoot '..\artifacts\tts-host\Models\silero-v5_5_ru\v5_5_ru.pt'),
-    [string]$ManifestPath = (Join-Path $PSScriptRoot '..\artifacts\tts-host\Models\silero-v5_5_ru\model-manifest.json')
+    [string]$ModelPath = '',
+    [string]$ManifestPath = ''
 )
 $ErrorActionPreference = 'Stop'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($ModelPath)) {
+    $ModelPath = Join-Path $repoRoot 'artifacts\tts-host\Models\silero-v5_5_ru\v5_5_ru.pt'
+}
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+    $ManifestPath = Join-Path $repoRoot 'artifacts\tts-host\Models\silero-v5_5_ru\model-manifest.json'
+}
 if (-not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) { throw 'TTS_MODEL_MISSING' }
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $hash = (Get-FileHash -LiteralPath $ModelPath -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -1,12 +1,19 @@
 [CmdletBinding()]
 param(
     [string]$ModelPath = '',
-    [string]$ManifestPath = (Join-Path $PSScriptRoot '..\apps\tts-host\model-manifest.json'),
-    [string]$OutputRoot = (Join-Path $PSScriptRoot '..\artifacts\tts-host\Models\silero-v5_5_ru'),
+    [string]$ManifestPath = '',
+    [string]$OutputRoot = '',
     [string]$ExpectedSha256 = '',
     [switch]$DownloadOfficial
 )
 $ErrorActionPreference = 'Stop'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+    $ManifestPath = Join-Path $repoRoot 'apps\tts-host\model-manifest.json'
+}
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Join-Path $repoRoot 'artifacts\tts-host\Models\silero-v5_5_ru'
+}
 $officialUrl = 'https://models.silero.ai/models/tts/ru/v5_5_ru.pt'
 if ($DownloadOfficial) {
     if ($ModelPath -ne 'v5_5_ru.pt' -and -not [string]::IsNullOrWhiteSpace($ModelPath)) { throw 'TTS_OFFICIAL_URL_ONLY' }

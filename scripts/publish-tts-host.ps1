@@ -1,12 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = (Join-Path $PSScriptRoot '..\artifacts\desktop\TtsHost'),
-    [string]$ModelRoot = (Join-Path $PSScriptRoot '..\artifacts\tts-host\Models\silero-v5_5_ru'),
+    [string]$OutputRoot = '',
+    [string]$ModelRoot = '',
     [string]$PythonExe = '',
     [switch]$NoInstall
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Join-Path $repoRoot 'artifacts\desktop\TtsHost'
+}
+if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
+    $ModelRoot = Join-Path $repoRoot 'artifacts\tts-host\Models\silero-v5_5_ru'
+}
 $dirty = @(cmd.exe /d /s /c "git -C `"$repoRoot`" status --porcelain --untracked-files=normal 2>NUL")
 if ($dirty.Count -gt 0 -and $env:WHISPERX_ALLOW_DIRTY_RELEASE -notin @('1','true','yes')) { throw 'TTS_BUILD_DIRTY_WORKTREE' }
 $python = if ($PythonExe) { (Resolve-Path $PythonExe).Path } else { Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe' }
