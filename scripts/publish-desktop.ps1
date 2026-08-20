@@ -79,8 +79,15 @@ if ($LASTEXITCODE -ne 0) { throw "TtsHost publish failed with exit code $LASTEXI
 # Host.  The legacy Python app.py is kept in the repository for compatibility,
 # but must never leak into an installed payload or become a second production
 # entry point.
+$ttsVendorRoot = [IO.Path]::GetFullPath((Join-Path $output 'TtsHost\_internal\torch'))
+$ttsApplicationSources = @('tts_host.py', 'protocol.py', 'silero_runtime.py', 'text_normalizer.py')
 $forbiddenPayload = @(Get-ChildItem -LiteralPath $output -Recurse -File -ErrorAction Stop | Where-Object {
-    $_.Name -ieq 'app.py' -or $_.Extension -iin @('.py', '.pyc', '.pyo') -or $_.Name -match '(?i)^python(?:\.exe)?$'
+    $fullPath = [IO.Path]::GetFullPath($_.FullName)
+    $isFrozenTorchVendor = $fullPath.StartsWith($ttsVendorRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+    $_.Name -ieq 'app.py' -or
+        $_.Name -match '(?i)^python(?:\.exe)?$' -or
+        $_.Name -iin $ttsApplicationSources -or
+        ($_.Extension -iin @('.py', '.pyc', '.pyo') -and -not $isFrozenTorchVendor)
 })
 if ($forbiddenPayload.Count -gt 0) {
     throw "PRODUCTION_PAYLOAD_CONTAINS_LEGACY_PYTHON: $($forbiddenPayload.FullName -join ', ')"
