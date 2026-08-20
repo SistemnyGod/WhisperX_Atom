@@ -56,9 +56,20 @@ foreach ($entry in $required.GetEnumerator()) {
     $artifactResults[$entry.Key] = [ordered]@{ path = $entry.Value; buildIdentity = $identity; sha256 = $hash }
 }
 
-$legacyPayload = @(Get-ChildItem -LiteralPath $artifacts -Recurse -File -ErrorAction Stop | Where-Object {
-    $_.Name -ieq "app.py" -or $_.Extension -iin @(".py", ".pyc", ".pyo") -or $_.Name -match "(?i)^python(?:\.exe)?$"
-})
+function Get-ForbiddenPythonPayload([string]$Root) {
+    $frozenTorchRoot = [IO.Path]::GetFullPath((Join-Path $Root "TtsHost\_internal\torch"))
+    $applicationSources = @("tts_host.py", "protocol.py", "silero_runtime.py", "text_normalizer.py")
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction Stop | Where-Object {
+        $fullPath = [IO.Path]::GetFullPath($_.FullName)
+        $isFrozenTorchVendor = $fullPath.StartsWith($frozenTorchRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+        $_.Name -ieq "app.py" -or
+            $_.Name -match "(?i)^python(?:\.exe)?$" -or
+            $_.Name -iin $applicationSources -or
+            ($_.Extension -iin @(".py", ".pyc", ".pyo") -and -not $isFrozenTorchVendor)
+    })
+}
+
+$legacyPayload = @(Get-ForbiddenPythonPayload $artifacts)
 if ($legacyPayload.Count -gt 0) { Fail "RUNTIME_LEGACY_PYTHON_IN_PAYLOAD" ($legacyPayload.FullName -join ", ") }
 
 $installedResults = [ordered]@{}
@@ -71,9 +82,7 @@ if ($installedPresent) {
         if ($identity -ne $expected) { Fail "RUNTIME_INSTALLED_IDENTITY_MISMATCH" "$($entry.Key)=$identity expected=$expected" }
         $installedResults[$entry.Key] = [ordered]@{ path = $entry.Value; buildIdentity = $identity; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
     }
-    $legacyInstalled = @(Get-ChildItem -LiteralPath $installed -Recurse -File -ErrorAction Stop | Where-Object {
-        $_.Name -ieq "app.py" -or $_.Extension -iin @(".py", ".pyc", ".pyo") -or $_.Name -match "(?i)^python(?:\.exe)?$"
-    })
+    $legacyInstalled = @(Get-ForbiddenPythonPayload $installed)
     if ($legacyInstalled.Count -gt 0) { Fail "RUNTIME_LEGACY_PYTHON_INSTALLED" ($legacyInstalled.FullName -join ", ") }
 }
 
@@ -113,8 +122,8 @@ $output = [ordered]@{
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     buildIdentity = $expected
     commit = $commit
-    productionPath = @("Desktop", "AudioGraph Recorder Host", "Voice Host", "Docker core", "Host GPU Worker")
-    legacyPython = [ordered]@{ allowedInRepository = $true; allowedInProductionPayload = $false; appPyUsedAsProductionEntryPoint = $false }
+    productionPath = @("Desktop", "AudioGraph Recorder Host", "Voice Host", "Silero TtsHost", "Docker core", "Host GPU Worker")
+    legacyPython = [ordered]@{ allowedInRepository = $true; allowedInProductionPayload = $false; frozenTorchVendorSources = $true; appPyUsedAsProductionEntryPoint = $false }
     artifacts = $artifactResults
     installed = if ($installedPresent) { $installedResults } else { $null }
     runningProcesses = @($runningResults)
