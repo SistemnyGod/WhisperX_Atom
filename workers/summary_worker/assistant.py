@@ -860,7 +860,7 @@ class AssistantWorker:
                 # The retry budget is exhausted.  Persist a terminal state and
                 # let the consumer ACK the current delivery; a terminal
                 # assistant request must not loop forever in JetStream.
-                self.repository.set_status(query_id, "FAILED", error="ASSISTANT_RETRY_EXHAUSTED")
+                self.repository.set_status(query_id, "LLM_UNAVAILABLE", error="ASSISTANT_RETRY_EXHAUSTED")
                 LOGGER.error("assistant query=%s retry budget exhausted: %s", query_id, detail)
                 return
             # Deterministic validation/scope/model configuration failures are
