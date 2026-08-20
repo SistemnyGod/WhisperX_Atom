@@ -256,6 +256,18 @@ def test_desktop_support_bundle_is_redacted_and_atomic():
     assert "Сформировать диагностический пакет" in settings
 
 
+def test_windows_reboot_gate_is_manual_and_preserves_local_session_ids():
+    script = read(Path("scripts/e2e-windows-reboot-recovery.ps1"))
+    assert 'ValidateSet("BeforeReboot", "AfterReboot")' in script
+    assert 'rebootRequested = $false' in script
+    assert 'containersStopped = $false' in script
+    assert 'LIST_LOCAL_SESSIONS' in script
+    assert 'localSessionIdsPreserved' in script
+    assert 'REBOOT_GATE_DUPLICATE_SESSION_IDS' in script
+    assert 'REBOOT_GATE_MARKER_MISSING' in script
+    assert 'RequireDocker' in script
+
+
 def test_summary_and_assistant_workers_extend_long_job_leases():
     worker = read(Path("workers/summary_worker/worker.py"))
     assistant = read(Path("workers/summary_worker/assistant.py"))

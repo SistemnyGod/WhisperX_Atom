@@ -102,3 +102,8 @@ Legacy `app.py`, `app/` и watch/runtime-файлы сохранены для с
   атомарный `support-bundle-*.zip` в `%ProgramData%\WhisperXAtom\Diagnostics`;
   в отчёт добавляются Recorder/Voice/TTS, очереди и server readiness, но не
   пользовательское содержимое.
+- `scripts/e2e-windows-reboot-recovery.ps1` разделяет проверку на ручные фазы
+  `BeforeReboot` и `AfterReboot`: штатную перезагрузку выполняет оператор,
+  скрипт только фиксирует marker, проверяет Named Pipe v6, Voice Host, Docker,
+  server readiness и сохранность `localSessionId`. Автоматическая остановка
+  контейнеров и запись аудио этим gate запрещены.
