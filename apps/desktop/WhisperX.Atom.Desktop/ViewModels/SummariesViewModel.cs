@@ -174,7 +174,14 @@ public sealed class SummariesViewModel : ObservableObject
                 return false;
             }
             var completed = await _services.JobTracker.WaitForTerminalAsync(job, current =>
-                StatusText = $"{UiStatusMapper.Text(current.Status)} · {UiStatusMapper.Text(current.Stage)} · {current.Progress}%", cancellationToken);
+                StatusText = $"{UiStatusMapper.Text(current.Status)} · {UiStatusMapper.Text(current.Stage)} · {current.Progress}%", cancellationToken,
+                observation =>
+                {
+                    if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
+                        StatusText = observation.State == ProcessingJobState.Blocked
+                            ? $"Обработка заблокирована: {observation.Reason}"
+                            : $"Обработка приостановлена: {observation.Reason}";
+                });
             if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
             {
                 ErrorText = completed?.Error ?? "Пересборка саммари завершилась ошибкой.";

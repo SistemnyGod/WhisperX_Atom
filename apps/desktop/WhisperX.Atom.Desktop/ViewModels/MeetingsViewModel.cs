@@ -455,7 +455,13 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             {
                 LatestJob = current;
                 PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
-            }, cancellationToken);
+            }, cancellationToken, observation =>
+            {
+                if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
+                    PipelineText = observation.State == ProcessingJobState.Blocked
+                        ? $"Обработка заблокирована: {observation.Reason}"
+                        : $"Обработка приостановлена: {observation.Reason}";
+            });
             if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
             {
                 ErrorText = completed?.Error ?? "Пересборка саммари завершилась ошибкой.";
@@ -503,7 +509,13 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
         {
             LatestJob = current;
             PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
-        }, cancellationToken);
+        }, cancellationToken, observation =>
+        {
+            if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
+                PipelineText = observation.State == ProcessingJobState.Blocked
+                    ? $"Обработка заблокирована: {observation.Reason}"
+                    : $"Обработка приостановлена: {observation.Reason}";
+        });
         if (completed is null || !string.Equals(completed.Status, "READY", StringComparison.OrdinalIgnoreCase))
         {
             ErrorText = completed?.Error ?? "Повторная транскрибация завершилась ошибкой.";
