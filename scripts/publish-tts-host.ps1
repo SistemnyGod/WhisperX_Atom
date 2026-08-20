@@ -57,8 +57,9 @@ $env:WHISPERX_BUILD_IDENTITY = $identity
 $smokeRequest = [ordered]@{ schemaVersion=1; id='publish-smoke'; op='ping'; buildIdentity=$identity } | ConvertTo-Json -Compress
 $smokeStart = [Diagnostics.ProcessStartInfo]::new()
 $smokeStart.FileName = Join-Path $built 'TtsHost.exe'
-$smokeStart.ArgumentList.Add('--parent-pid')
-$smokeStart.ArgumentList.Add([string]$PID)
+# Windows PowerShell 5.1 targets .NET Framework, where ArgumentList is not
+# available. The only argument is a validated integer generated locally.
+$smokeStart.Arguments = "--parent-pid $PID"
 $smokeStart.UseShellExecute = $false
 $smokeStart.CreateNoWindow = $true
 $smokeStart.RedirectStandardInput = $true
