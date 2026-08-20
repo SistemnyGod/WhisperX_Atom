@@ -1,5 +1,5 @@
 # Build-time only. Never installed on the target workstation.
---index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.8.0+cpu
 numpy==2.3.2
 pyinstaller==6.15.0
