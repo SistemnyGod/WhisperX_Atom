@@ -24,6 +24,7 @@ def test_assistant_retry_is_bounded_and_terminal_grounding_is_not_retried():
     worker = read("workers/summary_worker/worker.py")
     migration = read("apps/server/WhisperX.Atom.Api/Migrations/038_assistant_retry_policy.sql")
     assert "ASSISTANT_MAX_RETRIES" in assistant
+    assert "ASSISTANT_CONTEXT_SIZE" in assistant
     assert "is_retryable_assistant_error" in assistant
     assert "AssistantRetryScheduled" in assistant and "schedule_retry" in assistant
     assert "no_evidence" in assistant and "grounding_rejected" in assistant
@@ -52,3 +53,37 @@ def test_gpu_priority_order_keeps_v1_ahead_of_assistant_enrichment_and_summary()
     # Enrichment must not make itself look like pending V1 work.
     asr_gate = lease.split("WHERE type IN", 1)[1].split("AND (status", 1)[0]
     assert "TRANSCRIPT_ENRICH" not in asr_gate
+
+
+def test_gpu_progress_watchdog_has_stage_liveness_and_single_requeue_gate():
+    worker = read("workers/ml_worker/worker.py")
+    persistence = read("workers/ml_worker/persistence.py")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/039_job_progress_watchdog.sql")
+    coordinator = read("workers/gpu_runtime_coordination.py")
+    assert "_watch_progress" in worker
+    assert "WorkerProcessRestartRequested" in worker
+    assert "requeue_or_fail_stage_timeout" in persistence
+    assert "GPU_STAGE_TIMEOUT_REQUEUED" in persistence
+    assert "GPU_STAGE_TIMEOUT" in persistence
+    assert "timeout_requeue_count" in migration
+    assert "stage_changed_at" in migration and "progress_changed_at" in migration
+    # Heartbeat renewal must not fake progress and the trigger must handle
+    # INSERT without reading OLD.
+    assert "updated_at=now()" not in persistence.split("def renew_lease", 1)[1].split("def job_progress_liveness", 1)[0]
+    assert "TG_OP = 'INSERT'" in migration
+    assert "wait_for_llm_release" in coordinator
+    assert "preempt_if_requested" in coordinator
+
+
+def test_summary_and_assistant_release_resident_llm_for_durable_asr_request():
+    summary = read("workers/summary_worker/worker.py")
+    assistant = read("workers/summary_worker/assistant.py")
+    llama = read("workers/summary_worker/llama_subprocess.py")
+    compose = read("compose.dev.yml")
+    for source in (summary, assistant):
+        assert "llm_may_start" in source
+        assert "mark_llm_resident" in source
+        assert "preempt_if_requested" in source
+    assert 'LLM_RESIDENT_ENABLED", "true"' in llama
+    assert 'LLM_IDLE_UNLOAD_SECONDS", "120"' in llama
+    assert "GPU_RUNTIME_COORDINATION_ENABLED" in compose

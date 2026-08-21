@@ -108,7 +108,7 @@ def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
             if state is None or str(state[0]) in {"CANCELLED", "FAILED", "READY"}:
                 return False
             connection.execute(
-                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),watchdog_requeue_count=0,last_watchdog_requeue_at=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (socket.gethostname(), job_id),
             )
             # Job id is the durable idempotency key; random outbox UUIDs are
@@ -139,7 +139,7 @@ def update_job(job_id: str, status: str, stage: str, progress: int, error: str |
 def renew_lease(job_id: str, message_id: str | None = None) -> None:
     with psycopg.connect(_conninfo()) as connection:
         connection.execute(
-            "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='RUNNING'",
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now() WHERE id=%s AND status='RUNNING'",
             (job_id,),
         )
         if message_id:

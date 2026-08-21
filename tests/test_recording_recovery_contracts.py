@@ -112,6 +112,37 @@ def test_terminal_server_assembly_failure_does_not_retry_forever_or_purge_spool(
     assert 'new FinalizationResult(true, "SERVER_FINALIZE"' in delivery
 
 
+def test_windows_reboot_gate_separates_pipe_names_from_commands():
+    script = read("scripts/e2e-windows-reboot-recovery.ps1")
+    assert "[string]$PipeName" in script
+    assert "[string]$Command" in script
+    assert "command = $Command" in script
+    assert "Invoke-PipeCommand -PipeName $recorderPipeName -Command \"HEALTH\"" in script
+    assert "Invoke-PipeCommand -PipeName $recorderPipeName -Command \"LIST_LOCAL_SESSIONS\"" in script
+    assert "Invoke-PipeCommand -PipeName $voicePipeName -Command \"STATUS\"" in script
+    assert "IPC_PIPE_OR_COMMAND_REQUIRED" in script
+    assert 'Invoke-PipeCommand "HEALTH"' not in script
+    assert 'Invoke-PipeCommand $voicePipeName @{}' not in script
+
+
+def test_vertical_gate_restarts_only_selected_gpu_mode_services():
+    script = read("scripts/e2e-vertical-pipeline.ps1")
+    assert '[ValidateSet("host", "container")][string]$GpuMode' in script
+    assert "stop-host-gpu-worker.ps1" in script and "start-host-gpu-worker.ps1" in script
+    assert "restart media-worker summary-worker" in script
+    assert "restart media-worker gpu-worker summary-worker" in script
+    assert "Patrol360" not in script
+    assert "down -v" not in script
+
+
+def test_media_to_asr_transition_starts_with_fresh_watchdog_backoff():
+    persistence = read("workers/media_worker/persistence.py")
+    transition = persistence.split("def mark_ready_for_asr_and_enqueue", 1)[1]
+    assert "stage='READY_FOR_ASR'" in transition
+    assert "watchdog_requeue_count=0" in transition
+    assert "last_watchdog_requeue_at=NULL" in transition
+
+
 def test_capture_write_failure_is_persisted_and_does_not_leave_recording_running():
     coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
     host = read("apps/recorder-agent/AgentPipeHost.cs")
@@ -387,7 +418,7 @@ def test_session_finalization_uploads_only_its_own_chunks():
     coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
     assert "UploadPendingChunksAsync(spool, localSessionId, cancellationToken)" in coordinator
     assert "UploadPendingChunksAsync(SpoolStore spool, string? localSessionId" in client
-    assert "PendingChunksAsync(localSessionId, 200, cancellationToken)" in client
+    assert "PendingChunksWithUploadContextAsync(localSessionId, 200, cancellationToken)" in client
     assert "AND ($session IS NULL OR c.session_id=$session)" in spool
 
 

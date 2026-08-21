@@ -53,6 +53,8 @@ public static class UiStatusMapper
             ["TRANSCRIPT_READY"] = new("TRANSCRIPT_READY", "Стенограмма готова", UiStatusKind.Success),
             ["READY"] = new("READY", "Готово", UiStatusKind.Success),
             ["PARTIAL_READY"] = new("PARTIAL_READY", "Готово с предупреждениями", UiStatusKind.Warning),
+            ["DEGRADED"] = new("DEGRADED", "Ожидает восстановления сервиса", UiStatusKind.Warning),
+            ["SUMMARY_REVIEW"] = new("SUMMARY_REVIEW", "Саммари готово · требуется проверка", UiStatusKind.Warning),
             ["NO_SPEECH_DETECTED"] = new("NO_SPEECH_DETECTED", "Речь не обнаружена", UiStatusKind.Warning),
             ["TRANSCRIPT_EMPTY"] = new("TRANSCRIPT_EMPTY", "Стенограмма пустая", UiStatusKind.Warning),
             ["TRANSCRIPT_INVALID_TIMECODE"] = new("TRANSCRIPT_INVALID_TIMECODE", "Некорректные таймкоды", UiStatusKind.Warning),

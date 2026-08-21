@@ -259,7 +259,42 @@ public sealed class HomeViewModel : ObservableObject
 
     private async Task RefreshMeetingMetricsAsync(CancellationToken cancellationToken)
     {
-        var metrics = await Task.WhenAll(RecentMeetings.Select(meeting => LoadMeetingMetricsAsync(meeting, cancellationToken)));
+        var meetingIds = RecentMeetings
+            .Select(meeting => Guid.TryParse(meeting.Id, out var id) ? id : Guid.Empty)
+            .Where(id => id != Guid.Empty)
+            .ToArray();
+        try
+        {
+            var aggregate = await _services.Backend.GetMeetingMetricsAsync(meetingIds, cancellationToken);
+            var byMeeting = aggregate.ToDictionary(item => item.MeetingId, StringComparer.OrdinalIgnoreCase);
+            var aggregateMetrics = RecentMeetings.Select(meeting =>
+            {
+                if (!byMeeting.TryGetValue(meeting.Id, out var item))
+                    return new MeetingMetrics(meeting.Title, false, false, 0, meeting.Status, 0);
+                var current = item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status))
+                    ?? item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
+                return new MeetingMetrics(
+                    meeting.Title,
+                    item.Jobs.Any(job => !IsTerminal(job.Status)),
+                    SummaryPresentation.IsDisplayable(item.Summary),
+                    item.OpenTasks.Count,
+                    current?.Stage ?? meeting.Status,
+                    Math.Clamp(current?.Progress ?? 0, 0, 100));
+            }).ToArray();
+            ApplyMeetingMetrics(aggregateMetrics);
+            return;
+        }
+        catch (DesktopApiException exception) when (exception.ErrorCode is "MEETING_METRICS_UNSUPPORTED")
+        {
+            // Rolling compatibility: old API versions keep the existing
+            // per-meeting calls until the aggregate endpoint is deployed.
+        }
+        var fallbackMetrics = await Task.WhenAll(RecentMeetings.Select(meeting => LoadMeetingMetricsAsync(meeting, cancellationToken)));
+        ApplyMeetingMetrics(fallbackMetrics);
+    }
+
+    private void ApplyMeetingMetrics(IReadOnlyList<MeetingMetrics> metrics)
+    {
         var processing = metrics.Where(item => item.IsProcessing).ToArray();
         ProcessingText = processing.Length.ToString(CultureInfo.InvariantCulture);
         ReadySummariesText = metrics.Count(item => item.HasSummary).ToString(CultureInfo.InvariantCulture);

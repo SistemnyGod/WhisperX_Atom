@@ -12,6 +12,7 @@ import logging
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
+from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from workers.db_pool import DatabaseConnectionPool
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
@@ -207,7 +208,7 @@ class SummaryRepository:
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')",
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')",
                 (job_id,),
             )
             if message_id:
@@ -473,6 +474,7 @@ class SummaryWorker:
     def __init__(self) -> None:
         self.repository = SummaryRepository()
         self._gpu_lease = PostgresGpuLease(self.repository.conninfo, priority=100)
+        self._gpu_coordination = GpuRuntimeCoordinator(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None
@@ -513,11 +515,24 @@ class SummaryWorker:
             self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 10)
             LOGGER.info("job=%s waiting for GPU lease", job_id)
             llm_started_at = time.perf_counter()
+            preemption_wait_ms = 0.0
+            model_start_ms = 0.0
+            generation_started_at = llm_started_at
             async with self._gpu_lease:
                 LOGGER.info("job=%s acquired GPU lease", job_id)
+                preemption_started_at = time.perf_counter()
+                if not await asyncio.to_thread(self._gpu_coordination.llm_may_start):
+                    raise RuntimeError("gpu_asr_pending")
+                preemption_wait_ms = (time.perf_counter() - preemption_started_at) * 1000.0
+                model_started_at = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
+                model_start_ms = (time.perf_counter() - model_started_at) * 1000.0
+                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "summary-worker"):
+                    await asyncio.to_thread(self._llm_runtime.stop)
+                    raise RuntimeError("gpu_asr_pending")
                 try:
                     client = self._client_for(server.base_url)
+                    generation_started_at = time.perf_counter()
 
                     async def report_progress(stage: str, progress: int) -> None:
                         await asyncio.to_thread(self.repository.update_job, job_id, "RUNNING", stage, progress)
@@ -546,6 +561,11 @@ class SummaryWorker:
                         result["correlation_id"] = correlation_id
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
+                    if self._llm_runtime.enabled:
+                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "summary-worker"):
+                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, "summary-worker")
+                    else:
+                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, "summary-worker")
             LOGGER.info("job=%s released GPU lease", job_id)
             self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
             self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
@@ -558,6 +578,9 @@ class SummaryWorker:
                     meeting_id,
                     {
                         "summary_llm_ms": max(0.0, (time.perf_counter() - llm_started_at) * 1000.0),
+                        "summary_preemption_wait_ms": max(0.0, preemption_wait_ms),
+                        "summary_model_start_ms": max(0.0, model_start_ms),
+                        "summary_generation_ms": max(0.0, (persist_started_at - generation_started_at) * 1000.0),
                         "summary_persist_ms": max(0.0, (time.perf_counter() - persist_started_at) * 1000.0),
                         "summary_total_ms": max(0.0, (time.perf_counter() - started_at) * 1000.0),
                     },
@@ -662,6 +685,16 @@ async def run() -> None:
     assistant_watchdog_interval = max(15.0, float(os.getenv("ASSISTANT_QUEUE_WATCHDOG_INTERVAL_SECONDS", "30")))
     assistant_queue_timeout = max(120, int(os.getenv("ASSISTANT_QUEUE_TIMEOUT_SECONDS", "600")))
 
+    async def gpu_coordination_watch() -> None:
+        """Unload resident Qwen promptly when an ASR job requests the GPU."""
+        while True:
+            await asyncio.to_thread(
+                summary_worker._gpu_coordination.preempt_if_requested,
+                summary_worker._llm_runtime,
+                "summary-runtime",
+            )
+            await asyncio.sleep(max(0.25, float(os.getenv("GPU_COORDINATION_POLL_SECONDS", "1"))))
+
     async def consume_summary() -> None:
         while True:
             await asyncio.to_thread(summary_worker._llm_runtime.release_idle)
@@ -746,9 +779,12 @@ async def run() -> None:
                     heartbeat.set_job(None)
                     set_runtime_state()
 
+    coordination_task = asyncio.create_task(gpu_coordination_watch())
     try:
         await asyncio.gather(consume_assistant(), consume_summary())
     finally:
+        coordination_task.cancel()
+        await asyncio.gather(coordination_task, return_exceptions=True)
         await summary_worker.close()
         await assistant_worker.close()
 

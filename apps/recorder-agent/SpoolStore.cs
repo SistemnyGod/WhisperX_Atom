@@ -85,6 +85,7 @@ public sealed record RawChunkBacklog(
     string? LastErrorCode = null);
 
 public sealed record ServerBinding(string LocalSessionId, string LocalTrackId, Guid ServerSessionId, Guid ServerTrackId);
+public sealed record PendingChunkUploadContext(RecordingChunk Chunk, ServerBinding Binding, string? PipelineCorrelationId);
 public sealed record RecordingManifestTrack(Guid ServerTrackId, string TrackType, int SampleRate, int Channels, int ExpectedChunkCount, long TotalSamples, long StartSample = 0);
 public sealed record PendingCommandResult(Guid CommandId, long Cursor, string Status, JsonElement Result);
 public sealed record RecordingEventRow(string Id, string SessionId, string EventType, long? MediaTimeMs, string PayloadJson, DateTimeOffset CreatedAt);
@@ -2276,6 +2277,60 @@ public sealed class SpoolStore
             reader.GetInt64(5), reader.GetInt64(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetString(9),
             reader.GetInt64(10), reader.GetString(11), reader.GetString(12), reader.GetInt32(13),
             ParseDate(reader, 14), ParseDate(reader, 15), reader.IsDBNull(16) ? null : reader.GetString(16)));
+        return result;
+    }
+
+    /// <summary>
+    /// Read upload-ready chunks together with their server binding and
+    /// pipeline correlation in one SQLite round-trip.  Binding/correlation
+    /// are immutable delivery context, so fetching them per chunk created a
+    /// measurable N+1 cost on large offline backlogs.
+    /// </summary>
+    public async Task<IReadOnlyList<PendingChunkUploadContext>> PendingChunksWithUploadContextAsync(
+        string? sessionId, int limit = 100, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            WITH eligible AS (
+                SELECT c.id,c.session_id,c.track_id,c.sequence,c.local_path,c.start_sample,c.sample_count,
+                       c.sample_rate,c.channels,c.track_type,c.size_bytes,c.sha256,c.status,c.attempts,
+                       c.last_attempt_at,c.next_attempt_at,c.last_error_code,
+                       b.server_session_id,b.server_track_id,s.pipeline_correlation_id,
+                       CASE WHEN s.state IN ('RECORDING','PAUSED') THEN 0
+                            WHEN s.state IN ('FINALIZING','FINALIZE_ACCEPTED') THEN 1 ELSE 2 END AS priority,
+                       ROW_NUMBER() OVER (PARTITION BY c.session_id ORDER BY c.track_id,c.sequence) AS session_rank
+                FROM recording_chunks c
+                JOIN recording_sessions s ON s.id=c.session_id
+                JOIN server_bindings b ON b.local_session_id=c.session_id AND b.local_track_id=c.track_id
+                WHERE c.status NOT IN ('CONFIRMED','CANCELLED','BLOCKED','UPLOADING')
+                  AND s.state<>'CANCELLED'
+                  AND ($session IS NULL OR c.session_id=$session)
+                  AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= $now)
+            )
+            SELECT id,session_id,track_id,sequence,local_path,start_sample,sample_count,sample_rate,channels,
+                   track_type,size_bytes,sha256,status,attempts,last_attempt_at,next_attempt_at,last_error_code,
+                   server_session_id,server_track_id,pipeline_correlation_id
+            FROM eligible
+            ORDER BY priority,session_rank,session_id,track_id,sequence
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", (object?)sessionId ?? DBNull.Value);
+        var result = new List<PendingChunkUploadContext>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var chunk = new RecordingChunk(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4),
+                reader.GetInt64(5), reader.GetInt64(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetString(9),
+                reader.GetInt64(10), reader.GetString(11), reader.GetString(12), reader.GetInt32(13),
+                ParseDate(reader, 14), ParseDate(reader, 15), reader.IsDBNull(16) ? null : reader.GetString(16));
+            var binding = new ServerBinding(chunk.SessionId, chunk.TrackId, Guid.Parse(reader.GetString(17)), Guid.Parse(reader.GetString(18)));
+            result.Add(new PendingChunkUploadContext(chunk, binding, reader.IsDBNull(19) ? null : reader.GetString(19)));
+        }
         return result;
     }
 

@@ -12,6 +12,7 @@ public sealed class SileroTtsEngine : ITtsEngine
     private readonly string _expectedBuildIdentity;
     private readonly string _tempRoot;
     private int _failureBurst;
+    private string _lastVoice = "aidar";
 
     public SileroTtsEngine(string executablePath, string modelRoot, string expectedModelSha256 = "", string expectedBuildIdentity = "", string? tempRoot = null)
     {
@@ -25,7 +26,12 @@ public sealed class SileroTtsEngine : ITtsEngine
 
     public string EngineName => "SILERO";
     public string ModelName => "v5_5_ru";
-    public string VoiceName => "aidar";
+    /// <summary>
+    /// The voice returned by the last successful synthesis.  This is
+    /// intentionally not always the configured default: the router may pass
+    /// a different allow-listed voice for a particular response.
+    /// </summary>
+    public string VoiceName => Volatile.Read(ref _lastVoice);
     public string VoiceCulture => "ru-RU";
     public bool IsReady { get; private set; }
     public int? ProcessId => _client.ProcessId;
@@ -101,6 +107,7 @@ public sealed class SileroTtsEngine : ITtsEngine
             }
             LastSynthesisMs = response.SynthesisMs;
             LastErrorCode = null;
+            Volatile.Write(ref _lastVoice, response.Voice ?? options.Voice);
             Interlocked.Exchange(ref _failureBurst, 0);
             return new(true, EngineName, response.Model ?? ModelName, response.Voice ?? options.Voice, path, response.DurationMs, response.SynthesisMs, IsStaticCache: response.CacheHit);
         }

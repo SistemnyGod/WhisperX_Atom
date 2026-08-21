@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from workers.gpu_lease import PostgresGpuLease
 from whisperx_atom.gpu_scheduler import GpuScheduler
 from whisperx_atom.checkpoint_store import checkpoint_store_from_env
 from workers.runtime_heartbeat import AsyncHeartbeat
+from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from .persistence import JobRepository
 
 class ResidentLlmConflict(RuntimeError):
@@ -28,6 +30,54 @@ class RetryScheduled(RuntimeError):
     def __init__(self, delay_seconds: float):
         super().__init__("GPU_JOB_RETRY_SCHEDULED")
         self.delay_seconds = delay_seconds
+
+
+class WorkerProcessRestartRequested(RuntimeError):
+    """The durable job was requeued and this process must be recycled."""
+
+
+def _duration_seconds(message: dict[str, Any]) -> float | None:
+    for key in ("audio_duration_ms", "duration_ms"):
+        try:
+            value = float(message.get(key))
+            if value > 0:
+                return value / 1000.0
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _stage_timeout_seconds(stage: str, duration_seconds: float | None) -> float:
+    duration = duration_seconds or 0.0
+    normalized = (stage or "").upper()
+    if normalized in {
+        "PREPARING", "PREPROCESSING", "VALIDATING", "NORMALIZING", "READY_FOR_ASR",
+        "QUALITY_CHECK", "POSTPROCESSING", "PERSISTING", "VALIDATING_EVIDENCE",
+    }:
+        return 20 * 60
+    if normalized in {"ALIGNING"}:
+        return max(30 * 60, duration * 0.75) if duration else 30 * 60
+    if normalized in {"DIARIZING"}:
+        return max(45 * 60, duration) if duration else 45 * 60
+    if normalized in {"TRANSCRIBING", "ASR", "ASR_RUNNING"}:
+        return max(45 * 60, duration * 1.5) if duration else 2 * 60 * 60
+    return 2 * 60 * 60
+
+
+def _job_timeout_seconds(duration_seconds: float | None) -> float:
+    duration = duration_seconds or 0.0
+    configured = min(8 * 60 * 60, max(3 * 60 * 60, float(os.getenv("GPU_JOB_MAX_RUNTIME_SECONDS", "28800"))))
+    derived = max(3 * 60 * 60, duration * 3) if duration else 3 * 60 * 60
+    return min(configured, derived)
+
+
+def _utc_age(value: Any) -> float:
+    if value is None:
+        return float("inf")
+    if isinstance(value, datetime):
+        timestamp = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    return float("inf")
 
 
 async def resident_llm_detected() -> bool:
@@ -125,11 +175,38 @@ class GpuWorker:
         # never permits concurrent CUDA inference.
         self._asr_gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=10)
         self._enrichment_gpu_lease = PostgresGpuLease(self._repository.conninfo, priority=50)
+        self._gpu_coordination = GpuRuntimeCoordinator(self._repository.conninfo)
         self._heartbeat = heartbeat
 
     def close(self) -> None:
         self._pipeline.close()
         self._repository.close()
+
+    async def _watch_progress(self, job_id: str, message_id: str, started_at: float, duration_seconds: float | None) -> None:
+        """Detect a live process whose CUDA/thread call stopped advancing."""
+        while True:
+            await asyncio.sleep(10)
+            if time.monotonic() - started_at >= _job_timeout_seconds(duration_seconds):
+                outcome = await asyncio.to_thread(self._repository.requeue_or_fail_stage_timeout, job_id, message_id)
+                if outcome:
+                    LOGGER.error("job=%s exceeded overall GPU runtime outcome=%s", job_id, outcome)
+                    raise WorkerProcessRestartRequested(outcome)
+                return
+            liveness = await asyncio.to_thread(self._repository.job_progress_liveness, job_id)
+            if liveness is None:
+                return
+            stage, _progress, stage_changed_at, progress_changed_at = liveness
+            # Either a stage transition or a numeric progress update proves
+            # that the pipeline is alive.  Use the newest timestamp rather
+            # than the oldest one; max() would timeout a job whose progress
+            # keeps advancing inside a long-running stage.
+            age = min(_utc_age(stage_changed_at), _utc_age(progress_changed_at))
+            if age >= _stage_timeout_seconds(stage, duration_seconds):
+                outcome = await asyncio.to_thread(self._repository.requeue_or_fail_stage_timeout, job_id, message_id)
+                if outcome:
+                    LOGGER.error("job=%s stage=%s made no progress age=%.1fs outcome=%s", job_id, stage, age, outcome)
+                    raise WorkerProcessRestartRequested(outcome)
+                return
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         queued_at = time.perf_counter()
@@ -191,12 +268,25 @@ class GpuWorker:
                 self._repository.update_job(job_id, "RUNNING", stage, value)
 
             failure_code: str | None = None
+            coordination_request_id = f"{job_id}:{message.get('message_id', '') or 'delivery'}"
+            coordination_requested = False
             draft_holder: dict[str, str | None] = {"id": None}
 
             def persist_asr_draft(draft: dict[str, Any]) -> None:
                 draft_holder["id"] = self._repository.persist_asr_draft(job_id, str(message["meeting_id"]), draft)
 
             try:
+                coordination_requested = await asyncio.to_thread(
+                    self._gpu_coordination.request_asr,
+                    coordination_request_id,
+                    "gpu-worker",
+                )
+                if coordination_requested and not await asyncio.to_thread(
+                    self._gpu_coordination.wait_for_llm_release,
+                    coordination_request_id,
+                    float(os.getenv("GPU_LLM_PREEMPT_TIMEOUT_SECONDS", "120")),
+                ):
+                    raise ResidentLlmConflict("resident_llama_release_timeout")
                 if await resident_llm_detected():
                     raise ResidentLlmConflict("resident_llama_server_must_be_stopped_before_transcription")
                 LOGGER.info("job=%s waiting for GPU lease path=%s", job_id, request.media_path)
@@ -210,7 +300,30 @@ class GpuWorker:
                     while True:
                         try:
                             draft_callback = None if enrichment_job else persist_asr_draft
-                            result = await asyncio.to_thread(self._pipeline.process, request, progress, draft_callback)
+                            processing_task = asyncio.create_task(
+                                asyncio.to_thread(self._pipeline.process, request, progress, draft_callback)
+                            )
+                            watchdog_task = asyncio.create_task(
+                                self._watch_progress(
+                                    job_id,
+                                    str(message.get("message_id", "")),
+                                    time.monotonic(),
+                                    _duration_seconds(message),
+                                )
+                            )
+                            done, _pending = await asyncio.wait(
+                                {processing_task, watchdog_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if watchdog_task in done:
+                                # A timed-out to_thread cannot be cancelled safely;
+                                # the caller will recycle this process immediately
+                                # after the durable requeue transaction commits.
+                                await watchdog_task
+                                raise WorkerProcessRestartRequested("GPU_STAGE_TIMEOUT")
+                            watchdog_task.cancel()
+                            await asyncio.gather(watchdog_task, return_exceptions=True)
+                            result = await processing_task
                             break
                         except Exception as exc:
                             if error_code_for(exc) != "CUDA_OOM" or oom_attempt >= 1:
@@ -268,6 +381,8 @@ class GpuWorker:
                 if self._heartbeat:
                     self._heartbeat.set_state("READY", "GPU_RESIDENT_LLM_CONFLICT")
                 raise
+            except WorkerProcessRestartRequested:
+                raise
             except Exception as exc:
                 LOGGER.exception("job=%s failed", job_id)
                 failure_code = error_code_for(exc)
@@ -289,6 +404,8 @@ class GpuWorker:
                     self._heartbeat.set_state("READY", failure_code)
                 raise
             finally:
+                if coordination_requested:
+                    await asyncio.to_thread(self._gpu_coordination.clear_asr, coordination_request_id)
                 if self._heartbeat:
                     self._heartbeat.set_job(None)
                     self._heartbeat.set_state("READY", failure_code)
@@ -395,6 +512,12 @@ async def run() -> None:
                 async with maintain_message(message, on_tick=lambda: asyncio.to_thread(worker._repository.renew_lease, job_id, message_id)):
                     await worker.handle(payload)
                 await message.ack()
+            except WorkerProcessRestartRequested as exc:
+                # The job was durably requeued/failed before this point. Do not
+                # ACK or NAK the delivery; process exit lets JetStream redeliver
+                # it after the container/host watchdog restarts this worker.
+                LOGGER.critical("recycling GPU worker after watchdog outcome=%s", exc)
+                os._exit(70)
             except ResidentLlmConflict:
                 # The job is deliberately returned to QUEUED by handle(). A
                 # delayed NAK prevents a resident llama-server from turning

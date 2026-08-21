@@ -397,9 +397,11 @@ def test_summary_details_render_protocol_as_readable_sections_with_text_fallback
 
 def test_summary_registry_does_not_render_failed_content_as_raw_text():
     view_model = (DESKTOP / "ViewModels" / "SummariesViewModel.cs").read_text(encoding="utf-8")
-    assert 'ContentValidity, "INVALID"' in view_model
-    assert 'GenerationState, "FAILED"' in view_model
-    assert "Саммари не показано" in view_model
+    presentation = (DESKTOP / "Services" / "SummaryPresentation.cs").read_text(encoding="utf-8")
+    assert "SummaryPresentation.Format(summary)" in view_model
+    assert "summary.ContentValidity" in presentation and '"INVALID"' in presentation
+    assert "summary.GenerationState" in presentation and '"FAILED"' in presentation
+    assert "Саммари не показано" in presentation
 
 
 def test_summary_compact_mode_uses_master_detail_and_scoped_warning_notice():

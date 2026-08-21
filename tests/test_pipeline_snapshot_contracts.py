@@ -93,3 +93,24 @@ def test_vertical_gate_persists_snapshot_and_benchmark_supports_warm_runs():
     assert '"10x10"' in matrix and '"30x5"' in matrix and '"60x5"' in matrix and '"600x3"' in matrix
     assert "e2e-transcription-benchmark.ps1" in matrix
     assert "credentialsIncluded = $false" in matrix
+
+
+def test_home_uses_bounded_meeting_metrics_aggregate_with_rolling_fallback():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    client = read("apps/desktop/WhisperX.Atom.Desktop/ServerApiClient.cs")
+    home = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/HomeViewModel.cs")
+    assert '"/api/meetings/metrics"' in api
+    assert "Take(50)" in api
+    assert "GetMeetingMetricsAsync" in client and "MEETING_METRICS_UNSUPPORTED" in client
+    assert "GetMeetingMetricsAsync" in home and "LoadMeetingMetricsAsync" in home
+
+
+def test_recorder_upload_context_avoids_binding_and_correlation_n_plus_one():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    client = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "PendingChunkUploadContext" in spool
+    assert "PendingChunksWithUploadContextAsync" in spool
+    assert "JOIN server_bindings" in spool
+    assert "pipeline_correlation_id" in spool
+    assert "PendingChunksWithUploadContextAsync(localSessionId" in client
+    assert "context.PipelineCorrelationId" in client

@@ -9,6 +9,7 @@ param(
   [string]$ResultPath,
   [switch]$DevelopmentHost,
   [switch]$RestartWorkers,
+  [ValidateSet("host", "container")][string]$GpuMode = "",
   [string]$DevelopmentDataRoot,
   [string]$InstalledHostPath = "C:\Program Files\WhisperX Atom\RecorderHost\WhisperX.Atom.Recorder.Host.exe"
 )
@@ -44,8 +45,18 @@ try {
   if ($RestartWorkers) {
     $compose = Join-Path $repo "compose.dev.yml"
     if (-not (Test-Path -LiteralPath $compose -PathType Leaf)) { throw "VERTICAL_COMPOSE_FILE_MISSING" }
-    & docker compose -f $compose --profile core --profile gpu --profile llm restart media-worker gpu-worker summary-worker
-    if ($LASTEXITCODE -ne 0) { throw "VERTICAL_WORKER_RESTART_FAILED:$LASTEXITCODE" }
+    $effectiveGpuMode = if ($GpuMode) { $GpuMode.ToLowerInvariant() } elseif ($env:GPU_WORKER_MODE) { $env:GPU_WORKER_MODE.ToLowerInvariant() } else { "container" }
+    if ($effectiveGpuMode -eq "host") {
+      & (Join-Path $PSScriptRoot "stop-host-gpu-worker.ps1")
+      if ($LASTEXITCODE -ne 0) { throw "VERTICAL_HOST_GPU_STOP_FAILED:$LASTEXITCODE" }
+      & docker compose -f $compose --profile core --profile llm restart media-worker summary-worker
+      if ($LASTEXITCODE -ne 0) { throw "VERTICAL_WORKER_RESTART_FAILED:$LASTEXITCODE" }
+      & (Join-Path $PSScriptRoot "start-host-gpu-worker.ps1")
+      if ($LASTEXITCODE -ne 0) { throw "VERTICAL_HOST_GPU_START_FAILED:$LASTEXITCODE" }
+    } else {
+      & docker compose -f $compose --profile core --profile gpu --profile llm restart media-worker gpu-worker summary-worker
+      if ($LASTEXITCODE -ne 0) { throw "VERTICAL_WORKER_RESTART_FAILED:$LASTEXITCODE" }
+    }
   }
 
   $url = if ($BaseUrl) { $BaseUrl.TrimEnd('/') } elseif ($env:WHISPERX_DEV_API_URL) { $env:WHISPERX_DEV_API_URL.TrimEnd('/') } else { "http://127.0.0.1:8080" }

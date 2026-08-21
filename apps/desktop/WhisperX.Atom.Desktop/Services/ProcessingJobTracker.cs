@@ -141,7 +141,15 @@ public sealed class ProcessingJobTracker(IBackendService backend)
         if (job.Status.Equals("READY", StringComparison.OrdinalIgnoreCase)) return ProcessingJobState.Ready;
         if (job.Status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
             || job.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)) return ProcessingJobState.Failed;
-        if (pipeline is not null && pipeline.Retryable && !string.IsNullOrWhiteSpace(pipeline.BlockedBy))
+        // A normal WAITING/PROCESSING snapshot is not a block.  Only an
+        // explicit degraded/failed snapshot with a component owner may stop
+        // the polling loop; this prevents RUNNING enrichment/summary jobs
+        // from being reported as blocked merely because a worker heartbeat is
+        // sampled between ticks.
+        if (pipeline is not null
+            && pipeline.Retryable
+            && !string.IsNullOrWhiteSpace(pipeline.BlockedBy)
+            && (pipeline.OverallStatus is "DEGRADED" or "FAILED" or "PARTIAL_READY"))
         {
             reason = pipeline.ErrorCode ?? pipeline.BlockedBy;
             return ProcessingJobState.Blocked;

@@ -388,20 +388,20 @@ public sealed class AgentApiClient : IDisposable
     public async Task<int> UploadPendingChunksAsync(SpoolStore spool, string? localSessionId, CancellationToken cancellationToken)
     {
         if (!IsConfigured) return 0;
-        var pending = await spool.PendingChunksAsync(localSessionId, 200, cancellationToken);
+        var pending = await spool.PendingChunksWithUploadContextAsync(localSessionId, 200, cancellationToken);
         var configuredConcurrency = int.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_UPLOAD_CONCURRENCY"), out var parsedConcurrency)
             ? parsedConcurrency
             : 3;
         using var gate = new SemaphoreSlim(Math.Clamp(configuredConcurrency, 1, 4));
         var confirmed = 0;
-        var uploads = pending.Select(async chunk =>
+        var uploads = pending.Select(async context =>
         {
             await gate.WaitAsync(cancellationToken);
             var claimed = false;
+            var chunk = context.Chunk;
             try
             {
-                var binding = await spool.GetServerBindingAsync(chunk.SessionId, chunk.TrackId, cancellationToken);
-                if (binding is null) return;
+                var binding = context.Binding;
                 if (!File.Exists(chunk.LocalPath))
                 {
                     await spool.MarkUploadFailedAsync(chunk, "LOCAL_CHUNK_MISSING", cancellationToken);
@@ -411,8 +411,7 @@ public sealed class AgentApiClient : IDisposable
                 claimed = true;
                 try
                 {
-                    var correlationId = (await spool.GetSessionInfoAsync(chunk.SessionId, cancellationToken))?.PipelineCorrelationId;
-                    await UploadChunkAsync(binding, chunk, correlationId, cancellationToken);
+                    await UploadChunkAsync(binding, chunk, context.PipelineCorrelationId, cancellationToken);
                     await spool.MarkConfirmedAsync(chunk.TrackId, chunk.Sequence, cancellationToken);
                     Interlocked.Increment(ref confirmed);
                 }

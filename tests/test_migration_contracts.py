@@ -32,3 +32,14 @@ def test_live_memory_retention_migration_keeps_stop_to_v1_handoff_bounded():
     assert "UNTIL_V1_READY" in migration
     assert "CANONICALIZED" in migration
     assert "7 days" in migration
+
+
+def test_gpu_watchdog_and_runtime_coordination_migrations_are_additive():
+    watchdog = (MIGRATIONS / "039_job_progress_watchdog.sql").read_text(encoding="utf-8")
+    coordination = (MIGRATIONS / "040_gpu_runtime_coordination.sql").read_text(encoding="utf-8")
+    assert "stage_changed_at" in watchdog and "progress_changed_at" in watchdog
+    assert "timeout_requeue_count" in watchdog and "TG_OP = 'INSERT'" in watchdog
+    assert "gpu_runtime_coordination" in coordination
+    assert "llm_state" in coordination and "asr_request_id" in coordination
+    assert "asr_state" in coordination and "ASR_PENDING" in coordination
+    assert "ix_transcript_segments_russian_fts" in coordination

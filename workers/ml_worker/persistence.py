@@ -206,7 +206,7 @@ class JobRepository:
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),updated_at=now() WHERE id=%s AND status='RUNNING'",
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now() WHERE id=%s AND status='RUNNING'",
                 (job_id,),
             )
             if message_id:
@@ -214,6 +214,80 @@ class JobRepository:
                     "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
                     (socket.gethostname(), message_id),
                 )
+
+    def job_progress_liveness(self, job_id: str) -> tuple[str, int, Any, Any] | None:
+        """Return durable stage/progress timestamps without touching updated_at."""
+        with self._db.connection() as connection:
+            try:
+                row = connection.execute(
+                    "SELECT stage,progress,stage_changed_at,progress_changed_at FROM jobs WHERE id=%s",
+                    (job_id,),
+                ).fetchone()
+            except Exception:
+                # Rolling upgrades may start the worker before migration 039;
+                # use the last durable update as a conservative fallback.
+                connection.rollback()
+                row = connection.execute(
+                    "SELECT stage,progress,updated_at,updated_at FROM jobs WHERE id=%s",
+                    (job_id,),
+                ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), int(row[1] or 0), row[2], row[3]
+
+    def requeue_or_fail_stage_timeout(self, job_id: str, message_id: str | None = None) -> str | None:
+        """Perform the single watchdog recovery permitted for one job.
+
+        The NATS delivery stays unacknowledged; expiring its inbox lease lets
+        the restarted worker receive the same durable message. A second
+        timeout is terminal, while any persisted V1 remains untouched.
+        """
+        with self._db.connection() as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    "SELECT status,timeout_requeue_count FROM jobs WHERE id=%s FOR UPDATE",
+                    (job_id,),
+                ).fetchone()
+                if row is None or str(row[0]) != "RUNNING":
+                    return None
+                timeout_count = int(row[1] or 0)
+                if timeout_count < 1:
+                    connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status='QUEUED',stage='RETRY_PENDING',progress=0,
+                            worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,
+                            error_message='GPU stage made no progress within the configured timeout',
+                            error_code='GPU_STAGE_TIMEOUT_REQUEUED',
+                            timeout_requeue_count=timeout_requeue_count+1,
+                            attempt=attempt+1,updated_at=now()
+                        WHERE id=%s AND status='RUNNING'
+                        """,
+                        (job_id,),
+                    )
+                    if message_id:
+                        connection.execute(
+                            "UPDATE inbox_messages SET lease_expires_at=now()-interval '1 second',worker_id=NULL WHERE message_id=%s",
+                            (message_id,),
+                        )
+                    return "REQUEUED"
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status='FAILED',stage='FAILED',progress=0,
+                        worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,
+                        error_message='GPU stage exceeded the progress timeout twice',
+                        error_code='GPU_STAGE_TIMEOUT',updated_at=now()
+                    WHERE id=%s AND status='RUNNING'
+                    """,
+                    (job_id,),
+                )
+                if message_id:
+                    connection.execute(
+                        "UPDATE inbox_messages SET lease_expires_at=now()-interval '1 second',worker_id=NULL WHERE message_id=%s",
+                        (message_id,),
+                    )
+                return "FAILED"
 
     def resolve_pipeline_correlation(self, job_id: str, meeting_id: str) -> str | None:
         with self._db.connection() as connection:

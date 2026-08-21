@@ -14,11 +14,13 @@ if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
     $ModelRoot = Join-Path $repoRoot 'artifacts\tts-host\Models\silero-v5_5_ru'
 }
 $dirty = @(cmd.exe /d /s /c "git -C `"$repoRoot`" status --porcelain --untracked-files=normal 2>NUL")
-if ($dirty.Count -gt 0 -and $env:WHISPERX_ALLOW_DIRTY_RELEASE -notin @('1','true','yes')) { throw 'TTS_BUILD_DIRTY_WORKTREE' }
+$dirtyAllowed = $env:WHISPERX_ALLOW_DIRTY_RELEASE -in @('1','true','yes')
+if ($dirty.Count -gt 0 -and -not $dirtyAllowed) { throw 'TTS_BUILD_DIRTY_WORKTREE' }
 $python = if ($PythonExe) { (Resolve-Path $PythonExe).Path } else { Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe' }
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "TTS_BUILD_PYTHON_MISSING: $python" }
-$identity = "1.0.1+" + (& git -C $repoRoot rev-parse HEAD).Trim()
-if ($identity -match '(?i)(dev|dirty)' -or $identity -notmatch '^1\.0\.1\+[0-9a-f]{40}$') { throw 'TTS_BUILD_IDENTITY_INVALID' }
+$dirtySuffix = if ($dirty.Count -gt 0) { '-dirty' } else { '' }
+$identity = "1.0.1+" + (& git -C $repoRoot rev-parse HEAD).Trim() + $dirtySuffix
+if ($identity -match '(?i)dev' -or $identity -notmatch '^1\.0\.1\+[0-9a-f]{40}(-dirty)?$') { throw 'TTS_BUILD_IDENTITY_INVALID' }
 $source = Join-Path $repoRoot 'apps\tts-host'
 $model = Join-Path $ModelRoot 'v5_5_ru.pt'
 if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw "TTS_MODEL_MISSING: stage it with prepare-silero-tts.ps1" }

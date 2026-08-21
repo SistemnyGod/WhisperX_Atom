@@ -35,6 +35,15 @@ jobs:
       - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Service.csproj
       - run: dotnet restore apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj
       - run: dotnet restore apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj
+      - name: Restore .NET test projects
+        shell: pwsh
+        run: |
+          $projects = @(Get-ChildItem -Path . -Recurse -Filter '*Tests.csproj' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]|[\\/]bin[\\/]' })
+          foreach ($project in $projects) {
+            dotnet restore $project.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - run: dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --no-restore -c Release
       - run: dotnet build apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj --no-restore -c Release
       - run: dotnet build apps/recorder-host/WhisperX.Atom.Recorder.Host.csproj --no-restore -c Release

@@ -11,5 +11,8 @@
     <AssemblyName>WhisperX.Atom.Updater</AssemblyName>
     <Version>1.0.1</Version>
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <WhisperXBuildIdentity Condition="'$(WhisperXBuildIdentity)' == ''">1.0.1+audio-float32-pcm16</WhisperXBuildIdentity>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
   </PropertyGroup>
 </Project>

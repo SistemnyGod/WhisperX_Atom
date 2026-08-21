@@ -6,6 +6,8 @@ import os
 import re
 import socket
 import hashlib
+import time
+from collections import deque
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -13,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from workers.db_pool import DatabaseConnectionPool
 from workers.gpu_lease import PostgresGpuLease
+from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
 from .hybrid_retrieval import HybridRetriever, RetrievalCandidate
@@ -337,7 +340,8 @@ class AssistantRepository:
         bounded embedding signal for paraphrases, then expands neighbours in
         the same meeting/transcript before the immutable RETRIEVED snapshot.
         """
-        candidate_limit = max(512, min(int(os.getenv("ASSISTANT_HYBRID_CANDIDATE_LIMIT", "12000")), 50000))
+        fts_anchor_limit = max(8, min(int(os.getenv("ASSISTANT_FTS_ANCHOR_LIMIT", "64")), 512))
+        semantic_candidate_limit = max(32, min(int(os.getenv("ASSISTANT_SEMANTIC_CANDIDATE_LIMIT", "512")), 4096))
         with self._db.connection() as connection:
             rows = connection.execute(
                 """
@@ -357,20 +361,30 @@ class AssistantRepository:
                       AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
                       AND (%s::uuid IS NOT NULL OR m.created_at >= now()-interval '90 days')
-                ), source AS (
+                ), fts_anchors AS (
                     SELECT base.*,
-                           CASE WHEN base.search_vector @@ websearch_to_tsquery('russian', %s)
-                                THEN ts_rank_cd(base.search_vector, websearch_to_tsquery('russian', %s))
-                                ELSE 0.0 END AS rank
+                           ts_rank_cd(base.search_vector, websearch_to_tsquery('russian', %s)) AS rank
                     FROM base
+                    WHERE base.search_vector @@ websearch_to_tsquery('russian', %s)
+                    ORDER BY rank DESC,meeting_created_at DESC,meeting_id,ordinal
+                    LIMIT %s
+                ), semantic_pool AS (
+                    SELECT base.*, 0.0::real AS rank
+                    FROM base
+                    WHERE NOT EXISTS (SELECT 1 FROM fts_anchors anchor WHERE anchor.id=base.id)
+                    ORDER BY meeting_created_at DESC,meeting_id,ordinal
+                    LIMIT %s
+                ), bounded AS (
+                    SELECT * FROM fts_anchors
+                    UNION ALL
+                    SELECT * FROM semantic_pool
                 )
                 SELECT id,meeting_id,start_ms,end_ms,transcript_id,transcript_version,speaker,text,version_kind,
                        ordinal,rank,meeting_created_at
-                FROM source
+                FROM bounded
                 ORDER BY (rank > 0) DESC,rank DESC,meeting_created_at DESC,meeting_id,ordinal
-                LIMIT %s
                 """,
-                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query, query, candidate_limit),
+                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query, query, fts_anchor_limit, semantic_candidate_limit),
             ).fetchall()
 
             candidates = [
@@ -425,7 +439,11 @@ class AssistantRepository:
                     """,
                     (meeting_id,),
                 ).fetchone()[0])
-        max_chars = min(36000, max(4000, int(os.getenv('ASSISTANT_MAX_CONTEXT_CHARS', '36000'))))
+        # Assistant prompts use a smaller independent budget than the
+        # summary worker.  The default is approximately 8k tokens while the
+        # existing override remains available for controlled experiments.
+        default_assistant_chars = max(4000, min(36000, int(os.getenv('ASSISTANT_CONTEXT_SIZE', '8192')) * 4))
+        max_chars = min(36000, max(4000, int(os.getenv('ASSISTANT_MAX_CONTEXT_CHARS', str(default_assistant_chars)))))
         valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
         lines: list[str] = []
         kinds: set[str] = set()
@@ -499,7 +517,8 @@ class AssistantRepository:
                     """,
                     (meeting_id,),
                 ).fetchone()[0])
-        max_chars = min(36000, max(4000, int(os.getenv("ASSISTANT_MAX_CONTEXT_CHARS", "36000"))))
+        default_assistant_chars = max(4000, min(36000, int(os.getenv("ASSISTANT_CONTEXT_SIZE", "8192")) * 4))
+        max_chars = min(36000, max(4000, int(os.getenv("ASSISTANT_MAX_CONTEXT_CHARS", str(default_assistant_chars)))))
         if rows:
             if meeting_id is None:
                 # Rows are already ordered by FTS rank. Keep at most five
@@ -571,21 +590,28 @@ class AssistantRepository:
         # canonical V1/V2 still process both original tracks independently.
         original_live_count = len(rows)
         deduped: list[tuple[Any, ...]] = []
+        normalized_by_index: dict[int, str] = {}
+        window: deque[tuple[int, int]] = deque()
         for row in rows:
             text = str(row[4]).strip()
             normalized = re.sub(r"[^\wА-Яа-яЁё]+", " ", text.lower().replace("ё", "е")).strip()
             duplicate_index = None
-            for index, previous in enumerate(deduped):
-                if abs(int(row[2]) - int(previous[2])) > 1500:
-                    continue
-                previous_text = re.sub(r"[^\wА-Яа-яЁё]+", " ", str(previous[4]).lower().replace("ё", "е")).strip()
+            start_ms = int(row[2])
+            while window and start_ms - window[0][1] > 1500:
+                window.popleft()
+            for index, _previous_start in window:
+                previous_text = normalized_by_index.get(index, "")
                 if normalized and previous_text and SequenceMatcher(None, normalized, previous_text).ratio() >= 0.85:
                     duplicate_index = index
                     break
             if duplicate_index is None:
+                duplicate_index = len(deduped)
                 deduped.append(row)
+                normalized_by_index[duplicate_index] = normalized
+                window.append((duplicate_index, start_ms))
             elif str(row[8] or "") == "REMOTE_SYSTEM" and str(deduped[duplicate_index][8] or "") != "REMOTE_SYSTEM":
                 deduped[duplicate_index] = row
+                normalized_by_index[duplicate_index] = normalized
         rows = deduped
         self._last_retrieval_metadata["deduplicatedSegments"] = max(0, original_live_count - len(deduped))
         query_tokens = {
@@ -675,7 +701,7 @@ class AssistantRepository:
                             (query_id, segment_id, rank, transcript_id, transcript_version, meeting_id, start_ms, end_ms, hashlib.sha256(text.encode("utf-8")).hexdigest()),
                         )
 
-    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None, expected_meeting_id: str | None = None) -> None:
+    def persist(self, query_id: str, result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str, transcript_kind: str = "ENRICHED", reason: str | None = None, expected_meeting_id: str | None = None, timings: dict[str, float] | None = None) -> None:
         if assistant_mode in {"CURRENT_MEETING", "LIVE_MEETING"} and expected_meeting_id:
             if any(value[0] != expected_meeting_id for value in valid.values()):
                 valid = {}
@@ -742,7 +768,7 @@ class AssistantRepository:
         with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now(),updated_at=now(),next_retry_at=NULL,retryable=false WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
-                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": bool(claims), "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
+                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": bool(claims), "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "timings": timings or {}, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
             ).fetchone()
             if evidence_ids:
                 for rank, segment_id in enumerate(evidence_ids, start=1):
@@ -777,6 +803,7 @@ class AssistantWorker:
         # Assistant is interactive and must wait behind V1 ASR, but ahead of
         # optional enrichment and automatic Summary work.
         self.lease = PostgresGpuLease(self.repository.conninfo, priority=30)
+        self._gpu_coordination = GpuRuntimeCoordinator(self.repository.conninfo)
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self._llm_runtime = LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None
@@ -794,6 +821,7 @@ class AssistantWorker:
         self.repository.close()
 
     async def handle(self, payload: dict[str, Any]) -> None:
+        total_started = time.perf_counter()
         query_id = str(payload["query_id"])
         message_id = str(payload.get("message_id", ""))
         if message_id and not self.repository.claim(message_id, query_id):
@@ -809,6 +837,7 @@ class AssistantWorker:
         # start or invoke_json raises; without this initialization the cleanup
         # path itself raised UnboundLocalError and hid the real failure.
         result: dict[str, Any] = {}
+        timings: dict[str, float] = {"queue_wait_ms": max(0.0, float(payload.get("queue_wait_ms") or 0.0))}
         try:
             if assistant_mode == "GENERAL_CHAT":
                 self.repository.clear_retrieval_metadata()
@@ -822,7 +851,9 @@ class AssistantWorker:
                 )
                 user_content = f"Вопрос: {query}"
             elif assistant_mode == "LIVE_MEETING":
+                retrieval_started = time.perf_counter()
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, query)
+                timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
                     return
@@ -835,8 +866,10 @@ class AssistantWorker:
                 )
                 user_content = f"Вопрос: {query}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
             else:
+                retrieval_started = time.perf_counter()
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)
+                timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
                     return
@@ -858,10 +891,21 @@ class AssistantWorker:
             ]
             synthesis_completed = False
             async with self.lease:
+                preemption_started = time.perf_counter()
+                if not await asyncio.to_thread(self._gpu_coordination.llm_may_start):
+                    raise RuntimeError("gpu_asr_pending")
+                timings["preemption_wait_ms"] = round((time.perf_counter() - preemption_started) * 1000.0, 3)
+                model_started = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
+                timings["model_start_ms"] = round((time.perf_counter() - model_started) * 1000.0, 3)
+                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "assistant-worker"):
+                    await asyncio.to_thread(self._llm_runtime.stop)
+                    raise RuntimeError("gpu_asr_pending")
                 try:
                     client = self._client_for(server.base_url)
+                    generation_started = time.perf_counter()
                     result = await client.invoke_json(messages, ASSISTANT_SCHEMA)
+                    timings["generation_ms"] = round((time.perf_counter() - generation_started) * 1000.0, 3)
                     if assistant_mode != "GENERAL_CHAT" and not claims_are_semantically_grounded(result, valid, assistant_mode):
                         # One controlled retry is allowed.  The second result
                         # is still validated by persist(), so a malformed or
@@ -870,16 +914,28 @@ class AssistantWorker:
                             *messages,
                             {"role": "user", "content": "Проверка grounding не пройдена. Верни только claims с существующими evidenceIds из контекста; каждый факт обязан иметь хотя бы один источник."},
                         ]
+                        retry_started = time.perf_counter()
                         result = await client.invoke_json(retry_messages, ASSISTANT_SCHEMA)
+                        timings["generation_ms"] = round(timings.get("generation_ms", 0.0) + (time.perf_counter() - retry_started) * 1000.0, 3)
+                    grounding_started = time.perf_counter()
+                    if assistant_mode != "GENERAL_CHAT":
+                        claims_are_semantically_grounded(result, valid, assistant_mode)
+                    timings["grounding_ms"] = round((time.perf_counter() - grounding_started) * 1000.0, 3)
                     synthesis_completed = True
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
+                    if self._llm_runtime.enabled:
+                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "assistant-worker"):
+                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, "assistant-worker")
+                    else:
+                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, "assistant-worker")
                     # Do not turn a failed model start, timeout or malformed
                     # response into a synthetic terminal answer.  The outer
                     # failure path must be able to record FAILED/LLM_UNAVAILABLE
                     # and leave the durable query retryable.
                     if synthesis_completed:
-                        await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id)
+                        timings["total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 3)
+                        await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id, timings=timings)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             if is_retryable_assistant_error(exc):

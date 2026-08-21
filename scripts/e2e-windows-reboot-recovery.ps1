@@ -11,8 +11,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$pipeName = "WhisperXAtomRecorderHost"
-$voicePipeName = "WhisperXAtomVoiceHost"
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repo "artifacts\acceptance\windows-reboot-recovery"
 }
@@ -22,17 +20,26 @@ if ([string]::IsNullOrWhiteSpace($MarkerPath)) {
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 $MarkerPath = [IO.Path]::GetFullPath($MarkerPath)
 $reportPath = Join-Path $OutputRoot ("{0}-{1}.json" -f $Phase, (Get-Date -Format "yyyyMMdd-HHmmss"))
+$recorderPipeName = "WhisperXAtomRecorderHost"
+$voicePipeName = "WhisperXAtomVoiceHost"
 
-function Invoke-PipeCommand([string]$Name, [hashtable]$Payload = @{}, [int]$TimeoutMs = 5000) {
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $Name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+function Invoke-PipeCommand(
+    [Parameter(Mandatory = $true)][string]$PipeName,
+    [Parameter(Mandatory = $true)][string]$Command,
+    [hashtable]$Payload = @{},
+    [int]$TimeoutMs = 5000) {
+    if ([string]::IsNullOrWhiteSpace($PipeName) -or [string]::IsNullOrWhiteSpace($Command)) {
+        throw "IPC_PIPE_OR_COMMAND_REQUIRED"
+    }
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", $PipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
     try {
         $pipe.Connect($TimeoutMs)
         $reader = [System.IO.StreamReader]::new($pipe, [Text.Encoding]::UTF8, $false, 4096, $true)
         $writer = [System.IO.StreamWriter]::new($pipe, [Text.Encoding]::UTF8, 4096, $true)
         $writer.AutoFlush = $true
-        $writer.WriteLine(([ordered]@{ command = $Name; protocolVersion = 6; payload = $Payload } | ConvertTo-Json -Compress -Depth 8))
+        $writer.WriteLine(([ordered]@{ command = $Command; protocolVersion = 6; payload = $Payload } | ConvertTo-Json -Compress -Depth 8))
         $line = $reader.ReadLine()
-        if ([string]::IsNullOrWhiteSpace($line)) { throw "IPC_EMPTY_RESPONSE:$Name" }
+        if ([string]::IsNullOrWhiteSpace($line)) { throw "IPC_EMPTY_RESPONSE:$Command" }
         return $line | ConvertFrom-Json
     }
     finally { $pipe.Dispose() }
@@ -52,8 +59,8 @@ function Get-RedactedSessions($response) {
 }
 
 function Get-HostEvidence {
-    $health = Invoke-PipeCommand "HEALTH"
-    $sessions = Invoke-PipeCommand "LIST_LOCAL_SESSIONS" @{ limit = 500 }
+    $health = Invoke-PipeCommand -PipeName $recorderPipeName -Command "HEALTH"
+    $sessions = Invoke-PipeCommand -PipeName $recorderPipeName -Command "LIST_LOCAL_SESSIONS" -Payload @{ limit = 500 }
     $ids = @(Get-RedactedSessions $sessions | ForEach-Object { $_.sessionId } | Where-Object { $_ })
     $duplicates = @($ids | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name)
     [ordered]@{
@@ -70,7 +77,7 @@ function Get-HostEvidence {
 
 function Get-VoiceEvidence {
     try {
-        $status = Invoke-PipeCommand $voicePipeName @{} 3000
+        $status = Invoke-PipeCommand -PipeName $voicePipeName -Command "STATUS" -TimeoutMs 3000
         [ordered]@{
             reachable = $status.ok -eq $true
             state = [string]$status.data.state

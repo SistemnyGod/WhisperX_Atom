@@ -113,11 +113,11 @@ class LocalLlamaRuntime:
     _last_used = 0.0
 
     def __init__(self, idle_seconds: int | None = None) -> None:
-        self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "900")))
+        self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "120")))
         # Keep the safe stop-after-job behavior until the deployment enables
         # cross-worker GPU coordination. The resident path is opt-in so a
         # standalone summary container cannot starve the ASR worker.
-        self.enabled = os.getenv("LLM_RESIDENT_ENABLED", "false").lower() in {"1", "true", "yes"}
+        self.enabled = os.getenv("LLM_RESIDENT_ENABLED", "true").lower() in {"1", "true", "yes"}
 
     @staticmethod
     def _model_fingerprint() -> tuple[str, int, int, str, str, str]:

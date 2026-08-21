@@ -51,6 +51,8 @@ public sealed record DesktopTask(string Id, string MeetingId, Guid? SummaryId, s
     [JsonIgnore]
     public string DeadlineText => Deadline is DateTime value ? value.ToLocalTime().ToString("dd.MM.yyyy") : "Срок не указан";
 }
+public sealed record DesktopMeetingMetrics(string MeetingId, IReadOnlyList<DesktopJob> Jobs, DesktopSummary? Summary, IReadOnlyList<DesktopTask> OpenTasks, IReadOnlyList<DesktopPipelineRun> Pipeline);
+public sealed record DesktopMeetingMetricsEnvelope(IReadOnlyList<DesktopMeetingMetrics> Items);
 public sealed record DesktopRegistryPage<T>(IReadOnlyList<T> Items, int TotalCount, bool HasMore);
 public sealed record DesktopSummaryRegistryRow(DesktopMeeting Meeting, DesktopSummary? Summary);
 public sealed record DesktopSpeakerRegistryRow(DesktopMeeting Meeting, DesktopSpeaker Speaker);
@@ -714,6 +716,18 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/{meetingId}/jobs", null, cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<List<DesktopJob>>(_json, cancellationToken) ?? [];
+    }
+
+    public async Task<IReadOnlyList<DesktopMeetingMetrics>> GetMeetingMetricsAsync(IReadOnlyList<Guid> meetingIds, CancellationToken cancellationToken = default)
+    {
+        var ids = meetingIds.Where(id => id != Guid.Empty).Distinct().Take(50).Select(id => id.ToString()).ToArray();
+        if (ids.Length == 0) return [];
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/meetings/metrics?ids={Uri.EscapeDataString(string.Join(',', ids))}", null, cancellationToken);
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented)
+            throw new DesktopApiException((int)response.StatusCode, "MEETING_METRICS_UNSUPPORTED", "Сервер не поддерживает агрегированные метрики.");
+        response.EnsureSuccessStatusCode();
+        var envelope = await response.Content.ReadFromJsonAsync<DesktopMeetingMetricsEnvelope>(_json, cancellationToken);
+        return envelope?.Items ?? [];
     }
 
     public async Task<IReadOnlyList<DesktopPipelineRun>> GetMeetingPipelineAsync(Guid meetingId, CancellationToken cancellationToken = default)

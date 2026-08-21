@@ -16,6 +16,7 @@ COPY workers/summary_worker /srv/workers/summary_worker
 COPY workers/__init__.py /srv/workers/__init__.py
 COPY workers/nats_utils.py /srv/workers/nats_utils.py
 COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
+COPY workers/gpu_runtime_coordination.py /srv/workers/gpu_runtime_coordination.py
 COPY workers/db_pool.py /srv/workers/db_pool.py
 COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py
 COPY workers/runtime_healthcheck.py /srv/workers/runtime_healthcheck.py

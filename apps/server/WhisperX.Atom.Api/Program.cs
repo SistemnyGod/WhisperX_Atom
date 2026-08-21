@@ -1435,6 +1435,47 @@ app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext contex
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
 });
+// Home uses this bounded aggregate to avoid the historical jobs/summary/tasks
+// N+1 refresh.  Each meeting is scope-checked before any child resource is
+// returned; the legacy per-meeting endpoints remain available for rolling
+// clients and detail views.
+app.MapGet("/api/meetings/metrics", async (string? ids, HttpContext context, UnifiedProductStore store, Database db) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var meetingIds = (ids ?? string.Empty)
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty)
+        .Where(id => id != Guid.Empty)
+        .Distinct()
+        .Take(50)
+        .ToArray();
+    if (meetingIds.Length == 0) return Results.BadRequest(new { error = "meeting_ids_required" });
+
+    var includeAll = IsPrivileged(context);
+    async Task<object?> Load(Guid meetingId)
+    {
+        if (await db.GetMeetingAsync(meetingId, userId, includeAll) is null) return null;
+        var jobsTask = db.ListJobsAsync(meetingId);
+        var summaryTask = store.GetLatestSummaryAsync(meetingId);
+        var tasksTask = store.ListActionItemsAsync(meetingId);
+        var pipelineTask = store.GetMeetingPipelineChainsAsync(meetingId);
+        await Task.WhenAll(jobsTask, summaryTask, tasksTask, pipelineTask);
+        var tasks = await tasksTask;
+        return new
+        {
+            meetingId,
+            jobs = await jobsTask,
+            summary = await summaryTask,
+            openTasks = tasks.Where(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase)
+                && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)).ToArray(),
+            pipeline = await pipelineTask
+        };
+    }
+
+    var items = (await Task.WhenAll(meetingIds.Select(Load))).Where(item => item is not null).ToArray();
+    return Results.Ok(new { items });
+});
 app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();

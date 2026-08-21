@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -39,49 +40,90 @@ def _peak_vram_bytes() -> int | None:
         return None
 
 
-def _gpu_utilization_percent() -> float | None:
-    """Best-effort point-in-time GPU utilisation for diagnostics only.
+@dataclass(frozen=True)
+class GpuTelemetrySample:
+    utilization: float | None = None
+    sampled_at: float | None = None
+    probe_ms: float | None = None
+    source: str = "NONE"
 
-    The worker image does not require NVML.  Prefer it when already installed
-    and fall back to ``nvidia-smi`` when available.  A missing driver/tool must
-    never fail transcription, so ``None`` is a valid value.
+
+class _GpuTelemetrySampler:
+    """One low-frequency sampler shared by all request metrics.
+
+    Calling nvidia-smi in the request completion path made telemetry itself
+    add up to 750 ms to every job. The sampler keeps that cost off the worker's
+    critical path and exposes the sample age for honest diagnostics.
     """
 
-    try:
-        import torch
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sample = GpuTelemetrySample()
+        self._started = False
+        self._interval = max(0.5, float(os.getenv("GPU_METRICS_SAMPLE_INTERVAL_SECONDS", "2")))
 
-        if not torch.cuda.is_available():
-            return None
-    except Exception:
-        # If torch is unavailable, retain the best-effort nvidia-smi fallback
-        # for lightweight diagnostic environments.
-        pass
-    try:
-        import pynvml  # type: ignore[import-not-found]
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        thread = threading.Thread(target=self._run, name="whisperx-gpu-telemetry", daemon=True)
+        thread.start()
 
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            return round(float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu), 3)
-        finally:
+    def snapshot(self) -> GpuTelemetrySample:
+        self.start()
+        with self._lock:
+            return self._sample
+
+    def _run(self) -> None:
+        while True:
+            started = time.perf_counter()
+            utilization: float | None = None
+            source = "NONE"
             try:
-                pynvml.nvmlShutdown()
+                import pynvml  # type: ignore[import-not-found]
+
+                pynvml.nvmlInit()
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    utilization = round(float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu), 3)
+                    source = "NVML"
+                finally:
+                    try:
+                        pynvml.nvmlShutdown()
+                    except Exception:
+                        pass
             except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=float(os.getenv("GPU_METRICS_TIMEOUT_SECONDS", "0.75")),
-        )
-        value = float((completed.stdout or "").strip().splitlines()[0])
-        return round(value, 3) if 0 <= value <= 100 else None
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        return None
+                try:
+                    completed = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=float(os.getenv("GPU_METRICS_TIMEOUT_SECONDS", "0.75")),
+                    )
+                    value = float((completed.stdout or "").strip().splitlines()[0])
+                    if 0 <= value <= 100:
+                        utilization = round(value, 3)
+                        source = "NVIDIA_SMI"
+                except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                    pass
+            sample = GpuTelemetrySample(utilization, time.time(), round((time.perf_counter() - started) * 1000.0, 3), source)
+            with self._lock:
+                self._sample = sample
+            time.sleep(self._interval)
+
+
+_GPU_SAMPLER = _GpuTelemetrySampler()
+
+
+def _gpu_utilization_snapshot() -> GpuTelemetrySample:
+    return _GPU_SAMPLER.snapshot()
+
+
+def _gpu_utilization_percent() -> float | None:
+    """Compatibility accessor for older diagnostics callers."""
+    return _gpu_utilization_snapshot().utilization
 
 
 @dataclass
@@ -133,10 +175,14 @@ class PipelineMetrics:
             self.checkpoint_hits += 1
 
     def to_dict(self, duration_seconds: float | None = None) -> dict[str, object]:
-        total_ms = (time.perf_counter() - self.started_at) * 1000.0
         audio_duration_ms = round(float(duration_seconds) * 1000.0, 3) if duration_seconds and duration_seconds > 0 else None
         peak_bytes = _peak_vram_bytes()
         peak_mb = round(peak_bytes / (1024.0 * 1024.0), 3) if peak_bytes is not None else None
+        gpu_sample = _gpu_utilization_snapshot()
+        sample_age_ms = round((time.time() - gpu_sample.sampled_at) * 1000.0, 3) if gpu_sample.sampled_at else None
+        # Measure after the resource probes so telemetry collection is
+        # visible in total_processing_ms instead of being silently omitted.
+        total_ms = (time.perf_counter() - self.started_at) * 1000.0
         metrics: dict[str, object] = {
             "model_load_ms": round(float(self.model_load_ms), 3),
             "queue_wait_ms": round(float(self.queue_wait_ms), 3),
@@ -148,7 +194,10 @@ class PipelineMetrics:
             "audio_duration_ms": audio_duration_ms,
             "peak_vram_bytes": peak_bytes,
             "gpu_peak_vram_mb": peak_mb,
-            "gpu_utilization": _gpu_utilization_percent(),
+            "gpu_utilization": gpu_sample.utilization,
+            "gpu_sample_source": gpu_sample.source,
+            "gpu_sample_age_ms": sample_age_ms,
+            "gpu_probe_ms": gpu_sample.probe_ms,
             "cuda_oom_count": int(self.cuda_oom_count),
             "checkpoint_lookups": int(self.checkpoint_lookups),
             "checkpoint_hits": int(self.checkpoint_hits),

@@ -89,6 +89,7 @@ public interface IBackendService : IDisposable
     Task<DesktopMeeting> ImportFileAsync(string path, string? title = null, CancellationToken cancellationToken = default);
     Task<DesktopMeeting> ImportFileWithProgressAsync(string path, string? title, IProgress<DesktopImportProgress>? progress, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopJob>> GetJobsAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DesktopMeetingMetrics>> GetMeetingMetricsAsync(IReadOnlyList<Guid> meetingIds, CancellationToken cancellationToken = default);
     Task<DesktopJob?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<DesktopJob?> WaitForJobEventsAsync(Guid jobId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopPipelineRun>> GetMeetingPipelineAsync(Guid meetingId, CancellationToken cancellationToken = default);
