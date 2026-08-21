@@ -22,6 +22,10 @@ from .hybrid_retrieval import HybridRetriever, RetrievalCandidate
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
 
+# This worker shares LocalLlamaRuntime with SummaryWorker.  The coordination
+# owner identifies the runtime, so both consumers must use the same value.
+LLM_RUNTIME_OWNER = "llm-runtime"
+
 ASSISTANT_MAX_RETRIES = max(0, int(os.getenv("ASSISTANT_MAX_RETRIES", "3")))
 
 
@@ -893,14 +897,17 @@ class AssistantRepository:
 
 
 class AssistantWorker:
-    def __init__(self) -> None:
+    def __init__(self, gpu_coordination: GpuRuntimeCoordinator | None = None,
+                 llm_runtime: LocalLlamaRuntime | None = None,
+                 llm_owner: str | None = None) -> None:
         self.repository = AssistantRepository()
         # Assistant is interactive and must wait behind V1 ASR, but ahead of
         # optional enrichment and automatic Summary work.
         self.lease = PostgresGpuLease(self.repository.conninfo, priority=30)
-        self._gpu_coordination = GpuRuntimeCoordinator(self.repository.conninfo)
+        self._gpu_coordination = gpu_coordination or GpuRuntimeCoordinator(self.repository.conninfo)
+        self._llm_owner = llm_owner or self._gpu_coordination.owner
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
-        self._llm_runtime = LocalLlamaRuntime()
+        self._llm_runtime = llm_runtime or LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None
 
     def _client_for(self, base_url: str) -> LlamaCppClient:
@@ -1003,10 +1010,10 @@ class AssistantWorker:
                 model_started = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 timings["model_start_ms"] = round((time.perf_counter() - model_started) * 1000.0, 3)
-                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "assistant-worker"):
+                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, self._llm_owner, "ASSISTANT", query_id):
                     await asyncio.to_thread(self._llm_runtime.stop)
                     raise RuntimeError("gpu_asr_pending")
-                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, "assistant-worker")
+                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, self._llm_owner, "ASSISTANT", query_id)
                 try:
                     client = self._client_for(server.base_url)
                     generation_started = time.perf_counter()
@@ -1031,10 +1038,10 @@ class AssistantWorker:
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
                     if self._llm_runtime.enabled:
-                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "assistant-worker"):
-                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, "assistant-worker")
+                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, self._llm_owner):
+                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, self._llm_owner)
                     else:
-                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, "assistant-worker")
+                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, self._llm_owner)
                     # Do not turn a failed model start, timeout or malformed
                     # response into a synthetic terminal answer.  The outer
                     # failure path must be able to record FAILED/LLM_UNAVAILABLE

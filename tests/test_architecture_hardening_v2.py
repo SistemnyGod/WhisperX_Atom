@@ -20,6 +20,32 @@ def test_priority_coordination_migration_is_additive_and_fts_cleanup_is_narrow()
     assert "ix_transcript_segments_text_russian" not in cleanup
 
 
+def test_llm_runtime_ownership_is_additive_and_process_scoped():
+    ownership = (ROOT / "apps/server/WhisperX.Atom.Api/Migrations/043_llm_runtime_ownership.sql").read_text()
+    coordination = (ROOT / "workers/gpu_runtime_coordination.py").read_text()
+    worker = (ROOT / "workers/summary_worker/worker.py").read_text()
+    assert "ADD COLUMN IF NOT EXISTS llm_owner_heartbeat_at" in ownership
+    assert "ADD COLUMN IF NOT EXISTS llm_active_workload" in ownership
+    assert "ADD COLUMN IF NOT EXISTS llm_active_request_id" in ownership
+    assert "summary-runtime:{socket.gethostname()}:{os.getpid()}" in worker
+    assert "heartbeat_owner" in coordination
+    assert "reclaim_stale_owner" in coordination
+    assert "pg_try_advisory_lock" in coordination
+    assert "NOT COALESCE(llm_active,FALSE)" in coordination
+    assert "GPU_LLM_OWNER_HEARTBEAT_SECONDS" in worker
+    assert "GPU_LLM_OWNER_STALE_SECONDS" in coordination
+
+
+def test_priority_gate_ignores_stale_assistant_without_lease():
+    source = (ROOT / "workers/gpu_lease.py").read_text()
+    compose = (ROOT / "compose.dev.yml").read_text()
+    assert "GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS" in source
+    assert "GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS" in compose
+    assert "q.updated_at >= now()" in source
+    assert "FROM inbox_messages i" in source
+    assert "i.job_id=q.id" in source
+
+
 def test_worker_uses_v1_preemption_before_lease_and_v2_after_priority_lease():
     source = (ROOT / "workers/ml_worker/worker.py").read_text()
     assert 'workload_type = "V2_ENRICH" if enrichment_job else "V1_ASR"' in source

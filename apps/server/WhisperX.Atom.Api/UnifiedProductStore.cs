@@ -127,6 +127,7 @@ public sealed record OperationsSnapshot(
     double OldestGpuProgressAgeSeconds = 0,
     long QueuedAssistantQueries = 0,
     long QueuedAsrJobs = 0);
+public sealed record LlmRuntimeSnapshot(string? Owner, DateTimeOffset? OwnerHeartbeatAt, bool Active, string? ActiveWorkload, string? ActiveRequestId);
 public sealed record WorkerRuntimeRow(string WorkerName, string InstanceId, string Status, DateTime LastSeenAt, Guid? CurrentJobId, string Version, JsonDocument Capabilities, string? LastErrorCode);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
 public enum ActionItemUpdateResult { NotFound, InvalidTransition, Updated }
@@ -1367,7 +1368,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var id = Guid.NewGuid();
         var normalizedSource = source.Trim().ToUpperInvariant() is "VOICE" or "SYSTEM" ? source.Trim().ToUpperInvariant() : "DESKTOP";
         await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,assistant_mode,requested_mode,router_confidence,source,grounding_status,answer_metadata,conversation_id,query,status,evidence) VALUES(@id,@user,@meeting,@mode,@requested,@confidence,@source,'PENDING',@metadata::jsonb,@conversation,@query,'QUEUED','[]'::jsonb)", connection, tx);
-        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value); insert.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value); insert.Parameters.AddWithValue("query", query);
+        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value);
+        insert.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
+        insert.Parameters.AddWithValue("query", query);
         insert.Parameters.AddWithValue("mode", assistantMode);
         insert.Parameters.AddWithValue("requested", (object?)requestedMode ?? DBNull.Value);
         insert.Parameters.AddWithValue("confidence", (object?)routerConfidence ?? DBNull.Value);
@@ -1468,7 +1471,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             LIMIT 1
             """, connection);
         command.Parameters.AddWithValue("user", userId);
-        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        // Npgsql cannot infer the type of a DBNull-only parameter when the
+        // SQL references it in both IS NULL and equality predicates.  This
+        // path is used by GENERAL_CHAT (no active meeting), so leaving the
+        // parameter untyped turns every conversation lookup into PostgreSQL
+        // 42P08 and prevents the request from ever reaching the worker.
+        var meetingParameter = command.Parameters.Add("meeting", NpgsqlDbType.Uuid);
+        meetingParameter.Value = meetingId is Guid value ? value : DBNull.Value;
         command.Parameters.AddWithValue("mode", string.IsNullOrWhiteSpace(requestedMode) ? "AUTO" : requestedMode.Trim().ToUpperInvariant());
         await using var reader = await command.ExecuteReaderAsync();
         return await reader.ReadAsync() ? ReadConversation(reader) : null;
@@ -1498,7 +1507,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("title", normalizedTitle);
         command.Parameters.AddWithValue("scope", scopeType);
-        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         command.Parameters.AddWithValue("mode", assistantMode);
         await using var reader = await command.ExecuteReaderAsync();
         return await reader.ReadAsync() ? ReadConversation(reader) : null;
@@ -1569,7 +1578,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         {
             insertQuery.Parameters.AddWithValue("id", queryId);
             insertQuery.Parameters.AddWithValue("user", userId);
-            insertQuery.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+            insertQuery.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
             insertQuery.Parameters.AddWithValue("mode", assistantMode);
             insertQuery.Parameters.AddWithValue("conversation", conversationId);
             insertQuery.Parameters.AddWithValue("user_message", userMessageId);
@@ -1889,7 +1898,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             LIMIT @limit OFFSET @offset
             """, connection);
         command.Parameters.AddWithValue("query", query);
-        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         command.Parameters.AddWithValue("owner", userId);
         command.Parameters.AddWithValue("include_all", includeAll);
         command.Parameters.AddWithValue("limit", limit);
@@ -1974,6 +1983,32 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
     }
 
+    public async Task<LlmRuntimeSnapshot?> GetLlmRuntimeSnapshotAsync()
+    {
+        await using var connection = await OpenAsync();
+        await using (var columns = new NpgsqlCommand("""
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_name='gpu_runtime_coordination'
+              AND column_name IN ('llm_owner_heartbeat_at','llm_active_workload','llm_active_request_id')
+            """, connection))
+        {
+            if (Convert.ToInt64(await columns.ExecuteScalarAsync()) != 3)
+                return null;
+        }
+        await using var command = new NpgsqlCommand("""
+            SELECT llm_owner,llm_owner_heartbeat_at,llm_active,llm_active_workload,llm_active_request_id
+            FROM gpu_runtime_coordination WHERE id=1
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        return new LlmRuntimeSnapshot(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
+            !reader.IsDBNull(2) && reader.GetBoolean(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
     public async Task<IReadOnlyList<WorkerRuntimeRow>> ListWorkerRuntimeAsync()
     {
         var result = new List<WorkerRuntimeRow>();
@@ -2010,7 +2045,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             ORDER BY a.created_at DESC
             LIMIT @limit OFFSET @offset
             """, connection);
-        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         command.Parameters.AddWithValue("event_type", (object?)eventType ?? DBNull.Value);
         command.Parameters.AddWithValue("limit", limit);
         command.Parameters.AddWithValue("offset", offset);
@@ -2099,7 +2134,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 "LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id " +
                 $"WHERE (@meeting IS NULL OR t.meeting_id=@meeting) AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND ({conditions}) " +
                 "ORDER BY s.start_ms LIMIT 8", connection);
-            search.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+            search.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
             foreach (var pair in tokens.Select((token, index) => (token, index)))
                 search.Parameters.AddWithValue($"term{pair.index}", $"%{pair.token}%");
             await using var reader = await search.ExecuteReaderAsync();
@@ -2131,7 +2166,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var source = evidence.Count > 0 ? "transcript_search" : asksForSummary && summary is not null ? "summary" : "none";
 
         await using var command = new NpgsqlCommand("INSERT INTO assistant_queries(id,meeting_id,query,answer,evidence) VALUES(gen_random_uuid(),@meeting,@query,@answer,@evidence::jsonb)", connection);
-        command.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        command.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         command.Parameters.AddWithValue("query", query);
         command.Parameters.AddWithValue("answer", answer);
         command.Parameters.AddWithValue("evidence", JsonSerializer.Serialize(evidence));
@@ -2255,7 +2290,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var audit = new NpgsqlCommand("INSERT INTO audit_events(id,actor_user_id,meeting_id,entity_type,entity_id,event_type,before_state,after_state) VALUES(gen_random_uuid(),@actor,@meeting,@entity_type,@entity_id,@event_type,@before::jsonb,@after::jsonb)", connection, tx);
         audit.Parameters.AddWithValue("actor", (object?)actorUserId ?? DBNull.Value);
-        audit.Parameters.AddWithValue("meeting", (object?)meetingId ?? DBNull.Value);
+        audit.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         audit.Parameters.AddWithValue("entity_type", entityType);
         audit.Parameters.AddWithValue("entity_id", (object?)entityId ?? DBNull.Value);
         audit.Parameters.AddWithValue("event_type", eventType);

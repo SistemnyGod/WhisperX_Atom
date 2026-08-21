@@ -61,3 +61,13 @@ def test_pipeline_metrics_accepts_media_prepare_and_keeps_all_stage_keys():
         assert key in payload
     assert payload["media_prepare_ms"] == 345.0
     assert payload["audio_duration_ms"] == 3_600_000.0
+
+
+def test_transcription_benchmark_has_real_capture_and_corpus_modes():
+    script = (Path(__file__).resolve().parents[1] / "scripts/e2e-transcription-benchmark.ps1").read_text(encoding="utf-8")
+    assert 'ValidateSet("Capture", "Corpus")' in script
+    assert "CORPUS_INPUT_FILES_REQUIRED" in script
+    assert "CAPTURE_AND_CORPUS_INPUTS_ARE_MUTUALLY_EXCLUSIVE" in script
+    assert 'e2e-core.ps1") @args' in script
+    assert "$args.AudioPath = $corpusFile.FullName" in script
+    assert "qualityComparison = \"IDs/hashes/metrics only; transcript text and audio are excluded\"" in script

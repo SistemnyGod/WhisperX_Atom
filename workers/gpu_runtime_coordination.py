@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import time
+import uuid
 from typing import Any
 
 import psycopg
@@ -20,9 +22,11 @@ LOGGER = logging.getLogger("whisperx.gpu-runtime-coordination")
 
 
 class GpuRuntimeCoordinator:
-    def __init__(self, conninfo: str | None = None) -> None:
+    def __init__(self, conninfo: str | None = None, owner: str | None = None) -> None:
         self.conninfo = conninfo or os.getenv("DATABASE_URL", "")
         self.enabled = os.getenv("GPU_RUNTIME_COORDINATION_ENABLED", "true").lower() in {"1", "true", "yes"}
+        self._lease_key = os.getenv("GPU_LEASE_KEY", "whisperx-atom-gpu-0")
+        self.owner = owner or f"summary-runtime:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
 
     def _connect(self) -> psycopg.Connection[Any]:
         if not self.conninfo:
@@ -112,7 +116,14 @@ class GpuRuntimeCoordinator:
         """Return false while a durable ASR request is pending."""
         return not self.asr_request_active()
 
-    def mark_llm_resident(self, owner: str) -> bool:
+    def mark_llm_resident(self, owner: str, workload: str | None = None, request_id: str | None = None) -> bool:
+        """Claim resident ownership after the caller holds the GPU lease.
+
+        Summary/Assistant invoke this only inside ``PostgresGpuLease``. That
+        ordering is the advisory-lock gate for normal ownership changes. A
+        dead process is recovered separately by ``reclaim_stale_owner`` before
+        consumers start; an active generation remains protected by ``llm_active``.
+        """
         if not self.enabled:
             return True
         try:
@@ -120,11 +131,16 @@ class GpuRuntimeCoordinator:
                 row = connection.execute(
                     """
                     UPDATE gpu_runtime_coordination
-                    SET llm_state='RESIDENT', llm_owner=%s, llm_active=FALSE, updated_at=now()
-                    WHERE id=1 AND (llm_owner=%s OR llm_owner IS NULL)
+                    SET llm_state='RESIDENT', llm_owner=%s, llm_active=FALSE,
+                        llm_owner_heartbeat_at=now(), llm_active_workload=%s,
+                        llm_active_request_id=%s, updated_at=now()
+                    WHERE id=1 AND (llm_owner=%s OR llm_owner IS NULL
+                                    OR (NOT COALESCE(llm_active,FALSE)
+                                        AND (llm_owner_heartbeat_at IS NULL
+                                             OR llm_owner_heartbeat_at < now() - (%s * interval '1 second'))))
                     RETURNING workload_request_id,asr_request_id
                     """,
-                    (owner, owner),
+                    (owner, workload, request_id, owner, float(os.getenv("GPU_LLM_OWNER_STALE_SECONDS", "30"))),
                 ).fetchone()
             return bool(row) and row[0] is None and row[1] is None
         except Exception:
@@ -134,15 +150,60 @@ class GpuRuntimeCoordinator:
             # that ASR is active.
             return True
 
-    def mark_llm_busy(self, owner: str) -> None:
+    def reclaim_stale_owner(self) -> bool:
+        """Clear ownership from a dead process only when the GPU lock is free.
+
+        This runs during process startup, before any workload acquires the
+        lease. If another process is still generating, ``pg_try_advisory_lock``
+        fails and the active owner is left untouched.
+        """
+        if not self.enabled:
+            return False
+        try:
+            with self._connect() as connection:
+                locked = bool(connection.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                    (self._lease_key,),
+                ).fetchone()[0])
+                if not locked:
+                    return False
+                try:
+                    row = connection.execute(
+                        """
+                        UPDATE gpu_runtime_coordination
+                        SET llm_state='STOPPED', llm_owner=NULL, llm_active=FALSE,
+                            llm_owner_heartbeat_at=NULL, llm_active_workload=NULL,
+                            llm_active_request_id=NULL, updated_at=now()
+                        WHERE id=1
+                          AND llm_owner IS NOT NULL
+                          AND llm_owner_heartbeat_at < now() - (%s * interval '1 second')
+                        RETURNING llm_owner
+                        """,
+                        (float(os.getenv("GPU_LLM_OWNER_STALE_SECONDS", "30")),),
+                    ).fetchone()
+                    return bool(row)
+                finally:
+                    connection.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                        (self._lease_key,),
+                    )
+        except Exception:
+            LOGGER.warning("gpu_runtime_coordination_reclaim_unavailable", exc_info=True)
+            return False
+
+    def mark_llm_busy(self, owner: str, workload: str | None = None, request_id: str | None = None) -> None:
         """Mark an in-flight generation so ASR cannot kill it mid-response."""
         if not self.enabled:
             return
         try:
             with self._connect() as connection:
                 connection.execute(
-                    "UPDATE gpu_runtime_coordination SET llm_state='RESIDENT',llm_owner=%s,llm_active=TRUE,updated_at=now() WHERE id=1 AND llm_owner=%s",
-                    (owner, owner),
+                    """UPDATE gpu_runtime_coordination
+                       SET llm_state='RESIDENT',llm_owner=%s,llm_active=TRUE,
+                           llm_owner_heartbeat_at=now(),llm_active_workload=%s,
+                           llm_active_request_id=%s,updated_at=now()
+                       WHERE id=1 AND llm_owner=%s""",
+                    (owner, workload, request_id, owner),
                 )
         except Exception:
             LOGGER.warning("gpu_runtime_coordination_mark_busy_unavailable", exc_info=True)
@@ -156,7 +217,9 @@ class GpuRuntimeCoordinator:
                     """
                     UPDATE gpu_runtime_coordination
                     SET llm_state='STOPPED', llm_owner=NULL, llm_active=FALSE,
-                        llm_ack_request_id=%s, updated_at=now()
+                        llm_ack_request_id=%s, llm_owner_heartbeat_at=NULL,
+                        llm_active_workload=NULL, llm_active_request_id=NULL,
+                        updated_at=now()
                     WHERE id=1
                     """,
                     (request_id,),
@@ -172,13 +235,33 @@ class GpuRuntimeCoordinator:
                 connection.execute(
                     """
                     UPDATE gpu_runtime_coordination
-                    SET llm_state='STOPPED', llm_owner=NULL, llm_active=FALSE, updated_at=now()
+                        SET llm_state='STOPPED', llm_owner=NULL, llm_active=FALSE,
+                            llm_owner_heartbeat_at=NULL, llm_active_workload=NULL,
+                            llm_active_request_id=NULL, updated_at=now()
                     WHERE id=1 AND (llm_owner=%s OR llm_owner IS NULL)
                     """,
                     (owner,),
                 )
         except Exception:
             LOGGER.warning("gpu_runtime_coordination_mark_stopped_unavailable", exc_info=True)
+
+    def heartbeat_owner(self, owner: str) -> bool:
+        """Refresh only this process' ownership; never resurrect another owner."""
+        if not self.enabled:
+            return True
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """UPDATE gpu_runtime_coordination
+                       SET llm_owner_heartbeat_at=now(), updated_at=now()
+                       WHERE id=1 AND llm_owner=%s
+                       RETURNING llm_owner""",
+                    (owner,),
+                ).fetchone()
+            return bool(row)
+        except Exception:
+            LOGGER.warning("gpu_runtime_coordination_heartbeat_unavailable", exc_info=True)
+            return False
 
     def wait_for_llm_release(self, request_id: str, timeout_seconds: float = 120.0) -> bool:
         """Wait until the resident LLM is stopped or this request is acked."""

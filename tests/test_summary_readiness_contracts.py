@@ -27,7 +27,10 @@ def test_readiness_requires_a_valid_release_identity_and_treats_assistant_only_a
     assert 'configuration.GetValue("ASSISTANT_ENABLED", true)' in readiness
     assert "var qwenEnabled = autoSummaryEnabled || assistantEnabled;" in readiness
     assert '"ASSISTANT_ONLY"' in readiness
-    assert "if (qwenEnabled) requiredWorkerNames.Add(\"summary-worker\");" in readiness
+    # Summary/Qwen is reported independently; it must not make core
+    # WhisperX/CUDA readiness false while the optional LLM worker is stale.
+    assert 'if (qwenEnabled) requiredWorkerNames.Add("summary-worker");' not in readiness
+    assert "Core processing readiness must not depend on the optional Qwen/Summary" in api
     assert "&& releaseIdentityValid;" in readiness
     assert "identityMismatch |= required && !matches;" in readiness
 
@@ -62,3 +65,20 @@ def test_qwen_and_diarization_readiness_use_actual_runtime_probe_state():
     assert "DiarizationPipeline" in worker
     assert "pyannote_model_loaded" in worker
     assert "LLAMA_RUNTIME_FAILED" in summary
+
+
+def test_general_chat_nullable_meeting_parameter_is_explicitly_typed():
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    assert 'command.Parameters.Add("meeting", NpgsqlDbType.Uuid)' in store
+    assert "meetingId is Guid value ? value : DBNull.Value" in store
+
+
+def test_shared_llm_runtime_uses_one_coordination_owner():
+    summary = read("workers/summary_worker/worker.py")
+    assistant = read("workers/summary_worker/assistant.py")
+    assert 'LLM_RUNTIME_OWNER = "llm-runtime"' in summary
+    assert 'LLM_RUNTIME_OWNER = "llm-runtime"' in assistant
+    assert "mark_llm_resident, self._llm_owner" in summary
+    assert "mark_llm_resident, self._llm_owner" in assistant
+    assert "mark_llm_busy, self._llm_owner" in summary
+    assert "mark_llm_busy, self._llm_owner" in assistant

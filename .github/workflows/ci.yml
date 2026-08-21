@@ -80,7 +80,34 @@ jobs:
           python-version-file: .python-version
           cache: pip
       - run: python -m pip install --upgrade pip pytest numpy
-      - run: python -m pytest -q tests/test_*contracts.py tests/test_media_retry.py
+      - name: Run unit and contract tests
+        run: python -m pytest -q -m "unit or contract" tests
+
+  python-integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.5-alpine3.21
+        ports:
+          - 5432/tcp
+        env:
+          POSTGRES_DB: whisperx_ci
+          POSTGRES_USER: whisperx
+          POSTGRES_PASSWORD: ci-only-password
+        options: >-
+          --health-cmd "pg_isready -U whisperx -d whisperx_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://whisperx:ci-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/whisperx_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+      - run: python -m pip install --upgrade pip pytest 'psycopg[binary]'
+      - name: Run PostgreSQL integration tests
+        run: python -m pytest -q -m integration tests
 
   migration-validation:
     runs-on: ubuntu-latest

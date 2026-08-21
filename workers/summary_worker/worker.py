@@ -32,6 +32,12 @@ from .assistant import AssistantGpuWaitScheduled, AssistantMessageAlreadyClaimed
 
 LOGGER = logging.getLogger("whisperx.summary-worker")
 
+# Summary and Assistant share one process-wide llama runtime.  Coordination
+# ownership is for that runtime, not for the NATS consumer that requested it.
+# Keeping one owner prevents a normal summary -> assistant handoff from being
+# misclassified as an ownership conflict.
+LLM_RUNTIME_OWNER = "llm-runtime"
+
 
 class RetryScheduled(RuntimeError):
     def __init__(self, delay_seconds: float):
@@ -471,12 +477,18 @@ def parse_deadline(value: Any) -> datetime | None:
 
 
 class SummaryWorker:
-    def __init__(self) -> None:
+    def __init__(self, gpu_coordination: GpuRuntimeCoordinator | None = None,
+                 llm_runtime: LocalLlamaRuntime | None = None,
+                 llm_owner: str | None = None) -> None:
         self.repository = SummaryRepository()
         self._gpu_lease = PostgresGpuLease(self.repository.conninfo, priority=100)
-        self._gpu_coordination = GpuRuntimeCoordinator(self.repository.conninfo)
+        self._gpu_coordination = gpu_coordination or GpuRuntimeCoordinator(self.repository.conninfo)
+        # Standalone construction (tests/rolling launchers) still gets a
+        # process-scoped owner; production injects the same owner into both
+        # SummaryWorker and AssistantWorker from run().
+        self._llm_owner = llm_owner or self._gpu_coordination.owner
         self.model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
-        self._llm_runtime = LocalLlamaRuntime()
+        self._llm_runtime = llm_runtime or LocalLlamaRuntime()
         self._llm_client: LlamaCppClient | None = None
 
     def _client_for(self, base_url: str) -> LlamaCppClient:
@@ -527,10 +539,10 @@ class SummaryWorker:
                 model_started_at = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 model_start_ms = (time.perf_counter() - model_started_at) * 1000.0
-                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "summary-worker"):
+                if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, self._llm_owner, "SUMMARY", job_id):
                     await asyncio.to_thread(self._llm_runtime.stop)
                     raise RuntimeError("gpu_asr_pending")
-                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, "summary-worker")
+                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, self._llm_owner, "SUMMARY", job_id)
                 try:
                     client = self._client_for(server.base_url)
                     generation_started_at = time.perf_counter()
@@ -563,10 +575,10 @@ class SummaryWorker:
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
                     if self._llm_runtime.enabled:
-                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "summary-worker"):
-                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, "summary-worker")
+                        if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, self._llm_owner):
+                            await asyncio.to_thread(self._gpu_coordination.preempt_if_requested, self._llm_runtime, self._llm_owner)
                     else:
-                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, "summary-worker")
+                        await asyncio.to_thread(self._gpu_coordination.mark_llm_stopped, self._llm_owner)
             LOGGER.info("job=%s released GPU lease", job_id)
             self.repository.update_job(job_id, "RUNNING", "VALIDATING_EVIDENCE", 70)
             self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
@@ -678,23 +690,38 @@ async def run() -> None:
     summary_subscription = await jetstream.pull_subscribe("llm.summarize", durable="summary-worker")
     assistant_subscription = await jetstream.pull_subscribe("llm.assistant", durable="assistant-worker")
     set_runtime_state()
-    summary_worker = SummaryWorker()
+    # One process-scoped owner and one coordinator/runtime are shared by both
+    # NATS consumers. Consumer names remain durable subscription identities,
+    # never GPU ownership identities.
+    runtime_owner = f"summary-runtime:{socket.gethostname()}:{os.getpid()}:{os.urandom(6).hex()}"
+    shared_coordination = GpuRuntimeCoordinator(owner=runtime_owner)
+    shared_runtime = LocalLlamaRuntime()
+    if await asyncio.to_thread(shared_coordination.reclaim_stale_owner):
+        LOGGER.warning("reclaimed_stale_llm_runtime_owner")
+    summary_worker = SummaryWorker(shared_coordination, shared_runtime, runtime_owner)
     recovered_summary = await asyncio.to_thread(summary_worker.repository.reset_stale_leases)
     if recovered_summary:
         LOGGER.warning("recovered stale summary jobs count=%s", recovered_summary)
-    assistant_worker = AssistantWorker()
+    assistant_worker = AssistantWorker(shared_coordination, shared_runtime, runtime_owner)
     assistant_watchdog_interval = max(15.0, float(os.getenv("ASSISTANT_QUEUE_WATCHDOG_INTERVAL_SECONDS", "30")))
     assistant_queue_timeout = max(120, int(os.getenv("ASSISTANT_QUEUE_TIMEOUT_SECONDS", "600")))
 
     async def gpu_coordination_watch() -> None:
         """Unload resident Qwen promptly when an ASR job requests the GPU."""
+        heartbeat_interval = max(1.0, float(os.getenv("GPU_LLM_OWNER_HEARTBEAT_SECONDS", "5")))
+        poll_interval = max(0.25, float(os.getenv("GPU_COORDINATION_POLL_SECONDS", "1")))
+        last_heartbeat = 0.0
         while True:
+            now = time.monotonic()
+            if now - last_heartbeat >= heartbeat_interval:
+                await asyncio.to_thread(shared_coordination.heartbeat_owner, runtime_owner)
+                last_heartbeat = now
             await asyncio.to_thread(
                 summary_worker._gpu_coordination.preempt_if_requested,
                 summary_worker._llm_runtime,
-                "summary-runtime",
+                runtime_owner,
             )
-            await asyncio.sleep(max(0.25, float(os.getenv("GPU_COORDINATION_POLL_SECONDS", "1"))))
+            await asyncio.sleep(poll_interval)
 
     async def consume_summary() -> None:
         while True:
@@ -792,6 +819,7 @@ async def run() -> None:
     finally:
         coordination_task.cancel()
         await asyncio.gather(coordination_task, return_exceptions=True)
+        await asyncio.to_thread(shared_coordination.mark_llm_stopped, runtime_owner)
         await summary_worker.close()
         await assistant_worker.close()
 

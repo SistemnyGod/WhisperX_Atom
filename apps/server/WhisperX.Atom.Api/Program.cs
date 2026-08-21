@@ -486,12 +486,14 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
 
     IReadOnlyList<WorkerRuntimeRow> workers = Array.Empty<WorkerRuntimeRow>();
     OperationsSnapshot? operations = null;
+    LlmRuntimeSnapshot? llmRuntime = null;
     if (postgres)
     {
         try
         {
             workers = await store.ListWorkerRuntimeAsync();
             operations = await store.GetOperationsSnapshotAsync();
+            llmRuntime = await store.GetLlmRuntimeSnapshotAsync();
         }
         catch (Exception ex)
         {
@@ -514,21 +516,22 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     static bool IsIdentityMatch(WorkerRuntimeRow worker, string expected)
         => string.Equals(expected, "dev", StringComparison.OrdinalIgnoreCase)
             || string.Equals(worker.Version, expected, StringComparison.Ordinal);
-    // Core media processing is always required. The LLM worker is required
-    // only when either assistant answers or automatic summaries are enabled.
-    // Keeping that distinction here prevents an intentionally disabled
-    // summary worker from making recording/ASR readiness look unhealthy.
+    // Core media processing is always required. The optional LLM worker is
+    // evaluated independently below, so a Qwen outage cannot make recording
+    // or WhisperX/ASR readiness look unhealthy.
     var autoSummaryEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     var assistantEnabled = configuration.GetValue("ASSISTANT_ENABLED", true);
     var qwenEnabled = autoSummaryEnabled || assistantEnabled;
     var qwenMode = autoSummaryEnabled
         ? "AUTO_SUMMARY_ENABLED"
         : assistantEnabled ? "ASSISTANT_ONLY" : "DISABLED";
+    // Core processing readiness must not depend on the optional Qwen/Summary
+    // runtime.  A stale Summary worker should make qwen=DEGRADED, while
+    // WhisperX/CUDA remains accurately available for recording and ASR.
     var requiredWorkerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "outbox-relay", "import-worker", "media-worker", "gpu-worker"
     };
-    if (qwenEnabled) requiredWorkerNames.Add("summary-worker");
 
     var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     var identityMismatch = false;
@@ -671,6 +674,16 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
             queuedAssistantQueries = operations.QueuedAssistantQueries,
             queuedAsrJobs = operations.QueuedAsrJobs
+        },
+        llmRuntime = llmRuntime is null ? null : new
+        {
+            llmOwner = llmRuntime.Owner,
+            llmOwnerHeartbeatAgeSeconds = llmRuntime.OwnerHeartbeatAt is null
+                ? (double?)null
+                : Math.Max(0, (DateTimeOffset.UtcNow - llmRuntime.OwnerHeartbeatAt.Value).TotalSeconds),
+            llmActive = llmRuntime.Active,
+            llmActiveWorkload = llmRuntime.ActiveWorkload,
+            llmActiveRequestId = llmRuntime.ActiveRequestId
         }
     });
 });

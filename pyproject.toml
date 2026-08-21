@@ -13,4 +13,10 @@ include = ["whisperx_atom*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "unit: fast deterministic unit tests",
+  "contract: source and API contract tests",
+  "integration: tests requiring PostgreSQL/NATS or other services",
+  "hardware: tests requiring CUDA, audio devices, or installed runtime",
+]
 

@@ -46,6 +46,7 @@ class PostgresGpuLease:
         their lease is fresh and assistant requests use the durable QUEUED
         state. ASR workers (priority 10) never wait on this gate.
         """
+        freshness_seconds = max(5, int(os.getenv("GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS", "90")))
         if self._priority > 10:
             asr_pending = connection.execute(
                 """
@@ -57,10 +58,11 @@ class PostgresGpuLease:
                               AND lease_expires_at IS NOT NULL
                               AND lease_expires_at > now()
                               AND COALESCE(progress_changed_at, stage_changed_at, last_heartbeat, updated_at)
-                                  >= now() - interval '90 seconds')
+                                  >= now() - (%s * interval '1 second'))
                       )
                 )
                 """,
+                (freshness_seconds,),
             ).fetchone()[0]
             if asr_pending:
                 return True
@@ -69,12 +71,21 @@ class PostgresGpuLease:
             assistant_pending = connection.execute(
                 """
                 SELECT EXISTS(
-                    SELECT 1 FROM assistant_queries
-                    WHERE status IN ('QUEUED','RUNNING')
-                      AND (next_retry_at IS NULL OR next_retry_at <= now())
-                      AND created_at >= now() - interval '60 minutes'
+                    SELECT 1 FROM assistant_queries q
+                    WHERE q.created_at >= now() - interval '60 minutes'
+                      AND (
+                          (q.status='QUEUED' AND (q.next_retry_at IS NULL OR q.next_retry_at <= now()))
+                          OR (q.status='RUNNING' AND (
+                              q.updated_at >= now() - (%s * interval '1 second')
+                              OR EXISTS (
+                                  SELECT 1 FROM inbox_messages i
+                                  WHERE i.job_id=q.id AND i.lease_expires_at > now()
+                              )
+                          ))
+                      )
                 )
                 """,
+                (freshness_seconds,),
             ).fetchone()[0]
             if assistant_pending:
                 return True
@@ -91,10 +102,11 @@ class PostgresGpuLease:
                           OR (lease_expires_at IS NOT NULL
                               AND lease_expires_at > now()
                               AND COALESCE(progress_changed_at, stage_changed_at, last_heartbeat, updated_at)
-                                  >= now() - interval '90 seconds')
+                                  >= now() - (%s * interval '1 second'))
                       )
                 )
                 """,
+                (freshness_seconds,),
             ).fetchone()[0]
             if enrichment_pending:
                 return True
