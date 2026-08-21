@@ -249,12 +249,15 @@ public sealed partial class MainWindow : Window
         var reportedProcessingReady = processingReadiness?.Ready == true;
         var whisperXStatus = UiStatusMapper.ComponentStatus(processingReadiness, "whisperx");
         var qwenStatus = UiStatusMapper.ComponentStatus(processingReadiness, "qwen");
+        var qwenReason = UiStatusMapper.ComponentReason(processingReadiness, "qwen");
         var processingReady = whisperXStatus is "READY" or "BUSY"
             || (whisperXStatus is null && reportedProcessingReady);
         var status = backendAvailable && !authenticated ? ("Требуется вход", "WarningBrush") :
             backendAvailable && recorderAvailable && !agentReady ? ("Recorder доступен; требуется привязка к пользователю", "WarningBrush") :
             backendAvailable && agentReady && processingReadiness is null ? ("WhisperX: readiness недоступна", "WarningBrush") :
             backendAvailable && agentReady && !processingReady ? ("WhisperX / GPU недоступны", "DangerBrush") :
+            backendAvailable && agentReady && (qwenReason is "gpu_asr_active" or "assistant_waiting_for_gpu") ? ("Мифодий ждёт освобождения GPU", "WarningBrush") :
+            backendAvailable && agentReady && qwenReason == "gpu_job_orphaned" ? ("ИИ-подсистема требует восстановления", "DangerBrush") :
             backendAvailable && agentReady && qwenStatus == "BUSY" ? ("Запись и WhisperX готовы · ИИ обрабатывает запрос", "NeutralStatusBrush") :
             backendAvailable && agentReady && qwenStatus is "UNAVAILABLE" or "DEGRADED" ? ("Запись и WhisperX готовы · ИИ временно недоступен", "WarningBrush") :
             backendAvailable && agentReady && qwenStatus == "DISABLED" ? ("Запись и WhisperX готовы · ИИ отключён", "WarningBrush") :

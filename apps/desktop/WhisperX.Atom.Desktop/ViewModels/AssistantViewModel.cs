@@ -203,7 +203,7 @@ public sealed class AssistantViewModel : ObservableObject
         OnPropertyChanged(nameof(HasMessages));
         OnPropertyChanged(nameof(HasPendingMessages));
         SelectedMessage = Messages.LastOrDefault(item => !item.IsUser) ?? Messages.LastOrDefault();
-        StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status) : "Чат готов к вопросу.";
+        StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status, last.ErrorCode) : "Чат готов к вопросу.";
     }
 
     public async Task RefreshSelectedConversationAsync(CancellationToken cancellationToken = default)
@@ -218,7 +218,7 @@ public sealed class AssistantViewModel : ObservableObject
         SelectedMessage = Messages.FirstOrDefault(item => item.Id == selectedId)
             ?? Messages.LastOrDefault(item => !item.IsUser)
             ?? Messages.LastOrDefault();
-        if (Messages.LastOrDefault() is { } last) StatusText = DisplayStatus(last.Status);
+        if (Messages.LastOrDefault() is { } last) StatusText = DisplayStatus(last.Status, last.ErrorCode);
     }
 
     public async Task AskAsync(CancellationToken pageToken, Guid? retryOf = null)
@@ -284,7 +284,7 @@ public sealed class AssistantViewModel : ObservableObject
                 return;
             }
             SelectedMessage = completed;
-            StatusText = DisplayStatus(completed.Status);
+            StatusText = DisplayStatus(completed.Status, completed.ErrorCode);
             await LoadConversationsAsync(cancellationToken);
         }
         catch (OperationCanceledException)
@@ -411,8 +411,12 @@ public sealed class AssistantViewModel : ObservableObject
 
     private static string? GetString(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static long? GetLong(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) ? number : null;
-    private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
+    private static string DisplayStatus(string status, string? errorCode = null)
     {
+        if (string.Equals(errorCode, "ASSISTANT_WAITING_FOR_GPU", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий ждёт освобождения GPU";
+        return status.ToUpperInvariant() switch
+        {
         "QUEUED" => "Запрос в очереди",
         "RUNNING" => "Помощник обрабатывает вопрос",
         "READY" => "Ответ готов",
@@ -425,8 +429,9 @@ public sealed class AssistantViewModel : ObservableObject
         "LLM_UNAVAILABLE" => "ИИ-помощник временно недоступен",
         "CLARIFICATION_REQUIRED" => "Нужно уточнить контекст вопроса",
         "FAILED" => "Помощник завершил запрос с ошибкой",
-        _ => "Состояние неизвестно"
-    };
+            _ => "Состояние неизвестно"
+        };
+    }
 
     private static bool IsTerminalStatus(string? status) => status is not null &&
         (status.Equals("READY", StringComparison.OrdinalIgnoreCase)

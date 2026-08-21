@@ -32,7 +32,10 @@ Copy-Item .env.example .env
 | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
 | `ASSISTANT_EMBEDDING_PROVIDER` | Hybrid retrieval provider (`auto`, `sentence-transformers`, `hash`) | `auto` |
 | `ASSISTANT_EMBEDDING_MODEL` | Локальная sentence-transformers модель при доступном optional runtime | `paraphrase-multilingual-MiniLM-L12-v2` |
-| `ASSISTANT_HYBRID_CANDIDATE_LIMIT` | Максимум scope-filtered кандидатов перед rerank | `12000` |
+| `ASSISTANT_FTS_ANCHOR_LIMIT` | Максимум FTS-якорей до semantic rerank | `64` |
+| `ASSISTANT_SEMANTIC_CANDIDATE_LIMIT` | Ограниченный semantic pool после RBAC/scope-фильтра | `512` |
+| `ASSISTANT_FINAL_TOP_K` | Число лучших anchors перед расширением соседями | `12` |
+| `ASSISTANT_NEIGHBOUR_LIMIT` | Максимум соседних сегментов в evidence-контексте | `36` |
 | `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.20` |
 | `ASSISTANT_HYBRID_EMBEDDING_MIN` | Минимальный embedding score для paraphrase-only hit | `0.60` |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |

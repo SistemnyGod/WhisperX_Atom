@@ -14,7 +14,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from workers.db_pool import DatabaseConnectionPool
-from workers.gpu_lease import PostgresGpuLease
+from workers.gpu_lease import AssistantGpuBusy, PostgresGpuLease
 from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
@@ -32,6 +32,22 @@ class AssistantRetryScheduled(RuntimeError):
         super().__init__("ASSISTANT_RETRY_SCHEDULED")
         self.delay_seconds = delay_seconds
         self.attempt = attempt
+
+
+class AssistantGpuWaitScheduled(RuntimeError):
+    """The durable Assistant query remains queued behind healthy ASR."""
+
+    def __init__(self, delay_seconds: float = 15.0):
+        super().__init__("ASSISTANT_WAITING_FOR_GPU")
+        self.delay_seconds = max(5.0, float(delay_seconds))
+
+
+class AssistantMessageAlreadyClaimed(RuntimeError):
+    """A duplicate Assistant delivery is owned by another live consumer."""
+
+    def __init__(self, delay_seconds: float = 15.0):
+        super().__init__("assistant_message_claimed_by_active_worker")
+        self.delay_seconds = max(5.0, float(delay_seconds))
 
 
 def assistant_retry_delay_seconds(attempt: int) -> float:
@@ -203,34 +219,59 @@ class AssistantRepository:
 
     def claim(self, message_id: str, query_id: str) -> bool:
         with self._db.connection() as connection:
-            row = connection.execute(
-                """
-                INSERT INTO inbox_messages(message_id,job_id,lease_expires_at,worker_id)
-                VALUES(%s,%s,now()+interval '30 minutes',%s)
-                ON CONFLICT(message_id) DO UPDATE SET lease_expires_at=excluded.lease_expires_at,worker_id=excluded.worker_id
-                WHERE inbox_messages.lease_expires_at IS NULL OR inbox_messages.lease_expires_at < now()
-                RETURNING message_id
-                """,
-                (message_id, query_id, socket.gethostname()),
-            ).fetchone()
-            return row is not None
+            worker_id = socket.gethostname()
+            with connection.transaction():
+                existing = connection.execute(
+                    "SELECT worker_id,lease_expires_at FROM inbox_messages WHERE message_id=%s FOR UPDATE",
+                    (message_id,),
+                ).fetchone()
+                if existing is not None:
+                    owner, lease_expires_at = existing
+                    expired = lease_expires_at is None or lease_expires_at.timestamp() <= time.time()
+                    if not expired and str(owner or "") != worker_id:
+                        remaining = max(15.0, min(60.0, lease_expires_at.timestamp() - time.time() + 0.5))
+                        raise AssistantMessageAlreadyClaimed(remaining)
+                    row = connection.execute(
+                        """UPDATE inbox_messages SET job_id=%s,lease_expires_at=now()+interval '30 minutes',worker_id=%s
+                           WHERE message_id=%s RETURNING message_id""",
+                        (query_id, worker_id, message_id),
+                    ).fetchone()
+                    return row is not None
+                row = connection.execute(
+                    """INSERT INTO inbox_messages(message_id,job_id,lease_expires_at,worker_id)
+                       VALUES(%s,%s,now()+interval '30 minutes',%s) RETURNING message_id""",
+                    (message_id, query_id, worker_id),
+                ).fetchone()
+                return row is not None
 
     def renew_lease(self, query_id: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
-            connection.execute(
-                "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')",
-                (query_id,),
-            )
             if message_id:
+                owner = socket.gethostname()
+                claimed = connection.execute(
+                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s AND worker_id=%s RETURNING message_id",
+                    (owner, message_id, owner),
+                ).fetchone()
+                if claimed:
+                    connection.execute(
+                        "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')",
+                        (query_id,),
+                    )
+            else:
                 connection.execute(
-                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
-                    (socket.gethostname(), message_id),
+                    "UPDATE assistant_queries SET updated_at=now() WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')",
+                    (query_id,),
                 )
 
     def query(self, query_id: str) -> tuple[str, str | None, str, str | None, str | None, str | None, str, str | None, str | None] | None:
         with self._db.connection() as connection:
             row = connection.execute("SELECT q.query,q.meeting_id,q.status,q.conversation_id,q.user_message_id,q.assistant_message_id,q.assistant_mode,q.user_id,u.role FROM assistant_queries q LEFT JOIN users u ON u.id=q.user_id WHERE q.id=%s", (query_id,)).fetchone()
             return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY"), str(row[7]) if row[7] else None, str(row[8]) if row[8] else None) if row else None
+
+    def created_at(self, query_id: str) -> Any | None:
+        with self._db.connection() as connection:
+            row = connection.execute("SELECT created_at FROM assistant_queries WHERE id=%s", (query_id,)).fetchone()
+            return row[0] if row else None
 
     def expire_stale_queries(self, max_age_seconds: int) -> int:
         """Move abandoned queued/running requests to a visible terminal state.
@@ -332,6 +373,58 @@ class AssistantRepository:
                         connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
             return int(row[0]) if row else None
 
+    def schedule_gpu_wait(self, query_id: str, message_id: str | None = None) -> str:
+        """Keep a healthy query durable without consuming retry_count.
+
+        A queue wait is not an infrastructure failure.  It is deliberately
+        separate from ``schedule_retry`` so Assistant's three-error retry
+        budget remains available for actual Qwen/NATS failures.  The created_at
+        bound prevents a request from being refreshed forever by a busy GPU.
+        """
+        max_wait = max(60, int(os.getenv("ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS", "3600")))
+        delay = max(5, int(os.getenv("ASSISTANT_GPU_WAIT_RETRY_SECONDS", "15")))
+        with self._db.connection() as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    UPDATE assistant_queries
+                    SET status='QUEUED', error_code='ASSISTANT_WAITING_FOR_GPU',
+                        retryable=true,
+                        next_retry_at=now() + (%s * interval '1 second'),
+                        answer_metadata=jsonb_set(COALESCE(answer_metadata,'{}'::jsonb),
+                          '{gpuWait}', jsonb_build_object('state','WAITING','nextRetryAt',now()+(%s * interval '1 second')), true),
+                        updated_at=now()
+                    WHERE id=%s AND created_at >= now() - (%s * interval '1 second')
+                      AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
+                    RETURNING assistant_message_id
+                    """,
+                    (delay, delay, query_id, max_wait),
+                ).fetchone()
+                if row is not None:
+                    if message_id:
+                        connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
+                    if row[0]:
+                        connection.execute(
+                            "UPDATE assistant_messages SET status='QUEUED',error_code='ASSISTANT_WAITING_FOR_GPU' WHERE id=%s",
+                            (row[0],),
+                        )
+                    return "QUEUED"
+                expired = connection.execute(
+                    """UPDATE assistant_queries
+                       SET status='LLM_UNAVAILABLE',error_code='ASSISTANT_GPU_BUSY_TIMEOUT',retryable=false,next_retry_at=NULL,completed_at=now(),updated_at=now()
+                       WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
+                       RETURNING assistant_message_id""",
+                    (query_id,),
+                ).fetchone()
+                if expired and message_id:
+                    connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
+                if expired and expired[0]:
+                    connection.execute(
+                        "UPDATE assistant_messages SET status='LLM_UNAVAILABLE',error_code='ASSISTANT_GPU_BUSY_TIMEOUT',completed_at=now() WHERE id=%s",
+                        (expired[0],),
+                    )
+                return "EXPIRED" if expired else "NOOP"
+
     def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         """Retrieve scope-safe evidence with Russian FTS + embeddings.
 
@@ -396,7 +489,9 @@ class AssistantRepository:
                 )
                 for row in rows if str(row[7] or '').strip()
             ]
-            ranked = self._hybrid.rank(query, candidates, limit=12)
+            final_top_k = max(4, min(int(os.getenv("ASSISTANT_FINAL_TOP_K", "12")), 64))
+            neighbour_limit = max(final_top_k, min(int(os.getenv("ASSISTANT_NEIGHBOUR_LIMIT", "36")), 128))
+            ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
             if meeting_id is None and ranked:
                 # History mode is limited to five meetings *after* hybrid
                 # ranking, so a paraphrase can still select the relevant one.
@@ -406,8 +501,8 @@ class AssistantRepository:
                     if value not in allowed_meetings and len(allowed_meetings) < 5:
                         allowed_meetings.append(value)
                 candidates = [item for item in candidates if item.meeting_id in allowed_meetings]
-                ranked = self._hybrid.rank(query, candidates, limit=12)
-            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=36)
+                ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
+            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=neighbour_limit)
             score_by_id = {item.candidate.segment_id: item.score for item in ranked}
             selected.sort(key=lambda item: (-score_by_id.get(item.segment_id, 0.0), item.meeting_id, item.ordinal, item.segment_id))
             rows = [
@@ -837,7 +932,17 @@ class AssistantWorker:
         # start or invoke_json raises; without this initialization the cleanup
         # path itself raised UnboundLocalError and hid the real failure.
         result: dict[str, Any] = {}
-        timings: dict[str, float] = {"queue_wait_ms": max(0.0, float(payload.get("queue_wait_ms") or 0.0))}
+        created_at = await asyncio.to_thread(self.repository.created_at, query_id)
+        queue_wait_ms = 0.0
+        if created_at is not None:
+            try:
+                created_timestamp = created_at.timestamp()
+                queue_wait_ms = max(0.0, (time.time() - created_timestamp) * 1000.0)
+            except (AttributeError, TypeError, ValueError, OSError):
+                queue_wait_ms = max(0.0, float(payload.get("queue_wait_ms") or 0.0))
+        else:
+            queue_wait_ms = max(0.0, float(payload.get("queue_wait_ms") or 0.0))
+        timings: dict[str, float] = {"queue_wait_ms": round(queue_wait_ms, 3)}
         try:
             if assistant_mode == "GENERAL_CHAT":
                 self.repository.clear_retrieval_metadata()
@@ -901,6 +1006,7 @@ class AssistantWorker:
                 if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "assistant-worker"):
                     await asyncio.to_thread(self._llm_runtime.stop)
                     raise RuntimeError("gpu_asr_pending")
+                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, "assistant-worker")
                 try:
                     client = self._client_for(server.base_url)
                     generation_started = time.perf_counter()
@@ -936,6 +1042,14 @@ class AssistantWorker:
                     if synthesis_completed:
                         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 3)
                         await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id, timings=timings)
+        except AssistantGpuBusy as exc:
+            state = await asyncio.to_thread(self.repository.schedule_gpu_wait, query_id, message_id or None)
+            if state == "QUEUED":
+                LOGGER.info("assistant query=%s waiting for GPU; retry_count unchanged", query_id)
+                raise AssistantGpuWaitScheduled(float(os.getenv("ASSISTANT_GPU_WAIT_RETRY_SECONDS", "15"))) from exc
+            # Expired requests are durably terminal and must be ACKed by the
+            # consumer; never turn this bounded wait into NATS redelivery.
+            return
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             if is_retryable_assistant_error(exc):

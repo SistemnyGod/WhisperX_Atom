@@ -13,7 +13,7 @@
 | `GET` | `/api/system/readiness` | Авторизованная проверка полного transcript runtime |
 | `GET` | `/api/system/status` | PostgreSQL и свободное место |
 
-`/api/system/readiness` показывает PostgreSQL, NATS, outbox/import/media/GPU worker heartbeat, CUDA, HF/diarization, optional Recorder и статус Qwen. `/ready` намеренно остаётся лёгким и не доказывает готовность WhisperX.
+`/api/system/readiness` показывает PostgreSQL, NATS, outbox/import/media/GPU worker heartbeat, CUDA, HF/diarization, optional Recorder и статус Qwen. Дополнительно `queue` содержит durable GPU ownership (`healthyGpuJobs`, `orphanedGpuJobs`, `activeInboxLeases`, `oldestGpuProgressAgeSeconds`), `queuedAsrJobs` и `queuedAssistantQueries`; `reasons` объясняет `gpu_asr_active`, `gpu_job_orphaned` и `assistant_waiting_for_gpu`. `/ready` намеренно остаётся лёгким инфраструктурным probe и не доказывает готовность WhisperX.
 
 ## Meetings, uploads и processing
 

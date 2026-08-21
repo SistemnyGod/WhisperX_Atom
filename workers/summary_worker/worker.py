@@ -28,7 +28,7 @@ from .contracts import (
 )
 from .summarizer import LlamaCppClient, SummaryOrchestrator, TranscriptSegment
 from .llama_subprocess import LocalLlamaRuntime
-from .assistant import AssistantRetryScheduled, AssistantWorker
+from .assistant import AssistantGpuWaitScheduled, AssistantMessageAlreadyClaimed, AssistantRetryScheduled, AssistantWorker
 
 LOGGER = logging.getLogger("whisperx.summary-worker")
 
@@ -530,6 +530,7 @@ class SummaryWorker:
                 if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, "summary-worker"):
                     await asyncio.to_thread(self._llm_runtime.stop)
                     raise RuntimeError("gpu_asr_pending")
+                await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, "summary-worker")
                 try:
                     client = self._client_for(server.base_url)
                     generation_started_at = time.perf_counter()
@@ -771,6 +772,12 @@ async def run() -> None:
                         exc.attempt,
                         exc.delay_seconds,
                     )
+                    await message.nak(delay=exc.delay_seconds)
+                except AssistantGpuWaitScheduled as exc:
+                    LOGGER.info("assistant query=%s waiting for GPU retry_in=%ss", query_id, exc.delay_seconds)
+                    await message.nak(delay=exc.delay_seconds)
+                except AssistantMessageAlreadyClaimed as exc:
+                    LOGGER.warning("assistant message claimed by another worker query=%s retry_in=%.1fs", query_id, exc.delay_seconds)
                     await message.nak(delay=exc.delay_seconds)
                 except Exception:
                     LOGGER.exception("assistant_message_failed query_id=%s", query_id)

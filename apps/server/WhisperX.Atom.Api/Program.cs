@@ -575,6 +575,13 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     {
         qwen = new { status = "DEGRADED", reason = "summary_worker_identity_mismatch", mode = qwenMode };
     }
+    else if (operations is not null && operations.OrphanedGpuJobs > 0)
+    {
+        // A durable RUNNING job without a fresh matching worker owner is an
+        // ownership conflict, not a healthy busy GPU.  Keep Qwen visibly
+        // recoverable instead of advertising READY or waiting for 30 minutes.
+        qwen = new { status = "DEGRADED", reason = "gpu_job_orphaned", mode = qwenMode };
+    }
     else
     {
         var capabilities = summaryWorker.Capabilities.RootElement;
@@ -589,6 +596,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         var llamaRuntimeFailed = llamaResident && string.Equals(llamaRuntimeState, "FAILED", StringComparison.OrdinalIgnoreCase);
         var llamaRuntimeStarting = llamaResident && string.Equals(llamaRuntimeState, "STARTING", StringComparison.OrdinalIgnoreCase);
         var gpuBusy = gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
+        var asrBusy = operations is not null && (operations.HealthyGpuJobs > 0 || operations.QueuedAsrJobs > 0);
         var summaryBusy = summaryWorker.CurrentJobId is not null || string.Equals(summaryWorker.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing", mode = qwenMode }
             : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing", mode = qwenMode }
@@ -599,7 +607,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready", mode = qwenMode }
             : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable", mode = qwenMode }
             : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded", mode = qwenMode }
-            : summaryBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : "gpu_lease_busy", mode = qwenMode }
+            : summaryBusy || asrBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : asrBusy ? "gpu_asr_active" : "gpu_lease_busy", mode = qwenMode }
             : new { status = "READY", reason = "summary_worker_ready", mode = qwenMode };
     }
     var gpuWorkerFailed = gpuWorker is null
@@ -607,10 +615,18 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         || string.Equals(gpuWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
     var gpuStatus = !cuda || gpuWorkerFailed
         ? "UNAVAILABLE"
+        : operations is not null && operations.OrphanedGpuJobs > 0
+            ? "DEGRADED"
         : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
             ? "BUSY"
             : "READY";
     var ready = postgres && nats && storage && requiredWorkersReady && cuda && !identityMismatch && releaseIdentityValid;
+    if (operations is not null && operations.OrphanedGpuJobs > 0)
+        ready = false;
+    var readinessReasons = new List<string>();
+    if (operations is not null && operations.OrphanedGpuJobs > 0) readinessReasons.Add("gpu_job_orphaned");
+    if (operations is not null && operations.HealthyGpuJobs > 0) readinessReasons.Add("gpu_asr_active");
+    if (operations is not null && operations.QueuedAssistantQueries > 0 && (operations.HealthyGpuJobs > 0 || operations.QueuedAsrJobs > 0)) readinessReasons.Add("assistant_waiting_for_gpu");
 
     return Results.Ok(new
     {
@@ -618,6 +634,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         buildIdentity = expectedBuildIdentity,
         releaseIdentityValid,
         identityMismatch,
+        reasons = readinessReasons,
         checkedAt,
         components = new
         {
@@ -628,7 +645,13 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             recordingIngress = new { status = postgres && storage ? "READY" : "UNAVAILABLE", database = postgres ? "READY" : "UNAVAILABLE", storage = storage ? "READY" : "UNAVAILABLE" },
             workers = workerReady,
             cuda = new { status = gpuStatus },
-            whisperx = new { status = requiredWorkersReady && cuda ? "READY" : "UNAVAILABLE", gpu = gpuStatus },
+            whisperx = new
+            {
+                status = operations is not null && operations.OrphanedGpuJobs > 0
+                    ? "DEGRADED"
+                    : gpuStatus == "BUSY" ? "BUSY" : requiredWorkersReady && cuda ? "READY" : "UNAVAILABLE",
+                gpu = gpuStatus
+            },
             hfDiarization = new { status = hf },
             recorder = new { status = "OPTIONAL" },
             qwen
@@ -641,7 +664,13 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             pendingOutbox = operations.PendingOutbox,
             activeGpuJobs = operations.ActiveGpuJobs,
             failedJobs24h = operations.FailedJobs24h,
-            staleRecordingSessions = operations.StaleRecordingSessions
+            staleRecordingSessions = operations.StaleRecordingSessions,
+            healthyGpuJobs = operations.HealthyGpuJobs,
+            orphanedGpuJobs = operations.OrphanedGpuJobs,
+            activeInboxLeases = operations.ActiveInboxLeases,
+            oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
+            queuedAssistantQueries = operations.QueuedAssistantQueries,
+            queuedAsrJobs = operations.QueuedAsrJobs
         }
     });
 });
@@ -2094,7 +2123,9 @@ public sealed record JobRow(
     string? ErrorCode = null,
     string? PipelineCorrelationId = null,
     DateTime? LastHeartbeat = null,
-    DateTime? UpdatedAt = null);
+    DateTime? UpdatedAt = null,
+    DateTime? StageChangedAt = null,
+    DateTime? ProgressChangedAt = null);
 public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
 public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
@@ -2916,7 +2947,7 @@ public sealed class Database(IConfiguration configuration)
     public async Task<JobRow?> GetJobAsync(Guid id)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at FROM jobs WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at,stage_changed_at,progress_changed_at FROM jobs WHERE id=@id", connection);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null : ReadJob(reader);
@@ -2926,7 +2957,7 @@ public sealed class Database(IConfiguration configuration)
     {
         var result = new List<JobRow>();
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at,stage_changed_at,progress_changed_at FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
         command.Parameters.AddWithValue("id", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadJob(reader));
@@ -3248,7 +3279,9 @@ public sealed class Database(IConfiguration configuration)
             reader.FieldCount > 8 && !reader.IsDBNull(8) ? reader.GetString(8) : null,
             reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : null,
             reader.FieldCount > 10 && !reader.IsDBNull(10) ? reader.GetDateTime(10) : null,
-            reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetDateTime(11) : null);
+            reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetDateTime(11) : null,
+            reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetDateTime(12) : null,
+            reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetDateTime(13) : null);
 
     private static MediaAssetRow ReadMedia(NpgsqlDataReader reader) =>
         new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10));

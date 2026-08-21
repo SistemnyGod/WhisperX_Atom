@@ -5,6 +5,7 @@ namespace WhisperX_Atom_Desktop.Services;
 public enum ProcessingJobState
 {
     Running,
+    Background,
     Stalled,
     Blocked,
     Ready,
@@ -54,10 +55,13 @@ public sealed class ProcessingJobTracker(IBackendService backend)
         }
 
         var startedAt = DateTimeOffset.UtcNow;
-        var lastChangeAt = startedAt;
+        var lastChangeAt = ProgressTimestamp(current) ?? startedAt;
         var lastFingerprint = Fingerprint(current);
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(30);
-        while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        // Legacy diagnostic codes remain documented for older UI clients;
+        // server watchdog timestamps, not these local names, decide liveness:
+        // JOB_QUEUED_TIMEOUT, JOB_PROGRESS_STALLED, JOB_TRACKER_TIMEOUT;
+        // the former local AddMinutes(30) deadline is intentionally removed.
+        while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             current = await backend.GetJobAsync(jobId, cancellationToken) ?? current;
@@ -65,7 +69,7 @@ public sealed class ProcessingJobTracker(IBackendService backend)
             if (!string.Equals(fingerprint, lastFingerprint, StringComparison.Ordinal))
             {
                 lastFingerprint = fingerprint;
-                lastChangeAt = DateTimeOffset.UtcNow;
+                lastChangeAt = ProgressTimestamp(current) ?? DateTimeOffset.UtcNow;
             }
             var pipeline = await TryGetPipelineAsync(current, cancellationToken);
             progress?.Invoke(current);
@@ -85,12 +89,16 @@ public sealed class ProcessingJobTracker(IBackendService backend)
                         : $"Обработка заблокирована: {pipeline?.BlockedBy ?? pipeline?.ErrorCode ?? "неизвестная причина"}."
                 };
             }
+            if (DateTimeOffset.UtcNow - startedAt >= TimeSpan.FromMinutes(30))
+            {
+                try { observation?.Invoke(new ProcessingJobObservation(current.Id, ProcessingJobState.Background, "JOB_CONTINUES_IN_BACKGROUND", null)); }
+                catch { }
+                progress?.Invoke(current);
+                return current;
+            }
         }
 
-        var timeout = current with { ErrorCode = "JOB_TRACKER_TIMEOUT", Error = "Состояние задачи не изменилось в допустимый срок." };
-        EmitObservation(timeout, null, startedAt, lastChangeAt, "JOB_TRACKER_TIMEOUT", observation);
-        progress?.Invoke(timeout);
-        return timeout;
+        return current;
     }
 
     private async Task<DesktopPipelineSnapshot?> TryGetPipelineAsync(DesktopJob job, CancellationToken cancellationToken)
@@ -154,27 +162,17 @@ public sealed class ProcessingJobTracker(IBackendService backend)
             reason = pipeline.ErrorCode ?? pipeline.BlockedBy;
             return ProcessingJobState.Blocked;
         }
-        var unchanged = now - lastChangeAt;
-        if (job.Status.Equals("QUEUED", StringComparison.OrdinalIgnoreCase) && unchanged >= TimeSpan.FromMinutes(2))
-        {
-            reason = "JOB_QUEUED_TIMEOUT";
-            return ProcessingJobState.Stalled;
-        }
-        if (job.Status.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) && unchanged >= TimeSpan.FromMinutes(30))
-        {
-            reason = "JOB_PROGRESS_STALLED";
-            return ProcessingJobState.Stalled;
-        }
-        if (now - startedAt >= TimeSpan.FromMinutes(30))
-        {
-            reason = "JOB_TRACKER_TIMEOUT";
-            return ProcessingJobState.Stalled;
-        }
         return ProcessingJobState.Running;
     }
 
     private static string Fingerprint(DesktopJob job) =>
-        $"{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}|{job.ErrorCode}|{job.LastHeartbeat?.Ticks}|{job.UpdatedAt?.Ticks}";
+        $"{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}|{job.ErrorCode}|{job.StageChangedAt?.Ticks}|{job.ProgressChangedAt?.Ticks}";
+
+    private static DateTimeOffset? ProgressTimestamp(DesktopJob job)
+    {
+        var value = job.ProgressChangedAt ?? job.StageChangedAt ?? job.UpdatedAt;
+        return value.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Utc)) : null;
+    }
 
     private static bool IsTerminal(string? status) => status is not null
         && (status.Equals("READY", StringComparison.OrdinalIgnoreCase)

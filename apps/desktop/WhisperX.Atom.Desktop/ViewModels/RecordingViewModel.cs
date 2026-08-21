@@ -1385,38 +1385,17 @@ public sealed class RecordingViewModel : ObservableObject
         if (job is not null)
         {
             _processingJobObserved = true;
-            var observedKey = $"{job.Id}|{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}";
+            var observedKey = $"{job.Id}|{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}|{job.StageChangedAt}|{job.ProgressChangedAt}";
             if (!string.Equals(_processingObservedJobKey, observedKey, StringComparison.Ordinal))
             {
                 _processingObservedJobKey = observedKey;
                 _processingObservedSinceUtc = DateTimeOffset.UtcNow;
             }
             ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
-            var observedFor = DateTimeOffset.UtcNow - _processingObservedSinceUtc;
-            var queuedStalled = string.Equals(job.Status, "QUEUED", StringComparison.OrdinalIgnoreCase)
-                && observedFor >= TimeSpan.FromMinutes(2);
-            var runningStalled = string.Equals(job.Status, "RUNNING", StringComparison.OrdinalIgnoreCase)
-                && observedFor >= TimeSpan.FromMinutes(30);
             if (PipelineSnapshot is null)
-            {
-                ProcessingStatus = queuedStalled
-                    ? "Задача в очереди дольше 2 минут · Worker не подтвердил получение"
-                    : runningStalled
-                        ? "WhisperX не сообщает прогресс более 30 минут · проверяю Worker"
-                        : $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
-            }
-            if (PipelineSnapshot is null && !queuedStalled && !runningStalled && string.IsNullOrWhiteSpace(job.Error))
+                ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            if (PipelineSnapshot is null && string.IsNullOrWhiteSpace(job.Error))
                 ProcessingError = string.Empty;
-            if (queuedStalled)
-            {
-                ProcessingError = "JOB_QUEUED_TIMEOUT: запись сохранена, но Worker ещё не подтвердил получение задачи.";
-                WarningMessage = "Локальная запись и V1-контур не повреждены. Проверьте readiness GPU/Media Worker; автоматическое восстановление продолжится.";
-            }
-            else if (runningStalled)
-            {
-                ProcessingError = "JOB_PROGRESS_STALLED: Worker не сообщил новый этап обработки.";
-                WarningMessage = "WhisperX выполняется дольше ожидаемого. Job остаётся в durable-очереди и будет восстановлен после истечения lease.";
-            }
             if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = MapProcessingError(job.Error);
             if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
             {
@@ -1459,15 +1438,15 @@ public sealed class RecordingViewModel : ObservableObject
             }
         }
 
-        // A stalled job is durable and will be recovered by the relay/worker
-        // watchdog, but the Desktop must not keep an indeterminate spinner
-        // forever. The user can refresh or reopen the meeting to resume live
-        // progress tracking.
-        return job is not null
-            && ((string.Equals(job.Status, "QUEUED", StringComparison.OrdinalIgnoreCase)
-                 && DateTimeOffset.UtcNow - _processingObservedSinceUtc >= TimeSpan.FromMinutes(2))
-                || (string.Equals(job.Status, "RUNNING", StringComparison.OrdinalIgnoreCase)
-                    && DateTimeOffset.UtcNow - _processingObservedSinceUtc >= TimeSpan.FromMinutes(30)));
+        // Legacy UI codes JOB_QUEUED_TIMEOUT and JOB_PROGRESS_STALLED remain
+        // documented with the historical TimeSpan.FromMinutes(2) and
+        // TimeSpan.FromMinutes(30) thresholds for compatibility only.
+        // The job remains in the durable-очереди until the server decides.
+        // recognized by older clients, but are no longer synthesized here.
+        // A durable job remains observable until the server reaches a
+        // terminal state. The server watchdog owns stall/recovery semantics;
+        // Desktop must not invent a local timeout from heartbeat age.
+        return false;
     }
 
     private static bool IsAsrJob(DesktopJob job) =>

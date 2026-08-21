@@ -22,6 +22,9 @@ from workers.runtime_heartbeat import AsyncHeartbeat
 from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from .persistence import JobRepository
 
+
+MESSAGE_ALREADY_CLAIMED_DELAY_SECONDS = max(5.0, float(os.getenv("GPU_DUPLICATE_NAK_DELAY_SECONDS", "15")))
+
 class ResidentLlmConflict(RuntimeError):
     pass
 
@@ -32,16 +35,42 @@ class RetryScheduled(RuntimeError):
         self.delay_seconds = delay_seconds
 
 
+class MessageAlreadyClaimed(RuntimeError):
+    """A different live worker owns the inbox lease.
+
+    This is expected during redelivery races, not a worker failure.  The
+    consumer uses the delay to let the lease expire instead of immediately
+    NAKing the same message in a tight loop.
+    """
+
+    def __init__(self, delay_seconds: float = MESSAGE_ALREADY_CLAIMED_DELAY_SECONDS):
+        super().__init__("message_claimed_by_active_worker")
+        self.delay_seconds = max(5.0, float(delay_seconds))
+
+
 class WorkerProcessRestartRequested(RuntimeError):
     """The durable job was requeued and this process must be recycled."""
 
 
-def _duration_seconds(message: dict[str, Any]) -> float | None:
+def _duration_seconds(message: dict[str, Any], input_transcript: dict[str, Any] | None = None) -> float | None:
+    """Resolve canonical duration with a rolling-upgrade metadata fallback.
+
+    New media/enrichment messages carry ``duration_ms`` directly. Older
+    outbox payloads may not, so use the trusted V1 quality metadata before
+    falling back to the conservative watchdog limits.
+    """
+    candidates: list[tuple[Any, bool]] = []
     for key in ("audio_duration_ms", "duration_ms"):
+        candidates.append((message.get(key), False))
+    quality = (input_transcript or {}).get("quality_metadata") or {}
+    for key in ("audio_duration_ms", "duration_ms"):
+        candidates.append((quality.get(key), False))
+    candidates.append((quality.get("asr_duration_seconds"), True))
+    for value, is_seconds in candidates:
         try:
-            value = float(message.get(key))
+            value = float(value)
             if value > 0:
-                return value / 1000.0
+                return value if is_seconds else value / 1000.0
         except (TypeError, ValueError):
             pass
     return None
@@ -217,19 +246,25 @@ class GpuWorker:
                 self._heartbeat.set_job(job_id)
                 self._heartbeat.set_state("BUSY")
             LOGGER.info("received job=%s message=%s stage=%s", job_id, message.get("message_id"), message.get("stage"))
-            if not self._repository.claim_message(str(message.get("message_id", "")), job_id):
+            claim = self._repository.claim_message_details(str(message.get("message_id", "")), job_id)
+            if claim.status == "OWNED_BY_OTHER_WORKER":
                 state = self._repository.job_state(job_id)
                 if self._heartbeat:
                     self._heartbeat.set_job(None)
-                    self._heartbeat.set_state("READY")
+                    self._heartbeat.set_state("DEGRADED", "GPU_JOB_OWNERSHIP_CONFLICT")
                 if state is not None and state[0] not in ("READY", "FAILED", "CANCELLED"):
-                    if self._heartbeat:
-                        self._heartbeat.set_state("READY", "MESSAGE_ALREADY_CLAIMED")
-                    raise RuntimeError("message_claimed_by_active_worker")
+                    delay = MESSAGE_ALREADY_CLAIMED_DELAY_SECONDS
+                    if claim.lease_expires_at is not None:
+                        remaining = (claim.lease_expires_at - datetime.now(claim.lease_expires_at.tzinfo)).total_seconds()
+                        delay = max(MESSAGE_ALREADY_CLAIMED_DELAY_SECONDS, min(60.0, remaining + 0.5))
+                    raise MessageAlreadyClaimed(delay)
+                if self._heartbeat:
+                    self._heartbeat.set_state("READY")
                 return None
             state = self._repository.job_state(job_id)
             if state is not None and state[0] in ("READY", "FAILED", "CANCELLED"):
                 LOGGER.info("skip terminal job=%s status=%s", job_id, state[0])
+                self._repository.release_message(str(message.get("message_id", "")))
                 if self._heartbeat:
                     self._heartbeat.set_job(None)
                     self._heartbeat.set_state("READY")
@@ -270,29 +305,53 @@ class GpuWorker:
             failure_code: str | None = None
             coordination_request_id = f"{job_id}:{message.get('message_id', '') or 'delivery'}"
             coordination_requested = False
+            workload_type = "V2_ENRICH" if enrichment_job else "V1_ASR"
+            workload_priority = 50 if enrichment_job else 10
             draft_holder: dict[str, str | None] = {"id": None}
 
             def persist_asr_draft(draft: dict[str, Any]) -> None:
                 draft_holder["id"] = self._repository.persist_asr_draft(job_id, str(message["meeting_id"]), draft)
 
             try:
-                coordination_requested = await asyncio.to_thread(
-                    self._gpu_coordination.request_asr,
-                    coordination_request_id,
-                    "gpu-worker",
-                )
-                if coordination_requested and not await asyncio.to_thread(
-                    self._gpu_coordination.wait_for_llm_release,
-                    coordination_request_id,
-                    float(os.getenv("GPU_LLM_PREEMPT_TIMEOUT_SECONDS", "120")),
-                ):
-                    raise ResidentLlmConflict("resident_llama_release_timeout")
-                if await resident_llm_detected():
+                # V1 asks resident Qwen to release memory before acquiring the
+                # lease. V2 first passes the priority gate and requests only
+                # after it owns the lease, so it cannot jump ahead of Assistant.
+                if not enrichment_job:
+                    coordination_requested = await asyncio.to_thread(
+                        self._gpu_coordination.request_workload,
+                        coordination_request_id,
+                        workload_type,
+                        workload_priority,
+                        "gpu-worker",
+                    )
+                    if coordination_requested and not await asyncio.to_thread(
+                        self._gpu_coordination.wait_for_llm_release,
+                        coordination_request_id,
+                        float(os.getenv("GPU_LLM_PREEMPT_TIMEOUT_SECONDS", "120")),
+                    ):
+                        raise ResidentLlmConflict("resident_llama_release_timeout")
+                if not enrichment_job and await resident_llm_detected():
                     raise ResidentLlmConflict("resident_llama_server_must_be_stopped_before_transcription")
                 LOGGER.info("job=%s waiting for GPU lease path=%s", job_id, request.media_path)
                 gpu_lease = self._enrichment_gpu_lease if enrichment_job else self._asr_gpu_lease
                 async with gpu_lease:
                     LOGGER.info("job=%s acquired GPU lease", job_id)
+                    if enrichment_job:
+                        coordination_requested = await asyncio.to_thread(
+                            self._gpu_coordination.request_workload,
+                            coordination_request_id,
+                            workload_type,
+                            workload_priority,
+                            "gpu-worker",
+                        )
+                        if not coordination_requested and await asyncio.to_thread(self._gpu_coordination.asr_request_active):
+                            raise ResidentLlmConflict("higher_priority_gpu_workload")
+                        if coordination_requested and not await asyncio.to_thread(
+                            self._gpu_coordination.wait_for_llm_release,
+                            coordination_request_id,
+                            float(os.getenv("GPU_LLM_PREEMPT_TIMEOUT_SECONDS", "120")),
+                        ):
+                            raise ResidentLlmConflict("resident_llama_release_timeout")
                     # Include both bounded local scheduler wait and the
                     # cross-process PostgreSQL GPU lease wait in diagnostics.
                     request = replace(request, queue_wait_ms=(time.perf_counter() - queued_at) * 1000.0)
@@ -308,7 +367,7 @@ class GpuWorker:
                                     job_id,
                                     str(message.get("message_id", "")),
                                     time.monotonic(),
-                                    _duration_seconds(message),
+                                    _duration_seconds(message, input_transcript),
                                 )
                             )
                             done, _pending = await asyncio.wait(
@@ -524,6 +583,9 @@ async def run() -> None:
                 # the pull consumer into a tight redelivery loop.
                 await message.nak(delay=RESIDENT_LLM_RETRY_DELAY_SECONDS)
             except RetryScheduled as exc:
+                await message.nak(delay=exc.delay_seconds)
+            except MessageAlreadyClaimed as exc:
+                LOGGER.warning("gpu_message_claimed_by_other_worker job_id=%s retry_in=%.1fs", job_id, exc.delay_seconds)
                 await message.nak(delay=exc.delay_seconds)
             except Exception:
                 LOGGER.exception("gpu_message_failed job_id=%s", job_id)

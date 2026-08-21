@@ -109,7 +109,24 @@ public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Titl
 public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null);
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
-public sealed record OperationsSnapshot(long QueuedJobs, long RunningJobs, long FailedJobs24h, long StaleLeases, long ActiveGpuJobs, long FailedGpuJobs24h, long PendingOutbox, long ActiveAgents, long UnavailableAgents, long StaleRecordingSessions, DateTimeOffset CheckedAt);
+public sealed record OperationsSnapshot(
+    long QueuedJobs,
+    long RunningJobs,
+    long FailedJobs24h,
+    long StaleLeases,
+    long ActiveGpuJobs,
+    long FailedGpuJobs24h,
+    long PendingOutbox,
+    long ActiveAgents,
+    long UnavailableAgents,
+    long StaleRecordingSessions,
+    DateTimeOffset CheckedAt,
+    long HealthyGpuJobs = 0,
+    long OrphanedGpuJobs = 0,
+    long ActiveInboxLeases = 0,
+    double OldestGpuProgressAgeSeconds = 0,
+    long QueuedAssistantQueries = 0,
+    long QueuedAsrJobs = 0);
 public sealed record WorkerRuntimeRow(string WorkerName, string InstanceId, string Status, DateTime LastSeenAt, Guid? CurrentJobId, string Version, JsonDocument Capabilities, string? LastErrorCode);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
 public enum ActionItemUpdateResult { NotFound, InvalidTransition, Updated }
@@ -1355,10 +1372,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         insert.Parameters.AddWithValue("requested", (object?)requestedMode ?? DBNull.Value);
         insert.Parameters.AddWithValue("confidence", (object?)routerConfidence ?? DBNull.Value);
         insert.Parameters.AddWithValue("source", normalizedSource);
-        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId, traceId }));
+        var queuedAtUtc = DateTime.UtcNow;
+        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId, traceId, queued_at_utc = queuedAtUtc }));
         insert.Parameters.AddWithValue("conversation", (object?)conversationId ?? DBNull.Value);
         await insert.ExecuteNonQueryAsync();
-        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), query_id = id, meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant" });
+        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), query_id = id, meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant", queued_at_utc = queuedAtUtc });
         await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.assistant',@payload::jsonb)", connection, tx);
         outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", payload);
         await outbox.ExecuteNonQueryAsync();
@@ -1909,7 +1927,51 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         // active local session in its heartbeat; only sessions without that
         // confirmation are surfaced as interrupted.
         var staleRecordingSessions = await ScalarLongAsync("SELECT COUNT(*) FROM recording_sessions s LEFT JOIN recorder_agents a ON a.id=s.agent_id WHERE s.state IN ('RECORDING','AWAITING_AGENT_RECONNECT') AND (s.local_session_id IS NULL OR a.id IS NULL OR COALESCE(a.capabilities->'deviceHealth'->>'activeSessionId','') <> s.local_session_id::text) AND (COALESCE(a.last_seen_at,s.created_at) < now()-interval '5 minutes' OR (COALESCE(s.total_samples,0)=0 AND COALESCE(s.started_at,s.created_at) < now()-interval '5 minutes'))");
-        return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
+        // Migrations 039 add stage/progress timestamps. Keep readiness
+        // backwards compatible while an older API is still serving traffic;
+        // once both columns exist they become the authoritative liveness age.
+        var hasProgressColumns = await ScalarLongAsync("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='jobs' AND column_name IN ('stage_changed_at','progress_changed_at')") == 2;
+        var progressExpression = hasProgressColumns
+            ? "COALESCE(j.progress_changed_at,j.stage_changed_at,j.last_heartbeat,j.updated_at)"
+            : "COALESCE(j.last_heartbeat,j.updated_at)";
+        var gpuOwnership = connection.CreateCommand();
+        gpuOwnership.CommandText = $"""
+            WITH gpu AS (
+                SELECT j.id,j.status,
+                       {progressExpression} AS progress_at,
+                       EXISTS (
+                           SELECT 1 FROM worker_instances wi
+                           WHERE wi.worker_name='gpu-worker'
+                             AND wi.current_job_id=j.id
+                             AND wi.status IN ('READY','BUSY','DEGRADED')
+                             AND wi.last_seen_at >= now()-interval '60 seconds'
+                       ) AS live_owner,
+                       EXISTS (
+                           SELECT 1 FROM inbox_messages im
+                           WHERE im.job_id=j.id AND im.lease_expires_at > now()
+                       ) AS active_lease
+                FROM jobs j
+                WHERE j.type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE')
+                  AND j.status IN ('QUEUED','RUNNING')
+            )
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM gpu WHERE status='RUNNING' AND live_owner),0),
+                COALESCE((SELECT COUNT(*) FROM gpu WHERE status='RUNNING' AND NOT live_owner),0),
+                COALESCE((SELECT COUNT(*) FROM gpu WHERE active_lease),0),
+                COALESCE((SELECT MAX(EXTRACT(EPOCH FROM (now()-progress_at))) FROM gpu WHERE status='RUNNING'),0),
+                COALESCE((SELECT COUNT(*) FROM assistant_queries WHERE status='QUEUED'),0),
+                COALESCE((SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS') AND status='QUEUED'),0)
+            """;
+        await using (gpuOwnership)
+        await using (var reader = await gpuOwnership.ExecuteReaderAsync())
+        {
+            if (!await reader.ReadAsync())
+                return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
+            return new OperationsSnapshot(
+                queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h,
+                pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow,
+                reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetDouble(3), reader.GetInt64(4), reader.GetInt64(5));
+        }
     }
 
     public async Task<IReadOnlyList<WorkerRuntimeRow>> ListWorkerRuntimeAsync()

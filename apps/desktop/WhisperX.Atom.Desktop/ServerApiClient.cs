@@ -99,7 +99,9 @@ public sealed record DesktopJob(
     string? ErrorCode = null,
     string? PipelineCorrelationId = null,
     DateTime? LastHeartbeat = null,
-    DateTime? UpdatedAt = null)
+    DateTime? UpdatedAt = null,
+    DateTime? StageChangedAt = null,
+    DateTime? ProgressChangedAt = null)
 {
     [JsonIgnore]
     public string StatusText => UiStatusMapper.Text(Status);

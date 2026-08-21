@@ -12,6 +12,8 @@ function Assert-File([string]$Path) {
 Assert-File "scripts\backup.ps1"
 Assert-File "scripts\restore.ps1"
 Assert-File "scripts\e2e-backup-restore.ps1"
+Assert-File "scripts\recover-gpu-runtime.ps1"
+Assert-File "workers\ml_worker\recovery.py"
 Assert-File "compose.dev.yml"
 Assert-File "apps\server\WhisperX.Atom.Api\Dockerfile"
 Assert-File "apps\server\WhisperX.Atom.Api\WhisperX.Atom.Api.csproj"

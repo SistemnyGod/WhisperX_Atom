@@ -126,7 +126,7 @@ if (Test-Path -LiteralPath $caddySource -PathType Container) {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage "infrastructure\caddy\$($_.Name)")
     }
 }
-foreach ($script in @('start-server-bundle.ps1','start-runtime.ps1','stop-server-bundle.ps1','doctor-server-bundle.ps1','install-server-startup-task.ps1','prune-stale-worker-heartbeats.ps1','backup.ps1','restore.ps1','e2e-backup-restore.ps1')) {
+foreach ($script in @('start-server-bundle.ps1','start-runtime.ps1','stop-server-bundle.ps1','doctor-server-bundle.ps1','install-server-startup-task.ps1','prune-stale-worker-heartbeats.ps1','recover-gpu-runtime.ps1','backup.ps1','restore.ps1','e2e-backup-restore.ps1')) {
     Copy-Item -LiteralPath (Join-Path $repo "scripts\$script") -Destination $stage
 }
 if (Test-Path -LiteralPath (Join-Path $repo 'migrations')) {

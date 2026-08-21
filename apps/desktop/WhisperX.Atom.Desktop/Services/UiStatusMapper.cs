@@ -35,6 +35,8 @@ public static class UiStatusMapper
             ["TRANSCRIPT_NOT_READY"] = new("TRANSCRIPT_NOT_READY", "Стенограмма ещё не готова", UiStatusKind.Warning),
             ["DONE"] = new("DONE", "Готово", UiStatusKind.Success),
             ["QUEUED"] = new("QUEUED", "В очереди", UiStatusKind.Processing),
+            ["ASSISTANT_WAITING_FOR_GPU"] = new("ASSISTANT_WAITING_FOR_GPU", "Мифодий ждёт освобождения GPU", UiStatusKind.Warning),
+            ["GPU_JOB_ORPHANED"] = new("GPU_JOB_ORPHANED", "ИИ-подсистема требует восстановления", UiStatusKind.Error),
             ["RUNNING"] = new("RUNNING", "В обработке", UiStatusKind.Processing),
             ["RECORDING"] = new("RECORDING", "Идёт запись", UiStatusKind.Processing),
             ["RECORDING_INTERRUPTED"] = new("RECORDING_INTERRUPTED", "Запись прервана — ожидается Recorder Agent", UiStatusKind.Warning),
@@ -118,6 +120,17 @@ public static class UiStatusMapper
         return status.GetString()?.Trim().ToUpperInvariant();
     }
 
+    public static string? ComponentReason(DesktopProcessingReadiness? readiness, string component)
+    {
+        if (readiness is null || readiness.Components.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !readiness.Components.TryGetProperty(component, out var value)
+            || value.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !value.TryGetProperty("reason", out var reason)
+            || reason.ValueKind != System.Text.Json.JsonValueKind.String)
+            return null;
+        return reason.GetString()?.Trim().ToLowerInvariant();
+    }
+
     public const string SummaryDisabledMessage =
         "Саммари отключено настройками сервера. Включите AUTO_SUMMARY_ENABLED и Summary Worker, чтобы пересборка стала доступна.";
 }
@@ -139,6 +152,8 @@ public static class UiErrorFormatter
         DesktopApiException { ErrorCode: "CUDA_OOM" } => "На GPU не хватило памяти. Закройте лишние GPU-процессы и повторите обработку.",
         DesktopApiException { ErrorCode: "GPU_RESIDENT_LLM_CONFLICT" } => "GPU занят LLM-сервисом. Остановите его перед транскрибацией WhisperX.",
         DesktopApiException { ErrorCode: "GPU_PROCESSING_FAILED" } => "WhisperX не завершил обработку на GPU. Повторите задачу или проверьте worker.",
+        DesktopApiException { ErrorCode: "ASSISTANT_GPU_BUSY_TIMEOUT" } => "Мифодий слишком долго ждал GPU. Повторите вопрос после завершения транскрибации.",
+        DesktopApiException { ErrorCode: "GPU_JOB_OWNERSHIP_CONFLICT" } => "ИИ-подсистема требует восстановления GPU Worker.",
         DesktopApiException { ErrorCode: "WORKER_RESTART_RECOVERY" } => "Worker был перезапущен. Задача возвращена в очередь; обновите статус через несколько секунд.",
         DesktopApiException { ErrorCode: "job_not_retryable" } => "Задача уже выполняется или завершена успешно; повторная обработка сейчас недоступна.",
         DesktopApiException { ErrorCode: "job_retry_conflict" } => "Состояние задачи изменилось. Обновите карточку совещания и повторите действие.",

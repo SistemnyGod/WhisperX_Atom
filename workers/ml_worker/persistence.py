@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -15,6 +17,25 @@ from .technical_events import build_technical_intervals, segment_technical_flags
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
 ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
+
+
+@dataclass(frozen=True)
+class MessageClaimResult:
+    """Durable inbox ownership outcome used by the GPU consumer.
+
+    A boolean cannot distinguish a terminal redelivery from a live owner.  In
+    particular, treating ``OWNED_BY_OTHER_WORKER`` as an exception creates a
+    NATS hot loop.  The explicit outcome is intentionally small so older
+    callers can keep using :meth:`claim_message` below.
+    """
+
+    status: str
+    owner: str | None = None
+    lease_expires_at: datetime | None = None
+
+    @property
+    def acquired(self) -> bool:
+        return self.status in {"ACQUIRED", "OWNED_BY_THIS_WORKER"}
 
 
 def _speaker_embedding(result: dict[str, Any], label: str, segments: list[dict[str, Any]]) -> Any:
@@ -108,24 +129,52 @@ class JobRepository:
                 )
                 return int(changed.rowcount)
 
-    def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
+    def claim_message_details(self, message_id: str | None, job_id: str | None = None) -> MessageClaimResult:
         if not message_id:
-            return True
+            return MessageClaimResult("ACQUIRED")
+        worker_id = socket.gethostname()
         with self._db.connection() as connection:
-            row = connection.execute(
-                """
-                INSERT INTO inbox_messages(message_id, job_id, lease_expires_at, worker_id)
-                VALUES(%s, %s, now() + interval '30 minutes', %s)
-                ON CONFLICT(message_id) DO UPDATE SET
-                    job_id=excluded.job_id,
-                    lease_expires_at=excluded.lease_expires_at,
-                    worker_id=excluded.worker_id
-                WHERE inbox_messages.lease_expires_at IS NULL OR inbox_messages.lease_expires_at < now()
-                RETURNING message_id
-                """,
-                (message_id, job_id, socket.gethostname()),
-            ).fetchone()
-            return row is not None
+            with connection.transaction():
+                existing = connection.execute(
+                    "SELECT job_id,worker_id,lease_expires_at FROM inbox_messages WHERE message_id=%s FOR UPDATE",
+                    (message_id,),
+                ).fetchone()
+                if existing is None:
+                    row = connection.execute(
+                        """INSERT INTO inbox_messages(message_id,job_id,lease_expires_at,worker_id)
+                           VALUES(%s,%s,now()+interval '30 minutes',%s)
+                           RETURNING worker_id,lease_expires_at""",
+                        (message_id, job_id, worker_id),
+                    ).fetchone()
+                    return MessageClaimResult("ACQUIRED", str(row[0]) if row and row[0] else worker_id, row[1] if row else None)
+                existing_job_id, owner, lease_expires_at = existing
+                terminal = connection.execute(
+                    "SELECT status FROM jobs WHERE id=%s",
+                    (job_id or existing_job_id,),
+                ).fetchone()
+                if terminal is not None and str(terminal[0]) in {"READY", "FAILED", "CANCELLED"}:
+                    return MessageClaimResult("TERMINAL", str(owner) if owner else None, lease_expires_at)
+                lease_expired = (
+                    lease_expires_at is None
+                    or lease_expires_at.timestamp() <= datetime.now().timestamp()
+                )
+                if lease_expired or str(owner or "") == worker_id:
+                    # A serial GPU worker has no concurrent handler.  A lease
+                    # owned by this hostname is therefore an orphan from a
+                    # previous process and may be reclaimed atomically.
+                    row = connection.execute(
+                        """UPDATE inbox_messages
+                           SET job_id=%s,lease_expires_at=now()+interval '30 minutes',worker_id=%s
+                           WHERE message_id=%s
+                           RETURNING worker_id,lease_expires_at""",
+                        (job_id, worker_id, message_id),
+                    ).fetchone()
+                    return MessageClaimResult("OWNED_BY_THIS_WORKER" if not lease_expired else "ACQUIRED", worker_id, row[1] if row else None)
+                return MessageClaimResult("OWNED_BY_OTHER_WORKER", str(owner) if owner else None, lease_expires_at)
+
+    def claim_message(self, message_id: str | None, job_id: str | None = None) -> bool:
+        """Compatibility wrapper for media/legacy workers."""
+        return self.claim_message_details(message_id, job_id).acquired
 
     def job_state(self, job_id: str | None) -> tuple[str, str] | None:
         if not job_id:
@@ -166,53 +215,72 @@ class JobRepository:
                     connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (message_id,))
             return int(row[0]) if row else None
 
+    def _mark_terminal_failure_locked(
+        self,
+        connection: psycopg.Connection[Any],
+        job_id: str,
+        error: str,
+        error_code: str,
+    ) -> None:
+        """Persist a terminal failure and synchronize the meeting state.
+
+        This method must be called while the caller owns the current job row
+        lock.  It is shared by normal exceptions and watchdog terminal paths
+        so enrichment cannot accidentally hide a durable V1 transcript.
+        """
+        job_type = connection.execute("SELECT type,meeting_id FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
+        if job_type is None:
+            return
+        connection.execute(
+            """UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,
+                error_message=%s,error_code=%s,worker_id=NULL,lease_expires_at=NULL,
+                last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')""",
+            (error, error_code, job_id),
+        )
+        meeting_id = job_type[1]
+        if str(job_type[0]) == ENRICHMENT_JOB_TYPE:
+            connection.execute(
+                """UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s
+                   AND EXISTS (SELECT 1 FROM transcripts WHERE meeting_id=%s
+                               AND version_kind='ASR_DRAFT' AND status IN ('READY','PARTIAL_READY'))""",
+                (meeting_id, meeting_id),
+            )
+            return
+        connection.execute(
+            """UPDATE meetings AS meeting SET status='FAILED'
+               FROM jobs AS job WHERE job.id=%s AND job.meeting_id=meeting.id
+               AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
+               AND NOT EXISTS (SELECT 1 FROM transcripts AS transcript
+                               WHERE transcript.meeting_id=meeting.id
+                                 AND transcript.status IN ('READY','PARTIAL_READY'))""",
+            (job_id,),
+        )
+
     def update_job(self, job_id: str, status: str, stage: str, progress: int, error: str | None = None, error_code: str | None = None) -> None:
         # Keep the persisted spelling backwards compatible, but reject a
         # stage that is not part of the shared pipeline contract.
         stage = validate_stage_name(stage)
         with self._db.connection() as connection:
+            if status == "FAILED":
+                with connection.transaction():
+                    self._mark_terminal_failure_locked(connection, job_id, error or "job failed", error_code or "JOB_FAILED")
+                return
             job_type = connection.execute("SELECT type,meeting_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             connection.execute(
                 "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                 (status, stage, progress, error, error_code, socket.gethostname(), status, job_id),
             )
-            if status == "FAILED":
-                if job_type is not None and str(job_type[0]) == ENRICHMENT_JOB_TYPE:
-                    # V1 is an independently durable product.  Enrichment is
-                    # optional and must never turn a usable V1 into a failed
-                    # meeting when alignment/diarization crashes.
-                    connection.execute(
-                        "UPDATE meetings SET status='PARTIAL_READY' WHERE id=%s AND EXISTS (SELECT 1 FROM transcripts WHERE meeting_id=%s AND version_kind='ASR_DRAFT' AND status IN ('READY','PARTIAL_READY'))",
-                        (job_type[1], job_type[1]),
-                    )
-                    return
-                connection.execute(
-                    """
-                    UPDATE meetings AS meeting
-                    SET status='FAILED'
-                    FROM jobs AS job
-                    WHERE job.id=%s
-                      AND job.meeting_id=meeting.id
-                      AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
-                      AND NOT EXISTS (
-                          SELECT 1 FROM transcripts AS transcript
-                          WHERE transcript.meeting_id=meeting.id
-                            AND transcript.status IN ('READY','PARTIAL_READY')
-                      )
-                    """,
-                    (job_id,),
-                )
 
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now() WHERE id=%s AND status='RUNNING'",
-                (job_id,),
+                "UPDATE jobs SET lease_expires_at=now()+interval '30 minutes',last_heartbeat=now() WHERE id=%s AND status='RUNNING' AND worker_id=%s",
+                (job_id, socket.gethostname()),
             )
             if message_id:
                 connection.execute(
-                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s",
-                    (socket.gethostname(), message_id),
+                    "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes',worker_id=%s WHERE message_id=%s AND worker_id=%s",
+                    (socket.gethostname(), message_id, socket.gethostname()),
                 )
 
     def job_progress_liveness(self, job_id: str) -> tuple[str, int, Any, Any] | None:
@@ -271,16 +339,11 @@ class JobRepository:
                             (message_id,),
                         )
                     return "REQUEUED"
-                connection.execute(
-                    """
-                    UPDATE jobs
-                    SET status='FAILED',stage='FAILED',progress=0,
-                        worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,
-                        error_message='GPU stage exceeded the progress timeout twice',
-                        error_code='GPU_STAGE_TIMEOUT',updated_at=now()
-                    WHERE id=%s AND status='RUNNING'
-                    """,
-                    (job_id,),
+                self._mark_terminal_failure_locked(
+                    connection,
+                    job_id,
+                    'GPU stage exceeded the progress timeout twice',
+                    'GPU_STAGE_TIMEOUT',
                 )
                 if message_id:
                     connection.execute(
@@ -443,7 +506,7 @@ class JobRepository:
                         blocked = warning_values & {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}
                         if not blocked:
                             media = connection.execute(
-                                "SELECT a.asr_storage_key FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
+                                "SELECT a.asr_storage_key,a.duration_ms FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
                                 (job_id,),
                             ).fetchone()
                             self._ensure_enrichment_job_and_outbox(
@@ -455,6 +518,7 @@ class JobRepository:
                                 str(quality_meta.get("language") or "ru"),
                                 str(quality_meta.get("acoustic_profile") or "AUTO"),
                                 str(job[2]) if job[2] else None,
+                                int(media[1]) if media and media[1] else None,
                             )
                     connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (existing[0], job_id))
                     return str(existing[0])
@@ -490,7 +554,7 @@ class JobRepository:
                 # separately. The partial transcript is never mutated by V2.
                 if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}:
                     media = connection.execute(
-                        "SELECT a.asr_storage_key FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
+                        "SELECT a.asr_storage_key,a.duration_ms FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
                         (job_id,),
                     ).fetchone()
                     storage_key = str(media[0]) if media and media[0] else None
@@ -503,6 +567,7 @@ class JobRepository:
                         str(draft.get("language") or quality.get("language") or "ru"),
                         str(quality.get("acoustic_profile") or "AUTO"),
                         str(job[2]) if job[2] else None,
+                        int(media[1]) if media and media[1] else None,
                     )
                     connection.execute(
                         "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
@@ -520,6 +585,7 @@ class JobRepository:
         language: str,
         acoustic_profile: str,
         correlation_id: str | None,
+        duration_ms: int | None = None,
     ) -> str | None:
         """Repair the V1→enrichment handoff without creating a second job.
 
@@ -565,6 +631,7 @@ class JobRepository:
                 "language": language or "ru",
                 "acousticProfile": acoustic_profile or "AUTO",
                 "correlation_id": correlation_id,
+                "duration_ms": duration_ms,
             })
             connection.execute("INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'ml.transcribe',%s::jsonb)", (message_id, payload))
         return enrichment_id

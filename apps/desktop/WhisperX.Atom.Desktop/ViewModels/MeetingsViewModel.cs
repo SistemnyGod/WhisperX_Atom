@@ -457,7 +457,9 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
                 PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
             }, cancellationToken, observation =>
             {
-                if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
+                if (observation.State == ProcessingJobState.Background)
+                    PipelineText = "Обработка продолжается в фоне. Обновите встречу позже.";
+                else if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
                     PipelineText = observation.State == ProcessingJobState.Blocked
                         ? $"Обработка заблокирована: {observation.Reason}"
                         : $"Обработка приостановлена: {observation.Reason}";
@@ -511,7 +513,9 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
             PipelineText = $"{DisplayStatus(current.Status)} · {DisplayStage(current.Stage)} · {current.Progress}%";
         }, cancellationToken, observation =>
         {
-            if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
+            if (observation.State == ProcessingJobState.Background)
+                PipelineText = "Обработка продолжается в фоне. Обновите встречу позже.";
+            else if (observation.State is ProcessingJobState.Stalled or ProcessingJobState.Blocked)
                 PipelineText = observation.State == ProcessingJobState.Blocked
                     ? $"Обработка заблокирована: {observation.Reason}"
                     : $"Обработка приостановлена: {observation.Reason}";

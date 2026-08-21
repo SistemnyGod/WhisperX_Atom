@@ -51,6 +51,12 @@ $env:APP_VERSION = $identity
 
 docker info | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'DOCKER_ENGINE_UNAVAILABLE' }
+$configDrive = [IO.Path]::GetPathRoot($config)
+$driveInfo = [IO.DriveInfo]::new($configDrive)
+$minimumFreeBytes = [int64](Read-EnvValue 'SERVER_MIN_FREE_GB')
+if ($minimumFreeBytes -le 0) { $minimumFreeBytes = 20 }
+$minimumFreeBytes *= 1GB
+if ($driveInfo.AvailableFreeSpace -lt $minimumFreeBytes) { throw "SERVER_FREE_SPACE_LOW: required=$minimumFreeBytes available=$($driveInfo.AvailableFreeSpace)" }
 $imagesTar = Join-Path $bundle 'docker-images.tar'
 if (-not (Test-Path -LiteralPath $imagesTar -PathType Leaf)) { throw 'SERVER_IMAGES_TAR_MISSING' }
 & docker load --input $imagesTar
@@ -94,15 +100,60 @@ if ($configText -match '(?im)image:\s*[^\r\n]*:(dev|latest)\b') { throw 'SERVER_
 $statePath = Join-Path $config 'pre-update-state.json'
 $previousStateJson = (& docker @compose @profiles ps --format json | Out-String)
 $previousStateJson | Set-Content -LiteralPath $statePath -Encoding utf8
+$inventory = [ordered]@{
+    capturedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    containers = @(& docker ps --all --format '{{json .}}')
+    images = @(& docker image ls --no-trunc --format '{{json .}}')
+    volumes = @(& docker volume ls --format '{{json .}}')
+}
+$inventory | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $config 'pre-update-inventory.json') -Encoding utf8
 $previousServices = @()
 foreach ($line in ($previousStateJson -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     try { $previousServices += @($line | ConvertFrom-Json) } catch { }
 }
 
-# Run the new image's additive migrations as a one-shot job before replacing
-# the API. No `down -v` or volume recreation is ever issued.
-& docker @compose @profiles run --rm --no-deps -e WHISPERX_MIGRATION_ONLY=true api
-if ($LASTEXITCODE -ne 0) { throw 'SERVER_MIGRATION_JOB_FAILED' }
+# Materialize a rollback overlay before quiescing anything. If additive
+# migrations or the recovery transaction fails, the two stopped workers are
+# restored with their previous image references rather than the new release.
+$rollbackPath = Join-Path $config 'rollback-compose.yml'
+$rollbackLines = [System.Collections.Generic.List[string]]::new()
+$rollbackLines.Add('services:')
+foreach ($service in $previousServices) {
+    $name = [string]$service.Service
+    $image = [string]$service.Image
+    if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($image)) { continue }
+    $rollbackLines.Add("  ${name}:")
+    $rollbackLines.Add("    image: $image")
+    $rollbackLines.Add('    build: !reset null')
+}
+if ($rollbackLines.Count -gt 1) { $rollbackLines -join "`r`n" | Set-Content -LiteralPath $rollbackPath -Encoding utf8 }
+
+# Quiesce only the two GPU owners before migration/recovery. PostgreSQL, NATS,
+# media, recordings, archives and all volumes remain online.
+$gpuQuiesced = $false
+& docker @compose @profiles stop gpu-worker summary-worker
+if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_QUIESCE_FAILED' }
+$gpuQuiesced = $true
+try {
+    # Run the new image's additive migrations as a one-shot job before
+    # replacing the API. No `down -v` or volume recreation is ever issued.
+    & docker @compose @profiles run --rm --no-deps -e WHISPERX_MIGRATION_ONLY=true api
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_MIGRATION_JOB_FAILED' }
+
+    # Preview and then apply one transactional GPU recovery using the same
+    # worker image. This never edits media/transcripts or deletes volumes.
+    & docker @compose @profiles run --rm --no-deps gpu-worker python -m workers.ml_worker.recovery --preview
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_RECOVERY_PREVIEW_FAILED' }
+    & docker @compose @profiles run --rm --no-deps gpu-worker python -m workers.ml_worker.recovery --apply
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_RECOVERY_APPLY_FAILED' }
+} catch {
+    if ($gpuQuiesced) {
+        $rollbackCompose = if (Test-Path -LiteralPath $rollbackPath) { $compose + @('-f',$rollbackPath) } else { $compose }
+        & docker @rollbackCompose @profiles up -d --no-deps --pull never gpu-worker summary-worker
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'SERVER_GPU_RESTORE_AFTER_PRESTART_FAILURE_FAILED=true' }
+    }
+    throw
+}
 try {
     & docker @compose @profiles up -d --pull never
     if ($LASTEXITCODE -ne 0) { throw 'SERVER_RELEASE_START_FAILED' }
