@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import math
+import importlib.util
 import struct
 import wave
+
+import pytest
 
 from whisperx_atom.audio_signal import analyze_wav, language_quality
 
@@ -15,6 +18,7 @@ def _wav(path, samples: list[int], rate: int = 16_000) -> None:
         handle.writeframes(struct.pack("<" + "h" * len(samples), *samples))
 
 
+@pytest.mark.skipif(importlib.util.find_spec("numpy") is None, reason="numpy is required for signal metrics")
 def test_signal_metrics_distinguish_silence_and_far_field(tmp_path):
     silent = tmp_path / "silent.wav"
     _wav(silent, [0] * 16_000)

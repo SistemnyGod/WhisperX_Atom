@@ -50,9 +50,13 @@ def test_gpu_priority_order_keeps_v1_ahead_of_assistant_enrichment_and_summary()
     assert "self._enrichment_gpu_lease if enrichment_job else self._asr_gpu_lease" in gpu
     assert "priority=30" in assistant
     assert "priority=100" in summary
-    # Enrichment must not make itself look like pending V1 work.
-    asr_gate = lease.split("WHERE type IN", 1)[1].split("AND (status", 1)[0]
-    assert "TRANSCRIPT_ENRICH" not in asr_gate
+    # Enrichment must not make itself look like pending V1 work.  Keep this
+    # assertion semantic rather than depending on the exact SQL formatting:
+    # the lease has one explicit ASR type set and a separate enrichment gate.
+    asr_type_set = lease.split("WHERE type IN", 1)[1].split(")", 1)[0]
+    assert "TRANSCRIBE" in asr_type_set
+    assert "TRANSCRIPT_ENRICH" not in asr_type_set
+    assert "type='TRANSCRIPT_ENRICH'" in lease
 
 
 def test_gpu_progress_watchdog_has_stage_liveness_and_single_requeue_gate():

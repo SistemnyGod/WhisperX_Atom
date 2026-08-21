@@ -16,6 +16,10 @@ public sealed class HomeViewModel : ObservableObject
     private bool _agentAvailable;
     private string _apiStatus = "Проверка API…";
     private string _agentStatus = "Проверка Recorder Agent…";
+    private string _recorderSummary = "Проверка Recorder…";
+    private string _serverSummary = "Проверка сервера…";
+    private string _whisperXSummary = "Проверка WhisperX…";
+    private string _voiceStatus = "Мифодий: проверка состояния";
     private string _recordingStatus = "Проверяется состояние записи…";
     private string _effectiveMicrophoneText = "Микрофон ещё не подтверждён";
     private string _microphoneSignalText = "Сигнал проверяется перед стартом записи";
@@ -47,6 +51,10 @@ public sealed class HomeViewModel : ObservableObject
     public bool AgentAvailable { get => _agentAvailable; private set => SetProperty(ref _agentAvailable, value); }
     public string ApiStatus { get => _apiStatus; private set => SetProperty(ref _apiStatus, value); }
     public string AgentStatus { get => _agentStatus; private set => SetProperty(ref _agentStatus, value); }
+    public string RecorderSummary { get => _recorderSummary; private set => SetProperty(ref _recorderSummary, value); }
+    public string ServerSummary { get => _serverSummary; private set => SetProperty(ref _serverSummary, value); }
+    public string WhisperXSummary { get => _whisperXSummary; private set => SetProperty(ref _whisperXSummary, value); }
+    public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public string RecordingStatus { get => _recordingStatus; private set => SetProperty(ref _recordingStatus, value); }
     public string EffectiveMicrophoneText { get => _effectiveMicrophoneText; private set => SetProperty(ref _effectiveMicrophoneText, value); }
     public string MicrophoneSignalText { get => _microphoneSignalText; private set => SetProperty(ref _microphoneSignalText, value); }
@@ -145,6 +153,15 @@ public sealed class HomeViewModel : ObservableObject
             OnPropertyChanged(nameof(MediaTimeText));
             AgentAvailable = response.IsReachable;
             AgentStatus = AgentStatusFormatter.Format(response);
+            RecorderSummary = response.IsReachable
+                ? response.State switch
+                {
+                    "Recording" => "Идёт запись",
+                    "Paused" => "Пауза записи",
+                    "Finalizing" => "Сохранение записи",
+                    _ => "Готов к записи"
+                }
+                : "Recorder недоступен";
             RecordingStatus = response.State switch
             {
                 "Recording" => "Идёт запись",
@@ -182,6 +199,14 @@ public sealed class HomeViewModel : ObservableObject
                 MicrophoneDbLabel = "Нет измерения";
                 MicrophoneWaveform = Array.Empty<double>();
             }
+
+            try
+            {
+                var voice = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken);
+                VoiceStatus = FormatVoiceStatus(voice, MicrophoneSignalState);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch { VoiceStatus = "Мифодий недоступен"; }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
@@ -192,6 +217,8 @@ public sealed class HomeViewModel : ObservableObject
             OnPropertyChanged(nameof(RecordingBadgeText));
             OnPropertyChanged(nameof(MediaTimeText));
             AgentStatus = "Recorder Agent недоступен";
+            RecorderSummary = "Recorder недоступен";
+            VoiceStatus = "Мифодий недоступен";
             RecordingStatus = "Запись недоступна";
             StorageText = "Ожидание проверки";
             PendingUploadsText = "—";
@@ -212,6 +239,24 @@ public sealed class HomeViewModel : ObservableObject
         {
             ApiAvailable = await _services.Backend.CheckReadyAsync(cancellationToken);
             ApiStatus = ApiAvailable ? "API доступен" : "API недоступен";
+            ServerSummary = ApiAvailable
+                ? (_services.Backend.HasSession ? "Подключён" : "Требуется вход")
+                : "Сервер недоступен";
+            var processingReadiness = ApiAvailable && _services.Backend.HasSession
+                ? await _services.Backend.GetProcessingReadinessAsync(cancellationToken)
+                : null;
+            var whisperStatus = UiStatusMapper.ComponentStatus(processingReadiness, "whisperx");
+            WhisperXSummary = !ApiAvailable
+                ? "Сервер недоступен"
+                : whisperStatus switch
+                {
+                    "READY" => "Готов к обработке",
+                    "BUSY" => "Занят обработкой",
+                    "DEGRADED" => "Требует восстановления",
+                    "UNAVAILABLE" => "Недоступен",
+                    _ when processingReadiness is null => "Статус не подтверждён",
+                    _ => "Ожидает записи"
+                };
             if (!ApiAvailable)
             {
                 MeetingsMessage = "API недоступен. Проверьте подключение в Настройках.";
@@ -241,6 +286,8 @@ public sealed class HomeViewModel : ObservableObject
             ApiStatus = "API недоступен";
             MeetingsMessage = _services.Backend.HasSession ? "Не удалось загрузить совещания" : "Войдите в API, чтобы загрузить совещания";
             ErrorText = string.IsNullOrWhiteSpace(ErrorText) ? SafeError(ex) : ErrorText;
+            ServerSummary = "Сервер недоступен";
+            WhisperXSummary = "Статус не получен";
             RecentMeetings.Clear();
             ResetMeetingMetrics("История недоступна", "Подключите API, чтобы увидеть конвейер");
             OnPropertyChanged(nameof(HasMeetings));
@@ -270,11 +317,11 @@ public sealed class HomeViewModel : ObservableObject
             var aggregateMetrics = RecentMeetings.Select(meeting =>
             {
                 if (!byMeeting.TryGetValue(meeting.Id, out var item))
-                    return new MeetingMetrics(meeting.Title, false, false, 0, meeting.Status, 0);
+                    return new MeetingMetrics(meeting.DisplayTitle, false, false, 0, meeting.Status, 0);
                 var current = item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status))
                     ?? item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
                 return new MeetingMetrics(
-                    meeting.Title,
+                    meeting.DisplayTitle,
                     item.Jobs.Any(job => !IsTerminal(job.Status)),
                     SummaryPresentation.IsDisplayable(item.Summary),
                     item.OpenTasks.Count,
@@ -307,7 +354,7 @@ public sealed class HomeViewModel : ObservableObject
 
     private async Task<MeetingMetrics> LoadMeetingMetricsAsync(DesktopMeeting meeting, CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(meeting.Id, out var meetingId)) return new MeetingMetrics(meeting.Title, false, false, 0, "Этап не указан", 0);
+            if (!Guid.TryParse(meeting.Id, out var meetingId)) return new MeetingMetrics(meeting.DisplayTitle, false, false, 0, "Этап не указан", 0);
         try
         {
             var jobsTask = _services.Backend.GetJobsAsync(meetingId, cancellationToken);
@@ -319,7 +366,7 @@ public sealed class HomeViewModel : ObservableObject
             var tasks = await tasksTask;
             var current = jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status)) ?? jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
             return new MeetingMetrics(
-                meeting.Title,
+                meeting.DisplayTitle,
                 jobs.Any(job => !IsTerminal(job.Status)),
                 SummaryPresentation.IsDisplayable(summary),
                 tasks.Count(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase) && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)),
@@ -369,6 +416,7 @@ public sealed class HomeViewModel : ObservableObject
 
     private static bool IsTerminal(string status) => status.Equals("READY", StringComparison.OrdinalIgnoreCase)
         || status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("ADMIN_REVIEW", StringComparison.OrdinalIgnoreCase)
         || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
         || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
 
@@ -378,9 +426,25 @@ public sealed class HomeViewModel : ObservableObject
         "ALIGNING" => "Выравнивание",
         "DIARIZING" => "Диаризация",
         "SUMMARIZING" => "Саммари",
+        "ADMIN_REVIEW" => "Требуется проверка",
         "READY" => "Готово",
         _ => string.IsNullOrWhiteSpace(stage) ? "Обработка" : stage
     };
+
+    private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState)
+    {
+        if (snapshot is null) return "Мифодий недоступен";
+        if (snapshot.IsSpeaking || snapshot.State.Equals("RESPONDING", StringComparison.OrdinalIgnoreCase)) return "Мифодий озвучивает ответ";
+        if (microphoneSignalState is "NO_PACKETS" or "READY_NO_SIGNAL") return "Мифодий ждёт аудиосигнал";
+        return snapshot.State.ToUpperInvariant() switch
+        {
+            "LISTENING" => "Мифодий слушает · готов к команде",
+            "CAPTURING" or "RECOGNIZING" or "WAKEDETECTED" => "Мифодий слушает вопрос",
+            "STARTING" => "Мифодий запускается",
+            "DEGRADED" or "ERROR" => "Мифодий требует проверки",
+            _ => "Мифодий готов"
+        };
+    }
 
     private sealed record MeetingMetrics(string Title, bool IsProcessing, bool HasSummary, int OpenTasks, string Stage, int Progress);
 

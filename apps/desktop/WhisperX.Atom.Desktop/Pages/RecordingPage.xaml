@@ -151,7 +151,7 @@
                                     <controls:OperationalStatusItem Title="Архив" Status="{Binding ArchiveStatusLabel}" Description="Локальная копия создаётся отдельно" Severity="info" />
                                     <controls:OperationalStatusItem Title="Доставка" Status="{Binding DeliveryStatusLabel}" Description="Сервер необязателен для записи" Severity="warning" />
                                     <controls:OperationalStatusItem Title="WhisperX" Status="{Binding ProcessingStatus}" Description="Обработка начнётся после завершения записи" Severity="neutral" />
-                                    <controls:OperationalStatusItem Title="Мифодий" Status="Слушает" Description="Голосовые команды доступны во время записи" Severity="info" />
+                                    <controls:OperationalStatusItem Title="Мифодий" Status="{Binding VoiceStatus}" Description="Голосовые команды работают независимо от доставки аудио" Severity="info" />
                                 </StackPanel>
                             </Grid>
                         </Border>

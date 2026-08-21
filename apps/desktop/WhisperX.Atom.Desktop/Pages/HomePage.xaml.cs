@@ -51,6 +51,10 @@ public sealed partial class HomePage : Page
             or nameof(HomeViewModel.ErrorText)
             or nameof(HomeViewModel.IsLoading)
             or nameof(HomeViewModel.AgentAvailable)
+            or nameof(HomeViewModel.RecorderSummary)
+            or nameof(HomeViewModel.ServerSummary)
+            or nameof(HomeViewModel.WhisperXSummary)
+            or nameof(HomeViewModel.VoiceStatus)
             or nameof(HomeViewModel.MicrophoneSignalState)
             or nameof(HomeViewModel.RecordingBadgeText)
             or nameof(HomeViewModel.MediaTimeText))
@@ -73,11 +77,45 @@ public sealed partial class HomePage : Page
                 : "SuccessBrush";
         var statusBrush = (Brush)Application.Current.Resources[statusBrushKey];
         AgentIndicator.Fill = statusBrush;
-        AgentRailIndicator.Fill = statusBrush;
+        RecorderSummaryIndicator.Fill = StatusBrush(ViewModel.RecorderSummary);
+        ServerSummaryIndicator.Fill = StatusBrush(ViewModel.ServerSummary);
+        WhisperXSummaryIndicator.Fill = StatusBrush(ViewModel.WhisperXSummary);
+        var voiceBrushKey = ViewModel.VoiceStatus.Contains("недоступен", StringComparison.OrdinalIgnoreCase)
+            ? "DangerBrush"
+            : ViewModel.VoiceStatus.Contains("требует", StringComparison.OrdinalIgnoreCase)
+                || ViewModel.VoiceStatus.Contains("ждёт", StringComparison.OrdinalIgnoreCase)
+                ? "WarningBrush"
+                : ViewModel.VoiceStatus.Contains("слушает", StringComparison.OrdinalIgnoreCase)
+                    || ViewModel.VoiceStatus.Contains("готов", StringComparison.OrdinalIgnoreCase)
+                    || ViewModel.VoiceStatus.Contains("озвучивает", StringComparison.OrdinalIgnoreCase)
+                    ? "SuccessBrush"
+                    : "NeutralStatusBrush";
+        AgentRailIndicator.Fill = (Brush)Application.Current.Resources[voiceBrushKey];
         UpdateRecordingBadge();
         OfflineInfoBar.IsOpen = !ViewModel.IsLoading && !ViewModel.ApiAvailable;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText) && ViewModel.ApiAvailable;
         ErrorInfoBar.Message = ViewModel.ErrorText;
+    }
+
+    private static Brush StatusBrush(string? status)
+    {
+        var value = status ?? string.Empty;
+        var key = value.Contains("недоступ", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("ошиб", StringComparison.OrdinalIgnoreCase)
+            ? "DangerBrush"
+            : value.Contains("требует", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("ожида", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("провер", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("вход", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("не подтверж", StringComparison.OrdinalIgnoreCase)
+                ? "WarningBrush"
+                : value.Contains("готов", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("подключ", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("идёт", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("занят", StringComparison.OrdinalIgnoreCase)
+                    ? "SuccessBrush"
+                    : "NeutralStatusBrush";
+        return (Brush)Application.Current.Resources[key];
     }
 
     private void UpdateRecordingBadge()
@@ -104,6 +142,13 @@ public sealed partial class HomePage : Page
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
     private void NewMeetingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
+    private void OpenMeetingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string meetingId } && Guid.TryParse(meetingId, out _))
+            App.MainWindow.NavigateTo("meetings", new MeetingNavigationTarget(meetingId));
+        else
+            App.MainWindow.NavigateTo("meetings");
+    }
     private void SettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
     private void OpenRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)

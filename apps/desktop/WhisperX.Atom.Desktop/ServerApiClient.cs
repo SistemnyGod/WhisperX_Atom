@@ -17,6 +17,19 @@ public sealed record DesktopMeeting(string Id, string Title, string? Description
 
     [JsonIgnore]
     public string CreatedAtText => CreatedAt.LocalDateTime.ToString("dd.MM.yyyy HH:mm");
+
+    [JsonIgnore]
+    public string DisplayTitle
+    {
+        get
+        {
+            var title = string.IsNullOrWhiteSpace(Title) ? "Совещание" : Title.Trim();
+            return title.Equals("Новая запись", StringComparison.OrdinalIgnoreCase)
+                || title.Equals("Голосовая запись", StringComparison.OrdinalIgnoreCase)
+                ? $"{title} · {CreatedAt.LocalDateTime:dd.MM HH:mm}"
+                : title;
+        }
+    }
 }
 public sealed record DesktopMeetingCancellation(string MeetingId, string Status, int CancelledJobs);
 public sealed record DesktopCurrentUser(Guid Id, string Username, string Role, bool MustChangePassword = false)

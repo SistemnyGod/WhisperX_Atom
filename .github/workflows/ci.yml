@@ -53,16 +53,7 @@ jobs:
       - name: Run .NET tests when test projects are present
         shell: pwsh
         run: |
-          $projects = @(Get-ChildItem -Path . -Recurse -Filter '*Tests.csproj' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]|[\\/]bin[\\/]' })
-          if ($projects.Count -eq 0) {
-            Write-Host 'No .NET test project is currently part of the repository; Python contract tests remain mandatory.'
-            exit 0
-          }
-          foreach ($project in $projects) {
-            dotnet test $project.FullName -c Release --no-restore --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          ./scripts/run-dotnet-tests.ps1 -Configuration Release -NoRestore -TimeoutSeconds 180
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-validation

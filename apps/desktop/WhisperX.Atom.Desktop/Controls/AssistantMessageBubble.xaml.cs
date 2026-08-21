@@ -47,7 +47,8 @@ public sealed partial class AssistantMessageBubble : UserControl
         RoleText.Foreground = Brush(isUser ? "AccentBrush" : "TextPrimaryBrush");
         ContentText.Text = message.Content;
         ContentText.Foreground = Brush("TextPrimaryBrush");
-        StatusText.Text = isUser ? "" : DisplayStatus(message.Status);
+        var displayStatus = isUser ? string.Empty : DisplayStatus(message.Status, message.ErrorCode, message.ProcessingStage);
+        StatusText.Text = displayStatus;
         StatusText.Foreground = Brush(message.Status.Equals("READY", StringComparison.OrdinalIgnoreCase) || message.Status.Equals("ANSWERED", StringComparison.OrdinalIgnoreCase)
             ? "SuccessBrush"
             : message.Status.Equals("NEEDS_REVIEW", StringComparison.OrdinalIgnoreCase) || message.Status.Equals("ANSWERED_WITH_WARNING", StringComparison.OrdinalIgnoreCase)
@@ -70,17 +71,37 @@ public sealed partial class AssistantMessageBubble : UserControl
         return string.Join(" · ", parts);
     }
 
-    private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
+    private static string DisplayStatus(string status, string? errorCode, string? processingStage)
     {
-        "QUEUED" => "В очереди",
-        "RUNNING" => "Обрабатывает",
-        "READY" or "ANSWERED" => "Готово",
-        "NEEDS_REVIEW" or "ANSWERED_WITH_WARNING" => "Нужна проверка",
-        "NO_EVIDENCE" => "Нет подтверждения",
-        "GROUNDING_REJECTED" => "Отклонено проверкой",
-        "FAILED" => "Ошибка",
-        _ => string.Empty
-    };
+        if (string.Equals(errorCode, "ASSISTANT_WAITING_FOR_GPU", StringComparison.OrdinalIgnoreCase)) return "Ждёт освобождения GPU";
+        if (string.Equals(errorCode, "ASSISTANT_GPU_BUSY_TIMEOUT", StringComparison.OrdinalIgnoreCase)) return "GPU занят слишком долго";
+        if (string.Equals(errorCode, "LOCAL_COMMAND_REQUIRED", StringComparison.OrdinalIgnoreCase)) return "Нужна явная команда";
+        if (!string.IsNullOrWhiteSpace(processingStage))
+        {
+            var stage = processingStage.Trim().ToUpperInvariant() switch
+            {
+                "WAITING_FOR_GPU" => "Ждёт GPU",
+                "LOADING_MODEL" => "Загружает модель",
+                "GENERATING" => "Формирует ответ",
+                "GROUNDING" => "Проверяет источники",
+                "DELIVERING_TTS" => "Готовит голосовой ответ",
+                _ => string.Empty
+            };
+            if (stage.Length > 0) return stage;
+        }
+        return status.ToUpperInvariant() switch
+        {
+            "QUEUED" => "В очереди",
+            "RUNNING" => "Обрабатывает",
+            "READY" or "ANSWERED" => "Готово",
+            "NEEDS_REVIEW" or "ANSWERED_WITH_WARNING" => "Нужна проверка",
+            "NO_EVIDENCE" => "Нет подтверждения",
+            "GROUNDING_REJECTED" => "Отклонено проверкой",
+            "LLM_UNAVAILABLE" => "ИИ временно недоступен",
+            "FAILED" => "Ошибка",
+            _ => string.Empty
+        };
+    }
 
     private static Brush Brush(string key) =>
         Application.Current.Resources[key] as Brush

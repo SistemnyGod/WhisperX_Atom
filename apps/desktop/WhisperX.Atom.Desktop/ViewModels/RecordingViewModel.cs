@@ -60,6 +60,7 @@ public sealed class RecordingViewModel : ObservableObject
     private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
     private IReadOnlyList<double> _systemAudioWaveform = Array.Empty<double>();
     private string _microphoneTestStatus = "Микрофон ещё не проверен.";
+    private string _voiceStatus = "Проверка голосового помощника…";
     private string _roomAcousticCheckStatus = "Проверка кабинета ещё не запускалась.";
     private bool _roomAcousticCheckRunning;
     private string _systemAudioTestStatus = "Системный звук ещё не проверен.";
@@ -402,6 +403,7 @@ public sealed class RecordingViewModel : ObservableObject
     public string TranscriptPreview => string.Join(" ", TranscriptSegments.Take(3).Select(segment => segment.Text).Where(text => !string.IsNullOrWhiteSpace(text)));
     public string MicrophoneStatus { get; private set; } = "Микрофон: ожидает проверки";
     public string SystemAudioStatus { get; private set; } = "Системный звук: ожидает проверки";
+    public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
     public double MicrophoneLevel => ToLevel(_microphoneDb);
     public double SystemAudioLevel => ToLevel(_systemAudioDb);
     public string MicrophoneDbLabel => FormatDb(_microphoneDb);
@@ -624,6 +626,13 @@ public sealed class RecordingViewModel : ObservableObject
         try
         {
             ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken), preserveUserFeedback: true);
+            try
+            {
+                var voice = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken);
+                VoiceStatus = FormatVoiceStatus(voice, _microphoneSignalState);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch { VoiceStatus = "Мифодий недоступен"; }
             OnPropertyChanged(nameof(AgentReady));
             OnPropertyChanged(nameof(CanStart));
             OnPropertyChanged(nameof(StartReadinessMessage));
@@ -640,6 +649,7 @@ public sealed class RecordingViewModel : ObservableObject
         catch (Exception)
         {
             State = RecordingState.Unavailable;
+            VoiceStatus = "Мифодий недоступен";
             StatusMessage = "Подключите Recorder Agent и повторите проверку устройств.";
             // Background health polling updates the persistent state text but
             // must not flash and then erase an InfoBar every two seconds.
@@ -648,6 +658,25 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(AgentStatus));
             OnPropertyChanged(nameof(StartReadinessMessage));
         }
+    }
+
+    private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState)
+    {
+        if (snapshot is null) return "Мифодий недоступен";
+        if (snapshot.IsSpeaking || snapshot.State.Equals("RESPONDING", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий озвучивает ответ";
+        if (string.Equals(microphoneSignalState, "NO_PACKETS", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(microphoneSignalState, "READY_NO_SIGNAL", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий ждёт аудиосигнал";
+        return snapshot.State.ToUpperInvariant() switch
+        {
+            "LISTENING" => "Мифодий слушает · готов к команде",
+            "CAPTURING" or "RECOGNIZING" or "WAKEDETECTED" => "Мифодий слушает вопрос",
+            "STARTING" => "Мифодий запускается",
+            "DEGRADED" or "ERROR" => "Мифодий требует внимания",
+            _ when !snapshot.MicrophoneReady => "Мифодий ждёт микрофон",
+            _ => "Мифодий готов к команде"
+        };
     }
 
     public async Task<bool> StartRecordingAsync()

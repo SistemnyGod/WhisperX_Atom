@@ -261,7 +261,7 @@ public sealed partial class MainWindow : Window
             backendAvailable && agentReady && qwenStatus == "BUSY" ? ("Запись и WhisperX готовы · ИИ обрабатывает запрос", "NeutralStatusBrush") :
             backendAvailable && agentReady && qwenStatus is "UNAVAILABLE" or "DEGRADED" ? ("Запись и WhisperX готовы · ИИ временно недоступен", "WarningBrush") :
             backendAvailable && agentReady && qwenStatus == "DISABLED" ? ("Запись и WhisperX готовы · ИИ отключён", "WarningBrush") :
-            backendAvailable && agentReady ? ("Система готова", "SuccessBrush") :
+            backendAvailable && agentReady ? ("Компоненты готовы к записи", "SuccessBrush") :
             backendAvailable ? ("LAN-сервер доступен; Recorder Service не запущен", "WarningBrush") :
             recorderAvailable ? ("Recorder доступен; LAN-сервер недоступен", "WarningBrush") :
             ("LAN-сервер и Recorder недоступны", "DangerBrush");
@@ -470,7 +470,7 @@ public sealed partial class MainWindow : Window
         {
             "DangerBrush" => "Требуется внимание",
             "WarningBrush" => "Проверка состояния",
-            "SuccessBrush" => "Система готова",
+            "SuccessBrush" => "Компоненты готовы к записи",
             _ => "Состояние системы"
         };
         GlobalNotificationBar.Severity = brushKey switch

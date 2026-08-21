@@ -107,21 +107,117 @@ function Start-WhisperXRuntime([object]$Manifest) {
     return $true
 }
 
-function Test-WhisperXRuntime([object]$Manifest) {
+function New-AuthenticatedReadinessSession([string]$Origin) {
+    $username = Read-EnvValue "BOOTSTRAP_ADMIN_USERNAME"
+    if ([string]::IsNullOrWhiteSpace($username)) { $username = "admin" }
+    $password = Read-EnvValue "BOOTSTRAP_ADMIN_PASSWORD"
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        Write-SupervisorLog "Authenticated readiness skipped because administrator credentials are not configured" "WARN"
+        return $null
+    }
+
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    try {
+        $body = @{ username = $username; password = $password } | ConvertTo-Json -Compress
+        Invoke-RestMethod -Method Post -Uri ($Origin.TrimEnd('/') + "/api/auth/login") -WebSession $session -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
+        return $session
+    }
+    catch {
+        Write-SupervisorLog "Authenticated readiness login failed" "WARN"
+        return $null
+    }
+}
+
+function Test-RequiredContainersRunning([object]$Manifest) {
     $compose = Get-ComposeArguments $Manifest
     $running = @(& docker @compose ps --services --status running 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $required = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker")
     foreach ($service in $required) {
         if ($running -notcontains $service) { return $false }
     }
-    $origin = Read-EnvValue "SERVER_ORIGIN"
-    if (-not [string]::IsNullOrWhiteSpace($origin)) {
-        try {
-            $null = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/health/live") -TimeoutSec 5
-        }
-        catch { return $false }
-    }
     return $true
+}
+
+function Test-WhisperXRuntime([object]$Manifest) {
+    $script:RuntimeContainersNeedStart = -not (Test-RequiredContainersRunning $Manifest)
+    if ($script:RuntimeContainersNeedStart) { return $false }
+    $origin = Read-EnvValue "SERVER_ORIGIN"
+    if ([string]::IsNullOrWhiteSpace($origin)) {
+        Write-SupervisorLog "SERVER_ORIGIN is not configured" "WARN"
+        return $false
+    }
+
+    try {
+        $live = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/health/live") -TimeoutSec 5
+        if ($null -eq $live) { throw "HEALTH_LIVE_EMPTY" }
+    }
+    catch {
+        Write-SupervisorLog "API health/live probe failed" "WARN"
+        return $false
+    }
+
+    $session = New-AuthenticatedReadinessSession $origin
+    if ($null -eq $session) { return $false }
+    try {
+        $readiness = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/api/system/readiness") -WebSession $session -TimeoutSec 10
+        if ([string]$readiness.buildIdentity -ne [string]$Manifest.buildIdentity -or $readiness.releaseIdentityValid -ne $true) {
+            Write-SupervisorLog "Authenticated readiness identity mismatch" "WARN"
+            return $false
+        }
+
+        $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
+        foreach ($workerName in $required) {
+            $worker = $readiness.components.workers.$workerName
+            if ($null -eq $worker) {
+                Write-SupervisorLog ("Authenticated readiness missing worker " + $workerName) "WARN"
+                return $false
+            }
+            if ([string]$worker.status -notin @("READY", "BUSY")) {
+                Write-SupervisorLog ("Authenticated readiness worker " + $workerName + " is " + [string]$worker.status) "WARN"
+                return $false
+            }
+            if ([string]$worker.version -ne [string]$Manifest.buildIdentity) {
+                Write-SupervisorLog ("Authenticated readiness worker identity mismatch: " + $workerName) "WARN"
+                return $false
+            }
+        }
+
+        $whisperxStatus = [string]$readiness.components.whisperx.status
+        if ($whisperxStatus -notin @("READY", "BUSY")) {
+            Write-SupervisorLog ("WhisperX readiness is " + $whisperxStatus) "WARN"
+            return $false
+        }
+        $queue = $readiness.queue
+        if ($null -ne $queue -and [int]$queue.orphanedGpuJobs -gt 0) {
+            Write-SupervisorLog ("GPU recovery required; orphaned jobs=" + [int]$queue.orphanedGpuJobs) "WARN"
+            return $false
+        }
+
+        $assistantEnabled = (Read-EnvValue "ASSISTANT_ENABLED") -ne "false"
+        $autoSummaryEnabled = (Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true"
+        if ($assistantEnabled -or $autoSummaryEnabled) {
+            $summary = $readiness.components.workers.'summary-worker'
+            $qwenStatus = [string]$readiness.components.qwen.status
+            if ($null -eq $summary -or [string]$summary.status -notin @("READY", "BUSY")) {
+                Write-SupervisorLog ("Summary worker readiness is " + ([string]$summary.status)) "WARN"
+                return $false
+            }
+            if ([string]$summary.version -ne [string]$Manifest.buildIdentity) {
+                Write-SupervisorLog "Summary worker identity mismatch" "WARN"
+                return $false
+            }
+            if ($qwenStatus -notin @("READY", "BUSY")) {
+                Write-SupervisorLog ("Qwen readiness is " + $qwenStatus) "WARN"
+                return $false
+            }
+        }
+
+        return $true
+    }
+    catch {
+        Write-SupervisorLog "Authenticated readiness probe failed" "WARN"
+        return $false
+    }
 }
 
 try {
@@ -137,9 +233,14 @@ try {
                 Write-SupervisorLog "Docker Engine did not become ready within timeout" "ERROR"
             }
             elseif (-not (Test-WhisperXRuntime $manifest)) {
-                [void](Start-WhisperXRuntime $manifest)
-                if (Test-WhisperXRuntime $manifest) { Write-SupervisorLog "WhisperX runtime is healthy" }
-                else { Write-SupervisorLog "WhisperX runtime is not healthy yet" "WARN" }
+                if ($script:RuntimeContainersNeedStart) {
+                    [void](Start-WhisperXRuntime $manifest)
+                    if (Test-WhisperXRuntime $manifest) { Write-SupervisorLog "WhisperX runtime is healthy" }
+                    else { Write-SupervisorLog "WhisperX runtime is not healthy yet" "WARN" }
+                }
+                else {
+                    Write-SupervisorLog "WhisperX containers are running but authenticated readiness is not healthy; no restart requested" "WARN"
+                }
             }
         }
         catch {

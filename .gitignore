@@ -77,4 +77,5 @@ artifacts/
 # Local test scratch directories (never package or commit these).
 .tmp-*/
 .tmp-pytest-*/
+.pytest-runtime-temp/
 tmp-*/

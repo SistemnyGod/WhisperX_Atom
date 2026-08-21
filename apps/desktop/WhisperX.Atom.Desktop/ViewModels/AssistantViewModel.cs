@@ -279,8 +279,11 @@ public sealed class AssistantViewModel : ObservableObject
             if (completed is not null) ReplaceMessage(completed);
             if (completed is null)
             {
-                StatusText = "Ответ готовится на сервере";
-                ErrorText = "Запрос сохранён. Открытый чат обновится автоматически, когда ответ будет готов.";
+                // HTTP 202 means the durable request was accepted.  A cold
+                // model or a queued GPU job is normal background work, not a
+                // client error and must not turn the page red.
+                StatusText = "Ответ готовится на сервере — чат обновится автоматически";
+                ErrorText = string.Empty;
                 return;
             }
             SelectedMessage = completed;
@@ -294,9 +297,7 @@ public sealed class AssistantViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusText = acceptedByServer ? "Запрос принят; связь при ожидании прервалась" : "Не удалось отправить запрос";
-            ErrorText = acceptedByServer
-                ? "Запрос сохранён на сервере. Обновите чат, чтобы получить готовый ответ."
-                : SafeError(ex);
+            ErrorText = acceptedByServer ? string.Empty : SafeError(ex);
         }
         finally { IsAsking = false; OnPropertyChanged(nameof(CanAsk)); }
     }

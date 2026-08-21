@@ -24,15 +24,15 @@ public sealed class PipelineSnapshotMatrixTests
 
     public static IEnumerable<object[]> States()
     {
-        yield return new object[] { "media-running", Chain(media: "RUNNING"), new Dictionary<string, bool>(), "PROCESSING", "MEDIA", null, false };
-        yield return new object[] { "asr-queued-ready", Chain(asr: "QUEUED"), new Dictionary<string, bool> { ["gpu-worker"] = true }, "WAITING", "ASR", null, false };
+        yield return new object[] { "media-running", Chain(media: "RUNNING"), new Dictionary<string, bool>(), "PROCESSING", "MEDIA", null!, false };
+        yield return new object[] { "asr-queued-ready", Chain(asr: "QUEUED"), new Dictionary<string, bool> { ["gpu-worker"] = true }, "WAITING", "ASR", null!, false };
         yield return new object[] { "asr-queued-unavailable", Chain(asr: "QUEUED"), new Dictionary<string, bool> { ["gpu-worker"] = false }, "DEGRADED", "ASR", "GPU_WORKER", true };
-        yield return new object[] { "asr-running", Chain(asr: "RUNNING"), new Dictionary<string, bool> { ["gpu-worker"] = false }, "PROCESSING", "ASR", null, false };
-        yield return new object[] { "enrichment-running-after-v1", Chain(enrichment: "RUNNING"), new Dictionary<string, bool> { ["gpu-worker"] = false }, "PARTIAL_READY", "ENRICHMENT", null, false };
-        yield return new object[] { "summary-running-after-v2", Chain(summaryJob: "RUNNING", summary: "DRAFT"), new Dictionary<string, bool> { ["summary-worker"] = false }, "PARTIAL_READY", "SUMMARY", null, false };
-        yield return new object[] { "summary-needs-review", Chain(summary: "NEEDS_REVIEW"), new Dictionary<string, bool> { ["summary-worker"] = false }, "PARTIAL_READY", "SUMMARY_REVIEW", null, false };
+        yield return new object[] { "asr-running", Chain(asr: "RUNNING"), new Dictionary<string, bool> { ["gpu-worker"] = false }, "PROCESSING", "ASR", null!, false };
+        yield return new object[] { "enrichment-running-after-v1", Chain(enrichment: "RUNNING"), new Dictionary<string, bool> { ["gpu-worker"] = false }, "PARTIAL_READY", "ENRICHMENT", null!, false };
+        yield return new object[] { "summary-running-after-v2", Chain(summaryJob: "RUNNING", summary: "DRAFT"), new Dictionary<string, bool> { ["summary-worker"] = false }, "PARTIAL_READY", "SUMMARY", null!, false };
+        yield return new object[] { "summary-needs-review", Chain(summary: "NEEDS_REVIEW"), new Dictionary<string, bool> { ["summary-worker"] = false }, "PARTIAL_READY", "SUMMARY_REVIEW", null!, false };
         yield return new object[] { "summary-failed-after-v1", Chain(summaryJob: "FAILED", summary: "DRAFT"), new Dictionary<string, bool>(), "PARTIAL_READY", "SUMMARY", "SUMMARY_WORKER", true };
-        yield return new object[] { "complete", Chain(), new Dictionary<string, bool>(), "READY", "TRANSCRIPT_V2", null, false };
+        yield return new object[] { "complete", Chain(), new Dictionary<string, bool>(), "READY", "TRANSCRIPT_V2", null!, false };
     }
 
     [Theory]
