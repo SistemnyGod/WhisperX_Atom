@@ -59,6 +59,7 @@ def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     compose = read("compose.dev.yml")
     worker = read("workers/ml_worker/worker.py")
     start = read("scripts/start-host-gpu-worker.ps1")
+    watchdog = read("scripts/watch-host-gpu-worker.ps1")
     common = read("scripts/WhisperX.Runtime.ps1")
     stop = read("scripts/stop-host-gpu-worker.ps1")
     doctor = read("scripts/doctor-host-gpu-worker.ps1")
@@ -75,6 +76,9 @@ def test_host_gpu_runtime_uses_local_cuda_and_maps_container_storage_paths():
     assert "cudaAvailable" in doctor and "gpu-worker" in doctor
     assert "worker_instances" in probe and "last_seen_at" in probe
     assert "Get-WhisperXHostWorkerCandidates" in common and "HOST_WORKER_DUPLICATE" in start
+    assert "heartbeatLive" in common and "heartbeatLive" in start
+    assert '"STARTING"' in watchdog and 'overall = $runtimeState' in watchdog
+    assert "StartupTimeoutSeconds = 240" in start
     assert 'ValidateSet("host", "container")' in transcript_start
     assert "-SkipRegistry" in e2e and "Set-WhisperXRuntimeEnvironment" in e2e
 

@@ -8,7 +8,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, MAX_UPLOAD_BYTES
@@ -17,6 +17,10 @@ from workers.runtime_heartbeat import start_sync_heartbeat
 
 LOG = logging.getLogger("whisperx-atom.import-worker")
 SAFE_CHARS = re.compile(r"[^\w.()\- ]+", re.UNICODE)
+
+
+class TransientImportError(RuntimeError):
+    """The source is valid, but the import dependency should be retried."""
 
 
 def safe_filename(name: str) -> str:
@@ -94,8 +98,14 @@ def post_import(api_url: str, token: str, payload: dict[str, object]) -> dict:
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:2048]
-        raise RuntimeError(f"import API rejected request ({exc.code}): {detail}") from exc
+        # Do not move a valid source file to rejected/ for an infrastructure
+        # outage.  Keep response bodies out of logs because they can contain
+        # deployment details or accidentally echoed credentials.
+        if exc.code >= 500 or exc.code == 429:
+            raise TransientImportError(f"import API unavailable ({exc.code})") from exc
+        raise RuntimeError(f"import API rejected request ({exc.code})") from exc
+    except (URLError, TimeoutError, ConnectionError) as exc:
+        raise TransientImportError("import API connection failed") from exc
 
 
 class HotFolderImporter:
@@ -110,6 +120,8 @@ class HotFolderImporter:
         self.batch_size = max(1, int(os.getenv("IMPORT_BATCH_SIZE", "8")))
         self.max_stable_paths = max(self.batch_size * 4, int(os.getenv("IMPORT_MAX_STABLE_PATHS", "2048")))
         self._stable: dict[str, tuple[int, int, int]] = {}
+        self._retry: dict[str, tuple[int, float]] = {}
+        self._retry_delays = (5.0, 15.0, 30.0, 60.0, 300.0)
 
     def scan_once(self) -> int:
         self.inbox.mkdir(parents=True, exist_ok=True)
@@ -136,6 +148,9 @@ class HotFolderImporter:
                 except (FileNotFoundError, OSError):
                     continue
                 key = str(path)
+                retry = self._retry.get(key)
+                if retry and time.monotonic() < retry[1]:
+                    continue
                 previous = self._stable.get(key)
                 count = previous[2] + 1 if previous and previous[:2] == (stat.st_size, stat.st_mtime_ns) else 1
                 self._stable[key] = (stat.st_size, stat.st_mtime_ns, count)
@@ -150,12 +165,19 @@ class HotFolderImporter:
                     result = post_import(self.api_url, self.token, payload)
                     self._archive(Path(payload["storage_key"]), str(payload["sha256"]), str(payload["original_name"]))
                     path.unlink(missing_ok=True)
+                    self._retry.pop(key, None)
                     LOG.info("registered %s as %s", payload["original_name"], result)
                     processed += 1
+                except TransientImportError as exc:
+                    attempts = (self._retry.get(key, (0, 0.0))[0] + 1)
+                    delay = self._retry_delays[min(attempts - 1, len(self._retry_delays) - 1)]
+                    self._retry[key] = (attempts, time.monotonic() + delay)
+                    LOG.warning("transient import failure for %s; retained for retry in %.0fs (%s)", path, delay, type(exc).__name__)
                 except Exception as exc:  # keep scanning other files
                     LOG.exception("failed to import %s", path)
                     if path.exists():
                         self._reject(path, type(exc).__name__ + ":" + str(exc))
+                    self._retry.pop(key, None)
 
         # The worker is intentionally bounded. Keep the stability cache bounded
         # too, otherwise a noisy hot folder could become an unbounded RAM sink.

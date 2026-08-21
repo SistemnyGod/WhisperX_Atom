@@ -33,11 +33,13 @@ try {
             $restartTimes.RemoveAt(0)
         }
         $status = Get-WhisperXHostWorkerStatus -RepoPath $repo -PythonPath $pythonPath
-        $healthy = $status.processAlive -and $status.commandMatchesPython -and $status.heartbeatReady
+        $starting = $status.heartbeatLive -and $status.heartbeat -and [string]$status.heartbeat.status -eq "STARTING"
+        $healthy = $status.processAlive -and $status.commandMatchesPython -and ($status.heartbeatReady -or $starting)
         if ($healthy) {
+            $runtimeState = if ($status.heartbeatReady) { "READY" } else { "STARTING" }
             Write-WhisperXRuntimeState -RepoPath $repo -State ([ordered]@{
-                overall = "READY"
-                hostGpuWorker = "READY"
+                overall = $runtimeState
+                hostGpuWorker = $runtimeState
                 hostGpuWorkerPid = $status.pid
                 hostGpuHeartbeat = $status.heartbeat
                 hostGpuRestartCount = $restartTimes.Count

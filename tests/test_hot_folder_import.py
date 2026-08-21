@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workers.import_worker.worker import HotFolderImporter, atomic_copy, is_candidate, safe_filename
+from workers.import_worker.worker import HotFolderImporter, TransientImportError, atomic_copy, is_candidate, safe_filename
 
 
 class HotFolderImportTests(unittest.TestCase):
@@ -65,6 +65,26 @@ class HotFolderImportTests(unittest.TestCase):
             importer.scan_once()
             self.assertTrue(partial.exists())
             self.assertFalse((root / "rejected").exists())
+
+    def test_transient_api_failure_keeps_source_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox, staging, archive, rejected = (root / name for name in ("inbox", "staging", "archive", "rejected"))
+            inbox.mkdir()
+            source = inbox / "offline.flac"
+            source.write_bytes(b"audio")
+            importer = HotFolderImporter()
+            importer.inbox, importer.staging, importer.archive, importer.rejected = inbox, staging, archive, rejected
+            with patch("workers.import_worker.worker.probe_audio", return_value={"duration_ms": 1000}), patch(
+                "workers.import_worker.worker.post_import",
+                side_effect=[TransientImportError("import API unavailable"), {"id": "job"}],
+            ):
+                self.assertEqual(importer.scan_once(), 0)
+                # The second scan reaches the API and must retain the source;
+                # a later stable pair is allowed to retry it.
+                self.assertEqual(importer.scan_once(), 0)
+                self.assertTrue(source.exists())
+                self.assertFalse((root / "rejected").exists())
 
 
 if __name__ == "__main__":

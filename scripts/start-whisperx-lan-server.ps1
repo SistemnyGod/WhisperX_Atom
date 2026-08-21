@@ -149,79 +149,10 @@ try {
         checks = [ordered]@{ live = "READY"; ready = "READY" }
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifact "core-readiness.json") -Encoding utf8
 
-    # Recovery is durable and bounded. QUEUED work and pending outbox messages
-    # are intentionally allowed to resume; FAILED/CANCELLED/READY records are
-    # never reopened. Expired RUNNING leases are returned to their original
-    # pipeline stage only when the single automatic retry is still available.
-    $recoverySql = @'
-BEGIN;
-UPDATE jobs
-SET status='QUEUED',
-    stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' ELSE 'UPLOADED' END,
-    worker_id=NULL,
-    lease_expires_at=NULL,
-    last_heartbeat=now(),
-    error_code=COALESCE(error_code,'WORKER_RESTART_RECOVERY'),
-    updated_at=now()
-WHERE status='RUNNING'
-  AND lease_expires_at IS NOT NULL
-  AND lease_expires_at < now()
-  AND attempt < 1;
-
-UPDATE jobs
-SET status='FAILED', stage='FAILED', worker_id=NULL, lease_expires_at=NULL,
-    last_heartbeat=now(), error_code='RETRY_LIMIT_EXCEEDED',
-    error_message=COALESCE(error_message,'Worker lease expired after retry limit'), updated_at=now()
-WHERE status='RUNNING'
-  AND lease_expires_at IS NOT NULL
-  AND lease_expires_at < now()
-  AND attempt >= 1;
-
-UPDATE recording_sessions AS session
-SET state=CASE
-            WHEN COALESCE(session.total_samples, 0) = 0
-                 AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
-              THEN 'ADMIN_REVIEW'
-            ELSE 'AWAITING_AGENT_RECONNECT'
-          END
-FROM recorder_agents AS agent
-WHERE session.agent_id=agent.id
-  AND session.state='RECORDING'
-  AND (session.local_session_id IS NULL
-       OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
-          <> session.local_session_id::text)
-  AND (
-        COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
-        OR (
-          COALESCE(session.total_samples, 0) = 0
-          AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
-        )
-      );
-
-UPDATE meetings AS meeting
-SET status=CASE WHEN session.state='ADMIN_REVIEW' THEN 'ADMIN_REVIEW' ELSE 'RECORDING_INTERRUPTED' END
-FROM recording_sessions AS session
-WHERE session.meeting_id=meeting.id
-  AND session.state IN ('AWAITING_AGENT_RECONNECT','ADMIN_REVIEW')
-  AND meeting.status='RECORDING';
-
-UPDATE recording_sessions
-SET state='ADMIN_REVIEW'
-WHERE state='AWAITING_AGENT_RECONNECT'
-  AND created_at < now() - interval '24 hours';
-
-UPDATE meetings AS meeting
-SET status='ADMIN_REVIEW'
-FROM recording_sessions AS session
-WHERE session.meeting_id=meeting.id
-  AND session.state='ADMIN_REVIEW'
-  AND meeting.status IN ('RECORDING','RECORDING_INTERRUPTED');
-COMMIT;
-'@
-    $recoveryCompose = $composeBase + @("--profile", "core", "exec", "-T", "postgres", "psql", "-U", "whisperx", "-d", "whisperx_atom", "-v", "ON_ERROR_STOP=1", "-At")
-    $recoveryOutput = $recoverySql | & docker @recoveryCompose 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "STARTUP_RECOVERY_FAILED" }
-    $recoveryOutput | Where-Object { $_ -and $_ -notmatch '^BEGIN$|^COMMIT$' } | ForEach-Object { Write-Verbose "Startup recovery: $_" }
+    # Recovery is owned by the API's OperationalRecoveryService and the
+    # worker-specific durable recovery commands.  This launcher intentionally
+    # does not know job stages or mutate PostgreSQL state; keeping one recovery
+    # owner prevents a restart from turning ASR jobs back into media jobs.
 
     $workerCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
     if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $workerCompose += @("--profile", "llm") }

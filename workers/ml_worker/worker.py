@@ -552,12 +552,23 @@ async def run() -> None:
                 capabilities["diarizationReason"] = "pyannote_model_load_failed"
         return capabilities
 
+    # Publish liveness before any network/model initialization.  A cold
+    # pyannote load can legitimately take longer than the host watchdog
+    # timeout; STARTING is a live process state, not a failed worker.
+    startup_capabilities: dict[str, Any] = {
+        "cudaAvailable": False,
+        "hfConfigured": bool(os.getenv("HF_TOKEN")),
+        "runtime": os.getenv("GPU_WORKER_RUNTIME", "container"),
+        "natsConnected": False,
+        "startupStage": "STARTING",
+    }
+    heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
+    await heartbeat.start()
+
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     # CUDA/model capability discovery is intentionally done once at startup.
     # It must not be repeated on every heartbeat tick while ASR is running.
-    startup_capabilities = {**await gpu_capabilities(), "natsConnected": True}
-    heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
-    await heartbeat.start()
+    startup_capabilities.update({**await gpu_capabilities(), "natsConnected": True, "startupStage": "READY"})
     worker = GpuWorker(heartbeat)
     recovered = await asyncio.to_thread(worker._repository.reset_stale_leases)
     if recovered:

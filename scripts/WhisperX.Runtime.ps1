@@ -145,9 +145,12 @@ function Get-WhisperXHostWorkerStatus {
     if ($PythonPath -and (Test-Path -LiteralPath $PythonPath)) {
         $json = & $PythonPath $probe --json 2>$null
         $probeExit = $LASTEXITCODE
-        if ($probeExit -eq 0 -and $json) {
-            try { $heartbeat = ($json -join "`n") | ConvertFrom-Json } catch { $heartbeat = $null }
-        }
+    # probe_host_gpu_worker emits a JSON heartbeat for a live STARTING worker
+    # and exits non-zero until the model is ready.  Parse it regardless of the
+    # exit code so callers can distinguish cold-start liveness from staleness.
+    if ($json) {
+        try { $heartbeat = ($json -join "`n") | ConvertFrom-Json } catch { $heartbeat = $null }
+    }
     }
     $expectedPython = ""
     try { $expectedPython = [IO.Path]::GetFullPath($PythonPath).ToLowerInvariant() } catch { }
@@ -168,7 +171,8 @@ function Get-WhisperXHostWorkerStatus {
         commandLine = $commandLine
         executablePath = $executablePath
         commandMatchesPython = $commandMatchesPython
-        heartbeatReady = ($probeExit -eq 0)
+        heartbeatLive = $null -ne $heartbeat
+        heartbeatReady = $null -ne $heartbeat -and [string]$heartbeat.status -in @("READY", "BUSY")
         heartbeat = $heartbeat
         pidPath = $pidPath
     }

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$PythonPath,
-    [int]$StartupTimeoutSeconds = 90
+    [int]$StartupTimeoutSeconds = 240
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +19,33 @@ $stdoutPath = Join-Path $runtimeRoot "host-gpu-worker.log"
 $stderrPath = Join-Path $runtimeRoot "host-gpu-worker.error.log"
 $process = $null
 
+function Wait-HostGpuWorkerReady([int]$ProcessId) {
+    $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+    do {
+        Start-Sleep -Seconds 2
+        $running = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if (-not $running) {
+            throw "WORKER_HEARTBEAT_LOST: host GPU Worker exited during startup."
+        }
+        $status = Get-WhisperXHostWorkerStatus -RepoPath $repo -PythonPath $PythonPath
+        if ($status.heartbeatReady) {
+            Write-WhisperXRuntimeState -RepoPath $repo -State ([ordered]@{
+                overall = "READY"
+                hostGpuWorker = "READY"
+                hostGpuWorkerPid = $ProcessId
+                runtime = "host"
+                lastErrorCode = $null
+            })
+            Write-Host "Host GPU Worker is ready (PID $ProcessId)." -ForegroundColor Green
+            return
+        }
+        if (-not $status.heartbeatLive) {
+            throw "WORKER_HEARTBEAT_LOST: host GPU Worker stopped reporting liveness during startup."
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "WORKER_HEARTBEAT_TIMEOUT: no fresh host GPU Worker heartbeat within $StartupTimeoutSeconds seconds."
+}
+
 try {
     $existing = Get-WhisperXHostWorkerStatus -RepoPath $repo -PythonPath $PythonPath
     if ($existing.processAlive) {
@@ -29,7 +56,9 @@ try {
             Write-Host "Host GPU Worker is already ready (PID $($existing.pid))." -ForegroundColor Green
             return
         }
-        throw "HOST_WORKER_NOT_READY: existing process has no fresh heartbeat."
+        if (-not $existing.heartbeatLive) { throw "HOST_WORKER_NOT_READY: existing process has no fresh heartbeat." }
+        Wait-HostGpuWorkerReady -ProcessId ([int]$existing.pid)
+        return
     }
     $candidates = @(Get-WhisperXHostWorkerCandidates -PythonPath $PythonPath)
     $candidatePids = @($candidates | ForEach-Object { $_.pid })
@@ -40,11 +69,11 @@ try {
     if ($roots.Count -eq 1) {
         Set-Content -LiteralPath $pidPath -Value $roots[0].pid -Encoding ascii
         $adopted = Get-WhisperXHostWorkerStatus -RepoPath $repo -PythonPath $PythonPath
-        if ($adopted.processAlive -and $adopted.commandMatchesPython -and $adopted.heartbeatReady) {
-            Write-Host "Adopted existing host GPU Worker (PID $($adopted.pid))." -ForegroundColor Green
-            return
+        if (-not ($adopted.processAlive -and $adopted.commandMatchesPython -and $adopted.heartbeatLive)) {
+            throw "HOST_WORKER_NOT_READY: existing host Worker process has no fresh heartbeat."
         }
-        throw "HOST_WORKER_NOT_READY: existing host Worker process has no fresh heartbeat."
+        Wait-HostGpuWorkerReady -ProcessId ([int]$adopted.pid)
+        return
     }
     if (Test-Path -LiteralPath $pidPath) { Remove-Item -LiteralPath $pidPath -Force }
 
@@ -74,27 +103,7 @@ try {
     }
     finally { Pop-Location }
 
-    $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
-    do {
-        Start-Sleep -Seconds 2
-        if ($process.HasExited) {
-            $detail = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Tail 20) -join [Environment]::NewLine } else { "" }
-            throw "HOST_WORKER_EXITED: host GPU Worker exited during startup.`n$detail"
-        }
-        $status = Get-WhisperXHostWorkerStatus -RepoPath $repo -PythonPath $PythonPath
-        if ($status.heartbeatReady) {
-            Write-WhisperXRuntimeState -RepoPath $repo -State ([ordered]@{
-                overall = "READY"
-                hostGpuWorker = "READY"
-                hostGpuWorkerPid = $process.Id
-                runtime = "host"
-                lastErrorCode = $null
-            })
-            Write-Host "Host GPU Worker is ready (PID $($process.Id))." -ForegroundColor Green
-            return
-        }
-    } while ((Get-Date) -lt $deadline)
-    throw "WORKER_HEARTBEAT_TIMEOUT: no fresh host GPU Worker heartbeat within $StartupTimeoutSeconds seconds."
+    Wait-HostGpuWorkerReady -ProcessId $process.Id
 }
 catch {
     if ($process -and -not $process.HasExited) { Stop-WhisperXProcessTree -ProcessId $process.Id }

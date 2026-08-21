@@ -180,6 +180,14 @@ def test_system_readiness_does_not_promote_starting_workers_to_ready():
     assert "age >= TimeSpan.Zero" in api
 
 
+def test_legacy_lan_launcher_does_not_mutate_pipeline_recovery_state():
+    launcher = read("scripts/start-whisperx-lan-server.ps1")
+    assert "OperationalRecoveryService" in launcher
+    assert "STARTUP_RECOVERY_FAILED" not in launcher
+    assert "UPDATE jobs" not in launcher
+    assert "UPDATE recording_sessions" not in launcher
+
+
 def test_async_worker_heartbeat_overwrites_stale_ready_state_on_restart():
     heartbeat = read("workers/runtime_heartbeat.py")
     assert "Publish STARTING before any NATS/model setup" in heartbeat
