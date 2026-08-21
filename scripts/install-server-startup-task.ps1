@@ -26,7 +26,12 @@ $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$su
 $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory $bundle
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -RestartCount 20 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType InteractiveToken -RunLevel Limited
+# Windows PowerShell exposes the scheduled-task enum as `Interactive` (the
+# `InteractiveToken` name is used by a few newer APIs but is not accepted by
+# New-ScheduledTaskPrincipal on the supported Windows runtime).  Interactive
+# still means the current ordinary user's logon session; it does not elevate
+# the supervisor or run it as SYSTEM.
+$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $registered) { throw "SERVER_STARTUP_TASK_NOT_REGISTERED" }

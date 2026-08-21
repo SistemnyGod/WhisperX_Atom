@@ -43,5 +43,5 @@ def test_supervisor_has_dynamic_services_targeted_recovery_and_budget():
 def test_server_task_starts_current_session_immediately():
     startup = read("scripts/install-server-startup-task.ps1")
     assert "Start-ScheduledTask" in startup
-    assert "InteractiveToken" in startup
+    assert "-LogonType Interactive" in startup
     assert "MultipleInstances IgnoreNew" in startup

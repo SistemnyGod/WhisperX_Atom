@@ -315,7 +315,7 @@ def test_server_runtime_supervisor_is_user_session_owned_and_bounded():
     assert "releaseIdentityValid" in supervisor
     assert "summary-worker" in supervisor
     assert "RestartCount 20" in startup and "RestartInterval" in startup
-    assert "AtLogOn" in startup and "InteractiveToken" in startup
+    assert "AtLogOn" in startup and "-LogonType Interactive" in startup
     assert "Start-ScheduledTask" in startup
     assert "release-manifest.json" in startup and "DOCKER_DESKTOP_NOT_FOUND" in startup
     assert "supervise-server-runtime.ps1" in bundle
