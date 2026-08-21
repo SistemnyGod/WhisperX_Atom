@@ -179,7 +179,7 @@ async def recover_expired(connection) -> None:
     """).fetchall()
     for job_id, meeting_id, asset_id, attempt, storage_key, source_type, session_id in media_rows:
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='UPLOADED',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='UPLOADED',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,scheduled_reason=NULL,queue_entered_at=now(),worker_claimed_at=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(
@@ -216,7 +216,7 @@ async def recover_expired(connection) -> None:
         metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
         storage_key = metadata.get("asr_storage_key")
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='ASR_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='ASR_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,scheduled_reason=NULL,queue_entered_at=now(),worker_claimed_at=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(
@@ -254,7 +254,7 @@ async def recover_expired(connection) -> None:
     for job_id, meeting_id, transcript_id, correlation_id, quality_metadata in summary_rows:
         metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='TRANSCRIPT_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='TRANSCRIPT_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,scheduled_reason=NULL,queue_entered_at=now(),worker_claimed_at=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(

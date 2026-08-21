@@ -114,13 +114,21 @@ public sealed record DesktopJob(
     DateTime? LastHeartbeat = null,
     DateTime? UpdatedAt = null,
     DateTime? StageChangedAt = null,
-    DateTime? ProgressChangedAt = null)
+    DateTime? ProgressChangedAt = null,
+    DateTime? NotBefore = null,
+    string? ScheduledReason = null,
+    DateTime? QueueEnteredAt = null,
+    DateTime? WorkerClaimedAt = null,
+    string? DispatchState = null)
 {
     [JsonIgnore]
     public string StatusText => UiStatusMapper.Text(Status);
 
     [JsonIgnore]
     public string StageText => UiStatusMapper.Text(Stage);
+
+    [JsonIgnore]
+    public string DispatchText => UiStatusMapper.Text(DispatchState ?? Stage);
 
     [JsonIgnore]
     public bool Retryable => IsRetryable(ErrorCode);
@@ -160,7 +168,12 @@ public sealed record DesktopPipelineSnapshot(
     JsonDocument? StageTimings = null,
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
-    DesktopPipelineStage? Recording = null);
+    DesktopPipelineStage? Recording = null,
+    DateTime? NotBefore = null,
+    string? ScheduledReason = null,
+    DateTime? QueueEnteredAt = null,
+    DateTime? WorkerClaimedAt = null,
+    string? DispatchState = null);
 public sealed record DesktopPipelineRun(
     Guid RecordingSessionId,
     Guid MeetingId,

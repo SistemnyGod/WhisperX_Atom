@@ -31,7 +31,12 @@ public sealed record RecordingPipelineSnapshot(
     JsonDocument? StageTimings = null,
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
-    PipelineStageSnapshot? Recording = null);
+    PipelineStageSnapshot? Recording = null,
+    DateTime? NotBefore = null,
+    string? ScheduledReason = null,
+    DateTime? QueueEnteredAt = null,
+    DateTime? WorkerClaimedAt = null,
+    string? DispatchState = null);
 
 /// <summary>
 /// Semantic state used by the snapshot resolver.  This deliberately keeps
@@ -73,7 +78,8 @@ public static class RecordingPipelineSnapshotResolver
         var baseSnapshot = new RecordingPipelineSnapshot(
             chain.RecordingSessionId, chain.MeetingId, chain.PipelineCorrelationId,
             "PROCESSING", "MEDIA", null, false, null,
-            delivery, media, asr, v1, enrichment, v2, summary, chain.StageTimings, chain.CreatedAt, chain.UpdatedAt, recording);
+            delivery, media, asr, v1, enrichment, v2, summary, chain.StageTimings, chain.CreatedAt, chain.UpdatedAt, recording,
+            chain.AsrNotBefore, chain.AsrScheduledReason, chain.AsrQueueEnteredAt, chain.AsrWorkerClaimedAt, chain.AsrDispatchState);
 
         if (IsFailed(media.Status))
             return FailedOrPartial(baseSnapshot, "MEDIA", "MEDIA_FAILED");
@@ -92,6 +98,10 @@ public static class RecordingPipelineSnapshotResolver
             return Processing(baseSnapshot, "ASR");
         if (!IsReady(asr.Status))
         {
+            if (chain.AsrNotBefore is DateTime scheduled && scheduled.ToUniversalTime() > DateTime.UtcNow)
+                return baseSnapshot with { OverallStatus = "WAITING", CurrentStage = "SCHEDULED", BlockedBy = null, Retryable = false, ErrorCode = null, DispatchState = "SCHEDULED" };
+            if (string.Equals(chain.AsrDispatchState, "WAITING_FOR_OUTBOX", StringComparison.OrdinalIgnoreCase))
+                return baseSnapshot with { OverallStatus = "WAITING", CurrentStage = "WAITING_FOR_OUTBOX", BlockedBy = null, Retryable = false, ErrorCode = null, DispatchState = "WAITING_FOR_OUTBOX" };
             if (ClassifyStage(asr.Status) == PipelineStageClassification.Queued
                 && !IsWorkerReady(workerReadiness, "gpu-worker"))
                 return Waiting(baseSnapshot, "ASR", "GPU_WORKER", "GPU_WORKER_UNAVAILABLE");

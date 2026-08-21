@@ -90,7 +90,8 @@ $bindOctets = $bindAddress.GetAddressBytes()
 $bindPrivate = $bindOctets[0] -eq 10 -or ($bindOctets[0] -eq 172 -and $bindOctets[1] -ge 16 -and $bindOctets[1] -le 31) -or ($bindOctets[0] -eq 192 -and $bindOctets[1] -eq 168)
 if (-not $bindPrivate -or $bindAddress.IPAddressToString -eq "127.0.0.1") { throw "LAN_BIND_ADDRESS_INVALID: address must be a non-loopback private IPv4." }
 if ($bindAddress.IPAddressToString -ne $originAddress.IPAddressToString) { throw "LAN_BIND_ADDRESS_MISMATCH: LAN_BIND_ADDRESS must match SERVER_ORIGIN host." }
-foreach ($secretName in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET")) {
+& (Join-Path $PSScriptRoot "ensure-supervisor-health-token.ps1") -EnvFile $EnvFile
+foreach ($secretName in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "SUPERVISOR_HEALTH_TOKEN")) {
     $secret = Read-EnvValue $secretName
     if ([string]::IsNullOrWhiteSpace($secret) -or $secret.Length -lt 16 -or $secret -match "^(generate-|replace-with|change-me|password|changeme)$") {
         throw "LAN_SECRET_INVALID: $secretName must be a strong non-placeholder value."

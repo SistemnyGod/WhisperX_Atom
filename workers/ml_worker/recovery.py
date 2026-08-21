@@ -73,6 +73,7 @@ def recover(apply: bool) -> dict[str, Any]:
                     UPDATE jobs
                     SET status='QUEUED',stage=%s,progress=0,
                         worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,
+                        not_before=NULL,scheduled_reason=NULL,queue_entered_at=now(),worker_claimed_at=NULL,
                         error_message=NULL,error_code='WORKER_RESTART_RECOVERY',
                         attempt=attempt+1,updated_at=now()
                     WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')

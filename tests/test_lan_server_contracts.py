@@ -307,15 +307,20 @@ def test_server_runtime_supervisor_is_user_session_owned_and_bounded():
     assert "DOCKER_DESKTOP_NOT_FOUND" in supervisor
     assert "Start-DockerDesktopIfNeeded" in supervisor
     assert "DockerTimeoutSeconds = 600" in supervisor
-    assert "New-AuthenticatedReadinessSession" in supervisor
-    assert "/api/system/readiness" in supervisor
+    assert "SUPERVISOR_HEALTH_TOKEN" in supervisor
+    assert "/api/internal/runtime/readiness" in supervisor
+    assert "Targeted restart requested" in supervisor
+    assert "Restart budget exhausted" in supervisor
     assert "orphanedGpuJobs" in supervisor
     assert "releaseIdentityValid" in supervisor
     assert "summary-worker" in supervisor
     assert "RestartCount 20" in startup and "RestartInterval" in startup
     assert "AtLogOn" in startup and "InteractiveToken" in startup
+    assert "Start-ScheduledTask" in startup
     assert "release-manifest.json" in startup and "DOCKER_DESKTOP_NOT_FOUND" in startup
     assert "supervise-server-runtime.ps1" in bundle
+    assert "ensure-supervisor-health-token.ps1" in bundle
+    assert "runtimeScripts" in bundle
 
 
 def test_reconnect_makes_only_retryable_delivery_due():

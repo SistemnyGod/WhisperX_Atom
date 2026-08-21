@@ -40,7 +40,7 @@ if (builder.Environment.IsProduction())
 {
     if (string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase))
         throw new InvalidOperationException("PRODUCTION_COOKIE_SECURE_REQUIRED");
-    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET" })
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "SUPERVISOR_HEALTH_TOKEN" })
         if (IsUnsafeSecret(builder.Configuration[name])) throw new InvalidOperationException($"PRODUCTION_SECRET_INVALID:{name}");
 }
 else if (builder.Environment.IsEnvironment("Lan"))
@@ -50,7 +50,7 @@ else if (builder.Environment.IsEnvironment("Lan"))
         throw new InvalidOperationException("LAN_HTTP_EXPLICIT_REQUIRED");
     if (!IsPrivateLanOrigin(builder.Configuration["SERVER_ORIGIN"]))
         throw new InvalidOperationException("LAN_SERVER_ORIGIN_INVALID");
-    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET" })
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "SUPERVISOR_HEALTH_TOKEN" })
     {
         var value = builder.Configuration[name];
         if (IsUnsafeSecret(value) || value!.Length < 16) throw new InvalidOperationException($"LAN_SECRET_INVALID:{name}");
@@ -261,7 +261,8 @@ app.Use(async (context, next) =>
         // users who have been provisioned with a temporary password.
     }
 
-    if (context.Request.Path.StartsWithSegments("/health") ||
+    if (context.Request.Path.Equals("/api/internal/runtime/readiness") ||
+        context.Request.Path.StartsWithSegments("/health") ||
         context.Request.Path.StartsWithSegments("/ready") ||
         context.Request.Path.StartsWithSegments("/api/system/version") ||
         context.Request.Path.StartsWithSegments("/api/client-updates") ||
@@ -686,6 +687,67 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             llmActiveRequestId = llmRuntime.ActiveRequestId
         }
     });
+});
+
+app.MapGet("/api/internal/runtime/readiness", async (HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    var expected = configuration["SUPERVISOR_HEALTH_TOKEN"] ?? string.Empty;
+    var supplied = context.Request.Headers["X-WhisperX-Supervisor-Token"].ToString();
+    var expectedBytes = Encoding.UTF8.GetBytes(expected);
+    var suppliedBytes = Encoding.UTF8.GetBytes(supplied);
+    if (expectedBytes.Length < 32 || !CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes))
+        return Results.Json(new { error = "SUPERVISOR_TOKEN_INVALID" }, statusCode: StatusCodes.Status401Unauthorized);
+
+    try
+    {
+        var workers = await store.ListWorkerRuntimeAsync();
+        var operations = await store.GetOperationsSnapshotAsync();
+        var llm = await store.GetLlmRuntimeSnapshotAsync();
+        var identity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev";
+        var releaseIdentityValid = !string.IsNullOrWhiteSpace(identity)
+            && !identity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+            && !identity.Contains("dirty", StringComparison.OrdinalIgnoreCase)
+            && identity.Contains('+', StringComparison.Ordinal)
+            && identity[(identity.IndexOf('+') + 1)..].Length >= 40;
+        return Results.Ok(new
+        {
+            buildIdentity = identity,
+            releaseIdentityValid,
+            checkedAt = DateTimeOffset.UtcNow,
+            workers = workers.Select(worker => new
+            {
+                name = worker.WorkerName,
+                status = worker.Status,
+                version = worker.Version,
+                currentJobId = worker.CurrentJobId,
+                lastSeenAt = worker.LastSeenAt,
+                lastErrorCode = worker.LastErrorCode
+            }),
+            queue = new
+            {
+                orphanedGpuJobs = operations.OrphanedGpuJobs,
+                healthyGpuJobs = operations.HealthyGpuJobs,
+                activeInboxLeases = operations.ActiveInboxLeases,
+                oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
+                queuedAssistantQueries = operations.QueuedAssistantQueries,
+                queuedAsrJobs = operations.QueuedAsrJobs,
+                pendingOutbox = operations.PendingOutbox
+            },
+            qwen = llm is null ? null : new
+            {
+                llmOwner = llm.Owner,
+                llmOwnerHeartbeatAt = llm.OwnerHeartbeatAt,
+                llm.Active,
+                llm.ActiveWorkload,
+                llm.ActiveRequestId
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Internal supervisor readiness query failed");
+        return Results.Json(new { error = "SUPERVISOR_READINESS_UNAVAILABLE" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 });
 
 app.MapGet("/api/system/status", async () =>
@@ -2148,7 +2210,12 @@ public sealed record JobRow(
     DateTime? LastHeartbeat = null,
     DateTime? UpdatedAt = null,
     DateTime? StageChangedAt = null,
-    DateTime? ProgressChangedAt = null);
+    DateTime? ProgressChangedAt = null,
+    DateTime? NotBefore = null,
+    string? ScheduledReason = null,
+    DateTime? QueueEnteredAt = null,
+    DateTime? WorkerClaimedAt = null,
+    string? DispatchState = null);
 public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
 public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
 public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
@@ -2996,7 +3063,7 @@ public sealed class Database(IConfiguration configuration)
     public async Task<JobRow?> GetJobAsync(Guid id)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at,stage_changed_at,progress_changed_at FROM jobs WHERE id=@id", connection);
+        await using var command = new NpgsqlCommand("SELECT j.id,j.meeting_id,j.type,j.status,j.stage,j.progress,j.attempt,j.error_message,j.error_code,j.pipeline_correlation_id,j.last_heartbeat,j.updated_at,j.stage_changed_at,j.progress_changed_at,j.not_before,j.scheduled_reason,j.queue_entered_at,j.worker_claimed_at,CASE WHEN j.status='QUEUED' AND j.not_before IS NOT NULL AND j.not_before > now() THEN 'SCHEDULED' WHEN j.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=j.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX' WHEN j.status='QUEUED' THEN 'WAITING_FOR_GPU' WHEN j.status='RUNNING' THEN 'PROCESSING' ELSE j.status END AS dispatch_state FROM jobs j WHERE j.id=@id", connection);
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null : ReadJob(reader);
@@ -3006,7 +3073,7 @@ public sealed class Database(IConfiguration configuration)
     {
         var result = new List<JobRow>();
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id,last_heartbeat,updated_at,stage_changed_at,progress_changed_at FROM jobs WHERE meeting_id=@id ORDER BY created_at DESC", connection);
+        await using var command = new NpgsqlCommand("SELECT j.id,j.meeting_id,j.type,j.status,j.stage,j.progress,j.attempt,j.error_message,j.error_code,j.pipeline_correlation_id,j.last_heartbeat,j.updated_at,j.stage_changed_at,j.progress_changed_at,j.not_before,j.scheduled_reason,j.queue_entered_at,j.worker_claimed_at,CASE WHEN j.status='QUEUED' AND j.not_before IS NOT NULL AND j.not_before > now() THEN 'SCHEDULED' WHEN j.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=j.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX' WHEN j.status='QUEUED' THEN 'WAITING_FOR_GPU' WHEN j.status='RUNNING' THEN 'PROCESSING' ELSE j.status END AS dispatch_state FROM jobs j WHERE j.meeting_id=@id ORDER BY j.created_at DESC", connection);
         command.Parameters.AddWithValue("id", meetingId);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadJob(reader));
@@ -3330,7 +3397,12 @@ public sealed class Database(IConfiguration configuration)
             reader.FieldCount > 10 && !reader.IsDBNull(10) ? reader.GetDateTime(10) : null,
             reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetDateTime(11) : null,
             reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetDateTime(12) : null,
-            reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetDateTime(13) : null);
+            reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetDateTime(13) : null,
+            reader.FieldCount > 14 && !reader.IsDBNull(14) ? reader.GetDateTime(14) : null,
+            reader.FieldCount > 15 && !reader.IsDBNull(15) ? reader.GetString(15) : null,
+            reader.FieldCount > 16 && !reader.IsDBNull(16) ? reader.GetDateTime(16) : null,
+            reader.FieldCount > 17 && !reader.IsDBNull(17) ? reader.GetDateTime(17) : null,
+            reader.FieldCount > 18 && !reader.IsDBNull(18) ? reader.GetString(18) : null);
 
     private static MediaAssetRow ReadMedia(NpgsqlDataReader reader) =>
         new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10));

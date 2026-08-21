@@ -106,17 +106,20 @@ def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
     with psycopg.connect(_conninfo()) as connection:
         with connection.transaction():
             try:
-                delay_seconds = int(os.getenv("TRANSCRIPTION_START_DELAY_SECONDS", "300"))
+                # V1 is the durable hand-off and must be eligible immediately
+                # after media assembly.  A positive value remains an explicit
+                # operator-controlled defer for diagnostics/experiments.
+                delay_seconds = int(os.getenv("TRANSCRIPTION_START_DELAY_SECONDS", "0"))
             except (TypeError, ValueError):
-                delay_seconds = 300
+                delay_seconds = 0
             delay_seconds = max(0, min(delay_seconds, 3600))
-            not_before = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            not_before = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)) if delay_seconds > 0 else None
             state = connection.execute("SELECT status,stage FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if state is None or str(state[0]) in {"CANCELLED", "FAILED", "READY"}:
                 return False
             connection.execute(
-                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),not_before=%s,watchdog_requeue_count=0,last_watchdog_requeue_at=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-                (socket.gethostname(), not_before, job_id),
+                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),not_before=%s,scheduled_reason=%s,queue_entered_at=now(),worker_claimed_at=NULL,watchdog_requeue_count=0,last_watchdog_requeue_at=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                (socket.gethostname(), not_before, "TRANSCRIPTION_DELAY" if not_before is not None else None, job_id),
             )
             # Job id is the durable idempotency key; random outbox UUIDs are
             # still fine because this predicate prevents a duplicate publish.

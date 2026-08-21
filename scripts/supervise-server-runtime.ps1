@@ -16,6 +16,11 @@ $logRoot = Join-Path $config "Logs"
 $logPath = Join-Path $logRoot "server-supervisor.log"
 $mutex = $null
 $mutexOwned = $false
+$script:ConsecutiveFailures = 0
+$script:RecoveryCycles = 0
+$script:RestartHistory = @{}
+$script:UnhealthyServices = @()
+$script:IdentityMismatch = $false
 
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 if (Test-Path -LiteralPath $logPath -PathType Leaf) {
@@ -107,31 +112,11 @@ function Start-WhisperXRuntime([object]$Manifest) {
     return $true
 }
 
-function New-AuthenticatedReadinessSession([string]$Origin) {
-    $username = Read-EnvValue "BOOTSTRAP_ADMIN_USERNAME"
-    if ([string]::IsNullOrWhiteSpace($username)) { $username = "admin" }
-    $password = Read-EnvValue "BOOTSTRAP_ADMIN_PASSWORD"
-    if ([string]::IsNullOrWhiteSpace($password)) {
-        Write-SupervisorLog "Authenticated readiness skipped because administrator credentials are not configured" "WARN"
-        return $null
-    }
-
-    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    try {
-        $body = @{ username = $username; password = $password } | ConvertTo-Json -Compress
-        Invoke-RestMethod -Method Post -Uri ($Origin.TrimEnd('/') + "/api/auth/login") -WebSession $session -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
-        return $session
-    }
-    catch {
-        Write-SupervisorLog "Authenticated readiness login failed" "WARN"
-        return $null
-    }
-}
-
 function Test-RequiredContainersRunning([object]$Manifest) {
     $compose = Get-ComposeArguments $Manifest
     $running = @(& docker @compose ps --services --status running 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $required = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker")
+    $required = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker")
+    if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $required += "summary-worker" }
     foreach ($service in $required) {
         if ($running -notcontains $service) { return $false }
     }
@@ -153,70 +138,112 @@ function Test-WhisperXRuntime([object]$Manifest) {
     }
     catch {
         Write-SupervisorLog "API health/live probe failed" "WARN"
+        $script:UnhealthyServices = @("api")
         return $false
     }
 
-    $session = New-AuthenticatedReadinessSession $origin
-    if ($null -eq $session) { return $false }
     try {
-        $readiness = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/api/system/readiness") -WebSession $session -TimeoutSec 10
-        if ([string]$readiness.buildIdentity -ne [string]$Manifest.buildIdentity -or $readiness.releaseIdentityValid -ne $true) {
+        $token = Read-EnvValue "SUPERVISOR_HEALTH_TOKEN"
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            Write-SupervisorLog "SUPERVISOR_HEALTH_TOKEN is not configured" "ERROR"
+            return $false
+        }
+        $headers = @{ "X-WhisperX-Supervisor-Token" = $token }
+        $readiness = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/api/internal/runtime/readiness") -Headers $headers -TimeoutSec 10
+        $script:IdentityMismatch = [string]$readiness.buildIdentity -ne [string]$Manifest.buildIdentity
+        if ($script:IdentityMismatch -or $readiness.releaseIdentityValid -ne $true) {
             Write-SupervisorLog "Authenticated readiness identity mismatch" "WARN"
             return $false
         }
 
         $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
+        if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $required += "summary-worker" }
+        $unhealthy = [System.Collections.Generic.List[string]]::new()
         foreach ($workerName in $required) {
-            $worker = $readiness.components.workers.$workerName
+            $worker = @($readiness.workers | Where-Object { $_.name -eq $workerName }) | Select-Object -First 1
             if ($null -eq $worker) {
                 Write-SupervisorLog ("Authenticated readiness missing worker " + $workerName) "WARN"
-                return $false
+                $unhealthy.Add($workerName)
+                continue
             }
             if ([string]$worker.status -notin @("READY", "BUSY")) {
                 Write-SupervisorLog ("Authenticated readiness worker " + $workerName + " is " + [string]$worker.status) "WARN"
-                return $false
+                $unhealthy.Add($workerName)
             }
             if ([string]$worker.version -ne [string]$Manifest.buildIdentity) {
                 Write-SupervisorLog ("Authenticated readiness worker identity mismatch: " + $workerName) "WARN"
-                return $false
+                $script:IdentityMismatch = $true
+                $unhealthy.Add($workerName)
             }
         }
 
-        $whisperxStatus = [string]$readiness.components.whisperx.status
-        if ($whisperxStatus -notin @("READY", "BUSY")) {
-            Write-SupervisorLog ("WhisperX readiness is " + $whisperxStatus) "WARN"
-            return $false
-        }
         $queue = $readiness.queue
         if ($null -ne $queue -and [int]$queue.orphanedGpuJobs -gt 0) {
             Write-SupervisorLog ("GPU recovery required; orphaned jobs=" + [int]$queue.orphanedGpuJobs) "WARN"
-            return $false
+            $unhealthy.Add("gpu-worker")
         }
-
-        $assistantEnabled = (Read-EnvValue "ASSISTANT_ENABLED") -ne "false"
-        $autoSummaryEnabled = (Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true"
-        if ($assistantEnabled -or $autoSummaryEnabled) {
-            $summary = $readiness.components.workers.'summary-worker'
-            $qwenStatus = [string]$readiness.components.qwen.status
-            if ($null -eq $summary -or [string]$summary.status -notin @("READY", "BUSY")) {
-                Write-SupervisorLog ("Summary worker readiness is " + ([string]$summary.status)) "WARN"
-                return $false
-            }
-            if ([string]$summary.version -ne [string]$Manifest.buildIdentity) {
-                Write-SupervisorLog "Summary worker identity mismatch" "WARN"
-                return $false
-            }
-            if ($qwenStatus -notin @("READY", "BUSY")) {
-                Write-SupervisorLog ("Qwen readiness is " + $qwenStatus) "WARN"
-                return $false
-            }
-        }
-
+        $script:UnhealthyServices = @($unhealthy | Select-Object -Unique)
+        if ($script:UnhealthyServices.Count -gt 0) { return $false }
         return $true
     }
     catch {
         Write-SupervisorLog "Authenticated readiness probe failed" "WARN"
         return $false
+    }
+}
+
+function Test-RestartBudget([string]$Service) {
+    $now = [DateTimeOffset]::UtcNow
+    if (-not $script:RestartHistory.ContainsKey($Service)) { $script:RestartHistory[$Service] = [System.Collections.Generic.List[DateTimeOffset]]::new() }
+    $history = $script:RestartHistory[$Service]
+    for ($i = $history.Count - 1; $i -ge 0; $i--) {
+        if ($now - $history[$i] -gt [TimeSpan]::FromMinutes(15)) { $history.RemoveAt($i) }
+    }
+    if ($history.Count -ge 3) { return $false }
+    if ($history.Count -gt 0 -and $now - $history[$history.Count - 1] -lt [TimeSpan]::FromMinutes(2)) { return $false }
+    return $true
+}
+
+function Invoke-TargetedRecovery([object]$Manifest) {
+    if ($script:IdentityMismatch) {
+        Write-SupervisorLog "Identity mismatch is fail-closed; targeted restart suppressed" "ERROR"
+        return
+    }
+    $compose = Get-ComposeArguments $Manifest
+    $script:RecoveryCycles++
+    $services = @($script:UnhealthyServices | Select-Object -Unique)
+    if ($services -contains "gpu-worker") {
+        if (Test-RestartBudget "gpu-worker") {
+            Write-SupervisorLog "GPU ownership/readiness unhealthy; running transactional recovery"
+            & docker @compose stop gpu-worker 2>&1 | Out-Null
+            $stopped = $LASTEXITCODE -eq 0
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle "recover-gpu-runtime.ps1") -BundleRoot $bundle -ConfigRoot $config
+            $previewOk = $LASTEXITCODE -eq 0
+            if ($previewOk) {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle "recover-gpu-runtime.ps1") -BundleRoot $bundle -ConfigRoot $config -Apply
+            }
+            if ($stopped -and $previewOk -and $LASTEXITCODE -eq 0) {
+                $script:RestartHistory["gpu-worker"].Add([DateTimeOffset]::UtcNow)
+                & docker @compose up -d --no-deps --pull never gpu-worker 2>&1 | Out-Null
+            } else { Write-SupervisorLog "GPU recovery command failed" "ERROR" }
+        } else { Write-SupervisorLog "GPU restart budget exhausted" "ERROR" }
+        $services = @($services | Where-Object { $_ -ne "gpu-worker" })
+    }
+    foreach ($service in $services) {
+        if (-not (Test-RestartBudget $service)) {
+            Write-SupervisorLog ("Restart budget exhausted for " + $service) "ERROR"
+            continue
+        }
+        Write-SupervisorLog ("Targeted restart requested for " + $service) "WARN"
+        & docker @compose restart $service 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $script:RestartHistory[$service].Add([DateTimeOffset]::UtcNow) }
+    }
+    if ($script:RecoveryCycles -ge 2) {
+        $reconcile = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker")
+        if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $reconcile += "summary-worker" }
+        Write-SupervisorLog "Targeted recovery did not restore readiness; reconciling WhisperX services" "ERROR"
+        & docker @compose up -d --no-deps --pull never @reconcile 2>&1 | Out-Null
+        $script:RecoveryCycles = 0
     }
 }
 
@@ -239,9 +266,14 @@ try {
                     else { Write-SupervisorLog "WhisperX runtime is not healthy yet" "WARN" }
                 }
                 else {
-                    Write-SupervisorLog "WhisperX containers are running but authenticated readiness is not healthy; no restart requested" "WARN"
+                    $script:ConsecutiveFailures++
+                    Write-SupervisorLog ("WhisperX readiness is unhealthy; consecutive failures=" + $script:ConsecutiveFailures) "WARN"
+                    if ($script:ConsecutiveFailures -ge 3) {
+                        Invoke-TargetedRecovery $manifest
+                        $script:ConsecutiveFailures = 0
+                    }
                 }
-            }
+            } else { $script:ConsecutiveFailures = 0; $script:RecoveryCycles = 0 }
         }
         catch {
             Write-SupervisorLog "Supervisor iteration failed with a stable runtime error" "WARN"

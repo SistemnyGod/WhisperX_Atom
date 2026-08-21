@@ -67,7 +67,12 @@ public sealed record RecordingPipelineChain(
     JsonDocument? StageTimings = null,
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
-    string? RecordingState = null)
+    string? RecordingState = null,
+    DateTime? AsrNotBefore = null,
+    string? AsrScheduledReason = null,
+    DateTime? AsrQueueEnteredAt = null,
+    DateTime? AsrWorkerClaimedAt = null,
+    string? AsrDispatchState = null)
 {
     /// <summary>Canonical server-owned state used by all clients.</summary>
     [JsonIgnore]
@@ -985,7 +990,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                    r.enrichment_job_id,ej.status,ej.stage,
                    r.transcript_v2_id,v2.status,
                    r.summary_job_id,sj.status,sj.stage,
-                   r.summary_id,s.status,r.pipeline_correlation_id,rs.state,rs.stage_timings,r.created_at,r.updated_at
+                   r.summary_id,s.status,r.pipeline_correlation_id,rs.state,rs.stage_timings,r.created_at,r.updated_at,
+                   aj.not_before,aj.scheduled_reason,aj.queue_entered_at,aj.worker_claimed_at,
+                   CASE WHEN aj.status='QUEUED' AND aj.not_before IS NOT NULL AND aj.not_before > now() THEN 'SCHEDULED'
+                        WHEN aj.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=aj.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX'
+                        WHEN aj.status='QUEUED' THEN 'WAITING_FOR_GPU'
+                        WHEN aj.status='RUNNING' THEN 'PROCESSING' ELSE aj.status END
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -1013,7 +1023,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             reader.IsDBNull(19) ? null : reader.GetString(19),
             reader.IsDBNull(21) ? null : JsonDocument.Parse(reader.GetString(21)),
             reader.GetDateTime(22), reader.GetDateTime(23),
-            reader.IsDBNull(20) ? null : reader.GetString(20));
+            reader.IsDBNull(20) ? null : reader.GetString(20),
+            reader.IsDBNull(24) ? null : reader.GetDateTime(24),
+            reader.IsDBNull(25) ? null : reader.GetString(25),
+            reader.IsDBNull(26) ? null : reader.GetDateTime(26),
+            reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+            reader.IsDBNull(28) ? null : reader.GetString(28));
     }
 
     public async Task<IReadOnlyList<RecordingPipelineChain>> GetMeetingPipelineChainsAsync(Guid meetingId)
@@ -1023,7 +1038,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             SELECT r.recording_session_id,r.meeting_id,r.media_asset_id,a.status,
                    r.asr_job_id,aj.status,aj.stage,r.transcript_v1_id,v1.status,
                    r.enrichment_job_id,ej.status,ej.stage,r.transcript_v2_id,v2.status,
-                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id,rs.state,rs.stage_timings,r.created_at,r.updated_at
+                   r.summary_job_id,sj.status,sj.stage,r.summary_id,s.status,r.pipeline_correlation_id,rs.state,rs.stage_timings,r.created_at,r.updated_at,
+                   aj.not_before,aj.scheduled_reason,aj.queue_entered_at,aj.worker_claimed_at,
+                   CASE WHEN aj.status='QUEUED' AND aj.not_before IS NOT NULL AND aj.not_before > now() THEN 'SCHEDULED'
+                        WHEN aj.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=aj.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX'
+                        WHEN aj.status='QUEUED' THEN 'WAITING_FOR_GPU'
+                        WHEN aj.status='RUNNING' THEN 'PROCESSING' ELSE aj.status END
             FROM recording_pipeline_runs r
             LEFT JOIN media_assets a ON a.id=r.media_asset_id
             LEFT JOIN jobs aj ON aj.id=r.asr_job_id
@@ -1050,7 +1070,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetString(18), reader.IsDBNull(19) ? null : reader.GetString(19),
                 reader.IsDBNull(21) ? null : JsonDocument.Parse(reader.GetString(21)),
                 reader.GetDateTime(22), reader.GetDateTime(23),
-                reader.IsDBNull(20) ? null : reader.GetString(20)));
+                reader.IsDBNull(20) ? null : reader.GetString(20),
+                reader.IsDBNull(24) ? null : reader.GetDateTime(24),
+                reader.IsDBNull(25) ? null : reader.GetString(25),
+                reader.IsDBNull(26) ? null : reader.GetDateTime(26),
+                reader.IsDBNull(27) ? null : reader.GetDateTime(27),
+                reader.IsDBNull(28) ? null : reader.GetString(28)));
         }
         return result;
     }

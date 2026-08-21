@@ -43,7 +43,8 @@ Copy-Item .env.example .env
 | `ASSISTANT_NEIGHBOUR_LIMIT` | Максимум соседних сегментов в evidence-контексте | `36` |
 | `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.30` |
 | `ASSISTANT_HYBRID_EMBEDDING_MIN` | Минимальный embedding score для реального semantic hit | `0.72` |
-| `TRANSCRIPTION_START_DELAY_SECONDS` | Durable-пауза после сборки аудио перед тяжёлой V1/V2 GPU-обработкой; оставляет окно для быстрых вопросов Мифодия | `300` (`0` отключает) |
+| `TRANSCRIPTION_START_DELAY_SECONDS` | Необязательная durable-пауза после сборки аудио перед V1/V2 GPU-обработкой; в production V1 запускается сразу | `0` (`>0` только для явного defer) |
+| `SUPERVISOR_HEALTH_TOKEN` | Отдельный секрет Server Node для ограниченного internal readiness Supervisor; не admin-пароль | генерируется при установке Server Node |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
 

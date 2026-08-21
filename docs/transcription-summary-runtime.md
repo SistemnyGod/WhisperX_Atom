@@ -47,10 +47,11 @@ GPU Worker сохраняет числовые метрики в `recording_sess
 `summary_total_ms`. Текст, пути, токены и содержимое вопросов в эту запись
 не попадают.
 
-Desktop не держит бесконечный общий таймер. Если job не создан за пять минут,
-показывается `PROCESSING_JOB_NOT_CREATED`; если QUEUED не меняется две минуты
-или RUNNING не сообщает новый этап тридцать минут — отображается конкретный
-stalled-код (`JOB_QUEUED_TIMEOUT`/`JOB_PROGRESS_STALLED`) без отмены durable job.
+V1 после `READY_FOR_ASR` публикуется сразу, если не задан положительный
+`TRANSCRIPTION_START_DELAY_SECONDS`. Desktop показывает отдельные стадии
+`SCHEDULED`, `WAITING_FOR_OUTBOX`, `WAITING_FOR_GPU` и `PROCESSING`; длительное
+наблюдение переводится в фон без локальной ошибки, а recovery выполняет
+серверный watchdog.
 
 Доставка Recorder также оставляет идемпотентные технические события в
 `recording_events`: `PIPELINE_LOCAL_READY`, `PIPELINE_FLAC_READY`,

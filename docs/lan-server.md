@@ -112,7 +112,7 @@ LAN-профиль предназначен для изолированной д
 
 ## Первый запуск
 
-На серверном ПК скопируйте `.env.lan.example` в `.env.lan`, задайте фактические сильные secrets и проверьте `SERVER_ORIGIN`. Не используйте значения `generate-*`, `replace-with-*`, `password` или `changeme`.
+На серверном ПК скопируйте `.env.lan.example` в `.env.lan`, задайте фактические сильные secrets и проверьте `SERVER_ORIGIN`. Не используйте значения `generate-*`, `replace-with-*`, `password` или `changeme`. `SUPERVISOR_HEALTH_TOKEN` создаётся установщиком Server Node и используется только для internal readiness.
 
 ```powershell
 Copy-Item .env.lan.example .env.lan
@@ -121,8 +121,20 @@ Copy-Item .env.lan.example .env.lan
 ```
 
 Регистрацию Scheduled Task выполняйте из PowerShell «Запуск от имени
-администратора»; скрипт проверяет результат регистрации и не сообщает об
-успехе при отказе в доступе.
+администратора»; скрипт проверяет результат регистрации, запускает Supervisor
+сразу в текущей пользовательской сессии и не сообщает об успехе при отказе в
+доступе. После этого Docker Desktop и WhisperX Compose восстанавливаются
+после входа без ручной консоли. Supervisor не выполняет `prune`, не удаляет
+volumes и не трогает Patrol360.
+
+## Server Node и Client Node
+
+Server Node — отдельный LAN-компьютер с Docker Desktop, PostgreSQL, NATS,
+Media/GPU/Summary Workers и `supervise-server-runtime.ps1`. Client Node —
+Desktop, Recorder Host, Voice Host, TtsHost и Updater. Клиентский установщик
+не запускает Docker и не регистрирует серверную задачу. Для Server Node
+используйте Server Bundle и `install-server-startup-task.ps1`; all-in-one
+режим не требуется.
 
 Профиль публикует только `http://192.168.2.194:8080` (или адрес из `.env.lan`). API, TUS, PostgreSQL и NATS не имеют host-портов. Gateway направляет `/api/*`, `/health/*`, `/ready` в API и `/files/*` в TUS.
 

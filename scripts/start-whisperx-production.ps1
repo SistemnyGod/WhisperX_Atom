@@ -47,7 +47,7 @@ foreach ($file in @("fullchain.pem", "privkey.pem")) {
     $path = Join-Path $tlsRoot $file
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "PRODUCTION_TLS_FILE_MISSING: $path" }
 }
-foreach ($secretName in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "VOICE_HOST_TOKEN")) {
+foreach ($secretName in @("POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "VOICE_HOST_TOKEN", "SUPERVISOR_HEALTH_TOKEN")) {
     [void](Require-Value $secretName)
 }
 

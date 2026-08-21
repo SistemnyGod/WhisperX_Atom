@@ -126,7 +126,8 @@ if (Test-Path -LiteralPath $caddySource -PathType Container) {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage "infrastructure\caddy\$($_.Name)")
     }
 }
-foreach ($script in @('start-server-bundle.ps1','start-runtime.ps1','supervise-server-runtime.ps1','stop-server-bundle.ps1','doctor-server-bundle.ps1','install-server-startup-task.ps1','prune-stale-worker-heartbeats.ps1','recover-gpu-runtime.ps1','backup.ps1','restore.ps1','e2e-backup-restore.ps1')) {
+$runtimeScripts = @('start-server-bundle.ps1','start-runtime.ps1','supervise-server-runtime.ps1','stop-server-bundle.ps1','doctor-server-bundle.ps1','install-server-startup-task.ps1','ensure-supervisor-health-token.ps1','prune-stale-worker-heartbeats.ps1','recover-gpu-runtime.ps1','backup.ps1','restore.ps1','e2e-backup-restore.ps1')
+foreach ($script in $runtimeScripts) {
     Copy-Item -LiteralPath (Join-Path $repo "scripts\$script") -Destination $stage
 }
 if (Test-Path -LiteralPath (Join-Path $repo 'migrations')) {
@@ -166,6 +167,10 @@ $manifest = [ordered]@{
     images = $imageRecords
     infrastructureImages = $infrastructure
     migrations = $migrationManifest
+    runtimeScripts = @($runtimeScripts | ForEach-Object {
+        $path = Join-Path $stage $_
+        [ordered]@{ name = $_; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    })
     dockerImages = [ordered]@{ path = 'docker-images.tar'; sha256 = $dockerTarHash }
     compose = @('compose.dev.yml','compose.lan.yml','compose.release.yml')
     volumesPolicy = 'preserve'

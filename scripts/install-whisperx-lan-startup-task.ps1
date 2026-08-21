@@ -23,6 +23,7 @@ try {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force -ErrorAction Stop | Out-Null
     $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     if ($null -eq $registered) { throw "SCHEDULED_TASK_NOT_FOUND_AFTER_REGISTER" }
+    Start-ScheduledTask -TaskName $TaskName
     Write-Host "LAN startup task installed: $TaskName" -ForegroundColor Green
 } catch {
     throw "LAN_STARTUP_TASK_INSTALL_FAILED: $($_.Exception.Message)"

@@ -4,7 +4,8 @@ param(
     [string]$ConfigRoot = "C:\ProgramData\WhisperXAtom\Server",
     [switch]$EnableQwen,
     [switch]$EnableAssistant,
-    [switch]$SkipBackup
+    [switch]$SkipBackup,
+    [switch]$InstallStartupTask
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,9 @@ $manifestPath = Join-Path $bundle "release-manifest.json"
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw "SERVER_CONFIG_REQUIRED: $envFile" }
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "SERVER_RELEASE_MANIFEST_MISSING" }
 if (-not (Test-Path -LiteralPath (Join-Path $bundle "compose.release.yml") -PathType Leaf)) { throw "SERVER_RELEASE_COMPOSE_MISSING" }
+$tokenScript = Join-Path $bundle "ensure-supervisor-health-token.ps1"
+if (-not (Test-Path -LiteralPath $tokenScript -PathType Leaf)) { throw "SERVER_HEALTH_TOKEN_SCRIPT_MISSING" }
+& (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $tokenScript -EnvFile $envFile
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.buildIdentity -match 'dev|dirty' -or $manifest.releaseTag -match 'dev|dirty') { throw "SERVER_RELEASE_IDENTITY_INVALID" }
 $tag = [string]$manifest.releaseTag
@@ -213,3 +217,7 @@ try {
 }
 Write-Host "SERVER_RUNTIME_STARTED=true"
 Write-Host "BUILD_IDENTITY=$identity"
+if ($InstallStartupTask) {
+    & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'install-server-startup-task.ps1') -BundleRoot $bundle -ConfigRoot $config
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_STARTUP_TASK_INSTALL_FAILED' }
+}
