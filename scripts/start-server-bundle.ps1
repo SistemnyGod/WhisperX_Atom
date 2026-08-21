@@ -85,7 +85,9 @@ if (-not $SkipBackup) {
 
 $compose = @('compose','--project-name','whisperx-atom','--env-file',$envFile,'-f',(Join-Path $bundle 'compose.dev.yml'),'-f',(Join-Path $bundle 'compose.lan.yml'),'-f',(Join-Path $bundle 'compose.release.yml'))
 $profiles = @('--profile','core','--profile','gpu','--profile','lan')
-if ($EnableQwen) { $profiles += @('--profile','llm') }
+# Assistant and automatic summaries share the Summary Worker/Qwen profile.
+# Enabling only ASSISTANT_ENABLED must therefore start the same profile.
+if ($EnableQwen -or $EnableAssistant) { $profiles += @('--profile','llm') }
 $configText = (& docker @compose @profiles config | Out-String)
 if ($LASTEXITCODE -ne 0) { throw 'SERVER_RELEASE_COMPOSE_INVALID' }
 if ($configText -match '(?im)image:\s*[^\r\n]*:(dev|latest)\b') { throw 'SERVER_RELEASE_COMPOSE_UNPINNED_IMAGE' }

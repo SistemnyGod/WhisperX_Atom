@@ -6,9 +6,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$start = Join-Path ([IO.Path]::GetFullPath($BundleRoot)) "start-server-bundle.ps1"
+$start = Join-Path ([IO.Path]::GetFullPath($BundleRoot)) "start-runtime.ps1"
 $envFile = Join-Path ([IO.Path]::GetFullPath($ConfigRoot)) ".env.lan"
-if (-not (Test-Path -LiteralPath $start -PathType Leaf)) { throw "SERVER_START_SCRIPT_MISSING: $start" }
+if (-not (Test-Path -LiteralPath $start -PathType Leaf)) { throw "SERVER_RUNTIME_SCRIPT_MISSING: $start" }
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw "SERVER_CONFIG_REQUIRED: $envFile" }
 $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
 $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$start`" -BundleRoot `"$BundleRoot`" -ConfigRoot `"$ConfigRoot`""

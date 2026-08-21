@@ -105,3 +105,15 @@ def test_server_bundle_reads_oci_labels_from_docker_json_on_windows_powershell()
         assert "ConvertFrom-Json" in script
     assert "io.whisperx.atom.build-identity" in builder
     assert "RELEASE_IMAGE_LABELS_MISMATCH" in builder
+
+
+def test_summary_is_never_rendered_as_raw_json_after_content_gate_failure():
+    meetings = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/MeetingsViewModel.cs")
+    legacy = read("apps/desktop/WhisperX.Atom.Desktop/Legacy/Wpf/MainWindow.xaml.cs")
+    presentation = read("apps/desktop/WhisperX.Atom.Desktop/Services/SummaryPresentation.cs")
+    assert "SummaryPresentation.Format(summary)" in meetings
+    assert "SummaryPresentation.Format(summary)" in legacy
+    assert "IsDisplayable" in presentation
+    assert "ContentValidity" in presentation
+    assert "SummaryPresentation.IsDisplayable(summary)" in read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/HomeViewModel.cs")
+    assert "return $\"Версия {summary.Version}; модель: {summary.ModelName}\\n\\n{root}\"" not in legacy

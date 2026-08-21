@@ -503,12 +503,24 @@ public sealed class SpoolStore
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<string>> SessionsNeedingPlayableAudioAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> SessionsNeedingPlayableAudioAsync(CancellationToken cancellationToken = default) =>
+        SessionsNeedingPlayableAudioAsync(includeReady: true, cancellationToken);
+
+    /// <summary>
+    /// Return sessions that need a playable build. Pending/retryable states are
+    /// cheap and are polled frequently; READY files are integrity-checked on a
+    /// slower cadence by the worker. Keeping the two paths separate avoids
+    /// rescanning every finished WAV on every five-second delivery wake-up.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> SessionsNeedingPlayableAudioAsync(bool includeReady, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id FROM recording_sessions WHERE state NOT IN ('RECORDING','PAUSED','CANCELLED','FINALIZED') AND local_finalize_state='LOCAL_READY' AND playable_audio_state IN ('PENDING','RECOVERY_PENDING','FAILED') AND (playable_audio_next_retry_at IS NULL OR playable_audio_next_retry_at <= $now) ORDER BY started_at";
+        var states = includeReady
+            ? "'PENDING','RECOVERY_PENDING','FAILED','READY'"
+            : "'PENDING','RECOVERY_PENDING','FAILED'";
+        command.CommandText = $"SELECT id FROM recording_sessions WHERE state NOT IN ('RECORDING','PAUSED','CANCELLED') AND local_finalize_state='LOCAL_READY' AND playable_audio_state IN ({states}) AND (playable_audio_state='READY' OR playable_audio_next_retry_at IS NULL OR playable_audio_next_retry_at <= $now) ORDER BY started_at";
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -538,18 +550,40 @@ public sealed class SpoolStore
         command.CommandText = "SELECT id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
         var result = new List<LocalSessionSummary>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         var rows = new List<(string Id, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext)>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
-            DateTimeOffset? Parse(int ordinal) => reader.IsDBNull(ordinal) || !DateTimeOffset.TryParse(reader.GetString(ordinal), out var value) ? null : value;
-            rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), Parse(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), Parse(9), Parse(10), Parse(11)));
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                DateTimeOffset? Parse(int ordinal) => reader.IsDBNull(ordinal) || !DateTimeOffset.TryParse(reader.GetString(ordinal), out var value) ? null : value;
+                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), Parse(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), Parse(9), Parse(10), Parse(11)));
+            }
         }
+
+        // Load all track rows in one SQLite query instead of opening a new
+        // connection for every session returned above. LIST_LOCAL_SESSIONS is
+        // used after restart, so this is especially visible with a large
+        // offline backlog.
+        var filesBySession = rows.ToDictionary(row => row.Id, _ => new List<PlayableAudioFile>(), StringComparer.Ordinal);
+        if (filesBySession.Count > 0)
+        {
+            var parameters = rows.Select((row, index) => (row.Id, Name: $"$session{index}")).ToArray();
+            await using var files = connection.CreateCommand();
+            files.CommandText = $"SELECT session_id,track_id,track_type,file_name,local_path,size_bytes,sample_count,sample_rate,channels,encoding,sha256,state FROM recording_playable_files WHERE session_id IN ({string.Join(',', parameters.Select(item => item.Name))}) ORDER BY session_id,file_name";
+            foreach (var parameter in parameters) files.Parameters.AddWithValue(parameter.Name, parameter.Id);
+            await using var fileReader = await files.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await fileReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var sessionId = fileReader.GetString(0);
+                if (!filesBySession.TryGetValue(sessionId, out var sessionFiles)) continue;
+                sessionFiles.Add(new PlayableAudioFile(sessionId, fileReader.GetString(1), fileReader.GetString(2), fileReader.GetString(3), fileReader.GetString(4), fileReader.GetInt64(5), fileReader.GetInt64(6), fileReader.GetInt32(7), fileReader.GetInt32(8), fileReader.GetString(9), fileReader.GetString(10), fileReader.GetString(11)));
+            }
+        }
+
         foreach (var row in rows)
             result.Add(new LocalSessionSummary(row.Id, row.Title, row.StartedAt, row.State, row.Local, row.Delivery, row.Playable,
-                row.Path, row.Error, row.Created, row.Next, row.PlayableNext,
-                await GetPlayableFilesAsync(row.Id, cancellationToken).ConfigureAwait(false)));
+                row.Path, row.Error, row.Created, row.Next, row.PlayableNext, filesBySession[row.Id]));
         return result;
     }
 

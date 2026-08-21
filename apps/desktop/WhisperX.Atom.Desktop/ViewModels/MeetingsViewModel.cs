@@ -609,7 +609,7 @@ public sealed class MeetingWorkspaceViewModel : ObservableObject
 
     private static string FormatSummary(DesktopSummary? summary)
     {
-        return MeetingProtocolParser.Parse(summary?.Content).DisplayText;
+        return SummaryPresentation.Format(summary);
     }
 
     private static string FormatDuration(long durationMs) => durationMs <= 0

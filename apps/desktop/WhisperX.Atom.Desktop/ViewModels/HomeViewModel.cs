@@ -280,12 +280,14 @@ public sealed class HomeViewModel : ObservableObject
             var tasksTask = _services.Backend.GetTasksAsync(meetingId, cancellationToken);
             await Task.WhenAll(jobsTask, summaryTask, tasksTask);
             var jobs = await jobsTask;
+            var summary = await summaryTask;
+            var tasks = await tasksTask;
             var current = jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status)) ?? jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
             return new MeetingMetrics(
                 meeting.Title,
                 jobs.Any(job => !IsTerminal(job.Status)),
-                await summaryTask is not null,
-                (await tasksTask).Count(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase) && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)),
+                SummaryPresentation.IsDisplayable(summary),
+                tasks.Count(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase) && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)),
                 current?.Stage ?? meeting.Status,
                 Math.Clamp(current?.Progress ?? 0, 0, 100));
         }

@@ -229,6 +229,46 @@ class AssistantRepository:
             row = connection.execute("SELECT q.query,q.meeting_id,q.status,q.conversation_id,q.user_message_id,q.assistant_message_id,q.assistant_mode,q.user_id,u.role FROM assistant_queries q LEFT JOIN users u ON u.id=q.user_id WHERE q.id=%s", (query_id,)).fetchone()
             return (str(row[0]), str(row[1]) if row[1] else None, str(row[2]), str(row[3]) if row[3] else None, str(row[4]) if row[4] else None, str(row[5]) if row[5] else None, str(row[6] or "MEETING_MEMORY"), str(row[7]) if row[7] else None, str(row[8]) if row[8] else None) if row else None
 
+    def expire_stale_queries(self, max_age_seconds: int) -> int:
+        """Move abandoned queued/running requests to a visible terminal state.
+
+        SSE clients are deliberately bounded, but a request must not remain
+        ``QUEUED`` forever when NATS or the worker disappears.  The update is
+        idempotent and only touches non-terminal rows whose heartbeat/update
+        timestamp is older than the configured safety window.
+        """
+
+        max_age_seconds = max(120, int(max_age_seconds))
+        with self._db.connection() as connection:
+            with connection.transaction():
+                rows = connection.execute(
+                    """
+                    UPDATE assistant_queries
+                    SET status='LLM_UNAVAILABLE',
+                        error_code='ASSISTANT_QUEUE_TIMEOUT',
+                        retryable=false,
+                        next_retry_at=NULL,
+                        completed_at=now(),
+                        updated_at=now()
+                    WHERE status IN ('QUEUED','RUNNING')
+                      AND updated_at < now() - (%s * interval '1 second')
+                    RETURNING id,assistant_message_id
+                    """,
+                    (max_age_seconds,),
+                ).fetchall()
+                for _, message_id in rows:
+                    if message_id:
+                        connection.execute(
+                            "UPDATE assistant_messages SET status='LLM_UNAVAILABLE',error_code='ASSISTANT_QUEUE_TIMEOUT',completed_at=now() WHERE id=%s",
+                            (message_id,),
+                        )
+                if rows:
+                    connection.execute(
+                        "DELETE FROM inbox_messages WHERE job_id = ANY(%s::uuid[])",
+                        ([str(row[0]) for row in rows],),
+                    )
+                return len(rows)
+
     def set_status(self, query_id: str, status: str, *, error: str | None = None) -> bool:
         with self._db.connection() as connection:
             row = connection.execute("""

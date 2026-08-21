@@ -12,6 +12,7 @@ using System.Windows.Media;
 using System.Windows.Input;
 using System.Windows.Threading;
 using WhisperX.Atom.Recorder;
+using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX.Atom.Desktop;
 
@@ -1304,10 +1305,7 @@ public partial class MainWindow : Window
     private static string FormatSummary(DesktopSummary? summary)
     {
         if (summary is null) return "Саммари пока не готово.";
-        var root = summary.Content.RootElement;
-        if (root.TryGetProperty("summary", out var text) && text.ValueKind == JsonValueKind.String)
-            return $"Версия {summary.Version}; модель: {summary.ModelName}\n\n{text.GetString()}";
-        return $"Версия {summary.Version}; модель: {summary.ModelName}\n\n{root}";
+        return $"Версия {summary.Version}; модель: {summary.ModelName}\n\n{SummaryPresentation.Format(summary)}";
     }
 
     private static string SafeError(Exception ex)

@@ -40,3 +40,25 @@ def test_llama_startup_keeps_child_diagnostics_visible():
     source = read("workers/summary_worker/llama_subprocess.py")
     assert "DEVNULL" not in source
     assert "llama_health_probe_failed" in source
+
+
+def test_assistant_only_server_startup_includes_llm_profile_and_boot_does_not_migrate():
+    launcher = read("scripts/start-server-bundle.ps1")
+    runtime = read("scripts/start-runtime.ps1")
+    startup = read("scripts/install-server-startup-task.ps1")
+    assert "if ($EnableQwen -or $EnableAssistant)" in launcher
+    assert "start-runtime.ps1" in startup
+    assert "docker load" not in runtime
+    assert "MIGRATION_ONLY" not in runtime
+    assert "ASSISTANT_ENABLED" in runtime
+
+
+def test_qwen_and_diarization_readiness_use_actual_runtime_probe_state():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    worker = read("workers/ml_worker/worker.py")
+    summary = read("workers/summary_worker/worker.py")
+    assert "llamaRuntimeState" in api
+    assert "llama_runtime_failed" in api
+    assert "DiarizationPipeline" in worker
+    assert "pyannote_model_loaded" in worker
+    assert "LLAMA_RUNTIME_FAILED" in summary

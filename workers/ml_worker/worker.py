@@ -304,7 +304,7 @@ async def run() -> None:
     except ImportError as exc:
         raise RuntimeError("Install workers/ml_worker/requirements.txt") from exc
 
-    def gpu_capabilities() -> dict[str, Any]:
+    async def gpu_capabilities() -> dict[str, Any]:
         capabilities: dict[str, Any] = {
             "cudaAvailable": False,
             "hfConfigured": bool(os.getenv("HF_TOKEN")),
@@ -318,13 +318,45 @@ async def run() -> None:
                 capabilities["cudaDevice"] = torch.cuda.get_device_name(0)
         except Exception as exc:
             capabilities["cudaError"] = type(exc).__name__
-        capabilities["diarization"] = "DEGRADED" if not capabilities["hfConfigured"] else "READY"
+        diarization_enabled = os.getenv("ENABLE_DIARIZATION", "true").lower() in {"1", "true", "yes"}
+        diarization_mode = os.getenv("DIARIZATION_MODE", "preferred").lower()
+        if not diarization_enabled or diarization_mode == "disabled":
+            capabilities["diarization"] = "DISABLED"
+            capabilities["diarizationReason"] = "diarization_disabled"
+        elif not capabilities["hfConfigured"]:
+            capabilities["diarization"] = "DEGRADED"
+            capabilities["diarizationReason"] = "hf_token_missing"
+        else:
+            # A token only proves that authentication is configured.  Probe the
+            # same WhisperX/pyannote constructor used by the enrichment stage so
+            # readiness cannot advertise diarization when the gated model or
+            # its cache is unavailable.
+            try:
+                from whisperx.diarize import DiarizationPipeline
+
+                device = os.getenv("DEVICE", "cuda").strip().lower() or "cuda"
+                probe = await asyncio.wait_for(
+                    asyncio.to_thread(DiarizationPipeline, use_auth_token=os.environ["HF_TOKEN"], device=device),
+                    timeout=float(os.getenv("DIARIZATION_READINESS_TIMEOUT_SECONDS", "120")),
+                )
+                del probe
+                capabilities["diarization"] = "READY"
+                capabilities["diarizationReason"] = "pyannote_model_loaded"
+            except asyncio.TimeoutError:
+                capabilities["diarization"] = "DEGRADED"
+                capabilities["diarizationReason"] = "pyannote_model_load_timeout"
+            except Exception as exc:
+                # Do not include exception text: model URLs and auth details
+                # must never leak into heartbeat payloads or logs.
+                LOGGER.warning("diarization_probe_failed error_type=%s", type(exc).__name__)
+                capabilities["diarization"] = "DEGRADED"
+                capabilities["diarizationReason"] = "pyannote_model_load_failed"
         return capabilities
 
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
     # CUDA/model capability discovery is intentionally done once at startup.
     # It must not be repeated on every heartbeat tick while ASR is running.
-    startup_capabilities = {**gpu_capabilities(), "natsConnected": True}
+    startup_capabilities = {**await gpu_capabilities(), "natsConnected": True}
     heartbeat = AsyncHeartbeat("gpu-worker", capabilities=lambda: dict(startup_capabilities))
     await heartbeat.start()
     worker = GpuWorker(heartbeat)

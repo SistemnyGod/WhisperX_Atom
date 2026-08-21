@@ -13,6 +13,37 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
     private const long LowSpaceReserveBytes = 64L * 1024 * 1024;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
+    /// <summary>
+    /// Reconcile the durable READY marker with the actual files.  This is
+    /// intentionally separate from capture and is safe to call after restart.
+    /// </summary>
+    public async Task<bool> ValidateReadyAsync(string sessionId, bool verifyHash, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (info is null || !string.Equals(info.PlayableAudioState, "READY", StringComparison.OrdinalIgnoreCase)) return false;
+            var files = await spool.GetPlayableFilesAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (files.Count == 0 || string.IsNullOrWhiteSpace(info.PlayableAudioPath)) return false;
+            if (!File.Exists(Path.Combine(info.PlayableAudioPath, "recording.json"))) return false;
+            foreach (var file in files)
+            {
+                if (!File.Exists(file.LocalPath)) return false;
+                var format = ParseFormat(file.Encoding, file.Encoding.Contains("FLOAT", StringComparison.OrdinalIgnoreCase) ? 32 : InferBits(file.Encoding), file.Channels, file.SampleRate);
+                var expectedDataSize = checked(file.SampleCount * format.BlockAlign);
+                if (new FileInfo(file.LocalPath).Length != file.SizeBytes
+                    || !await IsMatchingWaveAsync(file.LocalPath, expectedDataSize, format, file.SampleCount, cancellationToken).ConfigureAwait(false))
+                    return false;
+                if (verifyHash && !string.IsNullOrWhiteSpace(file.Sha256)
+                    && !string.Equals(await Sha256Async(file.LocalPath, cancellationToken).ConfigureAwait(false), file.Sha256, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return false; }
+    }
+
     public async Task BuildAsync(string sessionId, CancellationToken cancellationToken = default)
     {
         var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false)
@@ -34,7 +65,13 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
         var raw = await spool.GetRawChunksAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (raw.Count == 0)
         {
-            await spool.SetPlayableAudioStateAsync(sessionId, "FAILED", error: "NO_AUDIO_CAPTURED", clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            // Durability can remain LOCAL_READY for an encoded-only legacy
+            // session after raw retention. Do not misreport that as missing
+            // capture; it is a permanent inability to rebuild a WAV from the
+            // retained source and must be visible for diagnostics.
+            var encoded = await spool.GetArchiveChunksAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            var error = encoded.Count > 0 ? "PLAYABLE_SOURCE_PURGED" : "NO_AUDIO_CAPTURED";
+            await spool.SetPlayableAudioStateAsync(sessionId, "FAILED", error: error, clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
         }
         var files = new List<PlayableAudioFile>();
@@ -133,7 +170,7 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
         if (!string.IsNullOrWhiteSpace(root) && new DriveInfo(root).AvailableFreeSpace < expectedData + LowSpaceReserveBytes)
             throw new IOException("PLAYABLE_STORAGE_LOW");
         Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
-        if (File.Exists(finalPath) && await IsMatchingWaveAsync(finalPath, expectedData, cancellationToken).ConfigureAwait(false)) return;
+        if (File.Exists(finalPath) && await IsMatchingWaveAsync(finalPath, expectedData, format, totalSamples, cancellationToken).ConfigureAwait(false)) return;
         var part = finalPath + ".part";
         try
         {
@@ -181,22 +218,70 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
     }
     private static async Task CopyFileAsync(string source, FileStream destination, CancellationToken token)
     { await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan); await input.CopyToAsync(destination, 1024 * 1024, token).ConfigureAwait(false); }
-    private static async Task<bool> IsMatchingWaveAsync(string path, long dataSize, CancellationToken token)
+    private static async Task<bool> IsMatchingWaveAsync(string path, long dataSize, AudioFileFormat expected, long sampleCount, CancellationToken token)
     {
         try
         {
             await using var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             if (s.Length < 44) return false;
-            var header = new byte[80];
-            var headerLength = s.Length >= header.Length ? header.Length : (int)s.Length;
-            await s.ReadExactlyAsync(header.AsMemory(0, headerLength), token).ConfigureAwait(false);
+            var header = new byte[12];
+            await s.ReadExactlyAsync(header.AsMemory(), token).ConfigureAwait(false);
             var magic = System.Text.Encoding.ASCII.GetString(header, 0, 4);
-            if (magic == "RIFF") return BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(40, 4)) == (uint)Math.Min(uint.MaxValue, dataSize);
-            if (magic != "RF64" || s.Length < 80 || System.Text.Encoding.ASCII.GetString(header, 12, 4) != "ds64") return false;
-            return BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(28, 8)) == (ulong)dataSize;
+            if (magic is not ("RIFF" or "RF64") || System.Text.Encoding.ASCII.GetString(header, 8, 4) != "WAVE") return false;
+            var rf64 = magic == "RF64";
+            long? rf64DataSize = null;
+            int? sampleRate = null;
+            int? channels = null;
+            int? bits = null;
+            bool? isFloat = null;
+            long? foundDataSize = null;
+            long position = 12;
+            while (position + 8 <= s.Length)
+            {
+                s.Position = position;
+                var chunkHeader = new byte[8];
+                await s.ReadExactlyAsync(chunkHeader.AsMemory(), token).ConfigureAwait(false);
+                var id = System.Text.Encoding.ASCII.GetString(chunkHeader, 0, 4);
+                var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader.AsSpan(4, 4));
+                var dataStart = position + 8;
+                if (dataStart > s.Length) return false;
+                if (id == "ds64" && rf64 && chunkSize >= 16 && dataStart + 16 <= s.Length)
+                {
+                    var ds64 = new byte[16];
+                    s.Position = dataStart;
+                    await s.ReadExactlyAsync(ds64.AsMemory(), token).ConfigureAwait(false);
+                    rf64DataSize = checked((long)BinaryPrimitives.ReadUInt64LittleEndian(ds64.AsSpan(8, 8)));
+                }
+                else if (id == "fmt " && chunkSize >= 16 && dataStart + 16 <= s.Length)
+                {
+                    var fmt = new byte[16];
+                    s.Position = dataStart;
+                    await s.ReadExactlyAsync(fmt.AsMemory(), token).ConfigureAwait(false);
+                    var formatCode = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(0, 2));
+                    channels = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(2, 2));
+                    sampleRate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(fmt.AsSpan(4, 4)));
+                    bits = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(14, 2));
+                    isFloat = formatCode == 3;
+                }
+                else if (id == "data")
+                {
+                    foundDataSize = rf64 ? rf64DataSize : chunkSize;
+                    break;
+                }
+                position = checked(dataStart + chunkSize + (chunkSize & 1));
+            }
+            return foundDataSize == dataSize
+                && sampleRate == expected.SampleRate
+                && channels == expected.Channels
+                && bits == expected.BitsPerSample
+                && isFloat == expected.IsFloat
+                && dataSize % expected.BlockAlign == 0
+                && dataSize / expected.BlockAlign == sampleCount;
         }
         catch { return false; }
     }
+
+    private static int InferBits(string encoding) => encoding.Contains("24", StringComparison.OrdinalIgnoreCase) ? 24 : encoding.Contains("32", StringComparison.OrdinalIgnoreCase) ? 32 : 16;
     private static async Task FlushFileAsync(string path, CancellationToken token)
     {
         await using var s = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);

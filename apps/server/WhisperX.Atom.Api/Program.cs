@@ -550,7 +550,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         && IsActiveWorker(gpuWorker);
     var gpuCapabilities = gpuWorker?.Capabilities.RootElement;
     var cuda = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("cudaAvailable", out var cudaValue) && cudaValue.ValueKind == JsonValueKind.True;
-    var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue)
+    var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue) && diarizationValue.ValueKind == JsonValueKind.String
         ? diarizationValue.GetString() ?? "DEGRADED"
         : "DEGRADED";
     var requiredWorkersReady = requiredWorkerNames.All(name =>
@@ -582,12 +582,20 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
         var manifestAvailable = capabilities.TryGetProperty("modelManifestAvailable", out var manifest) && manifest.ValueKind == JsonValueKind.True;
         var manifestValid = capabilities.TryGetProperty("modelManifestValid", out var validManifest) && validManifest.ValueKind == JsonValueKind.True;
         var llamaAvailable = capabilities.TryGetProperty("llamaRuntimeAvailable", out var llama) && llama.ValueKind == JsonValueKind.True;
+        var llamaResident = capabilities.TryGetProperty("llamaResidentEnabled", out var resident) && resident.ValueKind == JsonValueKind.True;
+        var llamaRuntimeState = capabilities.TryGetProperty("llamaRuntimeState", out var runtimeState) && runtimeState.ValueKind == JsonValueKind.String
+            ? runtimeState.GetString()
+            : null;
+        var llamaRuntimeFailed = llamaResident && string.Equals(llamaRuntimeState, "FAILED", StringComparison.OrdinalIgnoreCase);
+        var llamaRuntimeStarting = llamaResident && string.Equals(llamaRuntimeState, "STARTING", StringComparison.OrdinalIgnoreCase);
         var gpuBusy = gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         var summaryBusy = summaryWorker.CurrentJobId is not null || string.Equals(summaryWorker.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
         qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing", mode = qwenMode }
             : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing", mode = qwenMode }
             : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch", mode = qwenMode }
             : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing", mode = qwenMode }
+            : llamaRuntimeFailed ? new { status = "UNAVAILABLE", reason = "llama_runtime_failed", mode = qwenMode }
+            : llamaRuntimeStarting ? new { status = "DEGRADED", reason = "llama_runtime_starting", mode = qwenMode }
             : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready", mode = qwenMode }
             : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable", mode = qwenMode }
             : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded", mode = qwenMode }

@@ -643,6 +643,10 @@ async def run() -> None:
             heartbeat.set_state("UNAVAILABLE", capabilities["modelValidationReason"])
         elif not capabilities["modelManifestValid"]:
             heartbeat.set_state("DEGRADED", capabilities["modelValidationReason"])
+        elif capabilities.get("llamaResidentEnabled") and str(capabilities.get("llamaRuntimeState", "")).upper() in {"FAILED", "UNAVAILABLE"}:
+            heartbeat.set_state("UNAVAILABLE", "LLAMA_RUNTIME_FAILED")
+        elif capabilities.get("llamaResidentEnabled") and str(capabilities.get("llamaRuntimeState", "")).upper() in {"STARTING", "DEGRADED"}:
+            heartbeat.set_state("DEGRADED", "LLAMA_RUNTIME_NOT_READY")
         else:
             heartbeat.set_state("READY")
     jetstream = client.jetstream()
@@ -655,6 +659,8 @@ async def run() -> None:
     if recovered_summary:
         LOGGER.warning("recovered stale summary jobs count=%s", recovered_summary)
     assistant_worker = AssistantWorker()
+    assistant_watchdog_interval = max(15.0, float(os.getenv("ASSISTANT_QUEUE_WATCHDOG_INTERVAL_SECONDS", "30")))
+    assistant_queue_timeout = max(120, int(os.getenv("ASSISTANT_QUEUE_TIMEOUT_SECONDS", "600")))
 
     async def consume_summary() -> None:
         while True:
@@ -696,8 +702,15 @@ async def run() -> None:
                     set_runtime_state()
 
     async def consume_assistant() -> None:
+        last_watchdog = 0.0
         while True:
             await asyncio.to_thread(assistant_worker._llm_runtime.release_idle)
+            now = time.monotonic()
+            if now - last_watchdog >= assistant_watchdog_interval:
+                expired = await asyncio.to_thread(assistant_worker.repository.expire_stale_queries, assistant_queue_timeout)
+                if expired:
+                    LOGGER.warning("assistant_stale_queries_expired count=%s timeout_seconds=%s", expired, assistant_queue_timeout)
+                last_watchdog = now
             for message in await fetch_available(assistant_subscription, nats.errors.TimeoutError, timeout=1):
                 query_id: str | None = None
                 try:

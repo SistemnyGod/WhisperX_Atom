@@ -33,13 +33,7 @@ public sealed class SummaryRegistryItem
 
     private static string FormatSummary(DesktopSummary? summary)
     {
-        if (summary is null) return "Саммари пока не готово.";
-        if (string.Equals(summary.ContentValidity, "INVALID", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(summary.ContentValidity, "FAILED", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(summary.GenerationState, "FAILED", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(summary.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
-            return "Саммари не показано: результат не прошёл проверку формата. Запустите пересборку после готовности V2.";
-        return MeetingProtocolParser.Parse(summary?.Content).DisplayText;
+        return SummaryPresentation.Format(summary);
     }
 
     private static string FormatReview(DesktopSummary? summary)
