@@ -14,7 +14,20 @@ def test_api_exposes_authorized_cancellation_and_deletion():
     assert 'MapDelete("/api/meetings/{id:guid}"' in source
     assert "CanAccessMeetingAsync(context, id)" in source
     assert "recording_must_stop_before_cancellation" in source
-    assert "MeetingStorageCleanup.Delete" in source
+    assert "filesDeletionQueued" in source
+    assert 'physicalCleanup = queued > 0 ? "PENDING" : "COMPLETE"' in source
+
+
+def test_physical_cleanup_is_durable_and_not_bound_to_delete_request():
+    source = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/047_storage_deletion_queue.sql")
+    assert "storage_deletion_queue" in source
+    assert "StorageDeletionService" in source
+    assert "QueueStorageDeletionAsync" not in source
+    assert "completed_at IS NULL" in source
+    assert "FOR UPDATE SKIP LOCKED" in source
+    assert "storage_deletion_queue" in migration
+    assert "ux_storage_deletion_queue_pending_key" in migration
 
 
 def test_cancelled_jobs_cannot_reenter_the_pipeline():

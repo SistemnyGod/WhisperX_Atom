@@ -16,6 +16,7 @@ builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<UnifiedProductStore>();
 builder.Services.AddSingleton<AssistantModeResolver>();
 builder.Services.AddHostedService<OperationalRecoveryService>();
+builder.Services.AddHostedService<StorageDeletionService>();
 builder.Services.AddHttpClient("nats-readiness", client => client.Timeout = TimeSpan.FromSeconds(2));
 static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
     || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
@@ -1019,8 +1020,20 @@ app.MapDelete("/api/meetings/{id:guid}", async (Guid id, bool? force, HttpContex
     if (result is null) return Results.NotFound();
     if (result.RecordingMustStop) return Results.Conflict(new { error = "recording_must_stop_before_deletion" });
     var commands = await QueueRecorderCancellationAsync(store, result.AgentSessions, discardTransport: true);
-    var cleanup = MeetingStorageCleanup.Delete(result.StorageKeys, app.Logger);
-    return Results.Ok(new { result.MeetingId, result.CancelledJobs, agentCommandsQueued = commands, filesDeleted = cleanup.FilesDeleted, fileDeleteFailures = cleanup.Failures });
+    // Physical deletion is durable and retried by StorageDeletionService. Do
+    // not perform unbounded File.Delete work in the request or lose an object
+    // when antivirus/Explorer temporarily holds it.
+    var queued = result.StorageKeys.Count;
+    return Results.Ok(new
+    {
+        result.MeetingId,
+        result.CancelledJobs,
+        agentCommandsQueued = commands,
+        filesDeleted = 0,
+        fileDeleteFailures = Array.Empty<string>(),
+        filesDeletionQueued = queued,
+        physicalCleanup = queued > 0 ? "PENDING" : "COMPLETE"
+    });
 });
 
 app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservationRequest request, HttpContext context) =>
@@ -2259,30 +2272,6 @@ public static class MediaPolicy
     public static bool IsVideoExtension(string name) => VideoExtensions.Contains(Path.GetExtension(name));
 }
 
-public static class MeetingStorageCleanup
-{
-    public static (int FilesDeleted, IReadOnlyList<string> Failures) Delete(IReadOnlyList<string> storageKeys, ILogger logger)
-    {
-        var deleted = 0;
-        var failures = new List<string>();
-        foreach (var key in storageKeys.Distinct(StringComparer.Ordinal))
-        {
-            try
-            {
-                var path = StorageHelpers.StoragePath(key);
-                if (!File.Exists(path)) continue;
-                File.Delete(path);
-                deleted++;
-            }
-            catch (Exception exception)
-            {
-                failures.Add(key);
-                logger.LogWarning(exception, "Unable to delete meeting storage object {StorageKey}", key);
-            }
-        }
-        return (deleted, failures);
-    }
-}
 public sealed class PasswordService
 {
     public static string Hash(string password)
@@ -2337,6 +2326,38 @@ public sealed class OperationalRecoveryService(
     }
 }
 
+public sealed record StorageDeletionBatchResult(int Completed, int Retried);
+
+public sealed class StorageDeletionService(
+    Database database,
+    ILogger<StorageDeletionService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await database.ProcessStorageDeletionQueueAsync(stoppingToken);
+                if (result.Completed > 0 || result.Retried > 0)
+                    logger.LogInformation("storage_deletion_queue_processed completed={Completed} retried={Retried}", result.Completed, result.Retried);
+                await timer.WaitForNextTickAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "storage_deletion_queue_failed");
+                try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
+        }
+    }
+}
+
 public sealed class Database(IConfiguration configuration)
 {
     private readonly string _connectionString =
@@ -2378,6 +2399,63 @@ public sealed class Database(IConfiguration configuration)
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await RecoverInterruptedWorkAsync(connection, cancellationToken);
+    }
+
+    public async Task<StorageDeletionBatchResult> ProcessStorageDeletionQueueAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var rows = new List<(long Id, string StorageKey, int Attempt)>();
+        await using (var select = new NpgsqlCommand("""
+            SELECT id, storage_key, attempt
+            FROM storage_deletion_queue
+            WHERE completed_at IS NULL AND next_retry_at <= now()
+            ORDER BY created_at
+            LIMIT 32
+            FOR UPDATE SKIP LOCKED
+            """, connection, transaction))
+        await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+                rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2)));
+        }
+
+        var completed = 0;
+        var retried = 0;
+        foreach (var row in rows)
+        {
+            try
+            {
+                var path = StorageHelpers.StoragePath(row.StorageKey);
+                if (File.Exists(path)) File.Delete(path);
+                await using var markComplete = new NpgsqlCommand("UPDATE storage_deletion_queue SET completed_at=now(), last_error=NULL WHERE id=@id", connection, transaction);
+                markComplete.Parameters.AddWithValue("id", row.Id);
+                await markComplete.ExecuteNonQueryAsync(cancellationToken);
+                completed++;
+            }
+            catch (Exception exception)
+            {
+                // Keep the tombstone forever with bounded exponential retry;
+                // a locked file or a temporarily unavailable disk must not
+                // become an orphan merely because the DELETE request ended.
+                var delaySeconds = Math.Min(3600, 5 * Math.Pow(2, Math.Min(row.Attempt, 9)));
+                await using var markRetry = new NpgsqlCommand("""
+                    UPDATE storage_deletion_queue
+                    SET attempt=attempt+1,
+                        next_retry_at=now() + (@delay_seconds * interval '1 second'),
+                        last_error=@error
+                    WHERE id=@id
+                    """, connection, transaction);
+                markRetry.Parameters.AddWithValue("delay_seconds", (int)delaySeconds);
+                markRetry.Parameters.AddWithValue("error", exception.Message.Length > 1000 ? exception.Message[..1000] : exception.Message);
+                markRetry.Parameters.AddWithValue("id", row.Id);
+                await markRetry.ExecuteNonQueryAsync(cancellationToken);
+                retried++;
+            }
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return new StorageDeletionBatchResult(completed, retried);
     }
 
     private static async Task RecoverInterruptedWorkAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
@@ -3190,6 +3268,17 @@ public sealed class Database(IConfiguration configuration)
             await using var command = new NpgsqlCommand(sql, connection, transaction);
             command.Parameters.AddWithValue("meeting", meetingId);
             await command.ExecuteNonQueryAsync();
+        }
+        if (keysToDelete.Length > 0)
+        {
+            await using var queue = new NpgsqlCommand("""
+                INSERT INTO storage_deletion_queue(storage_key, reason)
+                SELECT key, 'MEETING_DELETED'
+                FROM unnest(@keys::text[]) AS key
+                ON CONFLICT DO NOTHING
+                """, connection, transaction);
+            queue.Parameters.Add("keys", NpgsqlDbType.Array | NpgsqlDbType.Text).Value = keysToDelete;
+            await queue.ExecuteNonQueryAsync();
         }
         await transaction.CommitAsync();
         return new MeetingDeletionResult(meetingId, cancelledJobs, keysToDelete, agentSessions);
