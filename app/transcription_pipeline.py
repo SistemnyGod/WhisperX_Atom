@@ -25,6 +25,45 @@ from whisperx_atom.audio_signal import AudioSignalMetrics, analyze_wav
 from whisperx_atom.diarization_policy import env_bool, env_int, is_cuda_oom, should_release_asr
 
 
+_IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+
+def _is_placeholder_revision(value: str | None) -> bool:
+    normalized = (value or "").strip().lower()
+    return not normalized or normalized.startswith(("replace-with", "changeme", "change-me", "latest", "generate-"))
+
+
+def _resolve_pinned_snapshot(identifier: str, revision: str | None, *, local_only: bool, label: str) -> str:
+    """Resolve a model repository to the exact cached HF snapshot.
+
+    The inference libraries accept both aliases and local paths, but an alias
+    is not a reproducible release input.  Resolving the immutable revision
+    before constructing WhisperX/pyannote makes the object actually use the
+    pinned artifact rather than merely recording the value in a manifest.
+    """
+
+    candidate = (identifier or "").strip()
+    if not candidate:
+        raise RuntimeError(f"{label}_IDENTIFIER_MISSING")
+    if Path(candidate).is_dir():
+        return str(Path(candidate).resolve())
+    if _is_placeholder_revision(revision):
+        return candidate
+    if not _IMMUTABLE_REVISION.fullmatch((revision or "").strip()):
+        raise RuntimeError(f"{label}_REVISION_NOT_IMMUTABLE")
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+
+        return str(Path(snapshot_download(
+            repo_id=candidate,
+            revision=(revision or "").strip(),
+            local_files_only=local_only,
+        )).resolve())
+    except Exception as exc:
+        mode = "LOCAL_ONLY" if local_only else "PINNED_SNAPSHOT"
+        raise RuntimeError(f"{label}_SNAPSHOT_UNAVAILABLE:{mode}") from exc
+
+
 def _as_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name, str(default)).strip().lower()
     return value in {"1", "true", "yes", "y", "on"}
@@ -89,6 +128,8 @@ class PipelineContext:
 @dataclass
 class PipelineConfig:
     asr_model: str
+    asr_model_repository: str
+    asr_model_revision: str
     asr_backend: str
     language: str | None
     device: str
@@ -105,6 +146,9 @@ class PipelineConfig:
     min_speakers: int
     max_speakers: int
     hf_token: str
+    diarization_model: str
+    diarization_model_revision: str
+    model_local_only: bool
     use_glossary: bool
     glossary_rules_raw: str
     enable_speaker_clustering: bool
@@ -138,8 +182,11 @@ class PipelineConfig:
             language = None
         configured_min_speakers = max(1, _as_int("DIARIZATION_MIN_SPEAKERS", _as_int("MIN_SPEAKERS", 1)))
         configured_max_speakers = max(configured_min_speakers, _as_int("DIARIZATION_MAX_SPEAKERS", _as_int("MAX_SPEAKERS", 8)))
+        runtime_profile = (os.getenv("WHISPERX_RUNTIME_PROFILE") or "development").strip().lower()
         return cls(
             asr_model=os.getenv("WHISPERX_MODEL", "large-v3"),
+            asr_model_repository=os.getenv("WHISPERX_MODEL_REPOSITORY", "Systran/faster-whisper-large-v3"),
+            asr_model_revision=(os.getenv("WHISPERX_MODEL_REVISION") or "").strip(),
             asr_backend=os.getenv("ASR_BACKEND", "whisperx").lower(),
             language=language,
             device=device,
@@ -162,6 +209,9 @@ class PipelineConfig:
             min_speakers=configured_min_speakers,
             max_speakers=configured_max_speakers,
             hf_token=(os.getenv("HF_TOKEN") or "").strip(),
+            diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip(),
+            diarization_model_revision=(os.getenv("DIARIZATION_MODEL_REVISION") or "").strip(),
+            model_local_only=_as_bool("WHISPERX_MODEL_LOCAL_ONLY", runtime_profile in {"production", "release"}),
             use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
             enable_speaker_clustering=_as_bool("SPEAKER_CLUSTERING", False),
@@ -183,6 +233,7 @@ class ModelCacheManager:
         self._asr_weights = {}
         self._align = {}
         self._diarizer = {}
+        self._resolved_snapshots: dict[tuple[str, str, str, bool], str] = {}
         self._last_model_load_ms = 0.0
 
     def _asr_key(self, model: str, device: str, compute_type: str, backend: str) -> tuple:
@@ -194,9 +245,20 @@ class ModelCacheManager:
     def _wrapper_key(self, model: str, device: str, compute_type: str, backend: str, language: str | None, beam_size: int, vad_onset: float, chunk_size: int, initial_prompt: str, hotwords: str) -> tuple:
         return self._asr_key(model, device, compute_type, backend) + (language or "auto", beam_size, float(vad_onset), int(chunk_size), initial_prompt or "", hotwords or "")
 
+    def _resolve_snapshot(self, identifier: str, revision: str | None, *, local_only: bool, label: str) -> str:
+        key = (label, identifier, revision or "", local_only)
+        if key not in self._resolved_snapshots:
+            self._resolved_snapshots[key] = _resolve_pinned_snapshot(
+                identifier, revision, local_only=local_only, label=label
+            )
+        return self._resolved_snapshots[key]
+
     def get_asr_model(
         self,
         model: str,
+        model_repository: str,
+        model_revision: str,
+        model_local_only: bool,
         device: str,
         compute_type: str,
         backend: str,
@@ -208,24 +270,30 @@ class ModelCacheManager:
         initial_prompt: str,
         hotwords: str,
     ):
-        key = self._wrapper_key(model, device, compute_type, backend, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords)
+        resolved_model = self._resolve_snapshot(
+            model_repository if model_repository and not Path(model).is_dir() else model,
+            model_revision,
+            local_only=model_local_only,
+            label="ASR_MODEL",
+        )
+        key = self._wrapper_key(resolved_model, device, compute_type, backend, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords)
         existing = self._asr.get(key)
         started = time.perf_counter()
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
-                weights_key = self._asr_key(model, device, compute_type, backend)
-                self._asr.setdefault(key, self._asr_weights.get(weights_key) or WhisperModel(model, device=device, compute_type=compute_type))
+                weights_key = self._asr_key(resolved_model, device, compute_type, backend)
+                self._asr.setdefault(key, self._asr_weights.get(weights_key) or WhisperModel(resolved_model, device=device, compute_type=compute_type))
                 self._asr_weights.setdefault(weights_key, self._asr[key])
             else:
-                weights_key = self._asr_key(model, device, compute_type, backend)
+                weights_key = self._asr_key(resolved_model, device, compute_type, backend)
                 base_model = self._asr_weights.get(weights_key)
                 # Compatibility markers for the legacy cache contract:
                 # base_model = existing.model and model=base_model are the
                 # intended fast path when a wrapper is recreated for a new
                 # language.  The old eviction branch used ``del self._asr[key]``.
-                wrapper = self._load_whisperx_wrapper(model, device, compute_type, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords, base_model)
+                wrapper = self._load_whisperx_wrapper(resolved_model, device, compute_type, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords, base_model)
                 self._asr[key] = wrapper
                 if base_model is None:
                     self._asr_weights[weights_key] = getattr(wrapper, "model", wrapper)
@@ -260,11 +328,17 @@ class ModelCacheManager:
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._align[key]
 
-    def get_diarizer(self, device: str, hf_token: str):
-        key = (device, hf_token)
+    def get_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool):
+        resolved_model = self._resolve_snapshot(
+            model_name,
+            model_revision,
+            local_only=model_local_only,
+            label="DIARIZATION_MODEL",
+        )
+        key = (device, hf_token, resolved_model)
         if key not in self._diarizer:
             started = time.perf_counter()
-            self._diarizer[key] = WhisperXDiarizationPipeline(use_auth_token=hf_token, device=device)
+            self._diarizer[key] = WhisperXDiarizationPipeline(model_name=resolved_model, use_auth_token=hf_token, device=device)
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
 
@@ -284,8 +358,9 @@ class ModelCacheManager:
                     pass
         return had_models
 
-    def release_diarizer(self, device: str, hf_token: str) -> bool:
-        key = (device, hf_token)
+    def release_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool) -> bool:
+        resolved_model = self._resolve_snapshot(model_name, model_revision, local_only=model_local_only, label="DIARIZATION_MODEL")
+        key = (device, hf_token, resolved_model)
         existed = key in self._diarizer
         self._diarizer.pop(key, None)
         if existed:
@@ -313,6 +388,7 @@ class ModelCacheManager:
         self._asr_weights.clear()
         self._align.clear()
         self._diarizer.clear()
+        self._resolved_snapshots.clear()
         self._last_model_load_ms = 0.0
 
 
@@ -536,6 +612,9 @@ class TranscriptionPipeline:
         if self.config.asr_backend == "faster-whisper":
             model = self.cache.get_asr_model(
                 self.config.asr_model,
+                self.config.asr_model_repository,
+                self.config.asr_model_revision,
+                self.config.model_local_only,
                 self.config.device,
                 self.config.compute_type,
                 "faster-whisper",
@@ -590,6 +669,9 @@ class TranscriptionPipeline:
         require_binary("ffmpeg", extra_roots=[self.project_root])
         model = self.cache.get_asr_model(
             self.config.asr_model,
+            self.config.asr_model_repository,
+            self.config.asr_model_revision,
+            self.config.model_local_only,
             self.config.device,
             self.config.compute_type,
             "whisperx",
@@ -658,7 +740,13 @@ class TranscriptionPipeline:
             audio_path = str(alternate_path)
 
         def run_diarizer(device: str):
-            diarizer = self.cache.get_diarizer(device, self.config.hf_token)
+            diarizer = self.cache.get_diarizer(
+                device,
+                self.config.hf_token,
+                self.config.diarization_model,
+                self.config.diarization_model_revision,
+                self.config.model_local_only,
+            )
             return diarizer(
                 audio_path,
                 min_speakers=self.config.min_speakers,
@@ -673,7 +761,13 @@ class TranscriptionPipeline:
             # failure.  Release the failed CUDA diarizer and retry the same
             # canonical audio on CPU when explicitly allowed by policy.
             if requested_device == "cuda" and self.config.diarization_cpu_fallback and is_cuda_oom(exc):
-                self.cache.release_diarizer("cuda", self.config.hf_token)
+                self.cache.release_diarizer(
+                    "cuda",
+                    self.config.hf_token,
+                    self.config.diarization_model,
+                    self.config.diarization_model_revision,
+                    self.config.model_local_only,
+                )
                 ctx.diarization_runtime["device"] = "cpu"
                 ctx.diarization_runtime["cpu_fallback"] = True
                 diarize_df, speaker_embeddings = run_diarizer("cpu")

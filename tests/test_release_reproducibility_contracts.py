@@ -10,6 +10,7 @@ def read(path: str) -> str:
 
 def test_release_manifest_has_pinned_release_identity_and_models():
     manifest = read("scripts/write-runtime-manifest.ps1")
+    pipeline = read("app/transcription_pipeline.py")
     env = read(".env.example")
     for field in ("releaseVersion", "gitCommit", "runtimeProfile", "WHISPERX_MODEL_REVISION", "DIARIZATION_MODEL_REVISION", "LLM_MODEL_REVISION", "LLM_MODEL_SHA256"):
         assert field in manifest or field in env
@@ -18,6 +19,11 @@ def test_release_manifest_has_pinned_release_identity_and_models():
     assert "model-manifest.json" in manifest
     assert "whisperXModelInventoryHash" in manifest
     assert "onnxRuntime = $onnxVersion" in manifest
+    assert "snapshot_download" in pipeline
+    assert 'label="ASR_MODEL"' in pipeline
+    assert 'label="DIARIZATION_MODEL"' in pipeline
+    assert "model_name=resolved_model" in pipeline
+    assert "WHISPERX_MODEL_LOCAL_ONLY" in env
 
 
 def test_lan_launcher_fails_closed_for_unpinned_diarization_revision():
@@ -60,3 +66,5 @@ def test_release_gate_requires_all_live_acceptance_scenarios():
         assert scenario in gate
     assert "ACCEPTANCE_" in gate
     assert "backupVerified" in gate and "cleanRestore" in gate
+    assert 'summaryTerminalUsable = ($summaryStatus -in @("READY", "NEEDS_REVIEW"))' in gate
+    assert "summaryQualityGreen" in gate

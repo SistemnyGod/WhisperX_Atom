@@ -76,6 +76,13 @@ $chains = @($results | ForEach-Object {
         transcriptId = [string](Get-JsonProperty $_ "transcriptV1Id")
         traceId = [string](Get-JsonProperty $_ "traceId")
         transcriptReady = $transcriptReady
+        # NEEDS_REVIEW is a usable terminal protocol: the content gate has
+        # rejected some claims, but the pipeline still produced a user-visible
+        # result. Keep quality-green (READY) separate from technical usability
+        # so release acceptance does not confuse quality review with a failed
+        # summary worker.
+        summaryTerminalUsable = ($summaryStatus -in @("READY", "NEEDS_REVIEW")) -and (-not [string]::IsNullOrWhiteSpace($summaryId))
+        summaryQualityGreen = ($summaryStatus -eq "READY") -and (-not [string]::IsNullOrWhiteSpace($summaryId))
         summaryReady = ($summaryStatus -eq "READY") -and (-not [string]::IsNullOrWhiteSpace($summaryId))
         localArchiveReady = [bool](Get-JsonProperty $_ "flacReady")
         deliveryConfirmed = [bool](Get-JsonProperty $_ "deliveryConfirmed")
@@ -89,6 +96,8 @@ $deliveryReady = @($chains | Where-Object { $_.deliveryConfirmed }).Count -gt 0
 $mediaReady = @($chains | Where-Object { $_.mediaReady }).Count -gt 0
 $transcriptReady = @($chains | Where-Object { $_.transcriptReady }).Count -gt 0
 $summaryReady = @($chains | Where-Object { $_.summaryReady }).Count -gt 0
+$summaryTerminalUsable = @($chains | Where-Object { $_.summaryTerminalUsable }).Count -gt 0
+$summaryQualityGreen = @($chains | Where-Object { $_.summaryQualityGreen }).Count -gt 0
 
 $requiredAcceptanceScenarios = @(
     "e2e-5m",
@@ -160,7 +169,7 @@ if (-not $recordingReady) { $reasons.Add("LOCAL_ARCHIVE_EVIDENCE_MISSING") }
 if (-not $deliveryReady) { $reasons.Add("DELIVERY_CONFIRMATION_MISSING") }
 if (-not $mediaReady) { $reasons.Add("MEDIA_READY_EVIDENCE_MISSING") }
 if (-not $transcriptReady) { $reasons.Add("TRANSCRIPT_NOT_READY") }
-if (-not $summaryReady) { $reasons.Add("SUMMARY_NOT_READY") }
+if (-not $summaryTerminalUsable) { $reasons.Add("SUMMARY_NOT_TERMINAL_USABLE") }
 
 $uniqueMeetingIds = @($chains | ForEach-Object { $_.meetingId } | Where-Object { $_ } | Select-Object -Unique)
 $allJobIds = @($chains | ForEach-Object { $_.jobIds } | Where-Object { $_ })
@@ -201,7 +210,9 @@ $audit = [ordered]@{
         delivery = $deliveryReady
         media = $mediaReady
         transcript = $transcriptReady
-        summary = $summaryReady
+        summary = $summaryTerminalUsable
+        summaryTerminalUsable = $summaryTerminalUsable
+        summaryQualityGreen = $summaryQualityGreen
         acceptance = $acceptanceReady
         coreAcceptanceScenarios = $coreAcceptanceScenarios
         coreAcceptance = $coreAcceptanceBlockers.Count -eq 0
