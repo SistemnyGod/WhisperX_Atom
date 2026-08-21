@@ -55,7 +55,12 @@ begin
   ExtractTemporaryFile('Preflight-Upgrade.ps1');
   ScriptPath := ExpandConstant('{tmp}\Preflight-Upgrade.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -InstalledRoot "' + ExpandConstant('{app}') + '"';
-  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // Always run the native 64-bit PowerShell on x64 Windows.  The installer
+  // executable itself may be 32-bit even when ArchitecturesInstallIn64BitMode
+  // is enabled; using {sys} in that process can resolve to SysWOW64 and the
+  // preflight then cannot inspect the 64-bit Recorder Host (false
+  // INSTALL_BLOCKED_UNINSPECTABLE_PROCESS).
+  if not Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     Result := 'INSTALL_PREFLIGHT_FAILED_TO_START'
   else if ResultCode <> 0 then
     Result := 'INSTALL_PREFLIGHT_REJECTED_' + IntToStr(ResultCode);
