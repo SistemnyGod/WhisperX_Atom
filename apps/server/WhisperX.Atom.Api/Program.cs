@@ -2457,7 +2457,9 @@ public sealed class Database(IConfiguration configuration)
                 await using var known = new NpgsqlCommand("SELECT sha256 FROM schema_migration_checksums WHERE version=@version", connection);
                 known.Parameters.AddWithValue("version", version);
                 var stored = await known.ExecuteScalarAsync();
-                if (stored is string knownChecksum && !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase))
+                if (stored is string knownChecksum &&
+                    !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase) &&
+                    !IsKnownRollingCompatibleChecksum(version, knownChecksum, checksum))
                     throw new InvalidOperationException($"MIGRATION_CHECKSUM_MISMATCH:{version}");
                 if (stored is null or DBNull)
                 {
@@ -2484,6 +2486,20 @@ public sealed class Database(IConfiguration configuration)
             }
             await transaction.CommitAsync();
         }
+    }
+
+    private static bool IsKnownRollingCompatibleChecksum(string version, string stored, string current)
+    {
+        // 033 changed comments only between the pre-rolling server bundle and
+        // the current source. The SQL schema is byte-for-byte equivalent, but
+        // strict checksum enforcement otherwise blocks every additive upgrade.
+        // Keep this allow-list deliberately narrow; all other migration drift
+        // remains fail-closed.
+        return string.Equals(version, "033_live_meeting_memory", StringComparison.Ordinal) &&
+               ((string.Equals(stored, "7bf4b7621cd400fd28935e237fb6e9e36888a7219e3ea360aaff224dcc73f1ac", StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(current, "fa20655e547bd80b14622a171352d2f6138a64d86c8ee9a609d126f4e633851e", StringComparison.OrdinalIgnoreCase)) ||
+                (string.Equals(stored, "fa20655e547bd80b14622a171352d2f6138a64d86c8ee9a609d126f4e633851e", StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(current, "7bf4b7621cd400fd28935e237fb6e9e36888a7219e3ea360aaff224dcc73f1ac", StringComparison.OrdinalIgnoreCase)));
     }
 
     public async Task PingAsync()

@@ -59,8 +59,27 @@ $minimumFreeBytes *= 1GB
 if ($driveInfo.AvailableFreeSpace -lt $minimumFreeBytes) { throw "SERVER_FREE_SPACE_LOW: required=$minimumFreeBytes available=$($driveInfo.AvailableFreeSpace)" }
 $imagesTar = Join-Path $bundle 'docker-images.tar'
 if (-not (Test-Path -LiteralPath $imagesTar -PathType Leaf)) { throw 'SERVER_IMAGES_TAR_MISSING' }
-& docker load --input $imagesTar
-if ($LASTEXITCODE -ne 0) { throw 'SERVER_IMAGES_LOAD_FAILED' }
+$needsImageLoad = $false
+foreach ($property in @($manifest.images.PSObject.Properties) + @($manifest.infrastructureImages.PSObject.Properties)) {
+    try {
+        $existing = Get-DockerImageMetadata ([string]$property.Value.reference)
+        if ([string]$existing.Id -ne [string]$property.Value.imageId) {
+            $needsImageLoad = $true
+            break
+        }
+    }
+    catch {
+        $needsImageLoad = $true
+        break
+    }
+}
+if ($needsImageLoad) {
+    & docker load --input $imagesTar
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_IMAGES_LOAD_FAILED' }
+}
+else {
+    Write-Host "SERVER_IMAGES_ALREADY_LOADED=$tag"
+}
 foreach ($property in $manifest.images.PSObject.Properties) {
     $image = [string]$property.Value.reference
     $metadata = Get-DockerImageMetadata $image
