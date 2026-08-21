@@ -20,9 +20,16 @@ internal static class VoiceAcceptanceRunner
         var cases = new[]
         {
             ("start", "Мифодий, начни запись", VoiceIntent.StartRecording),
+            ("start-alias", "Мифодий, запусти запись", VoiceIntent.StartRecording),
             ("pause", "Мифодий, поставь на паузу", VoiceIntent.PauseRecording),
             ("resume", "Мифодий, продолжи запись", VoiceIntent.ResumeRecording),
             ("stop", "Мифодий, останови запись", VoiceIntent.StopRecording),
+            ("farewell", "Мифодий, пока", VoiceIntent.Farewell),
+            ("farewell-goodbye", "Мифодий, до свидания", VoiceIntent.Farewell),
+            ("repeat", "Мифодий, повтори", VoiceIntent.RepeatAnswer),
+            ("shorten", "Мифодий, короче", VoiceIntent.ShortenAnswer),
+            ("elaborate", "Мифодий, подробнее", VoiceIntent.ElaborateAnswer),
+            ("previous-question", "Мифодий, вернись к предыдущему вопросу", VoiceIntent.PreviousQuestion),
             ("question-repair", "Мифодий, кто отвечал за ремонт?", VoiceIntent.AssistantQuery),
             ("question-deadline", "Мифодий, какой срок назвали?", VoiceIntent.AssistantQuery),
             ("question-pump", "Мифодий, что решили по насосу?", VoiceIntent.AssistantQuery),
@@ -38,7 +45,8 @@ internal static class VoiceAcceptanceRunner
                 expectedIntent = item.Item3.ToString(),
                 actualIntent = command.Intent.ToString(),
                 hasWakeWord = parser.HasWakeWord(item.Item2),
-                parameterPresent = item.Item3 == VoiceIntent.AssistantQuery && !string.IsNullOrWhiteSpace(command.Parameter),
+                parameterPresent = (item.Item3 is VoiceIntent.AssistantQuery or VoiceIntent.Farewell)
+                    && !string.IsNullOrWhiteSpace(command.Parameter),
                 accepted = parser.HasWakeWord(item.Item2) && command.Intent == item.Item3,
             };
         }).ToArray();
@@ -264,6 +272,7 @@ internal static class VoiceAcceptanceRunner
                 VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => 0.60,
                 VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.55,
                 VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence,
+                VoiceIntent.RepeatAnswer or VoiceIntent.ShortenAnswer or VoiceIntent.ElaborateAnswer or VoiceIntent.PreviousQuestion => VoiceIntentParser.DefaultMinimumConfidence,
                 _ => VoiceIntentParser.DefaultMinimumConfidence
             };
             var accepted = hasWake && !result.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)

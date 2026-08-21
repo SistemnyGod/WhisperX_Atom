@@ -2031,6 +2031,37 @@ public sealed class SpoolStore
         return result;
     }
 
+    /// <summary>
+    /// Makes retryable server-delivery sessions immediately eligible after a
+    /// reconnect. Terminal/manual-repair states are deliberately excluded.
+    /// The update is a single SQLite transaction so a wake signal cannot race
+    /// with a partial state change.
+    /// </summary>
+    public async Task<int> MakeRetryableDeliveriesDueAsync(DateTimeOffset nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE recording_sessions
+            SET next_retry_at=$now
+            WHERE state NOT IN ('CANCELLED','FINALIZED','RECORDING','PAUSED')
+              AND local_finalize_state='LOCAL_READY'
+              AND delivery_state IN ('PENDING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY','DELIVERY_ERROR','DELIVERY_FAILED','RECONCILING')
+              AND (
+                    last_error_retryable=1
+                    OR (last_error_code IS NULL AND delivery_state IN ('PENDING_SERVER','WAITING_SERVER','WAITING_SERVER_ASSEMBLY'))
+                  )
+              AND COALESCE(last_error_code,'') NOT IN ('AGENT_AUTH_REJECTED','MEETING_OWNER_MISMATCH','LOCAL_FAILED','REQUIRES_MANUAL_REPAIR')
+            """;
+        command.Parameters.AddWithValue("$now", nowUtc.ToUniversalTime().ToString("O"));
+        var changed = await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return changed;
+    }
+
     public async Task<int> PendingUploadSessionCountAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);

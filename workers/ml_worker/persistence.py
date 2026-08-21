@@ -115,6 +115,7 @@ class JobRepository:
                         worker_id=NULL,
                         lease_expires_at=NULL,
                         last_heartbeat=NULL,
+                        not_before=NULL,
                         error_code='WORKER_RESTART_RECOVERY',
                         updated_at=now()
                     WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
@@ -204,7 +205,7 @@ class JobRepository:
                     SET status='QUEUED', stage='RETRY_PENDING', progress=0,
                         attempt=attempt+1, error_message=%s, error_code=%s,
                         worker_id=NULL, lease_expires_at=NULL,
-                        last_heartbeat=now(), updated_at=now()
+                        last_heartbeat=now(), not_before=NULL, updated_at=now()
                     WHERE id=%s AND status NOT IN ('CANCELLED','READY','FAILED')
                       AND attempt < %s
                     RETURNING attempt
@@ -234,7 +235,7 @@ class JobRepository:
         connection.execute(
             """UPDATE jobs SET status='FAILED',stage='FAILED',progress=0,
                 error_message=%s,error_code=%s,worker_id=NULL,lease_expires_at=NULL,
-                last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')""",
+                last_heartbeat=NULL,not_before=NULL,updated_at=now() WHERE id=%s AND status NOT IN ('READY','FAILED','CANCELLED')""",
             (error, error_code, job_id),
         )
         meeting_id = job_type[1]
@@ -267,8 +268,8 @@ class JobRepository:
                 return
             job_type = connection.execute("SELECT type,meeting_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             connection.execute(
-                "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-                (status, stage, progress, error, error_code, socket.gethostname(), status, job_id),
+                "UPDATE jobs SET status=%s, stage=%s, progress=%s, error_message=%s,error_code=%s,worker_id=%s,lease_expires_at=CASE WHEN %s IN ('READY','FAILED','CANCELLED') THEN NULL ELSE now()+interval '30 minutes' END,last_heartbeat=now(),not_before=CASE WHEN %s='RUNNING' THEN NULL ELSE not_before END,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                (status, stage, progress, error, error_code, socket.gethostname(), status, status, job_id),
             )
 
     def renew_lease(self, job_id: str, message_id: str | None = None) -> None:
@@ -464,7 +465,7 @@ class JobRepository:
                 no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
                 partial_quality = error_row is not None and str(error_row[0] or "").upper() in {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE"}
                 connection.execute(
-                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code IN ('NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','ASR_ENHANCEMENT_FAILED') THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code IN ('NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','ASR_ENHANCEMENT_FAILED') THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                     (job_id,),
                 )
                 connection.execute(
@@ -655,7 +656,7 @@ class JobRepository:
                 ).fetchone()
                 if existing_enriched:
                     connection.execute("UPDATE recording_pipeline_runs SET transcript_v2_id=%s,updated_at=now() WHERE enrichment_job_id=%s", (existing_enriched[0], job_id))
-                    connection.execute("UPDATE jobs SET status='READY',stage='ENRICHED_READY',progress=100,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    connection.execute("UPDATE jobs SET status='READY',stage='ENRICHED_READY',progress=100,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
                     return True
             correlation_id = result.get("correlation_id") or (str(job[2]) if job[2] else None)
             if not correlation_id:
@@ -787,7 +788,7 @@ class JobRepository:
                 )
             result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None
             final_stage = "ENRICHED_READY" if version_kind == "ENRICHED" else "ASR_READY"
-            connection.execute("UPDATE jobs SET status='READY',stage=%s,progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (final_stage, result_error_message, result_error_code, job_id))
+            connection.execute("UPDATE jobs SET status='READY',stage=%s,progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (final_stage, result_error_message, result_error_code, job_id))
             return True
 
     @staticmethod

@@ -42,7 +42,7 @@ public sealed record AgentCommandRow(Guid Id, string CommandType, JsonDocument P
 public sealed record RecordingSessionRow(Guid Id, Guid MeetingId, Guid? AgentId, string State, DateTime? StartedAt, DateTime? FinishedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null);
 public sealed record RecordingSessionCreateResult(RecordingSessionRow? Session, string? ErrorCode = null, bool Retryable = false, bool Created = true);
 public sealed record RecordingCorrelationRow(Guid ServerSessionId, string? LocalSessionId, string? PipelineCorrelationId, JsonDocument Timings);
-public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage);
+public sealed record RecordingSessionServerStatus(Guid SessionId, Guid MeetingId, string RecordingState, Guid? MediaAssetId, string? MediaStatus, Guid? JobId, string? JobStatus, string? JobStage, string? FailureCode = null);
 public sealed record RecordingPipelineChain(
     Guid RecordingSessionId,
     Guid MeetingId,
@@ -92,6 +92,20 @@ public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, s
     // pipeline. Exposing only this nested object keeps the Desktop contract
     // additive and avoids a schema migration.
     public JsonElement? Timings => AnswerMetadata?.RootElement.TryGetProperty("timings", out var timings) == true ? timings.Clone() : null;
+    public string? ProcessingStage => ReadMetadataString("processingStage");
+    public DateTime? AcceptedAt => ReadMetadataDateTime("acceptedAt") ?? CreatedAt;
+    public string? TraceId => ReadMetadataString("traceId");
+    public string? CommandId => ReadMetadataString("commandId");
+
+    private string? ReadMetadataString(string name) => AnswerMetadata?.RootElement.TryGetProperty(name, out var value) == true
+        && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private DateTime? ReadMetadataDateTime(string name)
+    {
+        if (AnswerMetadata?.RootElement.TryGetProperty(name, out var value) != true || value.ValueKind != JsonValueKind.String)
+            return null;
+        return DateTime.TryParse(value.GetString(), out var parsed) ? parsed : null;
+    }
 };
 public sealed record AssistantRequestRoute(string ResolvedMode, double Confidence, string? ErrorCode = null, string? Clarification = null);
 /// <summary>
@@ -106,7 +120,7 @@ public sealed record AssistantRetrievalProbe(int MatchCount, double BestRank)
 }
 public sealed record LiveMeetingAppendResult(Guid RecordingSessionId, int AcceptedCount);
 public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY");
-public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null);
+public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null);
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(
@@ -521,11 +535,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return result;
     }
 
-    public async Task<RecordingTrackRow?> CreateRecordingTrackAsync(Guid agentId, Guid sessionId, string trackType, string? deviceId, string? deviceName, string? selectionMode, string? recordingProfile, int sampleRate, int channels, string? encoding, int? bitsPerSample, string? sourceEncoding = null, string? sourceSubFormat = null, int? validBitsPerSample = null)
+    public async Task<RecordingTrackRow?> CreateRecordingTrackAsync(Guid agentId, Guid sessionId, string trackType, string? deviceId, string? deviceName, string? selectionMode, string? recordingProfile, int sampleRate, int channels, string? encoding, int? bitsPerSample, string? sourceEncoding = null, string? sourceSubFormat = null, int? validBitsPerSample = null, string? localTrackId = null)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("INSERT INTO recording_tracks(id,session_id,track_type,device_id,device_name,selection_mode,recording_profile,sample_rate,channels,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample) SELECT @id,@session,@type,@device,@name,@mode,@profile,@rate,@channels,@encoding,@bits,@sourceEncoding,@sourceSubFormat,@validBits WHERE EXISTS(SELECT 1 FROM recording_sessions WHERE id=@session AND agent_id=@agent) RETURNING id,session_id,track_type,sample_rate,channels,codec,device_id,device_name,selection_mode,recording_profile,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample", connection);
-        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("type", trackType); command.Parameters.AddWithValue("device", (object?)deviceId ?? DBNull.Value); command.Parameters.AddWithValue("name", (object?)deviceName ?? DBNull.Value); command.Parameters.AddWithValue("mode", (object?)selectionMode ?? DBNull.Value); command.Parameters.AddWithValue("profile", (object?)recordingProfile ?? DBNull.Value); command.Parameters.AddWithValue("rate", sampleRate); command.Parameters.AddWithValue("channels", channels); command.Parameters.AddWithValue("encoding", (object?)encoding ?? DBNull.Value); command.Parameters.AddWithValue("bits", (object?)bitsPerSample ?? DBNull.Value); command.Parameters.AddWithValue("sourceEncoding", (object?)sourceEncoding ?? DBNull.Value); command.Parameters.AddWithValue("sourceSubFormat", (object?)sourceSubFormat ?? DBNull.Value); command.Parameters.AddWithValue("validBits", (object?)validBitsPerSample ?? DBNull.Value);
+        const string columns = "id,session_id,local_track_id,track_type,device_id,device_name,selection_mode,recording_profile,sample_rate,channels,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample";
+        await using var command = new NpgsqlCommand($"INSERT INTO recording_tracks({columns}) SELECT @id,@session,@localTrack,@type,@device,@name,@mode,@profile,@rate,@channels,@encoding,@bits,@sourceEncoding,@sourceSubFormat,@validBits WHERE EXISTS(SELECT 1 FROM recording_sessions WHERE id=@session AND agent_id=@agent) ON CONFLICT (session_id,local_track_id) WHERE local_track_id IS NOT NULL DO UPDATE SET track_type=EXCLUDED.track_type,device_id=EXCLUDED.device_id,device_name=EXCLUDED.device_name,selection_mode=EXCLUDED.selection_mode,recording_profile=EXCLUDED.recording_profile,sample_rate=EXCLUDED.sample_rate,channels=EXCLUDED.channels,encoding=EXCLUDED.encoding,bits_per_sample=EXCLUDED.bits_per_sample,source_encoding=EXCLUDED.source_encoding,source_sub_format=EXCLUDED.source_sub_format,valid_bits_per_sample=EXCLUDED.valid_bits_per_sample RETURNING id,session_id,track_type,sample_rate,channels,codec,device_id,device_name,selection_mode,recording_profile,encoding,bits_per_sample,source_encoding,source_sub_format,valid_bits_per_sample", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid()); command.Parameters.AddWithValue("agent", agentId); command.Parameters.AddWithValue("session", sessionId); command.Parameters.AddWithValue("localTrack", (object?)localTrackId ?? DBNull.Value); command.Parameters.AddWithValue("type", trackType); command.Parameters.AddWithValue("device", (object?)deviceId ?? DBNull.Value); command.Parameters.AddWithValue("name", (object?)deviceName ?? DBNull.Value); command.Parameters.AddWithValue("mode", (object?)selectionMode ?? DBNull.Value); command.Parameters.AddWithValue("profile", (object?)recordingProfile ?? DBNull.Value); command.Parameters.AddWithValue("rate", sampleRate); command.Parameters.AddWithValue("channels", channels); command.Parameters.AddWithValue("encoding", (object?)encoding ?? DBNull.Value); command.Parameters.AddWithValue("bits", (object?)bitsPerSample ?? DBNull.Value); command.Parameters.AddWithValue("sourceEncoding", (object?)sourceEncoding ?? DBNull.Value); command.Parameters.AddWithValue("sourceSubFormat", (object?)sourceSubFormat ?? DBNull.Value); command.Parameters.AddWithValue("validBits", (object?)validBitsPerSample ?? DBNull.Value);
         await using var reader = await command.ExecuteReaderAsync(); return !await reader.ReadAsync() ? null : new RecordingTrackRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetInt32(11), reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetInt32(14));
     }
 
@@ -757,9 +772,14 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "OWNER_AUTHORIZATION_REJECTED");
 
         // A second finalize must return the existing pipeline instead of resetting a
-        // session that is already ingesting or has reached a terminal state.
+        // session that is already ingesting or has reached a terminal state. A
+        // failed recorder media assembly is the explicit recovery exception: the
+        // same job/asset is requeued atomically, so confirmed chunks are reused.
+        Guid? existingAssetIdForRecovery = null;
+        Guid? existingJobIdForRecovery = null;
+        var requeuedExistingJob = false;
         var storageKey = $"/data/recordings/{sessionId:N}";
-        await using (var existing = new NpgsqlCommand("SELECT j.id,a.id FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE a.storage_key=@key AND a.source_type='recorder_session' AND j.type IN ('TRANSCRIBE_ASR','TRANSCRIBE') ORDER BY j.created_at DESC LIMIT 1", connection, tx))
+        await using (var existing = new NpgsqlCommand("SELECT j.id,a.id,j.status FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE a.storage_key=@key AND a.source_type='recorder_session' AND j.type IN ('TRANSCRIBE_ASR','TRANSCRIBE') ORDER BY j.created_at DESC LIMIT 1", connection, tx))
         {
             existing.Parameters.AddWithValue("key", storageKey);
             await using var existingReader = await existing.ExecuteReaderAsync();
@@ -767,10 +787,48 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             {
                 var existingJobId = existingReader.GetGuid(0);
                 var existingAssetId = existingReader.GetGuid(1);
+                var existingJobStatus = existingReader.GetString(2);
                 await existingReader.CloseAsync();
-                await EnsurePipelineLineageAsync(connection, tx, sessionId, meetingId, existingAssetId, existingJobId, null);
-                await tx.CommitAsync();
-                return new FinalizeRecordingResult(true, true, meetingId, existingJobId, existingAssetId, Array.Empty<MissingRecordingChunks>(), null);
+                if (string.Equals(existingJobStatus, "FAILED", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The recovery path below is intentionally narrow. Other
+                    // terminal failures must remain visible for manual repair.
+                    await using var failedDetails = new NpgsqlCommand("SELECT error_code,attempt FROM jobs WHERE id=@job", connection, tx);
+                    failedDetails.Parameters.AddWithValue("job", existingJobId);
+                    await using var failedReader = await failedDetails.ExecuteReaderAsync();
+                    var errorCode = (string?)null;
+                    var attempt = 0;
+                    if (await failedReader.ReadAsync())
+                    {
+                        errorCode = failedReader.IsDBNull(0) ? null : failedReader.GetString(0);
+                        attempt = failedReader.IsDBNull(1) ? 0 : failedReader.GetInt32(1);
+                    }
+                    await failedReader.CloseAsync();
+                    if (attempt < 1 && errorCode is "AUDIO_TRACK_DRIFT_HIGH" or "MEDIA_PROCESSING_FAILED" or "AUDIO_PROCESSING_ERROR")
+                    {
+                        await using var requeueAsset = new NpgsqlCommand("UPDATE media_assets SET status='INGESTING',failure_code=NULL,failure_detail=NULL WHERE id=@asset AND status='FAILED'", connection, tx);
+                        requeueAsset.Parameters.AddWithValue("asset", existingAssetId);
+                        await requeueAsset.ExecuteNonQueryAsync();
+                        await using var requeueJob = new NpgsqlCommand("UPDATE jobs SET status='QUEUED',stage='INGEST',progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@job AND status='FAILED'", connection, tx);
+                        requeueJob.Parameters.AddWithValue("job", existingJobId);
+                        await requeueJob.ExecuteNonQueryAsync();
+                        existingAssetIdForRecovery = existingAssetId;
+                        existingJobIdForRecovery = existingJobId;
+                        requeuedExistingJob = true;
+                    }
+                    else
+                    {
+                        await EnsurePipelineLineageAsync(connection, tx, sessionId, meetingId, existingAssetId, existingJobId, null);
+                        await tx.CommitAsync();
+                        return new FinalizeRecordingResult(true, false, meetingId, existingJobId, existingAssetId, Array.Empty<MissingRecordingChunks>(), errorCode ?? "MEDIA_ASSEMBLY_TERMINAL");
+                    }
+                }
+                else
+                {
+                    await EnsurePipelineLineageAsync(connection, tx, sessionId, meetingId, existingAssetId, existingJobId, null);
+                    await tx.CommitAsync();
+                    return new FinalizeRecordingResult(true, true, meetingId, existingJobId, existingAssetId, Array.Empty<MissingRecordingChunks>(), null);
+                }
             }
         }
 
@@ -779,6 +837,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "recording_tracks_required");
 
         var expectations = RecordingFinalizeSupport.ReadExpectedTrackExpectations(manifest, tracks.Keys);
+        // The recorder manifest is authoritative for the binding attempt. A
+        // previous client/server crash could have left an empty legacy track
+        // for the same session. Do not let that orphan make a valid manifest
+        // fail with recording_chunks_incomplete; a track explicitly listed in
+        // the manifest is still validated normally.
+        if (expectations.Count > 0)
+            tracks = tracks.Where(item => expectations.ContainsKey(item.Key)).ToDictionary(item => item.Key, item => item.Value);
         var expected = expectations
             .Where(item => item.Value.ExpectedChunkCount is not null)
             .ToDictionary(item => item.Key, item => item.Value.ExpectedChunkCount!.Value);
@@ -800,7 +865,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
 
         var finished = (object?)finishedAt ?? DBNull.Value;
 
-        var assetId = Guid.NewGuid();
+        var assetId = existingAssetIdForRecovery ?? Guid.NewGuid();
         await using var asset = new NpgsqlCommand("""
             INSERT INTO media_assets(id,meeting_id,original_name,storage_key,size_bytes,status,source_type)
             VALUES(@id,@meeting,@name,@key,@size,'INGESTING','recorder_session')
@@ -817,7 +882,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         assetLookup.Parameters.AddWithValue("key", storageKey);
         assetId = (Guid)(await assetLookup.ExecuteScalarAsync())!;
 
-        var jobId = Guid.NewGuid();
+        var jobId = existingJobIdForRecovery ?? Guid.NewGuid();
         await using var job = new NpgsqlCommand("""
             INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage)
             VALUES(@id,@meeting,@asset,'TRANSCRIBE_ASR','QUEUED','INGEST')
@@ -857,9 +922,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         updateMeeting.Parameters.AddWithValue("id", meetingId);
         await updateMeeting.ExecuteNonQueryAsync();
 
-        await using var existingOutbox = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='media.ingest' AND payload->>'job_id'=@job)", connection, tx);
+        await using var existingOutbox = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='media.ingest' AND payload->>'job_id'=@job AND published_at IS NULL)", connection, tx);
         existingOutbox.Parameters.AddWithValue("job", jobId.ToString());
-        if (!(bool)(await existingOutbox.ExecuteScalarAsync())!)
+        if (requeuedExistingJob || !(bool)(await existingOutbox.ExecuteScalarAsync())!)
         {
             var acousticProfile = await ReadAcousticProfileAsync(connection, tx, sessionId);
             var payload = JsonSerializer.Serialize(new
@@ -881,7 +946,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand("""
-            SELECT rs.id,rs.meeting_id,rs.state,a.id,a.status,j.id,j.status,j.stage
+            SELECT rs.id,rs.meeting_id,rs.state,a.id,a.status,j.id,j.status,j.stage,a.failure_code
             FROM recording_sessions rs
             LEFT JOIN media_assets a ON a.storage_key=@storage AND a.source_type='recorder_session'
             LEFT JOIN jobs j ON j.media_asset_id=a.id AND j.type IN ('TRANSCRIBE_ASR','TRANSCRIBE')
@@ -900,7 +965,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             reader.IsDBNull(4) ? null : reader.GetString(4),
             reader.IsDBNull(5) ? null : reader.GetGuid(5),
             reader.IsDBNull(6) ? null : reader.GetString(6),
-            reader.IsDBNull(7) ? null : reader.GetString(7));
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8));
     }
 
     /// <summary>
@@ -1376,7 +1442,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         insert.Parameters.AddWithValue("confidence", (object?)routerConfidence ?? DBNull.Value);
         insert.Parameters.AddWithValue("source", normalizedSource);
         var queuedAtUtc = DateTime.UtcNow;
-        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId, traceId, queued_at_utc = queuedAtUtc }));
+        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId, traceId, queued_at_utc = queuedAtUtc, acceptedAt = queuedAtUtc, processingStage = "QUEUED" }));
         insert.Parameters.AddWithValue("conversation", (object?)conversationId ?? DBNull.Value);
         await insert.ExecuteNonQueryAsync();
         var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), query_id = id, meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant", queued_at_utc = queuedAtUtc });
@@ -1560,6 +1626,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var userMessageId = Guid.NewGuid();
         var assistantMessageId = Guid.NewGuid();
         var queryId = Guid.NewGuid();
+        var queuedAtUtc = DateTime.UtcNow;
         await using (var insertUser = new NpgsqlCommand("INSERT INTO assistant_messages(id,conversation_id,role,content,status,evidence,retry_of) VALUES(@id,@conversation,'USER',@content,'READY','[]'::jsonb,@retry)", connection, transaction))
         {
             insertUser.Parameters.AddWithValue("id", userMessageId);
@@ -1574,7 +1641,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             insertAssistant.Parameters.AddWithValue("conversation", conversationId);
             await insertAssistant.ExecuteNonQueryAsync();
         }
-        await using (var insertQuery = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,assistant_mode,conversation_id,user_message_id,assistant_message_id,query,status,evidence) VALUES(@id,@user,@meeting,@mode,@conversation,@user_message,@assistant_message,@query,'QUEUED','[]'::jsonb)", connection, transaction))
+        await using (var insertQuery = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,assistant_mode,conversation_id,user_message_id,assistant_message_id,query,status,evidence,answer_metadata) VALUES(@id,@user,@meeting,@mode,@conversation,@user_message,@assistant_message,@query,'QUEUED','[]'::jsonb,@metadata::jsonb)", connection, transaction))
         {
             insertQuery.Parameters.AddWithValue("id", queryId);
             insertQuery.Parameters.AddWithValue("user", userId);
@@ -1584,13 +1651,14 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             insertQuery.Parameters.AddWithValue("user_message", userMessageId);
             insertQuery.Parameters.AddWithValue("assistant_message", assistantMessageId);
             insertQuery.Parameters.AddWithValue("query", query);
+            insertQuery.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { queued_at_utc = queuedAtUtc, acceptedAt = queuedAtUtc, processingStage = "QUEUED" }));
             await insertQuery.ExecuteNonQueryAsync();
         }
         var payload = JsonSerializer.Serialize(new
         {
             message_id = Guid.NewGuid(), query_id = queryId, conversation_id = conversationId,
             user_message_id = userMessageId, assistant_message_id = assistantMessageId,
-            meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant"
+            meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant", queued_at_utc = queuedAtUtc
         });
         await using (var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'llm.assistant',@payload::jsonb)", connection, transaction))
         {
@@ -1670,12 +1738,20 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     private static AssistantMessageRow ReadMessage(NpgsqlDataReader reader)
     {
         JsonElement? timings = null;
+        string? processingStage = null;
+        DateTime? acceptedAt = null;
+        string? traceId = null;
+        string? commandId = null;
         if (!reader.IsDBNull(11))
         {
             var metadata = reader.GetFieldValue<JsonDocument>(11);
             if (metadata.RootElement.TryGetProperty("timings", out var value)) timings = value.Clone();
+            if (metadata.RootElement.TryGetProperty("processingStage", out var stage) && stage.ValueKind == JsonValueKind.String) processingStage = stage.GetString();
+            if (metadata.RootElement.TryGetProperty("acceptedAt", out var accepted) && accepted.ValueKind == JsonValueKind.String && DateTime.TryParse(accepted.GetString(), out var parsed)) acceptedAt = parsed;
+            if (metadata.RootElement.TryGetProperty("traceId", out var trace) && trace.ValueKind == JsonValueKind.String) traceId = trace.GetString();
+            if (metadata.RootElement.TryGetProperty("commandId", out var command) && command.ValueKind == JsonValueKind.String) commandId = command.GetString();
         }
-        return new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), timings);
+        return new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), timings, processingStage, acceptedAt, traceId, commandId);
     }
 
     public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)

@@ -50,7 +50,8 @@ def test_assistant_only_server_startup_includes_llm_profile_and_boot_does_not_mi
     runtime = read("scripts/start-runtime.ps1")
     startup = read("scripts/install-server-startup-task.ps1")
     assert "if ($EnableQwen -or $EnableAssistant)" in launcher
-    assert "start-runtime.ps1" in startup
+    assert "supervise-server-runtime.ps1" in startup
+    assert "AtLogOn" in startup and "RestartCount 20" in startup
     assert "docker load" not in runtime
     assert "MIGRATION_ONLY" not in runtime
     assert "ASSISTANT_ENABLED" in runtime

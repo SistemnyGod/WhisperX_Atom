@@ -47,6 +47,7 @@ def recover_starved_queued(connection) -> int:
         LEFT JOIN transcripts t ON t.id=j.input_transcript_id
         WHERE j.status='QUEUED'
           AND j.updated_at < now() - interval '{stale_seconds} seconds'
+          AND (j.not_before IS NULL OR j.not_before <= now())
           -- The marker is only a debounce window, not a terminal state.  A
           -- relay can mark the job and crash after the original outbox row
           -- was marked published but before JetStream made it visible to a
@@ -164,6 +165,7 @@ async def recover_expired(connection) -> None:
         JOIN media_assets a ON a.id=j.media_asset_id
         LEFT JOIN recording_pipeline_runs p ON p.media_asset_id=a.id
         WHERE j.type IN ('TRANSCRIBE','TRANSCRIBE_ASR')
+          AND (j.not_before IS NULL OR j.not_before <= now())
           AND (
               (j.status='RUNNING' AND {now_stale})
               OR (j.status='QUEUED' AND j.error_code='WORKER_RESTART_RECOVERY' AND j.lease_expires_at IS NULL)
@@ -177,7 +179,7 @@ async def recover_expired(connection) -> None:
     """).fetchall()
     for job_id, meeting_id, asset_id, attempt, storage_key, source_type, session_id in media_rows:
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='UPLOADED',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='UPLOADED',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(
@@ -199,6 +201,7 @@ async def recover_expired(connection) -> None:
         FROM jobs j
         JOIN transcripts t ON t.id=j.input_transcript_id
         WHERE j.type='TRANSCRIPT_ENRICH'
+          AND (j.not_before IS NULL OR j.not_before <= now())
           AND (
               (j.status='RUNNING' AND {now_stale})
               OR (j.status='QUEUED' AND j.error_code='WORKER_RESTART_RECOVERY' AND j.lease_expires_at IS NULL)
@@ -213,7 +216,7 @@ async def recover_expired(connection) -> None:
         metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
         storage_key = metadata.get("asr_storage_key")
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='ASR_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='ASR_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(
@@ -237,6 +240,7 @@ async def recover_expired(connection) -> None:
         FROM jobs j
         JOIN transcripts t ON t.id=j.input_transcript_id
         WHERE j.type='SUMMARIZE'
+          AND (j.not_before IS NULL OR j.not_before <= now())
           AND (
               (j.status='RUNNING' AND {now_stale})
               OR (j.status='QUEUED' AND j.error_code='WORKER_RESTART_RECOVERY' AND j.lease_expires_at IS NULL)
@@ -250,7 +254,7 @@ async def recover_expired(connection) -> None:
     for job_id, meeting_id, transcript_id, correlation_id, quality_metadata in summary_rows:
         metadata = quality_metadata if isinstance(quality_metadata, dict) else {}
         connection.execute(
-            "UPDATE jobs SET status='QUEUED',stage='TRANSCRIPT_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
+            "UPDATE jobs SET status='QUEUED',stage='TRANSCRIPT_READY',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,not_before=NULL,error_code='WORKER_RESTART_RECOVERY',updated_at=now() WHERE id=%s",
             (job_id,),
         )
         exists = connection.execute(
@@ -293,7 +297,20 @@ async def run() -> None:
                 print(f"outbox_queued_watchdog_requeued={recovered}", flush=True)
             await recover_expired(connection)
             row = connection.execute(
-                "SELECT id, topic, payload FROM outbox_messages WHERE published_at IS NULL ORDER BY created_at, id LIMIT 1"
+                """
+                SELECT id, topic, payload
+                FROM outbox_messages
+                WHERE published_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM jobs delayed_job
+                      WHERE delayed_job.id::text = outbox_messages.payload->>'job_id'
+                        AND delayed_job.not_before IS NOT NULL
+                        AND delayed_job.not_before > now()
+                  )
+                ORDER BY created_at, id
+                LIMIT 1
+                """
             ).fetchone()
 
         if row:

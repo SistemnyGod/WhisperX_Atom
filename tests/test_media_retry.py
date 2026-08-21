@@ -13,6 +13,7 @@ def test_media_failure_classifier_keeps_deterministic_recording_errors_permanent
         ValueError("recording_chunk_sample_gap:track:1"): "RECORDING_TIMELINE_INVALID",
         FileNotFoundError("confirmed chunk missing"): "RECORDING_CHUNK_MISSING",
         ValueError("media has no audio"): "MEDIA_NO_AUDIO",
+        ValueError("recording_track_duration_mismatch:track:expected=90000:actual=30000"): "AUDIO_TRACK_DRIFT_HIGH",
     }
     for exc, code in cases.items():
         failure = classify_media_failure(exc)
@@ -36,6 +37,8 @@ def test_retry_integration_contract_uses_delayed_nak_and_atomic_attempt_guard():
     assert "attempt=attempt+1" in persistence and "attempt=0" in persistence
     assert "MEDIA_RETRY_WAIT" in persistence
     assert "status <> 'READY'" in persistence  # duplicate READY cannot overwrite the asset
+    assert "update_asset_failed" in worker
+    assert "failure_code" in persistence
 
 
 def test_media_lifecycle_does_not_resurrect_cancelled_or_finalized_sessions():

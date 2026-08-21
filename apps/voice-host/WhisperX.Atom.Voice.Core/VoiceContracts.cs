@@ -34,7 +34,16 @@ public enum VoiceIntent
     // compatible with the same numeric value.
     AssistantQuery,
     HistoryQuestion = AssistantQuery,
-    StopSpeaking
+    StopSpeaking,
+    // Append-only: keep existing numeric values stable for IPC consumers.
+    Farewell,
+    // Conversational follow-ups are appended so the existing IPC enum values
+    // remain stable. They are routed through the same Assistant conversation
+    // as a normal question; they never mutate Recorder state.
+    RepeatAnswer,
+    ShortenAnswer,
+    ElaborateAnswer,
+    PreviousQuestion
 }
 
 public sealed record VoiceCommand(

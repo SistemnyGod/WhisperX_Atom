@@ -12,6 +12,9 @@ public static class VoiceCoreSelfTest
         Assert(parser.HasWakeWord("Мифодий, начни запись"), "primary wake word");
         Assert(parser.HasWakeWord("Мефодий, начни запись"), "wake alias");
         Assert(parser.Parse("Мифодий, начни запись").Intent == VoiceIntent.StartRecording, "primary start intent");
+        Assert(parser.Parse("Мифодий, запусти запись").Intent == VoiceIntent.StartRecording, "start alias intent");
+        Assert(parser.Parse("Мифодий, запусти запись после звонка").Intent == VoiceIntent.AssistantQuery, "start alias with trailing text is conversational");
+        Assert(parser.Parse("Мифодий, запустить запись").Intent == VoiceIntent.AssistantQuery, "infinitive start is conversational");
         Assert(parser.Parse("Атом, начни запись").Intent == VoiceIntent.StartRecording, "start intent");
         Assert(parser.Parse("Атом, зафиксируй решение по поставкам").Intent == VoiceIntent.MarkDecision, "decision intent");
         Assert(parser.Parse("Атом, зафиксируй решение по поставкам").Parameter == "по поставкам", "decision parameter");
@@ -19,6 +22,20 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, покажи решения по ремонту").Intent == VoiceIntent.AssistantQuery, "spoken meeting question without punctuation");
         Assert(parser.Parse("Мефодий, расскажи что решили").Intent == VoiceIntent.AssistantQuery, "spoken meeting question alias");
         Assert(parser.Parse("Мифодий, скажи привет").Intent == VoiceIntent.AssistantQuery, "general greeting");
+        Assert(parser.Parse("Мифодий, пока").Intent == VoiceIntent.Farewell, "farewell intent");
+        Assert(parser.Parse("МЕФОДИЙ, до свидания!").Intent == VoiceIntent.Farewell, "farewell normalization");
+        Assert(parser.Parse("Мифодий, до встречи").Intent == VoiceIntent.Farewell, "farewell alias");
+        Assert(parser.Parse("Атом, до свидания").Intent == VoiceIntent.Farewell, "farewell wake alias");
+        Assert(parser.Parse("Мифодий, пока идёт запись?").Intent == VoiceIntent.AssistantQuery, "farewell word in question remains conversational");
+        Assert(parser.Parse("Мифодий, пока не начинай запись").Intent == VoiceIntent.AssistantQuery, "farewell word in imperative sentence remains conversational");
+        Assert(parser.Parse("Мифодий, повтори").Intent == VoiceIntent.RepeatAnswer, "repeat follow-up intent");
+        Assert(parser.Parse("Мифодий, повтори последний ответ").Intent == VoiceIntent.RepeatAnswer, "repeat answer alias");
+        Assert(parser.Parse("Мифодий, короче").Intent == VoiceIntent.ShortenAnswer, "shorten follow-up intent");
+        Assert(parser.Parse("Мифодий, подробнее").Intent == VoiceIntent.ElaborateAnswer, "elaborate follow-up intent");
+        Assert(parser.Parse("Мифодий, вернись к предыдущему вопросу").Intent == VoiceIntent.PreviousQuestion, "previous question intent");
+        Assert(parser.Parse("Мифодий, почему сделать короче ответ?").Intent == VoiceIntent.AssistantQuery, "contextual shorten remains conversational");
+        Assert(parser.Parse("Мифодий, подробнее по ремонту").Intent == VoiceIntent.AssistantQuery, "contextual elaborate remains conversational");
+        Assert(parser.Parse("Мифодий, повтори ответ по ремонту").Intent == VoiceIntent.AssistantQuery, "contextual repeat remains conversational");
         Assert(parser.Parse("Мифодий, как дела").Intent == VoiceIntent.AssistantQuery, "general conversation");
         Assert(parser.Parse("Мифодий, пошути").Intent == VoiceIntent.AssistantQuery, "general joke request");
         Assert(parser.Parse("Мифодий, а подробнее?").Intent == VoiceIntent.AssistantQuery, "follow-up question");
@@ -29,6 +46,7 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, ???").Intent == VoiceIntent.Unknown, "unrecognizable utterance is unknown");
         Assert(parser.Parse("Мифодий, почему остановилась запись?").Intent == VoiceIntent.AssistantQuery, "why recording stopped is a question");
         Assert(parser.Parse("Мифодий, может нам остановить запись?").Intent == VoiceIntent.AssistantQuery, "infinitive suggestion is a question");
+        Assert(parser.Parse("Мифодий, может нам запустить запись?").Intent == VoiceIntent.AssistantQuery, "start infinitive suggestion is a question");
         Assert(parser.Parse("Мифодий, остановить запись").Intent == VoiceIntent.AssistantQuery, "infinitive is not a command");
         Assert(parser.Parse("Мифодий, начать запись").Intent == VoiceIntent.AssistantQuery, "start infinitive is not a command");
         Assert(parser.Parse("Мифодий, остановись").Intent == VoiceIntent.StopSpeaking, "stop speech intent");

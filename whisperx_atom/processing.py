@@ -32,6 +32,7 @@ from .audio_signal import language_quality, mute_wav_intervals
 from .runtime import WhisperXRuntime
 from .metrics import PipelineMetrics
 from diarization_quality import choose_best_diarization_candidate, diarization_profiles_for_processing_profile, score_diarization_result
+from .diarization_policy import resolve_speaker_bounds
 
 
 LOGGER = logging.getLogger("whisperx.processing")
@@ -154,8 +155,12 @@ class ProcessingService:
 
         config = self._runtime.load_config()
         config.language = request.language or config.language
-        config.min_speakers = max(1, request.min_speakers)
-        config.max_speakers = max(config.min_speakers, request.max_speakers)
+        config.min_speakers, config.max_speakers = resolve_speaker_bounds(
+            request.min_speakers,
+            request.max_speakers,
+            configured_min=config.min_speakers,
+            configured_max=config.max_speakers,
+        )
         asr_only = str(request.profile or "").strip().lower() in {"asr", "asr_draft", "transcribe_asr"}
         config.enable_alignment = not asr_only
         config.enable_diarization = not asr_only and os.getenv("DIARIZATION_MODE", "preferred").lower() != "disabled"
@@ -444,6 +449,7 @@ class ProcessingService:
                         "selected": selected_score.to_dict(),
                         "candidates": [candidate["score"].to_dict() for candidate in candidates],
                         "retry_attempted": len(candidates) > 1,
+                        "runtime": dict(getattr(ctx, "diarization_runtime", {}) or {}),
                     }
                     if selected_score.score < retry_score:
                         warnings.append("DIARIZATION_LOW_QUALITY")
@@ -502,6 +508,12 @@ class ProcessingService:
                 "backend": config.asr_backend,
                 "device": config.device,
                 "compute_type": config.compute_type,
+                "diarization_device": getattr(config, "diarization_device", config.device),
+                "diarization_speaker_bounds": {
+                    "min": getattr(config, "min_speakers", None),
+                    "max": getattr(config, "max_speakers", None),
+                },
+                "diarization_runtime": dict(getattr(ctx, "diarization_runtime", {}) or {}),
                 "speaker_count": len({item.get("speaker") for item in segments if item.get("speaker") and item.get("speaker") != "UNKNOWN"}),
                 "word_count": len(result.get("word_segments", [])),
                 "processing_profile": request.profile,
@@ -773,6 +785,12 @@ class ProcessingService:
                 "backend": config.asr_backend,
                 "device": config.device,
                 "compute_type": config.compute_type,
+                "diarization_device": getattr(config, "diarization_device", config.device),
+                "diarization_speaker_bounds": {
+                    "min": getattr(config, "min_speakers", None),
+                    "max": getattr(config, "max_speakers", None),
+                },
+                "diarization_runtime": dict(getattr(ctx, "diarization_runtime", {}) or {}),
                 "processing_profile": request.profile,
                 "source_transcript_id": source.get("transcript_id"),
                 "asr_preprocessing": enrichment_metadata.get("asr_preprocessing", {}),

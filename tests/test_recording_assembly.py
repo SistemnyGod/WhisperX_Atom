@@ -68,5 +68,40 @@ class RecordingAssemblyTests(unittest.TestCase):
             with patch.object(recording_assembly, "_storage_path", return_value=path):
                 with self.assertRaisesRegex(ValueError, "sequence_gap"):
                     recording_assembly._concat_track(track, Path(directory) / "out.flac")
+
+    def test_truncated_stream_copy_falls_back_to_reencode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.flac"
+            second = root / "second.flac"
+            for path, frequency in ((first, 440), (second, 660)):
+                subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration=0.25", "-ac", "1", "-ar", "48000", "-c:a", "flac", str(path)],
+                    check=True,
+                )
+            chunks = {"/data/first": first, "/data/second": second}
+            track = recording_assembly.Track(
+                "mic",
+                "microphone",
+                (
+                    recording_assembly.Chunk(0, "/data/first", 0, 12_000, first.stat().st_size, _sha256(first)),
+                    recording_assembly.Chunk(1, "/data/second", 12_000, 12_000, second.stat().st_size, _sha256(second)),
+                ),
+            )
+            original_validate = recording_assembly._validate_output
+            validation_calls = 0
+
+            def reject_truncated_copy(path: Path, candidate: recording_assembly.Track) -> dict:
+                nonlocal validation_calls
+                validation_calls += 1
+                if validation_calls == 1:
+                    raise ValueError("recording_track_duration_mismatch:stream-copy")
+                return original_validate(path, candidate)
+
+            with patch.object(recording_assembly, "_storage_path", side_effect=lambda key: chunks[key]), patch.object(recording_assembly, "_validate_output", side_effect=reject_truncated_copy):
+                result = recording_assembly._concat_track(track, root / "out.flac")
+
+            self.assertEqual(result["method"], "REENCODE_FALLBACK")
+            self.assertAlmostEqual(result["duration_ms"], 500, delta=100)
 if __name__ == "__main__":
     unittest.main()

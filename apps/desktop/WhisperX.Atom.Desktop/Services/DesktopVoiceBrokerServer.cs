@@ -14,6 +14,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private readonly VoiceAssistantConversationStore _voiceConversations;
     private readonly AssistantDeliveryStore _assistantDelivery;
     private readonly Action<Exception>? _log;
+    private readonly Action<string>? _messageLog;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
     private readonly object _commandCacheGate = new();
@@ -23,7 +24,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
 
     public event Action<Guid, Guid?>? AssistantResultAvailable;
 
-    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, VoiceAssistantConversationStore voiceConversations, AssistantDeliveryStore? assistantDelivery = null, Action<Exception>? log = null)
+    public DesktopVoiceBrokerServer(RecordingCommandService commands, IBackendService backend, ActiveMeetingContext activeMeeting, VoiceAssistantConversationStore voiceConversations, AssistantDeliveryStore? assistantDelivery = null, Action<Exception>? log = null, Action<string>? messageLog = null)
     {
         _commands = commands;
         _backend = backend;
@@ -31,6 +32,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         _voiceConversations = voiceConversations;
         _assistantDelivery = assistantDelivery ?? new AssistantDeliveryStore();
         _log = log;
+        _messageLog = messageLog;
     }
 
     public void Start()
@@ -156,20 +158,50 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 ? captureMeeting
                 : activeMeetingId ?? captureContext.MeetingId;
             var conversationId = GetVoiceConversationId(currentUser.Id, requestedMode, requestMeetingId);
-            var accepted = await _backend.CreateAssistantRequestAsync(
-                question,
-                requestedMode,
-                requestMeetingId,
-                conversationId,
-                "VOICE",
-                assistantCommandId,
-                assistantTraceId,
-                captureContext.RecordingSessionId,
-                captureContext.CaptureState,
-                previousResolvedMode: null,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            DesktopAssistantRequestAccepted? accepted;
+            try
+            {
+                accepted = await _backend.CreateAssistantRequestAsync(
+                    question,
+                    requestedMode,
+                    requestMeetingId,
+                    conversationId,
+                    "VOICE",
+                    assistantCommandId,
+                    assistantTraceId,
+                    captureContext.RecordingSessionId,
+                    captureContext.CaptureState,
+                    previousResolvedMode: null,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            catch (DesktopApiException exception)
+            {
+                var error = MapAssistantApiError(exception);
+                var rejected = new BrokerResponse(false, error,
+                    Detail: exception.Message, TraceId: exception.TraceId ?? assistantTraceId, CommandId: assistantCommandId);
+                CacheCommand(assistantCommandId, rejected);
+                return rejected;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                var timedOut = new BrokerResponse(false, "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT",
+                    Detail: "assistant_acceptance_timeout", TraceId: assistantTraceId, CommandId: assistantCommandId);
+                CacheCommand(assistantCommandId, timedOut);
+                return timedOut;
+            }
+            catch (HttpRequestException exception)
+            {
+                var unreachable = new BrokerResponse(false, "VOICE_ASSISTANT_SERVER_UNREACHABLE",
+                    Detail: exception.GetType().Name, TraceId: assistantTraceId, CommandId: assistantCommandId);
+                CacheCommand(assistantCommandId, unreachable);
+                return unreachable;
+            }
             if (accepted is null)
-                return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+            {
+                var rejected = new BrokerResponse(false, "VOICE_ASSISTANT_REQUEST_REJECTED", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
+                CacheCommand(assistantCommandId, rejected);
+                return rejected;
+            }
             if (Guid.TryParse(accepted.ConversationId, out var acceptedConversation))
             {
                 var acceptedMeeting = Guid.TryParse(accepted.MeetingId, out var parsedMeeting) ? parsedMeeting : (Guid?)null;
@@ -353,6 +385,12 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             try
             {
                 var user = await _backend.GetCurrentUserAsync(_shutdown.Token).ConfigureAwait(false);
+                if (user is null)
+                {
+                    LogMessage("ASSISTANT_DELIVERY_AUTH_OR_USER_UNAVAILABLE");
+                    await Task.Delay(TimeSpan.FromSeconds(3), _shutdown.Token).ConfigureAwait(false);
+                    continue;
+                }
                 foreach (var item in _assistantDelivery.GetForUser(user?.Id.ToString()))
                     await TryDeliverAssistantResultAsync(item, _shutdown.Token).ConfigureAwait(false);
             }
@@ -370,6 +408,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         if (query is null) return;
         var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
         if (!terminal) return;
+        LogMessage($"ASSISTANT_DELIVERY_TERMINAL queryId={pending.QueryId:N} status={query.Status} error={query.ErrorCode ?? "none"}");
         AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var resultConversation) ? resultConversation : null);
         // A worker must never be able to turn a failed grounding decision
         // into a confident spoken fact by populating VoiceAnswer.  For these
@@ -416,23 +455,94 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                     : null;
                 switch (playbackState?.ToUpperInvariant())
                 {
-                    case "PLAYED": _assistantDelivery.MarkDelivered(pending.QueryId); break;
-                    case "CANCELLED": _assistantDelivery.MarkCancelled(pending.QueryId); break;
+                    case "PLAYED": _assistantDelivery.MarkDelivered(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_PLAYED queryId={pending.QueryId:N}"); break;
+                    case "CANCELLED": _assistantDelivery.MarkCancelled(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_CANCELLED queryId={pending.QueryId:N}"); break;
                     case "FAILED":
                     case "AMBIGUOUS":
-                    case "RESERVED": _assistantDelivery.MarkAmbiguous(pending.QueryId); break;
-                    default: _assistantDelivery.MarkAccepted(pending.QueryId); break;
+                    case "RESERVED": _assistantDelivery.MarkAmbiguous(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pending.QueryId:N} playbackState={playbackState}"); break;
+                    default: _assistantDelivery.MarkAccepted(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_ACCEPTED queryId={pending.QueryId:N} playbackState={playbackState ?? "missing"}"); break;
                 }
             }
             else if (response.Error is "VOICE_HOST_BUSY" or "VOICE_ASSISTANT_QUEUE_FULL" or "VOICE_PLAYBACK_LEDGER_UNAVAILABLE")
+            {
                 _assistantDelivery.ResetToPending(pending.QueryId);
+                LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_FAILURE queryId={pending.QueryId:N} error={response.Error}");
+            }
             else
+            {
                 _assistantDelivery.MarkAmbiguous(pending.QueryId);
+                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pending.QueryId:N} error={response.Error ?? "unknown"}");
+            }
         }
-        catch (VoiceHostIpcException ex) when (!ex.RequestWritten) { _assistantDelivery.ResetToPending(pending.QueryId); }
-        catch (VoiceHostIpcException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
-        catch (IOException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
-        catch (TimeoutException) { _assistantDelivery.MarkAmbiguous(pending.QueryId); }
+        catch (VoiceHostIpcException ex) when (!ex.RequestWritten)
+        {
+            _assistantDelivery.ResetToPending(pending.QueryId);
+            LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_IPC queryId={pending.QueryId:N} detail={ex.Message}");
+        }
+        catch (VoiceHostIpcException ex) when (ex.RequestWritten)
+        {
+            // The write may have reached Voice Host even though the response
+            // was lost. Query the idempotency tombstone before declaring the
+            // dispatch ambiguous; this recovers PLAYED/ACCEPTED without ever
+            // synthesizing the answer a second time.
+            if (!await ReconcileAssistantPlaybackAsync(pending.QueryId, cancellationToken).ConfigureAwait(false))
+            {
+                _assistantDelivery.MarkAmbiguous(pending.QueryId);
+                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IPC queryId={pending.QueryId:N} detail={ex.Message}");
+            }
+        }
+        catch (IOException ex)
+        {
+            _assistantDelivery.MarkAmbiguous(pending.QueryId);
+            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IO queryId={pending.QueryId:N} detail={ex.Message}");
+        }
+        catch (TimeoutException ex)
+        {
+            _assistantDelivery.MarkAmbiguous(pending.QueryId);
+            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_TIMEOUT queryId={pending.QueryId:N} detail={ex.Message}");
+        }
+    }
+
+    private void LogMessage(string message) => _messageLog?.Invoke(message);
+
+    private async Task<bool> ReconcileAssistantPlaybackAsync(Guid queryId, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync(
+                "ASSISTANT_PLAYBACK_STATUS",
+                new { queryId },
+                timeout.Token).ConfigureAwait(false);
+            if (!response.Ok || response.Data is not JsonElement data || data.ValueKind != JsonValueKind.Object)
+                return false;
+            var playbackState = data.TryGetProperty("playbackState", out var state) ? state.GetString()?.ToUpperInvariant() : null;
+            switch (playbackState)
+            {
+                case "PLAYED":
+                    _assistantDelivery.MarkDelivered(queryId);
+                    LogMessage($"ASSISTANT_DELIVERY_RECONCILED queryId={queryId:N} playbackState=PLAYED");
+                    return true;
+                case "CANCELLED":
+                    _assistantDelivery.MarkCancelled(queryId);
+                    LogMessage($"ASSISTANT_DELIVERY_RECONCILED queryId={queryId:N} playbackState=CANCELLED");
+                    return true;
+                case "ACCEPTED":
+                case "RESERVED":
+                case "PLAYBACK_STARTED":
+                    _assistantDelivery.MarkAccepted(queryId);
+                    LogMessage($"ASSISTANT_DELIVERY_RECONCILED queryId={queryId:N} playbackState={playbackState}");
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or TimeoutException or OperationCanceledException)
+        {
+            LogMessage($"ASSISTANT_DELIVERY_RECONCILE_FAILED queryId={queryId:N} detail={exception.GetType().Name}");
+            return false;
+        }
     }
 
     private static string? AssistantErrorSpeech(string? errorCode) => errorCode switch
@@ -442,9 +552,27 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         "LOW_TRANSCRIPT_QUALITY" => "Сначала проверьте качество стенограммы.",
         "GROUNDING_REJECTED" => "Не удалось подтвердить ответ по стенограмме.",
         "NEEDS_REVIEW" => "Ответ требует проверки по стенограмме.",
+        "ASSISTANT_WAITING_FOR_GPU" => "Мифодий ждёт освобождения GPU и продолжит обработку автоматически.",
+        "ASSISTANT_GPU_BUSY_TIMEOUT" or "ASSISTANT_QUEUE_TIMEOUT" => "Мифодий не дождался освобождения GPU. Повторите вопрос позже.",
+        "ASSISTANT_LLM_UNAVAILABLE" => "Локальная модель Мифодия сейчас недоступна.",
+        "LOCAL_COMMAND_REQUIRED" => "Это команда записи. Скажите «Мифодий, начни запись».",
+        "ASSISTANT_NO_GROUNDED_ANSWER" => "Не удалось получить подтверждённый ответ.",
         "LLM_UNAVAILABLE" => "Помощник временно недоступен.",
         "FAILED" => "Не удалось получить подтверждённый ответ.",
         _ => null
+    };
+
+    private static string MapAssistantApiError(DesktopApiException exception) => exception.ErrorCode switch
+    {
+        "backend_unavailable" => "VOICE_ASSISTANT_SERVER_UNREACHABLE",
+        "backend_timeout" => "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT",
+        "authentication_required" => "VOICE_ASSISTANT_AUTH_REQUIRED",
+        "LOCAL_COMMAND_REQUIRED" => "LOCAL_COMMAND_REQUIRED",
+        "ASSISTANT_WAITING_FOR_GPU" => "ASSISTANT_WAITING_FOR_GPU",
+        "ASSISTANT_GPU_BUSY_TIMEOUT" => "ASSISTANT_GPU_BUSY_TIMEOUT",
+        "LLM_UNAVAILABLE" => "ASSISTANT_LLM_UNAVAILABLE",
+        _ when exception.StatusCode >= 500 => "VOICE_ASSISTANT_SERVER_ERROR",
+        _ => exception.ErrorCode
     };
 
     private Guid? GetVoiceConversationId(Guid userId, string? requestedMode, Guid? meetingId)

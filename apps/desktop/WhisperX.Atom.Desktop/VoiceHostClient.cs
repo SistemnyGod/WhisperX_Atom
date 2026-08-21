@@ -20,16 +20,21 @@ public sealed class VoiceHostClient
     public async Task<DesktopVoiceResponse> SendAsync(string command, object? payload = null, CancellationToken cancellationToken = default)
     {
         var requestWritten = false;
+        using var operationTimeout = string.Equals(command, "SPEAK_ASSISTANT_RESULT", StringComparison.OrdinalIgnoreCase)
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : null;
+        operationTimeout?.CancelAfter(TimeSpan.FromSeconds(15));
+        var operationToken = operationTimeout?.Token ?? cancellationToken;
         try
         {
             await using var pipe = new NamedPipeClientStream(".", "WhisperXAtomVoiceHost", PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync(500, cancellationToken).ConfigureAwait(false);
+            await pipe.ConnectAsync(500, operationToken).ConfigureAwait(false);
             using var reader = new StreamReader(pipe);
             await using var writer = new StreamWriter(pipe) { AutoFlush = true };
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload ?? new { }, _json));
             await writer.WriteLineAsync(JsonSerializer.Serialize(new { command, payload = document.RootElement.Clone() }, _json)).ConfigureAwait(false);
             requestWritten = true;
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(operationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(line)) throw new IOException("Voice Host returned an empty response.");
             using var result = JsonDocument.Parse(line);
             var root = result.RootElement;

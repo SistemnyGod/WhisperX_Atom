@@ -13,7 +13,7 @@ from whisperx_atom.domain import require_meeting_id
 from whisperx_atom.storage import LocalMediaStorage
 
 from .media_worker import prepare_media
-from .persistence import claim_message, job_attempt, job_state, mark_ready_for_asr_and_enqueue, record_stage_timing, release_message, reset_media_leases, renew_lease, schedule_media_retry, update_asset, update_job, update_recording_session_state
+from .persistence import claim_message, job_attempt, job_state, mark_ready_for_asr_and_enqueue, record_stage_timing, release_message, reset_media_leases, renew_lease, schedule_media_retry, update_asset, update_asset_failed, update_job, update_recording_session_state
 from .recording_assembly import assemble_recording_session
 from .retry import RETRY_DELAY_SECONDS, classify_media_failure, should_retry
 
@@ -153,6 +153,10 @@ async def run() -> None:
                         await asyncio.to_thread(update_recording_session_state, session_id, "MEDIA_FAILED")
                     except Exception:
                         logger.exception("recording_session_failure_state_update_failed session_id=%s", session_id)
+                try:
+                    await asyncio.to_thread(update_asset_failed, str(payload.get("media_asset_id")), failure.code, str(exc))
+                except Exception:
+                    logger.exception("media_asset_failure_state_update_failed asset_id=%s", payload.get("media_asset_id"))
                 update_job(job_id, "FAILED", "FAILED", 0, str(exc), failure.code)
                 await message.ack()
                 heartbeat.set_state("READY", failure.code)

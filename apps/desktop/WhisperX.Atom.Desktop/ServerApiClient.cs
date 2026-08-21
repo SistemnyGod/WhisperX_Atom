@@ -174,7 +174,7 @@ public sealed record DesktopPipelineRun(
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
     string? RecordingState = null);
-public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true);
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null);
 public sealed record DesktopAssistantRequestAccepted(
     string QueryId,
     string? ConversationId,
@@ -186,7 +186,11 @@ public sealed record DesktopAssistantRequestAccepted(
     string PollUrl,
     string EventsUrl,
     string? RoutingReason = null,
-    double? Confidence = null);
+    double? Confidence = null,
+    DateTimeOffset? AcceptedAt = null,
+    string? ProcessingStage = null,
+    string? TraceId = null,
+    string? CommandId = null);
 public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
     string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 
@@ -832,7 +836,8 @@ public sealed class ServerApiClient : IDisposable
     public async Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/assistant/conversations/{conversationId}/messages", new { content, retryOf }, cancellationToken);
-        if (!response.IsSuccessStatusCode) return null;
+        if (!response.IsSuccessStatusCode)
+            throw await CreateApiExceptionAsync(response, "ASSISTANT_REQUEST_REJECTED", "Сервер отклонил сообщение помощника.", cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<DesktopAssistantMessageCreateResult>(_json, cancellationToken);
     }
 
@@ -943,8 +948,39 @@ public sealed class ServerApiClient : IDisposable
     public async Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, Guid? recordingSessionId = null, string? captureState = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default)
     {
         using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/requests", new { question, requestedMode, source, activeMeetingId, recordingSessionId, captureState, conversationId, previousResolvedMode, commandId, traceId }, cancellationToken);
-        if (!response.IsSuccessStatusCode) return null;
+        if (!response.IsSuccessStatusCode)
+            throw await CreateApiExceptionAsync(response, "VOICE_ASSISTANT_REQUEST_REJECTED", "Сервер отклонил запрос Мифодия.", cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
+    }
+
+    private static async Task<DesktopApiException> CreateApiExceptionAsync(HttpResponseMessage response, string defaultCode, string defaultMessage, CancellationToken cancellationToken)
+    {
+        var statusCode = (int)response.StatusCode;
+        var errorCode = defaultCode;
+        var message = defaultMessage;
+        var retryable = statusCode >= 500 || statusCode == 408 || statusCode == 429;
+        var traceId = response.Headers.TryGetValues("X-Trace-Id", out var traceValues) ? traceValues.FirstOrDefault() : null;
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var document = JsonDocument.Parse(body);
+                var root = document.RootElement;
+                if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+                    errorCode = error.GetString() ?? errorCode;
+                if (root.TryGetProperty("message", out var serverMessage) && serverMessage.ValueKind == JsonValueKind.String)
+                    message = serverMessage.GetString() ?? message;
+                else if (root.TryGetProperty("spokenText", out var spoken) && spoken.ValueKind == JsonValueKind.String)
+                    message = spoken.GetString() ?? message;
+                if (root.TryGetProperty("retryable", out var retry) && retry.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    retryable = retry.GetBoolean();
+                if (root.TryGetProperty("traceId", out var trace) && trace.ValueKind == JsonValueKind.String)
+                    traceId = trace.GetString() ?? traceId;
+            }
+        }
+        catch (JsonException) { }
+        return new DesktopApiException(statusCode, errorCode, message, retryable: retryable, traceId: traceId);
     }
 
     public async Task<bool> PublishLiveMeetingSegmentsAsync(Guid meetingId, Guid? recordingSessionId, IReadOnlyList<DesktopLiveMeetingSegment> segments, CancellationToken cancellationToken = default)

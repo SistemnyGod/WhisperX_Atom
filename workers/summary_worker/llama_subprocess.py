@@ -113,7 +113,7 @@ class LocalLlamaRuntime:
     _last_used = 0.0
 
     def __init__(self, idle_seconds: int | None = None) -> None:
-        self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "120")))
+        self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "900")))
         # Keep the safe stop-after-job behavior until the deployment enables
         # cross-worker GPU coordination. The resident path is opt-in so a
         # standalone summary container cannot starve the ASR worker.

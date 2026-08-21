@@ -189,6 +189,23 @@ def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
     assert "HistoryQuestion = AssistantQuery" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
 
 
+def test_conversational_followups_use_the_existing_assistant_conversation():
+    contracts = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceContracts.cs").read_text(encoding="utf-8")
+    resolver = (ROOT / "apps/server/WhisperX.Atom.Api/AssistantModeResolver.cs").read_text(encoding="utf-8")
+    worker = (ROOT / "workers/summary_worker/assistant.py").read_text(encoding="utf-8")
+    for intent in ("RepeatAnswer", "ShortenAnswer", "ElaborateAnswer", "PreviousQuestion"):
+        assert intent in contracts
+        assert f"VoiceIntent.{intent}" in VOICE_PARSER or f"VoiceIntent.{intent}" in VOICE_RUNTIME
+    assert '"Повтори предыдущий ответ."' in VOICE_RUNTIME
+    assert '"Сделай предыдущий ответ короче."' in VOICE_RUNTIME
+    assert '"Расскажи подробнее по предыдущему ответу."' in VOICE_RUNTIME
+    assert '"Повтори предыдущий вопрос."' in VOICE_RUNTIME
+    assert '"сделай предыдущий ответ короче"' in resolver
+    assert '"вернись к предыдущему вопросу и ответь на него снова"' in resolver
+    assert "_retrieval_query_for_follow_up" in worker
+    assert 'role"' in worker and '== "user"' in worker
+
+
 def test_far_field_front_end_never_mutates_recorder_audio_and_commands_have_separate_confidence_policy():
     runtime = VOICE_RUNTIME
     front_end = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceAudioFrontEnd.cs").read_text(encoding="utf-8")
@@ -241,6 +258,20 @@ def test_voice_general_chat_is_not_blocked_by_an_active_recording():
     assert 'пошути' in parser
     assistant_block = broker.split('if (string.Equals(commandElement.GetString(), "ASSISTANT_QUESTION"', 1)[1].split('if (string.Equals(commandElement.GetString(), "ASSISTANT_RESULT"', 1)[0]
     assert 'StatusAsync(cancellationToken)' not in assistant_block
+
+
+def test_assistant_result_delivery_is_observable_and_bounded():
+    client = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/VoiceHostClient.cs").read_text(encoding="utf-8")
+    controller = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/VoiceHostController.cs").read_text(encoding="utf-8")
+    broker = (ROOT / "apps/desktop/WhisperX.Atom.Desktop/Services/DesktopVoiceBrokerServer.cs").read_text(encoding="utf-8")
+    assert 'CancelAfter(TimeSpan.FromSeconds(15))' in client
+    assert 'ASSISTANT_DELIVERY_EXCEPTION' in controller
+    assert 'ASSISTANT_DELIVERY_TERMINAL' in broker
+    assert 'ASSISTANT_DELIVERY_PLAYED' in broker
+    assert 'ASSISTANT_DELIVERY_AMBIGUOUS_IPC' in broker
+    assert 'ASSISTANT_PLAYBACK_STATUS' in broker
+    assert 'ReconcileAssistantPlaybackAsync' in broker
+    assert 'ASSISTANT_PLAYBACK_STATUS' in VOICE_RUNTIME
 
 
 def test_voice_documentation_matches_the_unrestricted_question_runtime():
@@ -350,6 +381,38 @@ def test_assistant_query_acceptance_is_silent_and_result_is_spoken_once():
     assert 'ASSISTANT_RESULT' in VOICE_RUNTIME
     # The generic acknowledgement must not be synthesized on every query.
     assert '"Вопрос принят, отвечу после обработки."' not in VOICE_RUNTIME
+
+
+def test_exact_greetings_use_local_tts_without_assistant_roundtrip():
+    assert "LocalGreetingText" in VOICE_RUNTIME
+    assert '"привет" or "скажи привет" or "поздоровайся"' in VOICE_RUNTIME
+    assert 'VoiceIntent.AssistantQuery when LocalGreetingText' in VOICE_RUNTIME
+    # Contextual or longer utterances must remain ordinary AssistantQuery;
+    # only the exact normalized greeting receives the local fast path.
+    assert 'VoiceIntent.AssistantQuery => await AskAssistantAsync' in VOICE_RUNTIME
+
+
+def test_duplicate_voice_command_is_visible_but_silent():
+    assert 'Команда уже выполняется' in VOICE_RUNTIME
+    assert 'speak: false' in VOICE_RUNTIME
+    assert 'if (!speak || _speech.QuietMode)' in VOICE_RUNTIME
+
+
+def test_voice_ledger_covers_wake_recognition_result_and_tts_without_raw_audio():
+    assert '"VOICE_WAKE_DETECTED"' in VOICE_RUNTIME
+    assert '"VOICE_RECOGNIZED"' in VOICE_RUNTIME
+    assert '"ASSISTANT_RESULT_READY"' in VOICE_RUNTIME
+    assert '"SYSTEM_RESPONSE_STARTED"' in VOICE_RUNTIME
+    assert '"SYSTEM_RESPONSE_FINISHED"' in VOICE_RUNTIME
+    assert "QueueVoiceLedgerEvent" in VOICE_RUNTIME
+    assert "recognizedTextLength" in VOICE_RUNTIME
+    # TEST_SPEECH may echo text for an explicit local diagnostic request;
+    # the durable lifecycle event itself stores only its length.
+    assert "recognizedText = command.Text" not in VOICE_RUNTIME
+    ledger = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceLedgerStore.cs").read_text(encoding="utf-8")
+    assert "voice-ledger.jsonl" in ledger
+    assert "MaximumBytes" in ledger
+    assert "audio" in ledger.lower()
 
 
 def test_assistant_page_refreshes_on_voice_result_without_manual_refresh():

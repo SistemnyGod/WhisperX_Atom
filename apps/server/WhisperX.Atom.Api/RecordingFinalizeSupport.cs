@@ -62,8 +62,11 @@ public static class RecordingFinalizeSupport
                 : null;
             var totalSamples = ReadNonNegativeLong(item, "total_samples");
             var startSample = ReadNonNegativeLong(item, "start_sample");
-            if (count is not null || totalSamples is not null || startSample is not null)
-                result[trackId] = new RecordingTrackExpectation(count, totalSamples, startSample);
+            // Keep the track id even when an older manifest has no optional
+            // expectation fields.  The manifest still identifies the tracks
+            // that belong to this local binding and lets finalize ignore a
+            // legacy orphan track created by a retried bind.
+            result[trackId] = new RecordingTrackExpectation(count, totalSamples, startSample);
         }
         return result;
     }

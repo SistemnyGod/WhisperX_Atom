@@ -92,11 +92,12 @@ GPU lease/queue state). A GPU worker that is processing is reported as `BUSY`,
 not as a failure. Qwen is `ENABLED` when `AUTO_SUMMARY_ENABLED=true` and the
 Summary Worker reports a valid model manifest and heartbeat.
 
-The 8 GB GPU LAN preset keeps WhisperX `large-v3`, uses `int8_float16` and
-`BATCH_SIZE=2`, and leaves pyannote diarization off until a measured acceptance
-run confirms enough VRAM headroom. Alignment remains enabled. This avoids a
-silent OOM while preserving the large-v3 ASR quality; diarization can be enabled
-later by setting `ENABLE_DIARIZATION=true` and repeating the runtime gate.
+The RTX 5060 Ti 16 GB LAN preset keeps WhisperX `large-v3`, uses
+`int8_float16` and `BATCH_SIZE=2`, and enables pyannote with bounded speaker
+search. The worker releases cached ASR/alignment models when free VRAM falls
+below `DIARIZATION_MIN_FREE_VRAM_MB` and retries diarization on CPU after a
+CUDA OOM, so V1 remains available. Machines with only 8 GB should keep
+`ENABLE_DIARIZATION=false` until a measured acceptance run confirms headroom.
 
 When a meeting is ready, the Desktop **Файлы** tab exposes **Скачать аудио**.
 The API downloads the permanent archive (or the original asset while derivatives

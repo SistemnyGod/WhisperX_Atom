@@ -299,6 +299,29 @@ def test_lan_launcher_persists_qwen_and_assistant_flags_for_startup():
     assert "-EnableQwen" in startup and "-EnableAssistant" in startup
 
 
+def test_server_runtime_supervisor_is_user_session_owned_and_bounded():
+    supervisor = read("scripts/supervise-server-runtime.ps1")
+    startup = read("scripts/install-server-startup-task.ps1")
+    bundle = read("scripts/build-server-bundle.ps1")
+    assert "Global\\WhisperXAtom.ServerSupervisor" in supervisor
+    assert "DOCKER_DESKTOP_NOT_FOUND" in supervisor
+    assert "Start-DockerDesktopIfNeeded" in supervisor
+    assert "DockerTimeoutSeconds = 600" in supervisor
+    assert "RestartCount 20" in startup and "RestartInterval" in startup
+    assert "AtLogOn" in startup and "InteractiveToken" in startup
+    assert "release-manifest.json" in startup and "DOCKER_DESKTOP_NOT_FOUND" in startup
+    assert "supervise-server-runtime.ps1" in bundle
+
+
+def test_reconnect_makes_only_retryable_delivery_due():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    client = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "MakeRetryableDeliveriesDueAsync" in spool
+    assert "last_error_retryable=1" in spool
+    assert "AGENT_AUTH_REJECTED" in spool and "MEETING_OWNER_MISMATCH" in spool
+    assert "_spool.MakeRetryableDeliveriesDueAsync" in client
+
+
 def test_summary_worker_image_contains_shared_runtime_modules():
     dockerfile = read("workers/summary_worker/Dockerfile")
     assert "COPY workers/db_pool.py /srv/workers/db_pool.py" in dockerfile

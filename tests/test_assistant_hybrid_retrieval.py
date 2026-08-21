@@ -27,7 +27,7 @@ def test_russian_normalization_keeps_yo_and_common_inflections_equivalent():
     assert normalized_tokens("ёх") == normalized_tokens("ех")
 
 
-def test_hybrid_embedding_recovers_paraphrase_without_fts_rank():
+def test_hashed_embedding_alone_never_creates_evidence_without_fts_or_lexical_overlap():
     retriever = HybridRetriever(HashedEmbeddingProvider())
     results = retriever.rank(
         "Кто отвечает за починку?",
@@ -36,10 +36,19 @@ def test_hybrid_embedding_recovers_paraphrase_without_fts_rank():
             candidate("noise", 1, "Погода и кофе."),
         ],
     )
+    assert results == []
+
+
+def test_lexical_overlap_remains_a_valid_hashed_anchor_without_fts():
+    retriever = HybridRetriever(HashedEmbeddingProvider())
+    results = retriever.rank(
+        "кто отвечает",
+        [candidate("target", 0, "Кто отвечает за ремонт? Ответственный назначен Иваном.")],
+    )
     assert results
     assert results[0].candidate.segment_id == "target"
     assert results[0].fts_score == 0
-    assert results[0].embedding_score >= 0.60
+    assert results[0].lexical_score > 0
 
 
 def test_neighbours_stay_inside_same_meeting_and_transcript():

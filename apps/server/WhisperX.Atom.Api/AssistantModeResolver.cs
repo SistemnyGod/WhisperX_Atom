@@ -52,6 +52,13 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         if (normalizedMode is null)
             return Invalid("ASSISTANT_MODE_INVALID", request.ConversationId);
 
+        // Recorder mutations must be handled by Voice Host/Desktop. If an
+        // older client sends an imperative here, fail closed instead of
+        // turning it into a meeting-memory question for Qwen.
+        if (IsRecorderImperative(question))
+            return new("", null, "local_command_required", 0.99, request.ConversationId,
+                "LOCAL_COMMAND_REQUIRED", "Повторите команду записи: «Мифодий, начни запись».");
+
         // A conversation is a server-owned scope hint. Reading it here also
         // makes follow-up questions work after Desktop has restarted, while
         // the user id keeps the lookup inside the authenticated RBAC boundary.
@@ -118,6 +125,8 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
     {
         var normalized = NormalizeRequestedMode(requestedMode);
         if (normalized is null) return new("", 0, "ASSISTANT_MODE_INVALID");
+        if (IsRecorderImperative(query))
+            return new("", 0.99, "LOCAL_COMMAND_REQUIRED", "Повторите команду записи: «Мифодий, начни запись».");
         var result = ResolveStaticPure(query?.Trim() ?? string.Empty, normalized, activeMeetingId);
         return new(result.ResolvedMode, result.Confidence, result.ErrorCode, result.Clarification);
     }
@@ -143,7 +152,6 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         return value.Contains("совещан", StringComparison.Ordinal)
             || value.Contains("встреч", StringComparison.Ordinal)
             || value.Contains("стенограмм", StringComparison.Ordinal)
-            || value.Contains("запис", StringComparison.Ordinal)
             || value.Contains("решили", StringComparison.Ordinal)
             || value.Contains("договорились", StringComparison.Ordinal)
             || value.Contains("поручен", StringComparison.Ordinal)
@@ -153,6 +161,24 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
             || value.Contains("по ремонту", StringComparison.Ordinal)
             || value.Contains("по насосу", StringComparison.Ordinal)
             || value.Contains("по истории", StringComparison.Ordinal);
+    }
+
+    internal static bool IsRecorderImperative(string text)
+    {
+        var value = NormalizeText(text);
+        string[] commands =
+        [
+            // These are recovery prompts for a stale/clipped utterance, not
+            // executable commands.  In particular, the infinitive
+            // «запустить запись» remains a conversational query as required
+            // by the fail-closed voice contract; only the exact imperative
+            // «запусти запись» is handled by VoiceIntentParser.
+            "начни запись", "запусти запись", "апусти запись", "останови запись", "заверши запись",
+            "поставь на паузу", "приостанови запись", "продолжи запись", "возобнови запись",
+            "поставь метку", "добавь метку", "отметь решение", "зафиксируй решение",
+            "отметь поручение", "зафиксируй поручение", "статус", "состояние", "замолчи"
+        ];
+        return commands.Any(command => value == command || value.StartsWith(command + " ", StringComparison.Ordinal));
     }
 
     internal static bool LooksLikeHistoryQuestion(string text)
@@ -172,6 +198,11 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         if (value.Length == 0 || value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 8)
             return false;
         return value is "почему" or "подробнее" or "а подробнее" or "а ещё" or "а еще" or "а кто" or "а когда"
+            or "повтори" or "повтори ответ" or "повтори последний ответ"
+            or "повтори предыдущий вопрос"
+            or "сделай предыдущий ответ короче"
+            or "расскажи подробнее по предыдущему ответу"
+            or "вернись к предыдущему вопросу и ответь на него снова"
             or "а почему" or "а срок" or "а ответственный" or "кто отвечает" or "кто ответственный"
             or "какой срок" or "срок точно";
     }

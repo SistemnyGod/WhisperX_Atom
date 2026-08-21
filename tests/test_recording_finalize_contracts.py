@@ -116,6 +116,16 @@ def test_server_finalize_revalidates_confirmed_chunk_checksum():
     assert "await RecordingFinalizeSupport.FindMissingAsync" in store
 
 
+def test_server_finalize_recovers_failed_recording_assembly_without_new_asset():
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    migration = read("apps/server/WhisperX.Atom.Api/Migrations/044_recording_delivery_integrity.sql")
+    assert "requeuedExistingJob" in store
+    assert "status='QUEUED',stage='INGEST'" in store
+    assert "failure_code=NULL" in store
+    assert "published_at IS NULL" in store
+    assert "failure_code text" in migration
+
+
 def test_missing_chunk_reconciliation_validates_confirmed_storage():
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
     missing = store.split("public async Task<IReadOnlyList<int>?> MissingChunksAsync", 1)[1]

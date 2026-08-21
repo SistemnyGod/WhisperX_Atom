@@ -163,6 +163,16 @@ class WhisperXRuntime:
         pipeline.config.max_speakers = config.max_speakers
         pipeline.config.enable_alignment = config.enable_alignment
         pipeline.config.enable_diarization = config.enable_diarization
+        # These controls are request-independent but can be changed by a
+        # rolling deployment without changing the ASR model fingerprint.
+        for name in (
+            "diarization_device",
+            "diarization_cpu_fallback",
+            "diarization_release_asr_on_low_vram",
+            "diarization_min_free_vram_mb",
+        ):
+            if hasattr(config, name):
+                setattr(pipeline.config, name, getattr(config, name))
 
     def cleanup_context(self, pipeline: Any, context: Any) -> None:
         cleanup = getattr(pipeline, "_cleanup_ctx", None)

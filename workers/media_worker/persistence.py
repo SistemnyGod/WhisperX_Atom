@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 from whisperx_atom.pipeline_contract import validate_stage_name
@@ -104,12 +105,18 @@ def mark_ready_for_asr_and_enqueue(job_id: str, payload: dict) -> bool:
     """
     with psycopg.connect(_conninfo()) as connection:
         with connection.transaction():
+            try:
+                delay_seconds = int(os.getenv("TRANSCRIPTION_START_DELAY_SECONDS", "300"))
+            except (TypeError, ValueError):
+                delay_seconds = 300
+            delay_seconds = max(0, min(delay_seconds, 3600))
+            not_before = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
             state = connection.execute("SELECT status,stage FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
             if state is None or str(state[0]) in {"CANCELLED", "FAILED", "READY"}:
                 return False
             connection.execute(
-                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),watchdog_requeue_count=0,last_watchdog_requeue_at=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
-                (socket.gethostname(), job_id),
+                "UPDATE jobs SET status='QUEUED',stage='READY_FOR_ASR',progress=25,error_message=NULL,error_code=NULL,worker_id=%s,lease_expires_at=now()+interval '30 minutes',last_heartbeat=now(),not_before=%s,watchdog_requeue_count=0,last_watchdog_requeue_at=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                (socket.gethostname(), not_before, job_id),
             )
             # Job id is the durable idempotency key; random outbox UUIDs are
             # still fine because this predicate prevents a duplicate publish.
@@ -154,6 +161,16 @@ def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key
         connection.execute(
             "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s AND status <> 'READY' AND EXISTS(SELECT 1 FROM jobs WHERE media_asset_id=media_assets.id AND status <> 'CANCELLED')",
             (sha256, archive_key, preview_key, asr_key, duration_ms, media_asset_id),
+        )
+
+
+def update_asset_failed(media_asset_id: str, error_code: str, error_detail: str) -> None:
+    """Keep the media asset terminal state aligned with its failed job."""
+    safe_detail = str(error_detail or "")[-2000:]
+    with psycopg.connect(_conninfo()) as connection:
+        connection.execute(
+            "UPDATE media_assets SET status='FAILED',failure_code=%s,failure_detail=%s WHERE id=%s AND status <> 'READY'",
+            (str(error_code or "MEDIA_PROCESSING_FAILED")[:120], safe_detail, media_asset_id),
         )
 
 

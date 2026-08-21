@@ -627,7 +627,11 @@ async def run() -> None:
     except ImportError as exc:
         raise RuntimeError("Install workers/summary_worker/requirements.txt") from exc
     client = await nats.connect(os.getenv("NATS_URL", "nats://nats:4222"))
-    runtime_probe = LocalLlamaRuntime()
+    # Capabilities must observe the same process-scoped runtime used by both
+    # NATS consumers; a separate probe reports STOPPED while Qwen is resident.
+    runtime_owner = f"summary-runtime:{socket.gethostname()}:{os.getpid()}:{os.urandom(6).hex()}"
+    shared_coordination = GpuRuntimeCoordinator(owner=runtime_owner)
+    shared_runtime = LocalLlamaRuntime()
     def summary_capabilities() -> dict[str, Any]:
         model_path = os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf")
         manifest_path = os.getenv("LLM_MODEL_MANIFEST", model_path + ".manifest.json")
@@ -667,8 +671,8 @@ async def run() -> None:
             "modelManifestSize": manifest_size,
             "modelValidationReason": validation_reason,
             "llamaRuntimeAvailable": os.path.isfile(llama_binary),
-            "llamaRuntimeState": runtime_probe.state,
-            "llamaResidentEnabled": runtime_probe.enabled,
+            "llamaRuntimeState": shared_runtime.state,
+            "llamaResidentEnabled": shared_runtime.enabled,
             "gpuRequired": os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"},
         }
     heartbeat = AsyncHeartbeat("summary-worker", capabilities=summary_capabilities)
@@ -693,9 +697,6 @@ async def run() -> None:
     # One process-scoped owner and one coordinator/runtime are shared by both
     # NATS consumers. Consumer names remain durable subscription identities,
     # never GPU ownership identities.
-    runtime_owner = f"summary-runtime:{socket.gethostname()}:{os.getpid()}:{os.urandom(6).hex()}"
-    shared_coordination = GpuRuntimeCoordinator(owner=runtime_owner)
-    shared_runtime = LocalLlamaRuntime()
     if await asyncio.to_thread(shared_coordination.reclaim_stale_owner):
         LOGGER.warning("reclaimed_stale_llm_runtime_owner")
     summary_worker = SummaryWorker(shared_coordination, shared_runtime, runtime_owner)
@@ -704,7 +705,17 @@ async def run() -> None:
         LOGGER.warning("recovered stale summary jobs count=%s", recovered_summary)
     assistant_worker = AssistantWorker(shared_coordination, shared_runtime, runtime_owner)
     assistant_watchdog_interval = max(15.0, float(os.getenv("ASSISTANT_QUEUE_WATCHDOG_INTERVAL_SECONDS", "30")))
-    assistant_queue_timeout = max(120, int(os.getenv("ASSISTANT_QUEUE_TIMEOUT_SECONDS", "600")))
+    # The durable GPU wait budget is one hour.  Keep the legacy
+    # ASSISTANT_QUEUE_TIMEOUT_SECONDS override, but fall back to the public
+    # GPU queue setting so the watchdog cannot expire a healthy query after
+    # ten minutes while schedule_gpu_wait still permits an hour.
+    assistant_queue_timeout = max(
+        120,
+        int(os.getenv(
+            "ASSISTANT_QUEUE_TIMEOUT_SECONDS",
+            os.getenv("ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS", "3600"),
+        )),
+    )
 
     async def gpu_coordination_watch() -> None:
         """Unload resident Qwen promptly when an ASR job requests the GPU."""
@@ -726,6 +737,9 @@ async def run() -> None:
     async def consume_summary() -> None:
         while True:
             await asyncio.to_thread(summary_worker._llm_runtime.release_idle)
+            if summary_worker._llm_runtime.state == "STOPPED":
+                await asyncio.to_thread(shared_coordination.mark_llm_stopped, runtime_owner)
+            set_runtime_state()
             for message in await fetch_available(summary_subscription, nats.errors.TimeoutError, timeout=1):
                 job_id: str | None = None
                 try:
@@ -766,6 +780,9 @@ async def run() -> None:
         last_watchdog = 0.0
         while True:
             await asyncio.to_thread(assistant_worker._llm_runtime.release_idle)
+            if assistant_worker._llm_runtime.state == "STOPPED":
+                await asyncio.to_thread(shared_coordination.mark_llm_stopped, runtime_owner)
+            set_runtime_state()
             now = time.monotonic()
             if now - last_watchdog >= assistant_watchdog_interval:
                 expired = await asyncio.to_thread(assistant_worker.repository.expire_stale_queries, assistant_queue_timeout)

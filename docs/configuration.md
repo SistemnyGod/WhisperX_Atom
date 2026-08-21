@@ -23,11 +23,16 @@ Copy-Item .env.example .env
 | `COMPUTE_TYPE` | faster-whisper compute type | `float16` |
 | `BATCH_SIZE` | ASR batch size | `2` для 8 GB VRAM |
 | `ENABLE_ALIGNMENT` | Word alignment stage | `true` |
-| `ENABLE_DIARIZATION` | pyannote speaker diarization | `false` для 8 GB VRAM preset |
+| `ENABLE_DIARIZATION` | pyannote speaker diarization | `true` при наличии HF доступа |
 | `REQUIRE_CUDA` | Запрет CPU fallback | `true` |
 | `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | Совместимость загрузки pyannote | `1` |
 | `HF_TOKEN` | Доступ к Hugging Face/diarization | Локальный секрет, можно оставить пустым для degraded |
 | `DIARIZATION_MODE` | Политика diarization | `preferred` |
+| `DIARIZATION_DEVICE` | Устройство pyannote (`auto`, `cuda`, `cpu`) | `auto` |
+| `DIARIZATION_MIN_SPEAKERS` / `DIARIZATION_MAX_SPEAKERS` | Ограничение поиска числа говорящих для типовой встречи | `1` / `8` |
+| `DIARIZATION_CPU_FALLBACK` | Повторить диаризацию на CPU после CUDA OOM | `true` |
+| `DIARIZATION_RELEASE_ASR_ON_LOW_VRAM` | Освободить ASR/alignment cache перед pyannote при низком VRAM | `true` |
+| `DIARIZATION_MIN_FREE_VRAM_MB` | Порог освобождения cache перед pyannote | `2048` |
 | `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
 | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
 | `ASSISTANT_EMBEDDING_PROVIDER` | Hybrid retrieval provider (`auto`, `sentence-transformers`, `hash`) | `auto` |
@@ -36,8 +41,9 @@ Copy-Item .env.example .env
 | `ASSISTANT_SEMANTIC_CANDIDATE_LIMIT` | Ограниченный semantic pool после RBAC/scope-фильтра | `512` |
 | `ASSISTANT_FINAL_TOP_K` | Число лучших anchors перед расширением соседями | `12` |
 | `ASSISTANT_NEIGHBOUR_LIMIT` | Максимум соседних сегментов в evidence-контексте | `36` |
-| `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.20` |
-| `ASSISTANT_HYBRID_EMBEDDING_MIN` | Минимальный embedding score для paraphrase-only hit | `0.60` |
+| `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.30` |
+| `ASSISTANT_HYBRID_EMBEDDING_MIN` | Минимальный embedding score для реального semantic hit | `0.72` |
+| `TRANSCRIPTION_START_DELAY_SECONDS` | Durable-пауза после сборки аудио перед тяжёлой V1/V2 GPU-обработкой; оставляет окно для быстрых вопросов Мифодия | `300` (`0` отключает) |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
 

@@ -269,12 +269,17 @@ class HybridRetriever:
             score = 0.50 * fts + 0.38 * embedding + 0.12 * lexical
             ranked.append(RankedCandidate(item, fts, embedding, lexical, score))
         ranked.sort(key=lambda item: (-item.score, -item.fts_score, item.candidate.meeting_id, item.candidate.ordinal, item.candidate.segment_id))
-        minimum = float(os.getenv("ASSISTANT_HYBRID_MIN_SCORE", "0.20"))
-        embedding_minimum = float(os.getenv("ASSISTANT_HYBRID_EMBEDDING_MIN", "0.60"))
+        minimum = float(os.getenv("ASSISTANT_HYBRID_MIN_SCORE", "0.30"))
+        embedding_minimum = float(os.getenv("ASSISTANT_HYBRID_EMBEDDING_MIN", "0.72"))
+        # The hashed provider is a deterministic fallback, not a semantic
+        # model. It must never create evidence from cosine similarity alone:
+        # unrelated segments can collide in the feature hash. A real local
+        # embedding provider may use the explicit semantic threshold.
+        semantic_provider = self.provider.name.startswith("sentence-transformers:")
         selected = [
             item for item in ranked
             if item.score >= minimum
-            and (item.fts_score > 0.0 or item.lexical_score > 0.0 or item.embedding_score >= embedding_minimum)
+            and (item.fts_score > 0.0 or item.lexical_score > 0.0 or (semantic_provider and item.embedding_score >= embedding_minimum))
         ][: max(1, min(int(limit), 12))]
         return selected
 

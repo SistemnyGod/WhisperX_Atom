@@ -203,7 +203,7 @@ public sealed class AssistantViewModel : ObservableObject
         OnPropertyChanged(nameof(HasMessages));
         OnPropertyChanged(nameof(HasPendingMessages));
         SelectedMessage = Messages.LastOrDefault(item => !item.IsUser) ?? Messages.LastOrDefault();
-        StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status, last.ErrorCode) : "Чат готов к вопросу.";
+        StatusText = Messages.LastOrDefault() is { } last ? DisplayStatus(last.Status, last.ErrorCode, last.ProcessingStage) : "Чат готов к вопросу.";
     }
 
     public async Task RefreshSelectedConversationAsync(CancellationToken cancellationToken = default)
@@ -218,7 +218,7 @@ public sealed class AssistantViewModel : ObservableObject
         SelectedMessage = Messages.FirstOrDefault(item => item.Id == selectedId)
             ?? Messages.LastOrDefault(item => !item.IsUser)
             ?? Messages.LastOrDefault();
-        if (Messages.LastOrDefault() is { } last) StatusText = DisplayStatus(last.Status, last.ErrorCode);
+        if (Messages.LastOrDefault() is { } last) StatusText = DisplayStatus(last.Status, last.ErrorCode, last.ProcessingStage);
     }
 
     public async Task AskAsync(CancellationToken pageToken, Guid? retryOf = null)
@@ -284,7 +284,7 @@ public sealed class AssistantViewModel : ObservableObject
                 return;
             }
             SelectedMessage = completed;
-            StatusText = DisplayStatus(completed.Status, completed.ErrorCode);
+            StatusText = DisplayStatus(completed.Status, completed.ErrorCode, completed.ProcessingStage);
             await LoadConversationsAsync(cancellationToken);
         }
         catch (OperationCanceledException)
@@ -411,10 +411,21 @@ public sealed class AssistantViewModel : ObservableObject
 
     private static string? GetString(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static long? GetLong(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) ? number : null;
-    private static string DisplayStatus(string status, string? errorCode = null)
+    private static string DisplayStatus(string status, string? errorCode = null, string? processingStage = null)
     {
         if (string.Equals(errorCode, "ASSISTANT_WAITING_FOR_GPU", StringComparison.OrdinalIgnoreCase))
             return "Мифодий ждёт освобождения GPU";
+        if (string.Equals(errorCode, "ASSISTANT_GPU_BUSY_TIMEOUT", StringComparison.OrdinalIgnoreCase))
+            return "GPU занят слишком долго — повторите вопрос позже";
+        if (string.Equals(errorCode, "LOCAL_COMMAND_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            return "Нужна явная команда записи";
+        if (string.Equals(errorCode, "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT", StringComparison.OrdinalIgnoreCase))
+            return "Сервер принимает запрос дольше обычного";
+        if (!string.IsNullOrWhiteSpace(processingStage))
+        {
+            var stageText = UiStatusMapper.Text($"PROCESSING_STAGE_{processingStage.Trim().ToUpperInvariant()}");
+            if (!string.Equals(stageText, "Состояние не определено", StringComparison.Ordinal)) return stageText;
+        }
         return status.ToUpperInvariant() switch
         {
         "QUEUED" => "Запрос в очереди",

@@ -85,5 +85,13 @@ def test_summary_and_assistant_release_resident_llm_for_durable_asr_request():
         assert "mark_llm_resident" in source
         assert "preempt_if_requested" in source
     assert 'LLM_RESIDENT_ENABLED", "true"' in llama
-    assert 'LLM_IDLE_UNLOAD_SECONDS", "120"' in llama
+    assert 'LLM_IDLE_UNLOAD_SECONDS", "900"' in llama
     assert "GPU_RUNTIME_COORDINATION_ENABLED" in compose
+
+
+def test_healthy_asr_wait_does_not_consume_assistant_retry_budget():
+    assistant = read("workers/summary_worker/assistant.py")
+    worker = read("workers/summary_worker/worker.py")
+    assert 'raise AssistantGpuBusy("ASSISTANT_WAITING_FOR_GPU")' in assistant
+    assert "retry_count unchanged" in assistant
+    assert 'os.getenv("ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS", "3600")' in worker

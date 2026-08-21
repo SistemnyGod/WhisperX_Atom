@@ -53,7 +53,8 @@ class PostgresGpuLease:
                 SELECT EXISTS(
                     SELECT 1 FROM jobs
                     WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS')
-                      AND (status='QUEUED'
+                      AND ((status='QUEUED'
+                            AND (not_before IS NULL OR not_before <= now()))
                            OR (status='RUNNING'
                               AND lease_expires_at IS NOT NULL
                               AND lease_expires_at > now()

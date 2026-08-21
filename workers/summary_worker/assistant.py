@@ -141,6 +141,11 @@ _LIVE_RETRIEVAL_STOPWORDS = _GROUNDING_STOPWORDS | {
 }
 
 _RU_INFLECTION_SUFFIXES = ("иями", "ами", "ями", "ого", "ему", "ому", "ов", "ев", "ам", "ям", "ах", "ях", "ы", "и", "а", "я", "у", "ю", "е", "о")
+_NON_NAME_CAPITALIZED = {
+    "Ответ", "Ответственный", "Срок", "Решение", "Решили", "Поручение", "Задача",
+    "Итог", "Итоги", "Вопрос", "Причина", "Причины", "Дата", "Нужно", "Нужен",
+    "Нужна", "Можно", "Следует", "Поэтому", "Также", "Тогда", "Это", "Этот", "Эта",
+}
 
 
 def _grounding_tokens(value: str) -> set[str]:
@@ -160,6 +165,15 @@ def _grounding_tokens(value: str) -> set[str]:
                     break
             result.add(token)
     return result
+
+
+def _named_tokens(value: str) -> set[str]:
+    """Return likely proper names/identifiers for strict evidence checks."""
+    return {
+        token.lower()
+        for token in re.findall(r"\b[А-ЯЁ][а-яё]{2,}\b", value or "")
+        if token not in _NON_NAME_CAPITALIZED
+    }
 
 
 def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str) -> bool:
@@ -186,13 +200,16 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
         evidence_tokens = _grounding_tokens(evidence_text)
         if claim_tokens and not (claim_tokens & evidence_tokens):
             return False
+        claim_names = _named_tokens(str(claim.get("text", "")))
+        evidence_lower = evidence_text.lower()
+        if any(name not in evidence_lower for name in claim_names):
+            return False
         numeric_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", claim_text))
         if any(token not in evidence_text for token in numeric_tokens):
             return False
-    # The UI answer and shorter spoken answer must be summaries of verified
-    # claims, not a second unverified generation channel.  Exact lexical
-    # containment is intentional here: names, numbers, dates and equipment
-    # identifiers cannot be invented through paraphrase.
+    # The UI answer and shorter spoken answer are a paraphrase channel, not a
+    # second claim list. Keep the hard checks for protected values while
+    # allowing normal Russian connective words and grammatical paraphrases.
     covered = " ".join(str(claim.get("text", "")) for claim in claims).lower()
     cited = " ".join(
         valid[str(item).removeprefix("SEG-")][3]
@@ -200,8 +217,10 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
         if str(item).removeprefix("SEG-") in valid
     ).lower()
     for value in (str(result.get("answer", "")), str(result.get("voice_answer", ""))):
-        tokens = _grounding_tokens(value)
-        if tokens and not tokens.issubset(_grounding_tokens(covered) | _grounding_tokens(cited)):
+        protected = set(re.findall(r"\d+(?:[.,]\d+)?", value))
+        protected.update(re.findall(r"\b[\w-]*\d[\w-]*\b", value.lower()))
+        protected.update(_named_tokens(value))
+        if any(token.lower() not in cited for token in protected):
             return False
     return True
 
@@ -331,6 +350,27 @@ class AssistantRepository:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
 
+    def set_processing_stage(self, query_id: str, stage: str) -> None:
+        """Publish a small durable stage without changing query ownership.
+
+        Stage metadata is intentionally additive JSONB.  It lets Desktop show
+        a truthful background state after the foreground 15-second wait while
+        preserving command/trace/queue metadata from acceptance.
+        """
+        normalized = (stage or "RUNNING").strip().upper()[:64]
+        with self._db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE assistant_queries
+                SET answer_metadata=jsonb_set(
+                      COALESCE(answer_metadata,'{}'::jsonb),
+                      '{processingStage}', to_jsonb(%s::text), true),
+                    updated_at=now()
+                WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
+                """,
+                (normalized, query_id),
+            )
+
     def schedule_retry(
         self,
         query_id: str,
@@ -395,8 +435,10 @@ class AssistantRepository:
                     SET status='QUEUED', error_code='ASSISTANT_WAITING_FOR_GPU',
                         retryable=true,
                         next_retry_at=now() + (%s * interval '1 second'),
-                        answer_metadata=jsonb_set(COALESCE(answer_metadata,'{}'::jsonb),
-                          '{gpuWait}', jsonb_build_object('state','WAITING','nextRetryAt',now()+(%s * interval '1 second')), true),
+                        answer_metadata=jsonb_set(
+                          jsonb_set(COALESCE(answer_metadata,'{}'::jsonb), '{gpuWait}',
+                            jsonb_build_object('state','WAITING','nextRetryAt',now()+(%s * interval '1 second')), true),
+                          '{processingStage}', to_jsonb('WAITING_FOR_GPU'::text), true),
                         updated_at=now()
                     WHERE id=%s AND created_at >= now() - (%s * interval '1 second')
                       AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
@@ -844,6 +886,12 @@ class AssistantRepository:
             status = "ANSWERED_WITH_WARNING" if provisional else "READY"
             grounding_status = "WARNING" if provisional else "GROUNDED"
             error_code = None
+            # Speak only text that has already passed the claim/evidence gate.
+            # This prevents a separate, ungrounded voice channel while still
+            # allowing the UI answer to use natural paraphrasing.
+            claim_voice = [str(claim.get("text", "")).strip() for claim in claims if isinstance(claim, dict) and str(claim.get("text", "")).strip()]
+            if assistant_mode != "GENERAL_CHAT" and claim_voice:
+                voice = " ".join(claim_voice[:3])[:500].strip()
         elif evidence_ids and answer:
             status = "GROUNDING_REJECTED"
             grounding_status = "REJECTED"
@@ -865,9 +913,17 @@ class AssistantRepository:
                 item.update({"sourceTrackType": source_type, "sourceTrackId": source_id, "channelRole": channel_role})
             evidence.append(item)
         with self._db.connection() as connection:
+            metadata = {"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"}, "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "processingStage": "READY" if status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"} else status, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}
             row = connection.execute(
-                "UPDATE assistant_queries SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,answer_metadata=%s::jsonb,completed_at=now(),updated_at=now(),next_retry_at=NULL,retryable=false WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE') RETURNING assistant_message_id,conversation_id",
-                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb({"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": bool(claims), "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "timings": timings or {}, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}), query_id),
+                """UPDATE assistant_queries
+                   SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,
+                       answer_metadata=jsonb_set(COALESCE(answer_metadata,'{}'::jsonb),'{timings}',
+                         COALESCE(answer_metadata->'timings','{}'::jsonb) || %s::jsonb,true)
+                         || %s::jsonb,
+                       completed_at=now(),updated_at=now(),next_retry_at=NULL,retryable=false
+                   WHERE id=%s AND status NOT IN ('READY','ANSWERED','ANSWERED_WITH_WARNING','FAILED','NEEDS_REVIEW','NO_EVIDENCE','GROUNDING_REJECTED','LLM_UNAVAILABLE')
+                   RETURNING assistant_message_id,conversation_id""",
+                (status, answer, voice, Jsonb(evidence), error_code, grounding_status, Jsonb(timings or {}), Jsonb(metadata), query_id),
             ).fetchone()
             if evidence_ids:
                 for rank, segment_id in enumerate(evidence_ids, start=1):
@@ -916,6 +972,41 @@ class AssistantWorker:
             self._llm_client = LlamaCppClient(normalized, self.model_alias)
         return self._llm_client
 
+    @staticmethod
+    def _retrieval_query_for_follow_up(query: str, history: list[dict[str, str]]) -> str:
+        """Use the previous user turn as evidence key for a modifier.
+
+        ``history`` is conversation context, not evidence. Only the previous
+        USER question is reused for transcript retrieval; assistant answers
+        are deliberately ignored so a prior hallucination cannot become a
+        new source of facts.
+        """
+        normalized = re.sub(r"\s+", " ", (query or "").strip().lower().replace("ё", "е"))
+        modifiers = {
+            "повтори",
+            "повтори ответ",
+            "повтори последний ответ",
+            "короче",
+            "ответь короче",
+            "коротко",
+            "сделай предыдущий ответ короче",
+            "подробнее",
+            "расскажи подробнее",
+            "объясни подробнее",
+            "расскажи подробнее по предыдущему ответу",
+            "вернись к предыдущему вопросу",
+            "повтори предыдущий вопрос",
+            "вернись к предыдущему вопросу и ответь на него снова",
+        }
+        if normalized not in modifiers:
+            return query
+        for message in reversed(history or []):
+            if str(message.get("role", "")).lower() == "user":
+                previous = str(message.get("content", "")).strip()
+                if previous:
+                    return previous
+        return query
+
     async def close(self) -> None:
         if self._llm_client is not None:
             await self._llm_client.aclose()
@@ -934,6 +1025,7 @@ class AssistantWorker:
         query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode, owner_user_id, role = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
+        await asyncio.to_thread(self.repository.set_processing_stage, query_id, "WAITING_FOR_GPU")
         # Keep a deterministic empty result for failure paths.  The finally
         # block persists a terminal diagnostic even when the local LLM cannot
         # start or invoke_json raises; without this initialization the cleanup
@@ -951,6 +1043,12 @@ class AssistantWorker:
             queue_wait_ms = max(0.0, float(payload.get("queue_wait_ms") or 0.0))
         timings: dict[str, float] = {"queue_wait_ms": round(queue_wait_ms, 3)}
         try:
+            # A conversational modifier ("повтори", "короче", "подробнее")
+            # is not an evidence query by itself. Use only the latest USER
+            # turn as a retrieval key; assistant text remains context for the
+            # prompt, never a factual evidence source.
+            history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
+            retrieval_query = self._retrieval_query_for_follow_up(query, history)
             if assistant_mode == "GENERAL_CHAT":
                 self.repository.clear_retrieval_metadata()
                 context, valid, transcript_kind, context_error = "", {}, "GENERAL", None
@@ -964,7 +1062,7 @@ class AssistantWorker:
                 user_content = f"Вопрос: {query}"
             elif assistant_mode == "LIVE_MEETING":
                 retrieval_started = time.perf_counter()
-                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, query)
+                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, retrieval_query)
                 timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
@@ -980,7 +1078,7 @@ class AssistantWorker:
             else:
                 retrieval_started = time.perf_counter()
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
-                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, query, owner_user_id, include_all)
+                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, retrieval_query, owner_user_id, include_all)
                 timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
@@ -995,7 +1093,6 @@ class AssistantWorker:
                     "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
                 user_content = f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"
-            history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
             messages = [
                 {"role": "system", "content": system_prompt},
                 *history,
@@ -1005,21 +1102,35 @@ class AssistantWorker:
             async with self.lease:
                 preemption_started = time.perf_counter()
                 if not await asyncio.to_thread(self._gpu_coordination.llm_may_start):
-                    raise RuntimeError("gpu_asr_pending")
+                    # A healthy ASR lease is a durable wait state, not an
+                    # infrastructure failure.  Keep it out of the normal
+                    # retry budget so the query remains queued until the GPU
+                    # becomes available.
+                    raise AssistantGpuBusy("ASSISTANT_WAITING_FOR_GPU")
                 timings["preemption_wait_ms"] = round((time.perf_counter() - preemption_started) * 1000.0, 3)
+                await asyncio.to_thread(self.repository.set_processing_stage, query_id, "LOADING_MODEL")
                 model_started = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
                 timings["model_start_ms"] = round((time.perf_counter() - model_started) * 1000.0, 3)
                 if not await asyncio.to_thread(self._gpu_coordination.mark_llm_resident, self._llm_owner, "ASSISTANT", query_id):
                     await asyncio.to_thread(self._llm_runtime.stop)
-                    raise RuntimeError("gpu_asr_pending")
+                    raise AssistantGpuBusy("ASSISTANT_WAITING_FOR_GPU")
                 await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, self._llm_owner, "ASSISTANT", query_id)
                 try:
                     client = self._client_for(server.base_url)
+                    await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GENERATING")
                     generation_started = time.perf_counter()
-                    result = await client.invoke_json(messages, ASSISTANT_SCHEMA)
+                    result = await client.invoke_json(
+                        messages,
+                        ASSISTANT_SCHEMA,
+                        max_output_tokens=int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "384")),
+                        retry_max_output_tokens=int(os.getenv("ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS", "512")),
+                        retry_instruction="Повтори ответ строго одним валидным JSON; используй только существующие evidenceIds и короткий voice_answer.",
+                    )
                     timings["generation_ms"] = round((time.perf_counter() - generation_started) * 1000.0, 3)
-                    if assistant_mode != "GENERAL_CHAT" and not claims_are_semantically_grounded(result, valid, assistant_mode):
+                    await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GROUNDING")
+                    retrieval_anchors = int(self._last_retrieval_metadata.get("anchorCount", 0) or 0)
+                    if assistant_mode != "GENERAL_CHAT" and retrieval_anchors > 0 and not claims_are_semantically_grounded(result, valid, assistant_mode):
                         # One controlled retry is allowed.  The second result
                         # is still validated by persist(), so a malformed or
                         # unsupported answer can never become READY.
@@ -1028,7 +1139,13 @@ class AssistantWorker:
                             {"role": "user", "content": "Проверка grounding не пройдена. Верни только claims с существующими evidenceIds из контекста; каждый факт обязан иметь хотя бы один источник."},
                         ]
                         retry_started = time.perf_counter()
-                        result = await client.invoke_json(retry_messages, ASSISTANT_SCHEMA)
+                        result = await client.invoke_json(
+                            retry_messages,
+                            ASSISTANT_SCHEMA,
+                            max_output_tokens=int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "384")),
+                            retry_max_output_tokens=int(os.getenv("ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS", "512")),
+                            retry_instruction="Исправь grounding: используй только существующие evidenceIds, числа и даты из контекста; voice_answer не более трёх предложений.",
+                        )
                         timings["generation_ms"] = round(timings.get("generation_ms", 0.0) + (time.perf_counter() - retry_started) * 1000.0, 3)
                     grounding_started = time.perf_counter()
                     if assistant_mode != "GENERAL_CHAT":

@@ -22,6 +22,7 @@ from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import VIDEO_EXTENSIONS
 from transcription_quality import preprocess_filter, preprocess_output_path
 from whisperx_atom.audio_signal import AudioSignalMetrics, analyze_wav
+from whisperx_atom.diarization_policy import env_bool, env_int, is_cuda_oom, should_release_asr
 
 
 def _as_bool(name: str, default: bool = False) -> bool:
@@ -76,6 +77,7 @@ class PipelineContext:
     error: Optional[str] = None
     asr_preprocessing: dict[str, Any] = field(default_factory=dict)
     audio_signal_metrics: dict[str, Any] = field(default_factory=dict)
+    diarization_runtime: dict[str, Any] = field(default_factory=dict)
     temp_paths: list[Path] = field(default_factory=list)
 
     def register_temp(self, path: Optional[Path]) -> Optional[Path]:
@@ -107,6 +109,10 @@ class PipelineConfig:
     glossary_rules_raw: str
     enable_speaker_clustering: bool
     use_torch_compile: bool
+    diarization_device: str
+    diarization_cpu_fallback: bool
+    diarization_release_asr_on_low_vram: bool
+    diarization_min_free_vram_mb: int
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
@@ -115,12 +121,23 @@ class PipelineConfig:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda" and not torch.cuda.is_available() and _as_bool("REQUIRE_CUDA", False):
             raise RuntimeError("cuda_required_but_unavailable")
+        diarization_device = os.getenv("DIARIZATION_DEVICE", "auto").strip().lower()
+        if diarization_device in {"", "auto"}:
+            diarization_device = device
+        elif diarization_device not in {"cpu", "cuda"}:
+            diarization_device = device
+        if diarization_device == "cuda" and not torch.cuda.is_available():
+            if _as_bool("REQUIRE_CUDA", False):
+                raise RuntimeError("diarization_cuda_required_but_unavailable")
+            diarization_device = "cpu"
         compute = os.getenv("COMPUTE_TYPE", "float16")
         if device == "cpu" and compute == "float16":
             compute = "float32"
         language = (os.getenv("LANGUAGE") or os.getenv("ASR_LANGUAGE") or "ru").strip() or None
         if language == "auto":
             language = None
+        configured_min_speakers = max(1, _as_int("DIARIZATION_MIN_SPEAKERS", _as_int("MIN_SPEAKERS", 1)))
+        configured_max_speakers = max(configured_min_speakers, _as_int("DIARIZATION_MAX_SPEAKERS", _as_int("MAX_SPEAKERS", 8)))
         return cls(
             asr_model=os.getenv("WHISPERX_MODEL", "large-v3"),
             asr_backend=os.getenv("ASR_BACKEND", "whisperx").lower(),
@@ -142,13 +159,17 @@ class PipelineConfig:
             hotwords_raw=(os.getenv("HOTWORDS", "") or "").strip(),
             enable_alignment=_as_bool("ENABLE_ALIGNMENT", True),
             enable_diarization=_as_bool("ENABLE_DIARIZATION", True),
-            min_speakers=max(1, _as_int("MIN_SPEAKERS", 2)),
-            max_speakers=max(1, _as_int("MAX_SPEAKERS", 12)),
+            min_speakers=configured_min_speakers,
+            max_speakers=configured_max_speakers,
             hf_token=(os.getenv("HF_TOKEN") or "").strip(),
             use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
             enable_speaker_clustering=_as_bool("SPEAKER_CLUSTERING", False),
             use_torch_compile=_as_bool("TORCH_COMPILE", False),
+            diarization_device=diarization_device,
+            diarization_cpu_fallback=env_bool("DIARIZATION_CPU_FALLBACK", True),
+            diarization_release_asr_on_low_vram=env_bool("DIARIZATION_RELEASE_ASR_ON_LOW_VRAM", True),
+            diarization_min_free_vram_mb=env_int("DIARIZATION_MIN_FREE_VRAM_MB", 2048, minimum=256, maximum=16384),
         )
 
 
@@ -246,6 +267,35 @@ class ModelCacheManager:
             self._diarizer[key] = WhisperXDiarizationPipeline(use_auth_token=hf_token, device=device)
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
+
+    def release_asr_models(self) -> bool:
+        """Release cached ASR/alignment references before pyannote if needed."""
+
+        had_models = bool(self._asr or self._asr_weights or self._align)
+        self._asr.clear()
+        self._asr_weights.clear()
+        self._align.clear()
+        if had_models:
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        return had_models
+
+    def release_diarizer(self, device: str, hf_token: str) -> bool:
+        key = (device, hf_token)
+        existed = key in self._diarizer
+        self._diarizer.pop(key, None)
+        if existed:
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        return existed
 
     def consume_model_load_ms(self) -> float:
         """Return and clear load time accumulated since the previous stage."""
@@ -578,18 +628,57 @@ class TranscriptionPipeline:
     def _apply_diarization(self, ctx: PipelineContext, result: dict, profile: str = "diar") -> dict:
         if not self.config.hf_token:
             raise RuntimeError("HF_TOKEN is required for diarization")
-        diarizer = self.cache.get_diarizer(self.config.device, self.config.hf_token)
+        requested_device = self.config.diarization_device
+        free_vram_mb: float | None = None
+        if requested_device == "cuda" and torch.cuda.is_available():
+            try:
+                free_bytes, _total_bytes = torch.cuda.mem_get_info()
+                free_vram_mb = round(float(free_bytes) / (1024 * 1024), 1)
+            except Exception:
+                free_vram_mb = None
+        released_asr = False
+        if should_release_asr(
+            free_vram_mb=free_vram_mb,
+            threshold_mb=self.config.diarization_min_free_vram_mb,
+            enabled=self.config.diarization_release_asr_on_low_vram,
+        ):
+            released_asr = self.cache.release_asr_models()
+        ctx.diarization_runtime = {
+            "requested_device": requested_device,
+            "device": requested_device,
+            "free_vram_before_mb": free_vram_mb,
+            "min_free_vram_mb": self.config.diarization_min_free_vram_mb,
+            "released_asr_on_low_vram": released_asr,
+            "cpu_fallback": False,
+        }
         audio_path = str(ctx.diar_audio_path or ctx.audio_path)
         if profile != "diar":
             alternate_path = self._preprocess_audio_profile(ctx.audio_path, profile)
             ctx.register_temp(alternate_path)
             audio_path = str(alternate_path)
-        diarize_df, speaker_embeddings = diarizer(
-            audio_path,
-            min_speakers=self.config.min_speakers,
-            max_speakers=self.config.max_speakers,
-            return_embeddings=True,
-        )
+
+        def run_diarizer(device: str):
+            diarizer = self.cache.get_diarizer(device, self.config.hf_token)
+            return diarizer(
+                audio_path,
+                min_speakers=self.config.min_speakers,
+                max_speakers=self.config.max_speakers,
+                return_embeddings=True,
+            )
+
+        try:
+            diarize_df, speaker_embeddings = run_diarizer(requested_device)
+        except Exception as exc:
+            # A CUDA OOM must not turn an otherwise valid V1 into a terminal
+            # failure.  Release the failed CUDA diarizer and retry the same
+            # canonical audio on CPU when explicitly allowed by policy.
+            if requested_device == "cuda" and self.config.diarization_cpu_fallback and is_cuda_oom(exc):
+                self.cache.release_diarizer("cuda", self.config.hf_token)
+                ctx.diarization_runtime["device"] = "cpu"
+                ctx.diarization_runtime["cpu_fallback"] = True
+                diarize_df, speaker_embeddings = run_diarizer("cpu")
+            else:
+                raise
         ctx.diar_segments = []
         for row in diarize_df.itertuples(index=False):
             ctx.diar_segments.append(

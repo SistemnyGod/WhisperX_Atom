@@ -22,6 +22,8 @@ def classify_media_failure(exc: BaseException) -> MediaFailure:
         return MediaFailure("RECORDING_CHUNK_CHECKSUM_MISMATCH", False)
     if "sequence_gap" in message or "sample_gap" in message or "timeline" in message:
         return MediaFailure("RECORDING_TIMELINE_INVALID", False)
+    if "recording_track_duration_mismatch" in message or "audio_track_drift_high" in message:
+        return MediaFailure("AUDIO_TRACK_DRIFT_HIGH", False)
     if isinstance(exc, FileNotFoundError) or "chunk_missing" in message or "recording_tracks_required" in message:
         return MediaFailure("RECORDING_CHUNK_MISSING", False)
     if "no audio" in message or "has_no_audio" in message:

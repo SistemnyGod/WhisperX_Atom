@@ -1310,7 +1310,10 @@ app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid se
         return Results.BadRequest(new { error = "recording_track_bits_invalid" });
     if (request.ValidBitsPerSample is not null && (request.ValidBitsPerSample < 1 || request.ValidBitsPerSample > request.BitsPerSample.GetValueOrDefault(32)))
         return Results.BadRequest(new { error = "recording_track_valid_bits_invalid" });
-    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample);
+    var localTrackId = string.IsNullOrWhiteSpace(request.LocalTrackId) ? null : request.LocalTrackId.Trim();
+    if (localTrackId is not null && localTrackId.Length > 200)
+        return Results.BadRequest(new { error = "recording_track_local_id_invalid" });
+    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample, localTrackId);
     return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
 });
 
@@ -1783,7 +1786,8 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         var conversation = await store.CreateAssistantConversationAsync(userId.Value, "Мифодий", scope, resolvedMeetingId, route.ResolvedMode);
         conversationId = conversation?.Id;
     }
-    var query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, route.ResolvedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
+    var requestedMode = string.IsNullOrWhiteSpace(request.RequestedMode) ? "AUTO" : request.RequestedMode.Trim().ToUpperInvariant();
+    var query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, requestedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
     if (query is null)
         return route.ResolvedMode == "LIVE_MEETING"
             ? Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." })
@@ -1797,8 +1801,13 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         status = query.Status,
         source = query.Source,
         routerConfidence = route.Confidence,
+        requestedMode,
         routingReason = route.Reason,
         confidence = route.Confidence,
+        acceptedAt = query.CreatedAt,
+        processingStage = "QUEUED",
+        traceId = request.TraceId,
+        commandId = request.CommandId,
         pollUrl = $"/api/assistant/queries/{query.Id}",
         eventsUrl = $"/api/assistant/queries/{query.Id}/events"
     });
@@ -1825,7 +1834,8 @@ app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, Http
         return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, spokenText = route.Clarification });
-    var query = await store.CreateAssistantQueryAsync(route.MeetingId, request.Query, userId, route.ResolvedMode);
+    var requestedMode = string.IsNullOrWhiteSpace(request.AssistantMode) ? "AUTO" : request.AssistantMode.Trim().ToUpperInvariant();
+    var query = await store.CreateAssistantQueryAsync(route.MeetingId, request.Query, userId, requestedMode);
     return query is null
         ? Results.BadRequest(new { error = "assistant_context_not_ready", routingReason = route.Reason })
         : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
@@ -2066,7 +2076,7 @@ public record AgentBootstrapRequest(Guid InstallationId, Guid? AgentId, string? 
 public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
 public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
 public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null, string? AcousticProfile = "AUTO");
-public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
+public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null, string? LocalTrackId = null);
 public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
 public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
 public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
@@ -2363,30 +2373,40 @@ public sealed class Database(IConfiguration configuration)
         await using (var sessions = new NpgsqlCommand("""
             -- Recovered rows use session.state='AWAITING_AGENT_RECONNECT'
             -- unless the zero-sample START is already safe to quarantine.
+            -- Do not trust the materialized total_samples alone: a finalize
+            -- race can leave it at zero after CONFIRMED chunks are present.
+            WITH confirmed AS (
+                SELECT session_id, COALESCE(MAX(start_sample + sample_count), 0) AS confirmed_samples
+                FROM recording_chunks
+                WHERE status='CONFIRMED'
+                GROUP BY session_id
+            ), candidates AS (
+                SELECT session.id, COALESCE(confirmed.confirmed_samples, 0) AS confirmed_samples
+                FROM recording_sessions AS session
+                JOIN recorder_agents AS agent ON session.agent_id=agent.id
+                LEFT JOIN confirmed ON confirmed.session_id=session.id
+                WHERE session.state='RECORDING'
+                  AND (session.local_session_id IS NULL
+                       OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
+                          <> session.local_session_id::text)
+                  AND (
+                        COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+                        OR (
+                          GREATEST(COALESCE(session.total_samples, 0), COALESCE(confirmed.confirmed_samples, 0)) = 0
+                          AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+                        )
+                      )
+            )
             UPDATE recording_sessions AS session
-            SET state=CASE
-                        WHEN COALESCE(session.total_samples, 0) = 0
+            SET total_samples=GREATEST(COALESCE(session.total_samples, 0), candidates.confirmed_samples),
+                state=CASE
+                        WHEN GREATEST(COALESCE(session.total_samples, 0), candidates.confirmed_samples) = 0
                              AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
                           THEN 'ADMIN_REVIEW'
                         ELSE 'AWAITING_AGENT_RECONNECT'
                       END
-            FROM recorder_agents AS agent
-            WHERE session.agent_id=agent.id
-              AND session.state='RECORDING'
-              AND (session.local_session_id IS NULL
-                   OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
-                      <> session.local_session_id::text)
-              AND (
-                    COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
-                    -- A live heartbeat is not proof that capture is active.
-                    -- Hosts publish activeSessionId while they own AudioGraph;
-                    -- a zero-sample row without that lease is a recoverable
-                    -- interrupted START and must not block the next recording.
-                    OR (
-                      COALESCE(session.total_samples, 0) = 0
-                      AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
-                    )
-                  )
+            FROM candidates
+            WHERE session.id=candidates.id
             """, connection, transaction))
         {
             await sessions.ExecuteNonQueryAsync(cancellationToken);

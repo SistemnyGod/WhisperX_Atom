@@ -28,7 +28,9 @@ def test_playable_state_is_durable_and_legacy_compatible():
 def test_delivery_wakes_on_reconnect_and_encoder_completion():
     api = (AGENT / "AgentApiClient.cs").read_text(encoding="utf-8")
     encoder = (AGENT / "GlobalRawEncoderWorker.cs").read_text(encoding="utf-8")
-    assert "if (!wasConnected) _deliveryWake.Signal();" in api
+    assert "if (!wasConnected)" in api
+    assert "MakeRetryableDeliveriesDueAsync" in api
+    assert "_deliveryWake.Signal();" in api
     assert encoder.count("deliveryWake.Signal();") >= 2
 
 

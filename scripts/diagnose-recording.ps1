@@ -8,24 +8,74 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$isWindowsPowerShell = $PSVersionTable.PSEdition -eq "Desktop"
+if ($isWindowsPowerShell) {
+    # The Recorder runtime targets .NET 10 and cannot be loaded into the
+    # .NET Framework host used by Windows PowerShell 5.1. Re-enter through
+    # PowerShell 7 when available instead of exposing an assembly/type error.
+    if ($Credential) { throw "SQLITE_RUNTIME_HOST_REQUIRED: run this command with pwsh when -Credential is used." }
+    $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($null -eq $pwsh) { throw "SQLITE_RUNTIME_HOST_REQUIRED: install PowerShell 7 or run the diagnostic on the Recorder host." }
+    $forward = @()
+    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+        $forward += "-$($entry.Key)"
+        if ($entry.Value -isnot [switch]) { $forward += [string]$entry.Value }
+    }
+    & $pwsh.Source -NoProfile -File $PSCommandPath @forward
+    exit $LASTEXITCODE
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($DataRoot)) { $DataRoot = Join-Path $env:ProgramData "WhisperXAtom\Agent" }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repo "artifacts\diagnostics" }
-$dbPath = Join-Path $DataRoot "agent.db"
-if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) { throw "AGENT_DB_NOT_FOUND: $dbPath" }
+$sourceDbPath = Join-Path $DataRoot "agent.db"
+if (-not (Test-Path -LiteralPath $sourceDbPath -PathType Leaf)) { throw "AGENT_DB_NOT_FOUND: $sourceDbPath" }
 
 $runtime = Join-Path $repo "apps\recorder-agent\bin\service\net10.0-windows\win-x64"
 $sqliteAssembly = Join-Path $runtime "Microsoft.Data.Sqlite.dll"
-if (-not (Test-Path -LiteralPath $sqliteAssembly)) { throw "SQLITE_RUNTIME_NOT_BUILT: run the Recorder build first." }
-[void][Reflection.Assembly]::LoadFrom($sqliteAssembly)
-foreach ($dependency in @("SQLitePCLRaw.core.dll", "SQLitePCLRaw.provider.e_sqlite3.dll", "SQLitePCLRaw.bundle_e_sqlite3.dll")) {
-    $path = Join-Path $runtime $dependency
-    if (Test-Path -LiteralPath $path) { [void][Reflection.Assembly]::LoadFrom($path) }
+if (-not (Test-Path -LiteralPath $sqliteAssembly)) { throw "SQLITE_RUNTIME_MISSING: run the Recorder build first." }
+$oldPath = $env:PATH
+try {
+    # Microsoft.Data.Sqlite resolves SQLitePCLRaw dependencies while its
+    # assembly is loaded. Put the self-contained runtime directory first and
+    # load native/provider dependencies before the managed Sqlite assembly.
+    $env:PATH = "$runtime;$env:PATH"
+    foreach ($dependency in @("SQLitePCLRaw.core.dll", "SQLitePCLRaw.provider.e_sqlite3.dll", "SQLitePCLRaw.batteries_v2.dll")) {
+        $path = Join-Path $runtime $dependency
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "SQLITE_RUNTIME_DEPENDENCY_MISSING: $dependency" }
+        [void][Reflection.Assembly]::LoadFrom($path)
+    }
+    [void][Reflection.Assembly]::LoadFrom($sqliteAssembly)
+    [SQLitePCL.Batteries_V2]::Init()
 }
-try { [SQLitePCL.Batteries_V2]::Init() } catch { }
+catch {
+    throw "SQLITE_RUNTIME_LOAD_FAILED: $($_.Exception.Message)"
+}
+finally {
+    $env:PATH = $oldPath
+}
+
+# The live Recorder process can keep the SQLite WAL/VFS locked while the
+# diagnostic is running. Query an isolated copy so diagnostics never compete
+# with capture or delivery. Old copies are cleaned on the next invocation.
+$diagnosticTempRoot = Join-Path $env:TEMP "WhisperXAtom\Diagnostics"
+New-Item -ItemType Directory -Force -Path $diagnosticTempRoot | Out-Null
+Get-ChildItem -LiteralPath $diagnosticTempRoot -Filter "agent-*.db" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-24) } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+$dbPath = Join-Path $diagnosticTempRoot ("agent-" + [Guid]::NewGuid().ToString("N") + ".db")
+try {
+    Copy-Item -LiteralPath $sourceDbPath -Destination $dbPath -Force
+    foreach ($sidecar in @("-wal", "-shm")) {
+        $sourceSidecar = "$sourceDbPath$sidecar"
+        if (Test-Path -LiteralPath $sourceSidecar -PathType Leaf) {
+            Copy-Item -LiteralPath $sourceSidecar -Destination "$dbPath$sidecar" -Force
+        }
+    }
+}
+catch { throw "SQLITE_DB_COPY_FAILED" }
 
 function Invoke-Sql([string]$sql, [hashtable]$parameters = @{}) {
-    $connection = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=$dbPath;Mode=ReadOnly")
+    $connection = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=$dbPath;Mode=ReadOnly;Cache=Shared")
     try {
         $connection.Open()
         $command = $connection.CreateCommand()
@@ -92,3 +142,6 @@ $destination = Join-Path $OutputRoot ("recording-" + $safeId)
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 $report | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $destination "report.json") -Encoding utf8
 $report | ConvertTo-Json -Depth 8
+Remove-Item -LiteralPath $dbPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$dbPath-wal" -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$dbPath-shm" -Force -ErrorAction SilentlyContinue

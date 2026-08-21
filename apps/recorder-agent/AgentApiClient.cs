@@ -67,16 +67,18 @@ public sealed class AgentApiClient : IDisposable
     private readonly object _configurationGate = new();
     private readonly SemaphoreSlim _bindingGate = new(1, 1);
     private readonly AgentStorageSettings _storage;
+    private readonly SpoolStore _spool;
     private readonly DeliveryWakeSignal _deliveryWake;
     private static readonly JsonSerializerOptions ConfigJson = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
     };
 
-    public AgentApiClient(AgentStorageSettings storage, DeliveryWakeSignal deliveryWake)
+    public AgentApiClient(AgentStorageSettings storage, DeliveryWakeSignal deliveryWake, SpoolStore spool)
     {
         _storage = storage;
         _deliveryWake = deliveryWake;
+        _spool = spool;
         _configPath = Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent", "agent-config.json");
         var config = ReadConfig(_configPath);
@@ -300,7 +302,16 @@ public sealed class AgentApiClient : IDisposable
                 _lastServerError = null;
                 _heartbeatFailures = 0;
                 _nextHeartbeatAtUtc = DateTimeOffset.UtcNow.AddSeconds(30);
-                if (!wasConnected) _deliveryWake.Signal();
+                if (!wasConnected)
+                {
+                    // Reconnect is a scheduling boundary: do not leave a
+                    // retryable session behind an old exponential backoff.
+                    // Failure to update the local spool must not hide the
+                    // connectivity transition or prevent the normal wake.
+                    try { await _spool.MakeRetryableDeliveriesDueAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false); }
+                    catch (Exception) { }
+                    _deliveryWake.Signal();
+                }
                 return true;
             }
 
@@ -586,6 +597,7 @@ public sealed class AgentApiClient : IDisposable
                 var mediaStatus = root.TryGetProperty("mediaStatus", out var media) && media.ValueKind == JsonValueKind.String ? media.GetString() : null;
                 var jobStatus = root.TryGetProperty("jobStatus", out var job) && job.ValueKind == JsonValueKind.String ? job.GetString() : null;
                 var jobStage = root.TryGetProperty("jobStage", out var stage) && stage.ValueKind == JsonValueKind.String ? stage.GetString() : null;
+                var failureCode = root.TryGetProperty("failureCode", out var failure) && failure.ValueKind == JsonValueKind.String ? failure.GetString() : null;
                 var terminal = string.Equals(mediaStatus, "FAILED", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(mediaStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(jobStatus, "FAILED", StringComparison.OrdinalIgnoreCase)
@@ -598,7 +610,7 @@ public sealed class AgentApiClient : IDisposable
                     mediaStatus,
                     jobStatus,
                     jobStage,
-                    terminal ? "SERVER_ASSEMBLY_FAILED" : null);
+                    terminal ? failureCode ?? "SERVER_ASSEMBLY_FAILED" : null);
             }
             catch (JsonException)
             {
@@ -628,6 +640,7 @@ public sealed class AgentApiClient : IDisposable
         request.Content = JsonContent.Create(new
         {
             trackType = track.TrackType,
+            localTrackId = track.TrackId,
             deviceId = track.EndpointId,
             deviceName = track.DeviceFriendlyName,
             selectionMode = track.SelectionMode,

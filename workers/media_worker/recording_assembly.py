@@ -102,10 +102,27 @@ def _probe_audio_format(path: Path) -> dict:
     }
 
 
+def _expected_duration_ms(track: Track) -> int:
+    if not track.chunks:
+        return 0
+    first = track.chunks[0].start_sample
+    end = track.chunks[-1].start_sample + track.chunks[-1].sample_count
+    return round(max(0, end - first) * 1000 / max(1, track.sample_rate))
+
+
 def _validate_output(path: Path, track: Track) -> dict:
     details = _probe_audio_format(path)
     if details["codec"] != "flac" or details["sample_rate"] != track.sample_rate or details["channels"] != 1:
         raise ValueError(f"recording_track_output_format_invalid:{track.track_id}")
+    actual_duration_ms = _probe_duration_ms(path)
+    expected_duration_ms = _expected_duration_ms(track)
+    tolerance_ms = max(250, int(os.getenv("AUDIO_TRACK_DRIFT_TOLERANCE_MS", "250")))
+    if abs(actual_duration_ms - expected_duration_ms) > tolerance_ms:
+        raise ValueError(
+            f"recording_track_duration_mismatch:{track.track_id}:"
+            f"expected={expected_duration_ms}:actual={actual_duration_ms}"
+        )
+    details["duration_ms"] = actual_duration_ms
     return details
 
 

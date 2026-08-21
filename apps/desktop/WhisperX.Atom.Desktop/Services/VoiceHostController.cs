@@ -162,7 +162,14 @@ public sealed class VoiceHostController : IAsyncDisposable
 
         if (_broker is null)
         {
-            _broker = new DesktopVoiceBrokerServer(_services.RecordingCommands, _services.Backend, _services.ActiveMeeting, _services.VoiceAssistantConversations, _services.AssistantDelivery);
+            _broker = new DesktopVoiceBrokerServer(
+                _services.RecordingCommands,
+                _services.Backend,
+                _services.ActiveMeeting,
+                _services.VoiceAssistantConversations,
+                _services.AssistantDelivery,
+                exception => App.WriteStartupLog("ASSISTANT_DELIVERY_EXCEPTION", exception),
+                message => App.WriteStartupLog(message, null));
             _broker.AssistantResultAvailable += (queryId, conversationId) => AssistantResultAvailable?.Invoke(queryId, conversationId);
         }
         _broker.Start();

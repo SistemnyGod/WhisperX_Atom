@@ -42,15 +42,23 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             // commonly decodes the spoken “мифодий” into that phonetic variant.
             // Keep the canonical spelling in the parser while using the model
             // vocabulary here to avoid Vosk silently dropping the primary token.
-            "мефодий", "мефодий начни запись", "мефодий продолжи запись",
+            "мефодий", "мефодий начни запись", "мефодий запусти запись", "мефодий продолжи запись",
             "мефодий поставь на паузу", "мефодий приостанови запись", "мефодий статус", "мефодий заверши запись", "мефодий останови запись", "мефодий подтверждаю", "мефодий отмена",
-            "мефодий останови запись", "атом начни запись", "атом останови запись", "атом подтверждаю", "[unk]"
+            "мефодий останови запись", "мефодий пока", "мефодий ну пока", "мефодий ладно пока",
+            "мефодий до свидания", "мефодий до встречи", "мефодий всего доброго", "мефодий хорошего дня",
+            "мефодий спокойной ночи", "мефодий увидимся", "мефодий спасибо пока", "мефодий спасибо до свидания",
+            "атом начни запись", "атом останови запись", "атом подтверждаю", "атом пока", "атом до свидания", "атом до встречи", "атом хорошего дня", "[unk]"
         };
         if (ExactWakeWordRequested)
         {
             // A custom/larger model can opt into the canonical spelling. The
             // phonetic fallback remains in the grammar for compatibility.
-            phrases.AddRange(["мифодий", "мифодий начни запись", "мифодий останови запись", "мифодий подтверждаю"]);
+            phrases.AddRange([
+                "мифодий", "мифодий начни запись", "мифодий запусти запись", "мифодий останови запись", "мифодий подтверждаю",
+                "мифодий пока", "мифодий ну пока", "мифодий ладно пока", "мифодий до свидания", "мифодий до встречи",
+                "мифодий всего доброго", "мифодий хорошего дня", "мифодий спокойной ночи", "мифодий увидимся",
+                "мифодий спасибо пока", "мифодий спасибо до свидания"
+            ]);
         }
         return phrases.Distinct(StringComparer.Ordinal).ToArray();
     }
@@ -64,6 +72,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
     private readonly SpeechResponder _speech = new(BuildIdentity);
+    private readonly VoiceLedgerStore _voiceLedger = new();
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
@@ -178,8 +187,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audio.CaptureError += OnCaptureError;
         _speech.Error += OnSpeechError;
         _logger?.LogInformation(
-            "Voice response engine initialized. Mode={Mode}, Voice={Voice}, Culture={Culture}",
-            _speech.UsesPreRecordedResponses ? "PRERECORDED" : "WINDOWS_TTS",
+            "Voice response engine constructed. RequestedEngine={Engine}, Voice={Voice}, Culture={Culture}",
+            _speech.TtsEngine,
             _speech.VoiceName,
             _speech.VoiceCulture);
 
@@ -340,6 +349,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var ttsCpuThreads = ReadNullableInt(payload, "ttsCpuThreads");
             var ttsFallbackEnabled = ReadBool(payload, "ttsFallbackEnabled", true);
             var ttsReady = await _speech.ConfigureAsync(windowsFallbackVoice, voiceRate, voiceVolume, ttsVoice, ttsSampleRate, ttsCpuThreads, ttsFallbackEnabled, cancellationToken, ttsEngine).ConfigureAwait(false);
+            _logger?.LogInformation(
+                "Voice response engine configured. Engine={Engine}, Model={Model}, Voice={Voice}, Ready={Ready}, Fallback={Fallback}, FallbackReason={FallbackReason}, TtsHostPid={TtsHostPid}",
+                _speech.TtsEngine,
+                _speech.TtsModel,
+                _speech.VoiceName,
+                ttsReady,
+                _speech.VoiceFallbackUsed,
+                _speech.TtsFallbackReason ?? "none",
+                _speech.TtsHostProcessId?.ToString() ?? "none");
             if (!ttsReady) _lastErrorCode = "VOICE_TTS_UNAVAILABLE";
 
             var normalized = string.IsNullOrWhiteSpace(requestedDevice) ? _microphoneDeviceId : requestedDevice.Trim();
@@ -566,6 +584,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                     return new VoiceHostResponse(false, Error: "VOICE_COMMAND_REJECTED");
                 if (!string.IsNullOrWhiteSpace(queryId) && TryGetAssistantTombstone(queryId, out var previous))
                     return new VoiceHostResponse(true, new VoiceResponse(answer, false, previous.AnswerStatus is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING", CommandId: commandId, TraceId: traceId, QueryId: queryId, ResponseId: previous.ResponseId, PlaybackState: previous.State, AcceptedForPlayback: previous.State == "ACCEPTED", AnswerStatus: previous.AnswerStatus));
+                QueueVoiceLedgerEvent("ASSISTANT_RESULT_READY", new
+                {
+                    eventId = Guid.NewGuid().ToString("N"),
+                    queryId,
+                    status,
+                    commandId,
+                    traceId,
+                    capturedAtUtc = DateTimeOffset.UtcNow
+                });
                 if (_speech.QuietMode)
                 {
                     var quietResponseId = Guid.NewGuid().ToString("N");
@@ -602,6 +629,25 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 return spoken.AcceptedForPlayback
                     ? new VoiceHostResponse(true, spoken)
                     : new VoiceHostResponse(false, Error: _lastErrorCode ?? "VOICE_HOST_BUSY");
+            }
+            case "ASSISTANT_PLAYBACK_STATUS":
+            {
+                var queryId = ReadString(payload, "queryId");
+                if (string.IsNullOrWhiteSpace(queryId))
+                    return new VoiceHostResponse(false, Error: "VOICE_COMMAND_REJECTED");
+                if (!TryGetAssistantTombstone(queryId, out var tombstone))
+                    return new VoiceHostResponse(true, new
+                    {
+                        queryId,
+                        playbackState = "NOT_FOUND"
+                    });
+                return new VoiceHostResponse(true, new
+                {
+                    queryId,
+                    responseId = tombstone.ResponseId,
+                    playbackState = tombstone.State,
+                    answerStatus = tombstone.AnswerStatus
+                });
             }
             case "STOP_SPEAKING":
                 await TryRecordVoiceEventAsync(
@@ -886,6 +932,13 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             {
                 _wakeStartedAt = now;
                 _wakeLatencyMs = _wakeSpeechStartedAt == default ? null : (now - _wakeSpeechStartedAt).TotalMilliseconds;
+                QueueVoiceLedgerEvent("VOICE_WAKE_DETECTED", new
+                {
+                    eventId = Guid.NewGuid().ToString("N"),
+                    capturedAtUtc = now,
+                    wakeLatencyMs = _wakeLatencyMs,
+                    wakeWordMode = WakeWordMode
+                });
             }
         }
         else if (string.IsNullOrWhiteSpace(partial)) _wakePartialHits = 0;
@@ -1292,12 +1345,29 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             }
             commandId = command.CommandId ?? commandId;
             command = command with { CommandId = commandId };
+            // Keep the recognition point distinct from the executable command
+            // marker. This gives the durable ledger a complete wake →
+            // recognition → intent → response/TTS timeline without persisting
+            // the user's raw speech text.
+            QueueVoiceLedgerEvent("VOICE_RECOGNIZED", new
+            {
+                eventId = Guid.NewGuid().ToString("N"),
+                intent = command.Intent.ToString(),
+                confidence = command.Confidence,
+                recognizedTextLength = command.Text?.Length ?? 0,
+                capturedAtUtc = command.CreatedAt ?? DateTimeOffset.UtcNow,
+                commandId,
+                traceId
+            });
             var fingerprint = $"{command.Intent}:{NormalizeCommandText(command.Text)}";
             if (command.Intent is not (VoiceIntent.Confirm or VoiceIntent.Cancel)
                 && string.Equals(_lastCommandFingerprint, fingerprint, StringComparison.Ordinal)
                 && DateTimeOffset.UtcNow - _lastCommandAtUtc < TimeSpan.FromSeconds(2))
             {
-                return await RespondAsync("Команда уже выполняется", cancellationToken, false, commandId: commandId, traceId: traceId);
+                // Keep the duplicate visible to Desktop, but do not enqueue a
+                // second spoken response. The first command remains the only
+                // side effect and the only TTS playback for this fingerprint.
+                return await RespondAsync("Команда уже выполняется", cancellationToken, true, commandId: commandId, traceId: traceId, speak: false);
             }
             if (command.Intent == VoiceIntent.StopSpeaking)
             {
@@ -1342,8 +1412,23 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.MarkDecision => await SendRecorderAsync("DECISION", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.Farewell => new VoiceResponse(FarewellText(command.Parameter ?? command.Text), true, true, CommandId: commandId, TraceId: traceId),
+                // Greetings are deterministic local UX.  Keeping the exact
+                // phrase out of Assistant avoids a cold Qwen load for a
+                // simple interaction while longer/ contextual greetings
+                // continue through the normal conversational route.
+                VoiceIntent.AssistantQuery when LocalGreetingText(command.Parameter ?? command.Text) is { } greeting
+                    => new VoiceResponse(greeting, true, true, CommandId: commandId, TraceId: traceId),
                 VoiceIntent.AssistantQuery when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
                 VoiceIntent.AssistantQuery => await AskAssistantAsync(command.Parameter ?? command.Text, commandId, traceId, cancellationToken),
+                VoiceIntent.RepeatAnswer when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.RepeatAnswer => await AskAssistantAsync("Повтори предыдущий ответ.", commandId, traceId, cancellationToken),
+                VoiceIntent.ShortenAnswer when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.ShortenAnswer => await AskAssistantAsync("Сделай предыдущий ответ короче.", commandId, traceId, cancellationToken),
+                VoiceIntent.ElaborateAnswer when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.ElaborateAnswer => await AskAssistantAsync("Расскажи подробнее по предыдущему ответу.", commandId, traceId, cancellationToken),
+                VoiceIntent.PreviousQuestion when _desktopBroker is null => new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.PreviousQuestion => await AskAssistantAsync("Повтори предыдущий вопрос.", commandId, traceId, cancellationToken),
                 _ => new VoiceResponse("Команда не распознана", true, false)
             };
             if (command.Intent == VoiceIntent.StartRecording)
@@ -1380,7 +1465,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             // time through the common response path); the grounded result is
             // delivered later through ASSISTANT_RESULT.  Return directly to
             // listening so capture and wake-word handling remain available.
-            if (command.Intent == VoiceIntent.AssistantQuery
+            if (IsAssistantConversationIntent(command.Intent)
                 && response.Success
                 && response.QueryId is not null
                 && !response.Speak)
@@ -1532,6 +1617,18 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
         "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",
+        "VOICE_ASSISTANT_DESKTOP_UNAVAILABLE" => "Desktop не отвечает. Откройте приложение и повторите вопрос.",
+        "VOICE_ASSISTANT_AUTH_REQUIRED" => "Сеанс сервера истёк. Войдите в Desktop заново.",
+        "VOICE_ASSISTANT_SERVER_UNREACHABLE" => "Сервер недоступен по сети. Запрос не был принят.",
+        "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT" => "Сервер принимает запрос дольше обычного. Проверьте Desktop — запрос мог сохраниться и продолжить обработку.",
+        "VOICE_ASSISTANT_SERVER_ERROR" => "Сервер получил вопрос, но не смог его обработать. Повторите позже.",
+        "VOICE_ASSISTANT_REQUEST_REJECTED" => "Сервер отклонил вопрос. Повторите его другими словами.",
+        "LOCAL_COMMAND_REQUIRED" => "Это команда записи. Скажите «Мифодий, начни запись» или «Мифодий, останови запись».",
+        "ASSISTANT_WAITING_FOR_GPU" => "Мифодий ждёт освобождения GPU и продолжит обработку автоматически.",
+        "ASSISTANT_GPU_BUSY_TIMEOUT" => "GPU занят транскрибацией слишком долго. Повторите вопрос после завершения обработки.",
+        "ASSISTANT_LLM_UNAVAILABLE" => "Языковая модель временно недоступна. Повторите вопрос позже.",
+        "ASSISTANT_RETRY_EXHAUSTED" => "Сервер исчерпал попытки обработки вопроса. Повторите запрос.",
+        "ASSISTANT_QUEUE_TIMEOUT" => "Вопрос слишком долго ожидает обработки. Повторите его позже.",
         "ASSISTANT_RECORDING_ACTIVE" => "Свежий контекст совещания ещё не готов.",
         "LIVE_MEETING_REQUIRED" => "Откройте текущее совещание, чтобы задать вопрос во время записи.",
         "LIVE_MEETING_NOT_READY" => "Пока нет свежего фрагмента совещания для ответа.",
@@ -1552,7 +1649,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _ => "Не удалось выполнить голосовую команду."
     };
 
-    private async Task<VoiceResponse> AskAssistantAsync(string question, string? commandId, string? traceId, CancellationToken cancellationToken)
+    private async Task<VoiceResponse> AskAssistantAsync(string? question, string? commandId, string? traceId, CancellationToken cancellationToken)
     {
         if (_desktopBroker is null)
             return new VoiceResponse("Вопросы доступны только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId);
@@ -1592,7 +1689,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         string? traceId = null,
         string? queryId = null,
         string? answerStatus = null,
-        string? reservedResponseId = null)
+        string? reservedResponseId = null,
+        bool speak = true)
     {
         var target = returnState ?? (_state.Snapshot.State == VoiceHostState.Confirming ? VoiceHostState.Confirming : VoiceHostState.Listening);
         _state.TryRespond(text, target);
@@ -1600,11 +1698,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         // command's context. The ring remains in-memory only and is rebuilt
         // from microphone frames after playback/cooldown.
         _preRoll.Clear();
-        if (_speech.QuietMode)
+        if (!speak || _speech.QuietMode)
         {
-            // Quiet mode is an intentional no-playback result, not a busy or
-            // failed TTS engine. Do not create a synthetic technical interval
-            // when no system audio was emitted.
+            // Quiet mode and duplicate suppression are intentional no-playback
+            // results, not a busy or failed TTS engine.
+            // Do not create a synthetic technical interval when no system audio was emitted.
             _state.FinishResponse();
             if (_state.Snapshot.State == VoiceHostState.Cooldown) _ = CompleteCooldownAsync();
             return new VoiceResponse(text, false, success, localSessionId, commandId, traceId, queryId, PlaybackState: "CANCELLED", AcceptedForPlayback: false, AnswerStatus: answerStatus);
@@ -1794,8 +1892,17 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         },
         VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.55,
         VoiceIntent.AssistantQuery => MinimumConfidence(),
+        VoiceIntent.RepeatAnswer or VoiceIntent.ShortenAnswer or VoiceIntent.ElaborateAnswer or VoiceIntent.PreviousQuestion => MinimumConfidence(),
+        VoiceIntent.Farewell => MinimumConfidence(),
         _ => MinimumConfidence()
     };
+
+    private static bool IsAssistantConversationIntent(VoiceIntent intent) => intent is
+        VoiceIntent.AssistantQuery or
+        VoiceIntent.RepeatAnswer or
+        VoiceIntent.ShortenAnswer or
+        VoiceIntent.ElaborateAnswer or
+        VoiceIntent.PreviousQuestion;
 
     private bool IsConfidenceSufficient(VoiceCommand command) =>
         // STOP is deliberately allowed through to ExecuteAsync, where a
@@ -1818,10 +1925,37 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static string NormalizeCommandText(string? text) =>
         string.Join(' ', (text ?? string.Empty).Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
+    private static string FarewellText(string? phrase)
+    {
+        var normalized = NormalizeCommandText(phrase);
+        return normalized switch
+        {
+            "до свидания" or "всего доброго" or "хорошего дня" => "До свидания! Хорошего дня.",
+            "до встречи" => "До встречи!",
+            "спокойной ночи" => "Спокойной ночи!",
+            "спасибо пока" or "спасибо до свидания" => "Пожалуйста! До свидания.",
+            _ => "Пока! Обращайтесь, если понадоблюсь."
+        };
+    }
+
+    private static string? LocalGreetingText(string? phrase)
+    {
+        var normalized = NormalizeCommandText(phrase);
+        return normalized switch
+        {
+            "привет" or "скажи привет" or "поздоровайся" => "Здравствуйте! Я готов помочь.",
+            "доброе утро" => "Доброе утро! Я готов помочь.",
+            "добрый день" => "Добрый день! Я готов помочь.",
+            "добрый вечер" => "Добрый вечер! Я готов помочь.",
+            _ => null
+        };
+    }
+
     private async Task<bool> TryRecordVoiceEventAsync(string eventType, object payload, CancellationToken? cancellationToken = null, string? localSessionId = null)
     {
         try
         {
+            var localSaved = _voiceLedger.Append(eventType, payload);
             bool ok;
             var token = cancellationToken ?? CancellationToken.None;
             if (_desktopBroker is not null)
@@ -1829,7 +1963,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             else
                 ok = (await _recorder.SendAsync("VOICE_EVENT", new { eventType, payload, localSessionId }, token)).Ok;
             if (!ok) _lastErrorCode = "VOICE_EVENT_PERSIST_FAILED";
-            return ok;
+            // A local ledger is authoritative when no recording session is
+            // active. During a meeting, preserve the broker acknowledgement
+            // semantics while still retaining a diagnostic local copy.
+            return ok || (localSaved && _desktopBroker is null);
         }
         catch (Exception ex)
         {
@@ -1837,6 +1974,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _logger?.LogDebug(ex, "Recorder event could not be persisted: {EventType}", eventType);
             return false;
         }
+    }
+
+    private void QueueVoiceLedgerEvent(string eventType, object payload, string? localSessionId = null)
+    {
+        // Ledger persistence is best-effort and must never stall microphone
+        // capture, wake detection, or TTS. The durable command/response
+        // events remain the authoritative path when the broker is available.
+        _ = TryRecordVoiceEventAsync(eventType, payload, CancellationToken.None, localSessionId);
     }
 
     private static string? ReadString(JsonElement payload, string name) => payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;

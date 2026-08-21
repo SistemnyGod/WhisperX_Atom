@@ -61,15 +61,31 @@ public sealed class VoiceIntentParser
         // pattern (or one of the exact status/confirmation tokens).
         var intent = withoutWake switch
         {
-            var value when Matches(value, "начни запись") => VoiceIntent.StartRecording,
-            var value when Matches(value, "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
-            var value when Matches(value, "продолжи запись", "возобнови запись") => VoiceIntent.ResumeRecording,
-            var value when Matches(value, "поставь метку", "добавь метку") => VoiceIntent.AddMarker,
+            var value when (Matches(value, "начни запись") || Matches(value, "запусти запись")) && IsExact(value, "начни запись", "запусти запись") => VoiceIntent.StartRecording,
+            var value when Matches(value, "поставь на паузу", "приостанови запись") && IsExact(value, "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
+            var value when Matches(value, "продолжи запись", "возобнови запись") && IsExact(value, "продолжи запись", "возобнови запись") => VoiceIntent.ResumeRecording,
+            var value when Matches(value, "поставь метку", "добавь метку") && IsExact(value, "поставь метку", "добавь метку") => VoiceIntent.AddMarker,
             var value when Matches(value, "отметь решение", "зафиксируй решение") => VoiceIntent.MarkDecision,
             var value when Matches(value, "отметь поручение", "зафиксируй поручение") => VoiceIntent.MarkActionItem,
             var value when Matches(value, "статус", "состояние") => VoiceIntent.GetStatus,
-            var value when Matches(value, "заверши запись", "останови запись") => VoiceIntent.StopRecording,
+            var value when Matches(value, "заверши запись", "останови запись") && IsExact(value, "заверши запись", "останови запись") => VoiceIntent.StopRecording,
             var value when Matches(value, "остановись", "замолчи", "прекрати говорить", "останови ответ") => VoiceIntent.StopSpeaking,
+            var value when IsExact(value,
+                "пока", "ну пока", "ладно пока", "до свидания", "до встречи",
+                "всего доброго", "хорошего дня", "спокойной ночи", "увидимся",
+                "спасибо пока", "спасибо до свидания") => VoiceIntent.Farewell,
+            // Conversational follow-ups are intentionally exact. A longer
+            // phrase such as «сделай ответ короче по ремонту» remains an
+            // AssistantQuery and is not accidentally collapsed into a
+            // modifier command.
+            var value when IsExact(value,
+                "повтори", "повтори ответ", "повтори последний ответ") => VoiceIntent.RepeatAnswer,
+            var value when IsExact(value,
+                "короче", "ответь короче", "коротко") => VoiceIntent.ShortenAnswer,
+            var value when IsExact(value,
+                "подробнее", "расскажи подробнее", "объясни подробнее") => VoiceIntent.ElaborateAnswer,
+            var value when IsExact(value,
+                "вернись к предыдущему вопросу", "повтори предыдущий вопрос") => VoiceIntent.PreviousQuestion,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
             // AssistantQuery is the canonical conversational intent.
@@ -79,7 +95,7 @@ public sealed class VoiceIntentParser
             _ => IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery : VoiceIntent.Unknown
         };
 
-        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.AssistantQuery
+        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.AssistantQuery or VoiceIntent.Farewell
             ? ExtractParameter(withoutWake, intent)
             : null;
         return new VoiceCommand(intent, text, confidence, parameter, DateTimeOffset.UtcNow);
@@ -132,6 +148,9 @@ public sealed class VoiceIntentParser
     private static bool Matches(string value, params string[] candidates) => candidates.Any(candidate =>
         value.Equals(candidate, StringComparison.Ordinal) || value.StartsWith(candidate + " ", StringComparison.Ordinal));
 
+    private static bool IsExact(string value, params string[] candidates) => candidates.Any(candidate =>
+        value.Equals(candidate, StringComparison.Ordinal));
+
     private static string ExtractParameter(string value, VoiceIntent intent)
     {
         var prefixes = intent switch
@@ -140,6 +159,7 @@ public sealed class VoiceIntentParser
             VoiceIntent.MarkActionItem => new[] { "зафиксируй поручение", "отметь поручение", "поручение", "задача" },
             _ => Array.Empty<string>()
         };
+        if (intent == VoiceIntent.Farewell) return value;
         foreach (var prefix in prefixes)
             if (value.StartsWith(prefix, StringComparison.Ordinal)) return value[prefix.Length..].Trim();
         return value;

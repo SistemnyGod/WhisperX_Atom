@@ -188,6 +188,16 @@ def retry_delay_seconds(attempt: int) -> float:
     return base + (attempt * 0.37)
 
 
+def _speaker_limit(message: dict[str, Any], key: str, env_name: str, fallback: int) -> int:
+    raw = message.get(key)
+    if raw is None or str(raw).strip() == "":
+        raw = os.getenv(env_name, str(fallback))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return fallback
+
+
 
 class GpuWorker:
     def __init__(self, heartbeat: AsyncHeartbeat | None = None) -> None:
@@ -288,8 +298,11 @@ class GpuWorker:
                 media_path=resolve_storage_path(str(message["storage_key"])),
                 language=normalized_language,
                 profile=request_profile,
-                min_speakers=int(message.get("min_speakers", 1)),
-                max_speakers=int(message.get("max_speakers", 12)),
+                # Older outbox payloads omit speaker limits.  Keep their
+                # compatibility shape, but let the deployment cap typical
+                # meetings through DIARIZATION_* without editing every job.
+                min_speakers=_speaker_limit(message, "min_speakers", "DIARIZATION_MIN_SPEAKERS", 1),
+                max_speakers=_speaker_limit(message, "max_speakers", "DIARIZATION_MAX_SPEAKERS", 8),
                 input_transcript=input_transcript,
                 source_storage_key=str(message.get("storage_key") or "") or None,
                 source_audio_hash=str(source_quality.get("asr_audio_hash") or "") or None,
@@ -510,7 +523,17 @@ async def run() -> None:
             try:
                 from whisperx.diarize import DiarizationPipeline
 
-                device = os.getenv("DEVICE", "cuda").strip().lower() or "cuda"
+                device = os.getenv("DIARIZATION_DEVICE", "auto").strip().lower() or "auto"
+                if device not in {"auto", "cpu", "cuda"}:
+                    device = "auto"
+                if device == "cuda" and not capabilities.get("cudaAvailable"):
+                    capabilities["diarization"] = "DEGRADED"
+                    capabilities["diarizationReason"] = "diarization_cuda_unavailable"
+                    return capabilities
+                if device == "auto":
+                    device = os.getenv("DEVICE", "cuda").strip().lower() or "cuda"
+                    if device == "cuda" and not capabilities.get("cudaAvailable"):
+                        device = "cpu"
                 probe = await asyncio.wait_for(
                     asyncio.to_thread(DiarizationPipeline, use_auth_token=os.environ["HF_TOKEN"], device=device),
                     timeout=float(os.getenv("DIARIZATION_READINESS_TIMEOUT_SECONDS", "120")),

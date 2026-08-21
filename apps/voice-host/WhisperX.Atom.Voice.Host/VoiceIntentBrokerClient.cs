@@ -80,11 +80,11 @@ internal sealed class VoiceIntentBrokerClient
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "broker_timeout", TraceId: traceId, CommandId: commandId);
+            return new(false, "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT", Detail: "broker_timeout", TraceId: traceId, CommandId: commandId);
         }
         catch (Exception ex) when (ex is IOException or TimeoutException or InvalidOperationException)
         {
-            return new(false, "VOICE_DESKTOP_BROKER_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
+            return new(false, "VOICE_ASSISTANT_DESKTOP_UNAVAILABLE", Detail: ex.GetType().Name, TraceId: traceId, CommandId: commandId);
         }
     }
 
