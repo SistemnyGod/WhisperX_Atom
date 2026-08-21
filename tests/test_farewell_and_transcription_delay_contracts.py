@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PARSER = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
 RUNTIME = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs").read_text(encoding="utf-8")
 MEDIA = (ROOT / "workers/media_worker/persistence.py").read_text(encoding="utf-8")
+COMPOSE = (ROOT / "compose.dev.yml").read_text(encoding="utf-8")
 RELAY = (ROOT / "workers/outbox_relay/worker.py").read_text(encoding="utf-8")
 LEASE = (ROOT / "workers/gpu_lease.py").read_text(encoding="utf-8")
 MIGRATION = (ROOT / "apps/server/WhisperX.Atom.Api/Migrations/045_transcription_start_delay.sql").read_text(encoding="utf-8")
@@ -28,6 +29,7 @@ def test_farewell_is_local_and_exactly_gated():
 
 def test_transcription_delay_is_durable_and_bypassed_after_due_time():
     assert "TRANSCRIPTION_START_DELAY_SECONDS" in MEDIA
+    assert "${TRANSCRIPTION_START_DELAY_SECONDS:-0}" in COMPOSE
     assert "not_before=%s" in MEDIA
     assert 'os.getenv("TRANSCRIPTION_START_DELAY_SECONDS", "0")' in MEDIA
     assert "if delay_seconds > 0" in MEDIA

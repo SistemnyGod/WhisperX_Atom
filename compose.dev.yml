@@ -195,9 +195,9 @@ services:
       # No wall-clock recording limit by default. Set a positive value only
       # when a deployment explicitly wants a media policy cap.
       MAX_MEDIA_DURATION_MS: "${MAX_MEDIA_DURATION_MS:-0}"
-      # Durable five-minute window for local Mifodiy interactions before
-      # heavy ASR/V2 work claims the single GPU.
-      TRANSCRIPTION_START_DELAY_SECONDS: ${TRANSCRIPTION_START_DELAY_SECONDS:-300}
+      # V1 ASR starts as soon as the canonical audio is ready. Deployments may
+      # opt into a positive durable delay explicitly through the environment.
+      TRANSCRIPTION_START_DELAY_SECONDS: ${TRANSCRIPTION_START_DELAY_SECONDS:-0}
       NATS_URL: nats://nats:4222
       WORKER_NAME: media-worker
       WORKER_INSTANCE_ID: media-worker
