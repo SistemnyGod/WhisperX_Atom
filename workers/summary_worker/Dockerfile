@@ -13,6 +13,7 @@ ENV PATH="/opt/llama:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/llama:/usr/local/cuda/lib64"
 RUN apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv python3-pip libgomp1 libstdc++6 libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY workers/summary_worker /srv/workers/summary_worker
+COPY workers/memory_worker /srv/workers/memory_worker
 COPY workers/__init__.py /srv/workers/__init__.py
 COPY workers/nats_utils.py /srv/workers/nats_utils.py
 COPY workers/gpu_lease.py /srv/workers/gpu_lease.py
