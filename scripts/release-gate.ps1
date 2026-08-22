@@ -109,7 +109,9 @@ $requiredAcceptanceScenarios = @(
     # in the release gate prevents software-only CI evidence from being
     # mistaken for production acceptance.
     "no-console-start",
+    "no-console-20x10s",
     "audio-quality",
+    "audio-quality-ab",
     "audio-device-loss",
     "system-audio-device-loss",
     "low-disk-during-recording",

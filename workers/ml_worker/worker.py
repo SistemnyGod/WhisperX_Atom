@@ -349,6 +349,7 @@ class GpuWorker:
                 gpu_lease = self._enrichment_gpu_lease if enrichment_job else self._asr_gpu_lease
                 async with gpu_lease:
                     LOGGER.info("job=%s acquired GPU lease", job_id)
+                    await asyncio.to_thread(self._repository.record_pipeline_event_for_job, job_id, "GPU_CLAIMED")
                     if enrichment_job:
                         coordination_requested = await asyncio.to_thread(
                             self._gpu_coordination.request_workload,

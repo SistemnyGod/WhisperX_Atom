@@ -13,6 +13,7 @@ from workers.db_pool import DatabaseConnectionPool
 from diarization_quality import normalize_speaker_label
 from .speaker_registry import default_display_label, match_profile, normalize_embedding
 from whisperx_atom.pipeline_contract import validate_stage_name
+from workers.pipeline_timeline import record_pipeline_event
 from .technical_events import build_technical_intervals, segment_technical_flags
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
@@ -461,7 +462,7 @@ class JobRepository:
         """Close an ASR-only job without creating a second transcript version."""
         with self._db.connection() as connection:
             with connection.transaction():
-                error_row = connection.execute("SELECT error_code FROM jobs WHERE id=%s", (job_id,)).fetchone()
+                error_row = connection.execute("SELECT error_code,pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
                 no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
                 partial_quality = error_row is not None and str(error_row[0] or "").upper() in {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE"}
                 connection.execute(
@@ -472,6 +473,29 @@ class JobRepository:
                     "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
                     ("PARTIAL_READY" if no_speech or partial_quality else "TRANSCRIPT_READY", meeting_id),
                 )
+                self._record_pipeline_event(connection, meeting_id, "V1_READY", str(error_row[1]) if error_row and error_row[1] else None)
+
+    @staticmethod
+    def _record_pipeline_event(connection: psycopg.Connection[Any], meeting_id: str, event: str, correlation_id: str | None = None) -> None:
+        if correlation_id:
+            row = connection.execute(
+                "SELECT id FROM recording_sessions WHERE pipeline_correlation_id=%s ORDER BY created_at DESC LIMIT 1",
+                (correlation_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+        if row:
+            record_pipeline_event(connection, str(row[0]), event)
+
+    def record_pipeline_event_for_job(self, job_id: str, event: str) -> None:
+        """Persist a first-write-only timeline marker for a worker-owned job."""
+        with self._db.connection() as connection:
+            row = connection.execute("SELECT meeting_id,pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
+            if row and row[0]:
+                self._record_pipeline_event(connection, str(row[0]), event, str(row[1]) if row[1] else None)
 
     def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
         """Persist the ASR-only Transcript V1 before alignment/diarization.
@@ -522,6 +546,7 @@ class JobRepository:
                                 int(media[1]) if media and media[1] else None,
                             )
                     connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (existing[0], job_id))
+                    self._record_pipeline_event(connection, meeting_id, "V1_READY", str(job[2]) if job[2] else None)
                     return str(existing[0])
                 version_row = connection.execute("SELECT COALESCE(MAX(version),0)+1 FROM transcripts WHERE meeting_id=%s", (meeting_id,)).fetchone()
                 version = int(version_row[0])
@@ -538,6 +563,7 @@ class JobRepository:
                     (meeting_id, version, draft.get("language"), metadata.get("model"), json.dumps(warnings), json.dumps(quality), quality.get("quality_score"), metadata.get("processing_profile"), metadata.get("selected_asr_pass")),
                 ).fetchone()[0]
                 connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (transcript_id, job_id))
+                self._record_pipeline_event(connection, meeting_id, "V1_READY", str(job[2]) if job[2] else None)
                 technical_intervals = _technical_intervals(connection, meeting_id)
                 for ordinal, segment in enumerate(draft.get("segments", [])):
                     start_ms = int(float(segment.get("start", 0)) * 1000)
@@ -657,6 +683,7 @@ class JobRepository:
                 if existing_enriched:
                     connection.execute("UPDATE recording_pipeline_runs SET transcript_v2_id=%s,updated_at=now() WHERE enrichment_job_id=%s", (existing_enriched[0], job_id))
                     connection.execute("UPDATE jobs SET status='READY',stage='ENRICHED_READY',progress=100,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
+                    self._record_pipeline_event(connection, meeting_id, "V2_READY", str(job[2]) if job[2] else None)
                     return True
             correlation_id = result.get("correlation_id") or (str(job[2]) if job[2] else None)
             if not correlation_id:
@@ -789,6 +816,8 @@ class JobRepository:
             result_error_message = "Речь не обнаружена в корректном аудиофайле." if result_error_code == "NO_SPEECH_DETECTED" else None
             final_stage = "ENRICHED_READY" if version_kind == "ENRICHED" else "ASR_READY"
             connection.execute("UPDATE jobs SET status='READY',stage=%s,progress=100,error_message=%s,error_code=%s,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (final_stage, result_error_message, result_error_code, job_id))
+            if version_kind == "ENRICHED":
+                self._record_pipeline_event(connection, meeting_id, "V2_READY", str(job[2]) if job[2] else None)
             return True
 
     @staticmethod

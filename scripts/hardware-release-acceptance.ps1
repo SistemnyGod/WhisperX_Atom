@@ -14,7 +14,10 @@ param(
     [switch]$AllowLongRun,
     [switch]$KeepAudio,
     [string]$TemporaryVhdPath,
-    [string]$EvidenceRoot = ''
+    [string]$EvidenceRoot = '',
+    [string]$PipelineEvidenceRoot = '',
+    [ValidateRange(10,20)][int]$AudioAbPairs = 10,
+    [string]$AudioAbRatingsPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,8 +104,24 @@ if ($NodeRole -eq 'Server') {
                 else { Add-Check 'resumeTask' 'READY' 'Resumed after reboot'; Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }
             } else { Add-Check 'resumeTask' 'BLOCKED' 'Run -PrepareReboot -AllowReboot, then invoke -Resume after the real reboot.' }
         }
-        '^cold-model-runtime$' { Require-Switch $true 'modelVolumesPreserved' 'Cold runtime must be executed by the operator without deleting model volumes.' | Out-Null; Add-Check 'operatorEvidence' 'BLOCKED' 'Attach real cold-model evidence after restart.' }
-        '^gpu-oom$' { Require-Switch $AllowGpuPressure 'gpuPressureAuthorization' 'GPU pressure is explicitly authorized.' | Out-Null; if ($AllowGpuPressure) { Add-Check 'operatorEvidence' 'BLOCKED' 'Run controlled GPU-OOM/recovery and attach evidence.' } }
+        '^no-console-20x10s$' {
+            if (-not $Resume) {
+                Add-Check 'noConsoleResume' 'BLOCKED' 'Run this Server scenario with -Resume after the real reboot; no simulated startup is accepted.'
+            } else {
+                $doctor = Join-Path ([IO.Path]::GetFullPath($BundleRoot)) 'doctor-server-bundle.ps1'
+                if (-not (Test-Path -LiteralPath $doctor)) { Add-Check 'serverDoctorQuick' 'BLOCKED' 'DOCTOR_SCRIPT_MISSING' }
+                else {
+                    try {
+                        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $doctor -BundleRoot $BundleRoot -ConfigRoot $ConfigRoot -Mode Quick | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "SERVER_DOCTOR_EXIT_$LASTEXITCODE" }
+                        Add-Check 'serverDoctorQuick' 'READY' 'Authenticated runtime readiness after reboot.'
+                        $metrics.noConsole = 'AUTO_RECOVERED'
+                    } catch { Add-Check 'serverDoctorQuick' 'FAILED' $_.Exception.Message }
+                }
+            }
+        }
+        '^cold-model-runtime$' { Require-Switch $true 'modelVolumesPreserved' 'Cold runtime must be executed by the operator without deleting model volumes.' | Out-Null; Add-Check 'operatorEvidence' 'BLOCKED' 'Attach real cold-model evidence after restart.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' }
+        '^gpu-oom$' { Require-Switch $AllowGpuPressure 'gpuPressureAuthorization' 'GPU pressure is explicitly authorized.' | Out-Null; if ($AllowGpuPressure) { Add-Check 'operatorEvidence' 'BLOCKED' 'Run controlled GPU-OOM/recovery and attach evidence.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' } }
         default { Add-Check 'scenario' 'BLOCKED' "Unsupported Server scenario '$Scenario'." }
     }
 }
@@ -117,13 +136,67 @@ elseif ($NodeRole -eq 'Client') {
                 catch { Add-Check 'audioQuality' 'FAILED' $_.Exception.Message }
             } else { Add-Check 'audioQuality' 'BLOCKED' 'AUDIO_ACCEPTANCE_SCRIPT_MISSING' }
         }
-        '^audio-device-loss$|^system-audio-device-loss$' { Add-Check 'operatorDeviceLoss' 'BLOCKED' 'Disconnect and restore the physical device, then rerun with operator evidence.' }
-        '^low-disk-during-recording$' {
-            if (-not $AllowTemporaryVhd) { Add-Check 'temporaryVhdAuthorization' 'BLOCKED' 'Use -AllowTemporaryVhd and a new run-scoped VHD path.' }
-            elseif ([string]::IsNullOrWhiteSpace($TemporaryVhdPath)) { Add-Check 'temporaryVhdPath' 'BLOCKED' 'TemporaryVhdPath is required; existing disks are never modified.' }
-            else { Add-Check 'temporaryVhdPath' 'BLOCKED' 'Operator must create/mount the isolated VHDX and attach evidence; no existing volume is touched.' }
+        '^audio-quality-ab$' {
+            $script = Join-Path $repo 'scripts\audio-quality-ab-gate.ps1'
+            if (Test-Path -LiteralPath $script) {
+                try {
+                    $abArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script,'-Pairs',$AudioAbPairs,'-OutputRoot',$root)
+                    if ($AudioAbRatingsPath) { $abArgs += @('-RatingsPath',$AudioAbRatingsPath) }
+                    & powershell.exe @abArgs
+                    if ($LASTEXITCODE -ne 0) { throw "AUDIO_AB_GATE_EXIT_$LASTEXITCODE" }
+                    Add-Check 'audioQualityAb' 'READY' 'AudioGraph/RAW pair gate completed.'
+                }
+                catch { Add-Check 'audioQualityAb' 'BLOCKED' "Real A/B pairs and blind operator ratings are required: $($_.Exception.Message)" }
+            } else { Add-Check 'audioQualityAb' 'BLOCKED' 'AUDIO_AB_GATE_SCRIPT_MISSING' }
         }
-        '^4h-recording$|^8h-recording$' { if ($AllowLongRun) { Add-Check 'longRunAuthorization' 'READY' 'Long-run gate explicitly authorized.'; Add-Check 'operatorEvidence' 'BLOCKED' 'Run the real installed-client endurance gate.' } else { Add-Check 'longRunAuthorization' 'BLOCKED' 'Use -AllowLongRun.' } }
+        '^no-console-20x10s$' {
+            if (-not $AllowLongRun) {
+                Add-Check 'twentyRunAuthorization' 'BLOCKED' 'Use -AllowLongRun for the real 20x10s no-console gate.'
+            } else {
+                $script = Join-Path $repo 'scripts\acceptance-audiograph-local-recording.ps1'
+                $childRoot = Join-Path $root 'runs'
+                New-Item -ItemType Directory -Force -Path $childRoot | Out-Null
+                $reports = [System.Collections.Generic.List[object]]::new()
+                $duplicateIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                for ($run = 1; $run -le 20; $run++) {
+                    try {
+                        $runStarted = [DateTime]::UtcNow
+                        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Seconds 10 -FinalizeTimeoutSeconds 180 -ServerDelivery -AllowPendingArchive -OutputRoot (Join-Path $childRoot ("run-{0:D2}" -f $run)) | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "CHILD_GATE_EXIT_$LASTEXITCODE" }
+                        $candidate = Get-ChildItem -LiteralPath $childRoot -Recurse -File -Filter 'report-*.json' -ErrorAction SilentlyContinue |
+                            Where-Object { $_.LastWriteTimeUtc -ge $runStarted } |
+                            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+                        if ($null -eq $candidate) { throw 'CHILD_EVIDENCE_MISSING' }
+                        $child = Get-Content -LiteralPath $candidate.FullName -Raw | ConvertFrom-Json
+                        $reports.Add($child)
+                        $jobId = [string]$child.result.processingJobId
+                        if ([string]::IsNullOrWhiteSpace($jobId)) { throw 'SERVER_JOB_ID_MISSING' }
+                        if (-not $duplicateIds.Add($jobId)) { throw "DUPLICATE_PROCESSING_JOB_ID: $jobId" }
+                        if ([string]$child.status -ne 'PASSED' -or [string]$child.result.deliveryState -ne 'CONFIRMED') { throw "CHILD_GATE_NOT_GREEN: $($child.status) / $($child.result.deliveryState)" }
+                    } catch { Add-Check ("run-{0:D2}" -f $run) 'FAILED' $_.Exception.Message }
+                }
+                $metrics.runsCompleted = $reports.Count
+                $metrics.uniqueProcessingJobIds = $duplicateIds.Count
+                if ($reports.Count -eq 20 -and $duplicateIds.Count -eq 20) {
+                    if ([string]::IsNullOrWhiteSpace($PipelineEvidenceRoot)) {
+                        Add-Check 'v1V2SummaryEvidence' 'BLOCKED' 'Attach real server evidence with V1/V2/Summary terminal states; delivery alone is insufficient.'
+                    } else {
+                        $pipelineFiles = @(Get-ChildItem -LiteralPath ([IO.Path]::GetFullPath($PipelineEvidenceRoot)) -Recurse -File -Filter '*.json' -ErrorAction SilentlyContinue)
+                        $pipelineReports = @($pipelineFiles | ForEach-Object { try { Get-Content $_.FullName -Raw | ConvertFrom-Json } catch { } } | Where-Object { $_.runId -eq $RunId -and $_.buildIdentity -eq $identity })
+                        $green = @($pipelineReports | Where-Object { $_.v1Status -in @('READY','PARTIAL_READY') -and $_.v2Status -in @('READY','PARTIAL_READY') -and $_.summaryStatus -in @('READY','NEEDS_REVIEW','PARTIAL_READY') -and [int]$_.duplicateCount -eq 0 }).Count
+                        if ($green -eq 20) { Add-Check 'v1V2SummaryEvidence' 'READY' '20/20 terminal V1/V2/Summary evidence.'; $metrics.outcome = 'AUTO_RECOVERED' }
+                        else { Add-Check 'v1V2SummaryEvidence' 'BLOCKED' "Expected 20 green server evidence records, got $green." }
+                    }
+                }
+            }
+        }
+        '^audio-device-loss$|^system-audio-device-loss$' { Add-Check 'operatorDeviceLoss' 'BLOCKED' 'Disconnect and restore the physical device, then rerun with operator evidence.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' }
+        '^low-disk-during-recording$' {
+            if (-not $AllowTemporaryVhd) { Add-Check 'temporaryVhdAuthorization' 'BLOCKED' 'Use -AllowTemporaryVhd and a new run-scoped VHD path.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' }
+            elseif ([string]::IsNullOrWhiteSpace($TemporaryVhdPath)) { Add-Check 'temporaryVhdPath' 'BLOCKED' 'TemporaryVhdPath is required; existing disks are never modified.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' }
+            else { Add-Check 'temporaryVhdPath' 'BLOCKED' 'Operator must create/mount the isolated VHDX and attach evidence; no existing volume is touched.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' }
+        }
+        '^4h-recording$|^8h-recording$' { if ($AllowLongRun) { Add-Check 'longRunAuthorization' 'READY' 'Long-run gate explicitly authorized.'; Add-Check 'operatorEvidence' 'BLOCKED' 'Run the real installed-client endurance gate.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' } else { Add-Check 'longRunAuthorization' 'BLOCKED' 'Use -AllowLongRun.'; $metrics.outcome = 'BLOCKED_OPERATOR_ACTION' } }
         default { Add-Check 'scenario' 'BLOCKED' "Unsupported Client scenario '$Scenario'." }
     }
 }

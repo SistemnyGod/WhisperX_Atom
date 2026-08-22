@@ -54,6 +54,23 @@ GET /api/meetings/{meetingId}/pipeline
 
 Ответ не содержит аудио, токены или текст стенограммы: только идентификаторы, статусы и correlation ID.
 
+## Единая timeline
+
+В `recording_sessions.stage_timings` сервер и workers записывают
+first-write-only события одной цепочки:
+
+```text
+STOP → LOCAL_READY → FLAC_READY → UPLOAD_START → DELIVERY_CONFIRMED
+     → MEDIA_READY → ASR_QUEUED → GPU_CLAIMED → V1_READY
+     → V2_READY → SUMMARY_READY
+```
+
+Для каждого соседнего перехода сохраняется duration в миллисекундах, а также
+`stop_to_v1_ms`, `stop_to_v2_ms` и `stop_to_summary_ms`. Повторная доставка
+NATS не изменяет первый timestamp и не создаёт новую lineage. Поля являются
+optional: старые клиенты продолжают читать прежние `pipelineEvents` и
+`pipelineDurations`.
+
 ## Вертикальный E2E
 
 Используется `scripts/e2e-vertical-pipeline.ps1`. Скрипт запускает установленный Recorder Host через существующий AudioGraph acceptance gate с включённой серверной доставкой, затем ожидает серверную lineage-цепочку и проверяет все обязательные ID до Summary. Он не включает аудио в acceptance JSON. Для явной проверки восстановления workers можно добавить `-RestartWorkers`; по умолчанию скрипт не изменяет running runtime.
@@ -66,3 +83,17 @@ GET /api/meetings/{meetingId}/pipeline
 ```
 
 Результат: `artifacts/acceptance/voice-to-transcript-v1.json`.
+
+Для no-console gate используется только реальный установленный runtime:
+
+```powershell
+.\scripts\hardware-release-acceptance.ps1 `
+  -NodeRole Server -Scenario no-console-20x10s -Resume -RunId <id>
+.\scripts\hardware-release-acceptance.ps1 `
+  -NodeRole Client -Scenario no-console-20x10s -AllowLongRun -RunId <id> `
+  -PipelineEvidenceRoot <server-evidence>
+```
+
+Сценарий делает 20 последовательных 10-секундных записей с серверной
+доставкой, проверяет уникальность job IDs и не выдаёт `PASSED`, пока не
+приложены отдельные терминальные V1/V2/Summary evidence.

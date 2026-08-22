@@ -1,7 +1,8 @@
 param(
     [string]$OutputRoot = (Join-Path $PSScriptRoot "..\artifacts\desktop"),
     [switch]$NoRestore,
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    [string]$TtsWheelhouse = ''
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +84,9 @@ Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Dest
 # Silero is a build-time dependency. It is staged outside Git and frozen into
 # an onedir host; a release must fail closed when the model/runtime is absent.
 $ttsPublisher = Join-Path $repoRoot "scripts\publish-tts-host.ps1"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ttsPublisher -OutputRoot (Join-Path $output "TtsHost")
+$ttsArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ttsPublisher,'-OutputRoot',(Join-Path $output 'TtsHost'))
+if ($TtsWheelhouse) { $ttsArgs += @('-WheelhouseRoot', $TtsWheelhouse) }
+& powershell.exe @ttsArgs
 if ($LASTEXITCODE -ne 0) { throw "TtsHost publish failed with exit code $LASTEXITCODE" }
 
 # The supported Windows runtime is .NET Desktop + AudioGraph Host + Voice

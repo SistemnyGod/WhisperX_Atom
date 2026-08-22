@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 from whisperx_atom.pipeline_contract import validate_stage_name
+from workers.pipeline_timeline import record_pipeline_event
 
 # The historical contract used the literal predicate job.type='TRANSCRIBE';
 # the production query below intentionally includes the additive
@@ -161,10 +162,17 @@ def renew_lease(job_id: str, message_id: str | None = None) -> None:
 
 def update_asset(media_asset_id: str, sha256: str, archive_key: str, preview_key: str, asr_key: str, duration_ms: int) -> None:
     with psycopg.connect(_conninfo()) as connection:
-        connection.execute(
+        changed = connection.execute(
             "UPDATE media_assets SET sha256=CASE WHEN duplicate_of IS NULL THEN %s ELSE NULL END,archive_storage_key=%s,preview_storage_key=%s,asr_storage_key=%s,duration_ms=%s,status='READY' WHERE id=%s AND status <> 'READY' AND EXISTS(SELECT 1 FROM jobs WHERE media_asset_id=media_assets.id AND status <> 'CANCELLED')",
             (sha256, archive_key, preview_key, asr_key, duration_ms, media_asset_id),
         )
+        if changed.rowcount:
+            session = connection.execute(
+                "SELECT recording_session_id FROM recording_pipeline_runs WHERE media_asset_id=%s LIMIT 1",
+                (media_asset_id,),
+            ).fetchone()
+            if session:
+                record_pipeline_event(connection, str(session[0]), "MEDIA_READY")
 
 
 def update_asset_failed(media_asset_id: str, error_code: str, error_detail: str) -> None:

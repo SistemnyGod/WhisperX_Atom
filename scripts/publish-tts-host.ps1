@@ -3,6 +3,7 @@ param(
     [string]$OutputRoot = '',
     [string]$ModelRoot = '',
     [string]$PythonExe = '',
+    [string]$WheelhouseRoot = '',
     [switch]$NoInstall
 )
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,7 @@ $dirtySuffix = if ($dirty.Count -gt 0) { '-dirty' } else { '' }
 $identity = "1.0.1+" + (& git -C $repoRoot rev-parse HEAD).Trim() + $dirtySuffix
 if ($identity -match '(?i)dev' -or $identity -notmatch '^1\.0\.1\+[0-9a-f]{40}(-dirty)?$') { throw 'TTS_BUILD_IDENTITY_INVALID' }
 $source = Join-Path $repoRoot 'apps\tts-host'
+$wheelhouse = if ($WheelhouseRoot) { [IO.Path]::GetFullPath($WheelhouseRoot) } elseif ($env:WHISPERX_TTS_WHEELHOUSE) { [IO.Path]::GetFullPath($env:WHISPERX_TTS_WHEELHOUSE) } else { '' }
 $model = Join-Path $ModelRoot 'v5_5_ru.pt'
 if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw "TTS_MODEL_MISSING: stage it with prepare-silero-tts.ps1" }
 $modelManifest = Join-Path $ModelRoot 'model-manifest.json'
@@ -36,7 +38,24 @@ $venv = Join-Path $staging '.venv'
 if ($LASTEXITCODE -ne 0) { throw 'TTS_VENV_CREATE_FAILED' }
 $venvPython = Join-Path $venv 'Scripts\python.exe'
 if (-not $NoInstall) {
-    & $venvPython -m pip install --disable-pip-version-check --requirement (Join-Path $source 'requirements.cpu.lock.txt')
+    $requirements = Join-Path $source 'requirements.cpu.lock.txt'
+    if ($wheelhouse) {
+        if (-not (Test-Path -LiteralPath $wheelhouse -PathType Container)) { throw "TTS_WHEELHOUSE_MISSING: $wheelhouse" }
+        $wheelManifest = Join-Path $wheelhouse 'wheelhouse-manifest.json'
+        if (-not (Test-Path -LiteralPath $wheelManifest -PathType Leaf)) { throw 'TTS_WHEELHOUSE_MANIFEST_MISSING' }
+        $manifest = Get-Content -LiteralPath $wheelManifest -Raw | ConvertFrom-Json
+        if ($manifest.schemaVersion -ne 1 -or @($manifest.files).Count -eq 0) { throw 'TTS_WHEELHOUSE_MANIFEST_INVALID' }
+        foreach ($entry in @($manifest.files)) {
+            $wheel = Join-Path $wheelhouse ([string]$entry.name)
+            if (-not (Test-Path -LiteralPath $wheel -PathType Leaf)) { throw "TTS_WHEEL_FILE_MISSING: $($entry.name)" }
+            $actual = (Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "TTS_WHEEL_HASH_MISMATCH: $($entry.name)" }
+        }
+        if (-not (@($manifest.files | Where-Object { [string]$_.name -match '^torch-2\.8\.0(?:\+cpu|\.post).*\.whl$' }).Count)) { throw 'TTS_TORCH_CPU_WHEEL_MISSING' }
+        & $venvPython -m pip install --disable-pip-version-check --no-index --find-links $wheelhouse --requirement $requirements
+    } else {
+        & $venvPython -m pip install --disable-pip-version-check --requirement $requirements
+    }
     if ($LASTEXITCODE -ne 0) { throw 'TTS_DEPENDENCY_INSTALL_FAILED' }
 }
 $out = [IO.Path]::GetFullPath($OutputRoot)

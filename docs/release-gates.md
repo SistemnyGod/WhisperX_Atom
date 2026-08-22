@@ -12,6 +12,8 @@ The following evidence is deliberately outside commit CI and must be recorded as
 - worker crash recovery;
 - Windows reboot and no-console startup (Docker Desktop/Supervisor must recover
   before a client is opened);
+- no-console `20 × 10s` sequence with unique jobs and terminal V1/V2/Summary
+  evidence;
 - capture quality evidence (native and normalized clipping, RMS/noise/DC and
   frame continuity);
 - microphone and system-audio device-loss recovery;
@@ -52,7 +54,9 @@ recorder-crash-recovery
 worker-crash-recovery
 windows-reboot-recovery
 no-console-start
+no-console-20x10s
 audio-quality
+audio-quality-ab
 audio-device-loss
 system-audio-device-loss
 low-disk-during-recording

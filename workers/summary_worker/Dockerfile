@@ -20,6 +20,7 @@ COPY workers/gpu_runtime_coordination.py /srv/workers/gpu_runtime_coordination.p
 COPY workers/db_pool.py /srv/workers/db_pool.py
 COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py
 COPY workers/runtime_healthcheck.py /srv/workers/runtime_healthcheck.py
+COPY workers/pipeline_timeline.py /srv/workers/pipeline_timeline.py
 COPY whisperx_atom /srv/whisperx_atom
 COPY workers/summary_worker/requirements.txt /srv/summary-requirements.txt
 RUN python3.12 -m pip install --break-system-packages --no-cache-dir -r /srv/summary-requirements.txt

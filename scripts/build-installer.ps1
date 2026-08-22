@@ -1,7 +1,8 @@
 ﻿param(
     [switch]$SkipPublish,
     [switch]$NoRestore,
-    [string]$ServerOrigin = "http://192.168.2.194:8080"
+    [string]$ServerOrigin = "http://192.168.2.194:8080",
+    [string]$TtsWheelhouse = ''
 )
 $ErrorActionPreference = "Stop"
 $originUri = $null
@@ -17,10 +18,12 @@ $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
 $artifact = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
 if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
     if ($NoRestore) {
-        & $publish -NoRestore
+        $publishArgs = @('-NoRestore')
     } else {
-        & $publish
+        $publishArgs = @()
     }
+    if ($TtsWheelhouse) { $publishArgs += @('-TtsWheelhouse', $TtsWheelhouse) }
+    & $publish @publishArgs
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($null -eq $iscc) {

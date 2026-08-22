@@ -15,6 +15,7 @@ import logging
 from psycopg.types.json import Jsonb
 
 from workers.gpu_lease import PostgresGpuLease
+from workers.pipeline_timeline import record_pipeline_event
 from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from workers.db_pool import DatabaseConnectionPool
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
@@ -167,6 +168,20 @@ class SummaryRepository:
                 (meeting_id,),
             ).fetchone()
             return str(row[0]) if row and row[0] else None
+
+    def _record_pipeline_event(self, connection: psycopg.Connection[Any], meeting_id: str, event: str, correlation_id: str | None = None) -> None:
+        if correlation_id:
+            row = connection.execute(
+                "SELECT id FROM recording_sessions WHERE pipeline_correlation_id=%s ORDER BY created_at DESC LIMIT 1",
+                (correlation_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT id FROM recording_sessions WHERE meeting_id=%s ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+        if row:
+            record_pipeline_event(connection, str(row[0]), event)
 
     def record_pipeline_metrics(self, job_id: str, meeting_id: str, metrics: dict[str, Any] | None) -> None:
         """Persist summary timings alongside the recording lineage.
@@ -365,6 +380,7 @@ class SummaryRepository:
                     connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
                     connection.execute("UPDATE recording_pipeline_runs SET summary_id=%s,summary_job_id=%s,updated_at=now() WHERE summary_job_id=%s", (existing_summary[0], job_id, job_id))
                     connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if existing_status == "READY" else "PARTIAL_READY", meeting_id))
+                    self._record_pipeline_event(connection, meeting_id, "SUMMARY_READY", str(job[1]) if job[1] else None)
                     return True
                 if existing_status != "FAILED":
                     raise RuntimeError("summary_persist_incomplete")
@@ -468,6 +484,8 @@ class SummaryRepository:
             else:
                 connection.execute("UPDATE jobs SET status='READY',stage='READY',progress=100,error_message=NULL,error_code=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'", (job_id,))
             connection.execute("UPDATE meetings SET status=%s WHERE id=%s AND status <> 'CANCELLED'", ("READY" if summary_status == "READY" else "PARTIAL_READY", meeting_id))
+            if summary_status in {"READY", "NEEDS_REVIEW"}:
+                self._record_pipeline_event(connection, meeting_id, "SUMMARY_READY", str(job[1]) if job[1] else None)
             return True
 
 def parse_deadline(value: Any) -> datetime | None:

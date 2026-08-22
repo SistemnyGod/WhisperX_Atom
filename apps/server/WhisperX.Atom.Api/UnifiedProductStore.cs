@@ -694,8 +694,34 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             ["PIPELINE_UPLOAD_STARTED"] = ("PIPELINE_FLAC_READY", "flac_to_upload_started_ms"),
             ["PIPELINE_UPLOAD_READY"] = ("PIPELINE_UPLOAD_STARTED", "upload_ms"),
             ["PIPELINE_FINALIZE_ACCEPTED"] = ("PIPELINE_UPLOAD_READY", "finalize_ms"),
-            ["PIPELINE_MEDIA_READY"] = ("PIPELINE_FINALIZE_ACCEPTED", "media_assembly_ms")
+            ["PIPELINE_MEDIA_READY"] = ("PIPELINE_FINALIZE_ACCEPTED", "media_assembly_ms"),
+            ["LOCAL_READY"] = ("STOP", "stop_to_local_ready_ms"),
+            ["FLAC_READY"] = ("LOCAL_READY", "local_ready_to_flac_ms"),
+            ["UPLOAD_START"] = ("FLAC_READY", "flac_to_upload_started_ms"),
+            ["DELIVERY_CONFIRMED"] = ("UPLOAD_START", "upload_to_delivery_confirmed_ms"),
+            ["MEDIA_READY"] = ("DELIVERY_CONFIRMED", "delivery_to_media_ready_ms"),
+            ["ASR_QUEUED"] = ("MEDIA_READY", "media_to_asr_queued_ms"),
+            ["GPU_CLAIMED"] = ("ASR_QUEUED", "asr_queue_to_gpu_claimed_ms"),
+            ["V1_READY"] = ("GPU_CLAIMED", "gpu_claimed_to_v1_ms"),
+            ["V2_READY"] = ("V1_READY", "v1_to_v2_ms"),
+            ["SUMMARY_READY"] = ("V2_READY", "v2_to_summary_ms")
         };
+
+    private static string CanonicalPipelineEvent(string eventType) => eventType.Trim().ToUpperInvariant() switch
+    {
+        "PIPELINE_STOP" or "STOP" => "STOP",
+        "PIPELINE_LOCAL_READY" or "LOCAL_READY" => "LOCAL_READY",
+        "PIPELINE_FLAC_READY" or "FLAC_READY" => "FLAC_READY",
+        "PIPELINE_UPLOAD_STARTED" or "UPLOAD_START" => "UPLOAD_START",
+        "PIPELINE_UPLOAD_READY" or "PIPELINE_FINALIZE_ACCEPTED" or "DELIVERY_CONFIRMED" => "DELIVERY_CONFIRMED",
+        "PIPELINE_MEDIA_READY" or "MEDIA_READY" => "MEDIA_READY",
+        "PIPELINE_ASR_QUEUED" or "ASR_QUEUED" => "ASR_QUEUED",
+        "PIPELINE_GPU_CLAIMED" or "GPU_CLAIMED" => "GPU_CLAIMED",
+        "PIPELINE_V1_READY" or "V1_READY" => "V1_READY",
+        "PIPELINE_V2_READY" or "V2_READY" => "V2_READY",
+        "PIPELINE_SUMMARY_READY" or "SUMMARY_READY" => "SUMMARY_READY",
+        _ => string.Empty
+    };
 
     /// <summary>
     /// Folds the idempotent recorder event stream into bounded diagnostic
@@ -711,51 +737,62 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         DateTimeOffset createdAt)
     {
         var createdText = createdAt.ToUniversalTime().ToString("O");
-        await using (var marker = new NpgsqlCommand("""
-            UPDATE recording_sessions
-            SET stage_timings=jsonb_set(
-                COALESCE(stage_timings,'{}'::jsonb),
-                ARRAY['pipelineEvents',@eventType]::text[],
-                to_jsonb(@createdText::text),
-                true)
-            WHERE id=@session
-            """, connection, transaction))
+        var canonical = CanonicalPipelineEvent(eventType);
+        foreach (var markerName in new[] { eventType.Trim().ToUpperInvariant(), canonical }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            marker.Parameters.AddWithValue("eventType", eventType);
+            await using var marker = new NpgsqlCommand("""
+                UPDATE recording_sessions
+                SET stage_timings=CASE
+                    WHEN COALESCE(stage_timings,'{}'::jsonb) #> ARRAY['pipelineEvents',@eventType]::text[] IS NULL
+                    THEN jsonb_set(COALESCE(stage_timings,'{}'::jsonb), ARRAY['pipelineEvents',@eventType]::text[], to_jsonb(@createdText::text), true)
+                    ELSE COALESCE(stage_timings,'{}'::jsonb)
+                    END
+                WHERE id=@session
+                """, connection, transaction);
+            marker.Parameters.AddWithValue("eventType", markerName);
             marker.Parameters.AddWithValue("createdText", createdText);
             marker.Parameters.AddWithValue("session", sessionId);
             await marker.ExecuteNonQueryAsync();
         }
 
-        if (!PipelineEventDurations.TryGetValue(eventType, out var duration)) return;
-
-        string? startText;
-        await using (var lookup = new NpgsqlCommand("""
-            SELECT stage_timings #>> ARRAY['pipelineEvents',@startEvent]::text[]
-            FROM recording_sessions
-            WHERE id=@session
-            """, connection, transaction))
+        var durations = new[]
         {
-            lookup.Parameters.AddWithValue("startEvent", duration.StartEvent);
-            lookup.Parameters.AddWithValue("session", sessionId);
-            startText = await lookup.ExecuteScalarAsync() as string;
+            PipelineEventDurations.TryGetValue(eventType, out var legacyDuration) ? legacyDuration : default,
+            PipelineEventDurations.TryGetValue(canonical, out var canonicalDuration) ? canonicalDuration : default
         }
+        .Where(item => !string.IsNullOrWhiteSpace(item.StartEvent) && !string.IsNullOrWhiteSpace(item.DurationKey))
+        .Distinct()
+        .ToArray();
+        foreach (var duration in durations)
+        {
+            string? startText;
+            await using (var lookup = new NpgsqlCommand("""
+                SELECT stage_timings #>> ARRAY['pipelineEvents',@startEvent]::text[]
+                FROM recording_sessions
+                WHERE id=@session
+                """, connection, transaction))
+            {
+                lookup.Parameters.AddWithValue("startEvent", duration.StartEvent);
+                lookup.Parameters.AddWithValue("session", sessionId);
+                startText = await lookup.ExecuteScalarAsync() as string;
+            }
 
-        if (!DateTimeOffset.TryParse(startText, out var startAt)) return;
-        var elapsedMs = Math.Max(0L, (long)Math.Round((createdAt - startAt).TotalMilliseconds));
-        await using var timing = new NpgsqlCommand("""
-            UPDATE recording_sessions
-            SET stage_timings=jsonb_set(
-                COALESCE(stage_timings,'{}'::jsonb),
-                ARRAY['pipelineDurations',@durationKey]::text[],
-                to_jsonb(@elapsedMs::bigint),
-                true)
-            WHERE id=@session
-            """, connection, transaction);
-        timing.Parameters.AddWithValue("durationKey", duration.DurationKey);
-        timing.Parameters.AddWithValue("elapsedMs", elapsedMs);
-        timing.Parameters.AddWithValue("session", sessionId);
-        await timing.ExecuteNonQueryAsync();
+            if (!DateTimeOffset.TryParse(startText, out var startAt)) continue;
+            var elapsedMs = Math.Max(0L, (long)Math.Round((createdAt - startAt).TotalMilliseconds));
+            await using var timing = new NpgsqlCommand("""
+                UPDATE recording_sessions
+                SET stage_timings=CASE
+                    WHEN COALESCE(stage_timings,'{}'::jsonb) #> ARRAY['pipelineDurations',@durationKey]::text[] IS NULL
+                    THEN jsonb_set(COALESCE(stage_timings,'{}'::jsonb), ARRAY['pipelineDurations',@durationKey]::text[], to_jsonb(@elapsedMs::bigint), true)
+                    ELSE COALESCE(stage_timings,'{}'::jsonb)
+                    END
+                WHERE id=@session
+                """, connection, transaction);
+            timing.Parameters.AddWithValue("durationKey", duration.DurationKey);
+            timing.Parameters.AddWithValue("elapsedMs", elapsedMs);
+            timing.Parameters.AddWithValue("session", sessionId);
+            await timing.ExecuteNonQueryAsync();
+        }
     }
 
     public async Task<FinalizeRecordingResult> FinalizeRecordingAsync(Guid agentId, Guid sessionId, JsonDocument? manifest = null, DateTime? finishedAt = null)
@@ -779,6 +816,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "MEETING_CANCELLED");
         if (!ownerActive)
             return new FinalizeRecordingResult(true, false, meetingId, null, null, Array.Empty<MissingRecordingChunks>(), "OWNER_AUTHORIZATION_REJECTED");
+
+        // STOP is server-owned for the durable pipeline.  A repeated finalize
+        // or a client restart can only fill the marker once and never moves it.
+        var stopAt = finishedAt.HasValue
+            ? new DateTimeOffset(finishedAt.Value.ToUniversalTime())
+            : DateTimeOffset.UtcNow;
+        await RecordPipelineEventTimingAsync(connection, tx, sessionId, "STOP", stopAt);
 
         // A second finalize must return the existing pipeline instead of resetting a
         // session that is already ingesting or has reached a terminal state. A
@@ -946,6 +990,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             outbox.Parameters.AddWithValue("payload", payload);
             await outbox.ExecuteNonQueryAsync();
         }
+        await RecordPipelineEventTimingAsync(connection, tx, sessionId, "ASR_QUEUED", DateTimeOffset.UtcNow);
         await tx.CommitAsync();
         return new FinalizeRecordingResult(true, true, meetingId, jobId, assetId, Array.Empty<MissingRecordingChunks>(), null);
     }
