@@ -146,6 +146,40 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
             || value.StartsWith("пошути ", StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A subset of the general-language hints is unambiguously world
+    /// knowledge.  Other explanatory wording (for example, "объясни причину
+    /// переноса ремонта") may refer to the active meeting and must be allowed
+    /// to go through meeting retrieval first.
+    /// </summary>
+    internal static bool IsClearlyGeneralQuestion(string text)
+    {
+        var value = NormalizeText(text);
+        return value is "привет" or "здравствуй" or "здравствуйте" or "добрый день" or "доброе утро" or "добрый вечер"
+            or "скажи привет" or "как дела" or "как тебя зовут" or "кто ты" or "спасибо" or "спасибо мифодий"
+            or "расскажи анекдот" or "пошути" or "поговори со мной"
+            || value.StartsWith("что такое ", StringComparison.Ordinal)
+            || value.StartsWith("как работает ", StringComparison.Ordinal)
+            || value.StartsWith("объясни принцип ", StringComparison.Ordinal)
+            || value.StartsWith("объясни термин ", StringComparison.Ordinal)
+            || value.StartsWith("напиши ", StringComparison.Ordinal)
+            || value.StartsWith("переведи ", StringComparison.Ordinal)
+            || value.StartsWith("расскажи анекдот ", StringComparison.Ordinal)
+            || value.StartsWith("пошути ", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Explanatory/causal wording is deliberately treated as meeting-shaped
+    /// while a meeting scope is available. This prevents a generic Qwen answer
+    /// from replacing a grounded answer about the current discussion.
+    /// </summary>
+    internal static bool IsAmbiguousMeetingQuestion(string text)
+    {
+        var value = NormalizeText(text);
+        return value.StartsWith("объясни ", StringComparison.Ordinal)
+            && !IsClearlyGeneralQuestion(value);
+    }
+
     internal static bool LooksLikeMeetingQuestion(string text)
     {
         var value = NormalizeText(text);
@@ -262,8 +296,10 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         // not be captured by a coincidental word match in the current/live
         // transcript while a meeting is recording. Meeting-shaped wording
         // still wins (for example, "что решили по насосу").
+        var ambiguousMeetingQuestion = meetingId is not null && IsAmbiguousMeetingQuestion(normalizedQuestion);
         if (IsGeneralConversationQuestion(normalizedQuestion)
-            && !LooksLikeMeetingQuestion(normalizedQuestion))
+            && !LooksLikeMeetingQuestion(normalizedQuestion)
+            && !ambiguousMeetingQuestion)
             return new("GENERAL_CHAT", null, "general_question", 0.94, conversationId);
 
         var historyHint = LooksLikeHistoryQuestion(normalizedQuestion);
@@ -322,6 +358,18 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
                 return new("CURRENT_MEETING", currentMeeting, "current_retrieval_match", 0.93, conversationId);
         }
 
+        // If retrieval did not find a fact, keep an ambiguous explanatory
+        // question in the meeting scope. The worker can then return
+        // NO_EVIDENCE instead of allowing GENERAL_CHAT to invent a plausible
+        // explanation from world knowledge.
+        if (ambiguousMeetingQuestion && meetingId is Guid ambiguousMeeting)
+            return new(
+                activeRecording && liveContextAvailable ? "LIVE_MEETING" : "CURRENT_MEETING",
+                ambiguousMeeting,
+                "meeting_scope_no_evidence",
+                0.44,
+                conversationId);
+
         if (historyHint)
         {
             var history = await store.ProbeMeetingMemoryAssistantContextAsync(userId, privileged, question, cancellationToken).ConfigureAwait(false);
@@ -356,10 +404,13 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         if (requestedMode is "MEETING_HISTORY" or "MEETING_MEMORY") return new("MEETING_MEMORY", null, "explicit_memory_mode", 0.94);
         if (requestedMode == "LIVE_MEETING") return activeMeetingId is Guid live ? new("LIVE_MEETING", live, "explicit_live_mode", 0.98) : MeetingRequired("LIVE_MEETING", null);
         if (requestedMode == "CURRENT_MEETING") return activeMeetingId is Guid current ? new("CURRENT_MEETING", current, "explicit_current_mode", 0.98) : MeetingRequired("CURRENT_MEETING", null);
-        if (text.Contains("общий вопрос", StringComparison.Ordinal) || IsGeneralConversationQuestion(text))
+        if (text.Contains("общий вопрос", StringComparison.Ordinal)
+            || (IsGeneralConversationQuestion(text)
+                && !(activeMeetingId is not null && IsAmbiguousMeetingQuestion(text))))
             return new("GENERAL_CHAT", null, "general_conversation_fallback", 0.76);
         if (LooksLikeHistoryQuestion(text)) return new("MEETING_MEMORY", null, "history_hint_compatibility", 0.65);
         if (activeMeetingId is Guid meeting && LooksLikeMeetingQuestion(text)) return new("CURRENT_MEETING", meeting, "meeting_scope_compatibility", 0.60);
+        if (activeMeetingId is Guid ambiguous && IsAmbiguousMeetingQuestion(text)) return new("CURRENT_MEETING", ambiguous, "meeting_scope_no_evidence", 0.44);
         if (LooksLikeMeetingQuestion(text)) return new("MEETING_MEMORY", null, "meeting_question_without_scope", 0.40);
         return new("GENERAL_CHAT", null, "general_fallback", 0.60);
     }

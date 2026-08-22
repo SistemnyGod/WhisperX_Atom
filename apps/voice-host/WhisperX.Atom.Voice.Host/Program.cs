@@ -10,7 +10,7 @@ using WhisperX.Atom.Voice.Host;
 
 if (args.Length >= 2 && string.Equals(args[0], "--model-smoke", StringComparison.OrdinalIgnoreCase))
 {
-    using var recognizer = new VoskRecognizer(args[1], grammar: new[] { "атом", "[unk]" });
+    using var recognizer = new VoskRecognizer(args[1], grammar: new[] { "мефодий", "мифодий", "[unk]" });
     recognizer.Accept(new byte[32000]);
     recognizer.FinalizeSessionResult();
     Console.WriteLine("Vosk model/native smoke passed.");

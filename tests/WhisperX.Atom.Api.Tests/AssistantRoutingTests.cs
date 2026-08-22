@@ -25,4 +25,26 @@ public sealed class AssistantRoutingTests
         Assert.Null(route.ErrorCode);
         Assert.Equal("GENERAL_CHAT", route.ResolvedMode);
     }
+
+    [Fact]
+    public void AmbiguousExplanationWithActiveMeetingStaysGroundedMeetingScope()
+    {
+        var meetingId = Guid.NewGuid();
+        var route = AssistantModeResolver.ResolveStatic(
+            "объясни причину переноса ремонта", "AUTO", meetingId, false);
+
+        Assert.Null(route.ErrorCode);
+        Assert.Equal("CURRENT_MEETING", route.ResolvedMode);
+    }
+
+    [Theory]
+    [InlineData("что такое Docker")]
+    [InlineData("как работает трансформатор")]
+    [InlineData("объясни принцип работы редуктора")]
+    public void ClearlyGeneralQuestionsRemainGeneralWithActiveMeeting(string text)
+    {
+        var route = AssistantModeResolver.ResolveStatic(text, "AUTO", Guid.NewGuid(), false);
+
+        Assert.Equal("GENERAL_CHAT", route.ResolvedMode);
+    }
 }

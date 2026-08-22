@@ -16,7 +16,7 @@ internal static class VoiceAcceptanceRunner
     /// </summary>
     public static Task<int> CommandAsync()
     {
-        var parser = new VoiceIntentParser();
+        var parser = new VoiceIntentParser(VoiceHostRuntime.LegacyAtomWakeEnabled);
         var cases = new[]
         {
             ("start", "Мифодий, начни запись", VoiceIntent.StartRecording),
@@ -24,6 +24,8 @@ internal static class VoiceAcceptanceRunner
             ("pause", "Мифодий, поставь на паузу", VoiceIntent.PauseRecording),
             ("resume", "Мифодий, продолжи запись", VoiceIntent.ResumeRecording),
             ("stop", "Мифодий, останови запись", VoiceIntent.StopRecording),
+            ("status-recording", "Мифодий, запись идёт?", VoiceIntent.GetStatus),
+            ("status-duration", "Мифодий, сколько идет запись", VoiceIntent.GetStatus),
             ("farewell", "Мифодий, пока", VoiceIntent.Farewell),
             ("farewell-goodbye", "Мифодий, до свидания", VoiceIntent.Farewell),
             ("repeat", "Мифодий, повтори", VoiceIntent.RepeatAnswer),
@@ -34,7 +36,9 @@ internal static class VoiceAcceptanceRunner
             ("question-deadline", "Мифодий, какой срок назвали?", VoiceIntent.AssistantQuery),
             ("question-pump", "Мифодий, что решили по насосу?", VoiceIntent.AssistantQuery),
         };
-        var aliases = new[] { "Мифодий, начни запись", "Мефодий, начни запись", "Атом, начни запись" };
+        var aliases = new List<string> { "Мифодий, начни запись", "Мефодий, начни запись" };
+        if (VoiceHostRuntime.LegacyAtomWakeEnabled)
+            aliases.Add("Атом, начни запись");
         var results = cases.Select(item =>
         {
             var command = parser.Parse(item.Item2, 0.95);
@@ -238,7 +242,7 @@ internal static class VoiceAcceptanceRunner
     private sealed class DryRunAnalyzer : IDisposable
     {
         private readonly VoskRecognizer _recognizer;
-        private readonly VoiceIntentParser _parser = new();
+        private readonly VoiceIntentParser _parser = new(VoiceHostRuntime.LegacyAtomWakeEnabled);
         public Dictionary<string, int> AcceptedByAlias { get; } = new(StringComparer.OrdinalIgnoreCase);
         public int FalseActivations { get; private set; }
         public int RecognizedEndpoints { get; private set; }

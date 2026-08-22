@@ -57,7 +57,10 @@ internal static class VoiceHostSelfTest
         Assert(VoiceAudioCapture.NormalizeEndpointId("{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}") == "{0.0.1.00000000}.{3b7ebaa4-d9e3-4bb2-ae45-ab9eb6fac20f}", "NAudio endpoint id preservation");
         Assert(VoiceAudioCapture.NormalizeEndpointId("DEFAULT") is null, "default endpoint normalization");
         Assert(VoiceHostRuntime.WakePhrases.Any(value => value == "мефодий" || value.StartsWith("мефодий ", StringComparison.Ordinal)), "wake grammar requires phonetic mifodiy");
-        Assert(VoiceHostRuntime.WakePhrases.Any(value => value.StartsWith("атом", StringComparison.Ordinal)), "wake grammar keeps atom alias");
+        Assert(VoiceHostRuntime.LegacyAtomWakeEnabled
+            ? VoiceHostRuntime.WakePhrases.Any(value => value.StartsWith("атом", StringComparison.Ordinal))
+            : !VoiceHostRuntime.WakePhrases.Any(value => value.StartsWith("атом", StringComparison.Ordinal)),
+            "wake grammar follows legacy atom toggle");
         Assert(VoiceHostRuntime.WakePhrases.Contains("[unk]"), "wake grammar unknown token");
         Assert(!VoiceHostRuntime.WakePhrases.Contains("что решили по ремонту"), "wake grammar must not contain arbitrary questions");
         var missingConfidence = VoskRecognizer.ParseResult("{\"text\":\"атом запись\"}", true);

@@ -23,9 +23,23 @@ public sealed class VoiceIntentParser
     public const double DefaultMinimumConfidence = 0.55;
 
     // "Мифодий" is the product wake word. "Мефодий" is a common speech
-    // recognition variant and "Атом" remains a temporary compatibility alias
-    // for already trained users.
-    private static readonly string[] WakeWords = ["мифодий", "мефодий", "атом", "atom"];
+    // recognition variant.  The old "Атом" alias is opt-in: it is useful for
+    // development/rollout compatibility, but is too common for production
+    // far-field listening and would otherwise create false activations.
+    private static readonly string[] PrimaryWakeWords = ["мифодий", "мефодий"];
+    private static readonly string[] LegacyWakeWords = ["атом", "atom"];
+    private readonly bool _allowLegacyAtom;
+
+    public VoiceIntentParser(bool allowLegacyAtom = true)
+    {
+        _allowLegacyAtom = allowLegacyAtom;
+    }
+
+    public bool AllowsLegacyAtom => _allowLegacyAtom;
+
+    private IEnumerable<string> WakeWords => _allowLegacyAtom
+        ? PrimaryWakeWords.Concat(LegacyWakeWords)
+        : PrimaryWakeWords;
 
     public bool HasWakeWord(string text)
     {
@@ -67,7 +81,9 @@ public sealed class VoiceIntentParser
             var value when Matches(value, "поставь метку", "добавь метку") && IsExact(value, "поставь метку", "добавь метку") => VoiceIntent.AddMarker,
             var value when Matches(value, "отметь решение", "зафиксируй решение") => VoiceIntent.MarkDecision,
             var value when Matches(value, "отметь поручение", "зафиксируй поручение") => VoiceIntent.MarkActionItem,
-            var value when Matches(value, "статус", "состояние") => VoiceIntent.GetStatus,
+            var value when IsExact(value,
+                "статус", "состояние", "запись идёт", "запись идет", "идёт запись", "идет запись",
+                "сколько идёт запись", "сколько идет запись") => VoiceIntent.GetStatus,
             var value when Matches(value, "заверши запись", "останови запись") && IsExact(value, "заверши запись", "останови запись") => VoiceIntent.StopRecording,
             var value when Matches(value, "остановись", "замолчи", "прекрати говорить", "останови ответ") => VoiceIntent.StopSpeaking,
             var value when IsExact(value,
@@ -165,7 +181,7 @@ public sealed class VoiceIntentParser
         return value;
     }
 
-    private static string RemoveWakeWord(string value)
+    private string RemoveWakeWord(string value)
     {
         foreach (var word in WakeWords.OrderByDescending(static word => word.Length))
             if (value.StartsWith(word, StringComparison.Ordinal)) return value[word.Length..].Trim(' ', ',', ':');

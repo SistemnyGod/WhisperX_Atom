@@ -1,6 +1,6 @@
 # WhisperX Atom Voice Host
 
-`WhisperX.Atom.Voice.Host` is the hidden, Desktop-managed Windows SessionHost. It listens to the selected microphone in memory, recognizes the wake word `Мифодий` (aliases `Мефодий` and temporary `Атом`), executes only an explicit allowlist of fixed recorder commands, and forwards every other confident utterance to the conversational Assistant. In managed mode it sends intents to the Desktop broker; Desktop is the only owner of Recorder commands and the Voice Host never owns recordings or spool data.
+`WhisperX.Atom.Voice.Host` is the hidden, Desktop-managed Windows SessionHost. It listens to the selected microphone in memory, recognizes the wake word `Мифодий` (the phonetic alias `Мефодий`; legacy `Атом` is disabled by default and can be explicitly enabled with `WHISPERX_WAKE_COMPAT_ATOM=true`), executes only an explicit allowlist of fixed recorder commands, and forwards every other confident utterance to the conversational Assistant. In managed mode it sends intents to the Desktop broker; Desktop is the only owner of Recorder commands and the Voice Host never owns recordings or spool data.
 
 Until microphone and voice-to-answer acceptance are complete, the feature is
 marked **Experimental**. The Desktop Broker, Assistant API and grounded Qwen

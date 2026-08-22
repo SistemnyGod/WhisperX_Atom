@@ -6,6 +6,9 @@ public static class VoiceCoreSelfTest
     public static void Run()
     {
         var parser = new VoiceIntentParser();
+        var productionParser = new VoiceIntentParser(allowLegacyAtom: false);
+        Assert(!productionParser.HasWakeWord("Атом, начни запись"), "atom alias is opt-in for production");
+        Assert(productionParser.Parse("Атом, начни запись").Intent != VoiceIntent.StartRecording, "disabled atom alias is fail-closed");
         Assert(VoiceIntent.HistoryQuestion == VoiceIntent.AssistantQuery, "legacy question alias");
         Assert(VoiceIntent.AssistantQuery.ToString() == "AssistantQuery", "canonical assistant intent name");
         Assert(parser.HasWakeWord("Атом, начни запись"), "wake word");
@@ -50,6 +53,8 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, остановить запись").Intent == VoiceIntent.AssistantQuery, "infinitive is not a command");
         Assert(parser.Parse("Мифодий, начать запись").Intent == VoiceIntent.AssistantQuery, "start infinitive is not a command");
         Assert(parser.Parse("Мифодий, остановись").Intent == VoiceIntent.StopSpeaking, "stop speech intent");
+        Assert(parser.Parse("Мифодий, запись идёт?").Intent == VoiceIntent.GetStatus, "recording status fast path");
+        Assert(parser.Parse("Мифодий, сколько идет запись").Intent == VoiceIntent.GetStatus, "recording duration fast path");
 
         var commands = new (string Text, VoiceIntent Intent)[]
         {

@@ -294,3 +294,11 @@ Broker и текущую пользовательскую сессию.
 - Assistant result не теряется при ожидании более трёх минут;
 - spoken answer соответствует сохранённому `voice_answer` и имеет evidence;
 - установленный Desktop и Voice Host имеют одну clean build identity.
+- **Wake-word policy (RC):** production accepts `Мифодий` and the phonetic
+  `Мефодий`. The historical `Атом/atom` alias is disabled by default via
+  `WHISPERX_WAKE_COMPAT_ATOM=false`; enable it only for a controlled legacy
+  rollout. The command-acceptance gate follows the same setting.
+- **Latency gate:** `scripts/e2e-mifodiy-latency.ps1` polls the durable query
+  at a bounded interval (default 100 ms), records stage transitions and
+  time-to-first-audio, and writes only a question hash plus IDs/timings to
+  its evidence file.

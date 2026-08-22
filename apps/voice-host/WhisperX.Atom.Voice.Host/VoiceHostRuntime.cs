@@ -25,14 +25,20 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static readonly string WakeWordMode = ExactWakeWordOption && !ExactWakeWordRequested
         ? "PHONETIC_FALLBACK_MODEL_NO_EXACT_TOKEN"
         : ExactWakeWordRequested ? "EXACT_PLUS_PHONETIC" : "PHONETIC_FALLBACK";
+    // "Атом" was a temporary migration alias. It is deliberately disabled
+    // by default in production because it occurs frequently in meeting speech
+    // and causes false activations. Set WHISPERX_WAKE_COMPAT_ATOM=true only
+    // for an explicit legacy/development rollout.
+    internal static readonly bool LegacyAtomWakeEnabled = IsTruthy(
+        Environment.GetEnvironmentVariable("WHISPERX_WAKE_COMPAT_ATOM"));
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
-    private static readonly string[] CancelGrammar =
-    [
-        "мефодий остановись", "мефодий замолчи", "мефодий прекрати говорить", "мефодий останови ответ",
-        "атом остановись", "атом замолчи", "атом прекрати говорить", "атом останови ответ",
-        "мифодий остановись", "мифодий замолчи", "мифодий прекрати говорить", "мифодий останови ответ", "[unk]"
-    ];
+    private static readonly string[] CancelGrammar = CreateCancelGrammar();
+
+    private static bool IsTruthy(string? value) =>
+        string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
 
     private static string[] CreateWakeGrammar()
     {
@@ -47,8 +53,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             "мефодий останови запись", "мефодий пока", "мефодий ну пока", "мефодий ладно пока",
             "мефодий до свидания", "мефодий до встречи", "мефодий всего доброго", "мефодий хорошего дня",
             "мефодий спокойной ночи", "мефодий увидимся", "мефодий спасибо пока", "мефодий спасибо до свидания",
-            "атом начни запись", "атом останови запись", "атом подтверждаю", "атом пока", "атом до свидания", "атом до встречи", "атом хорошего дня", "[unk]"
+            "мифодий начни запись", "мифодий запусти запись", "мифодий останови запись", "мифодий подтверждаю",
+            "мифодий пока", "мифодий до свидания", "мифодий до встречи", "мифодий хорошего дня", "[unk]"
         };
+        if (LegacyAtomWakeEnabled)
+        {
+            phrases.AddRange([
+                "атом начни запись", "атом запусти запись", "атом останови запись", "атом подтверждаю",
+                "атом пока", "атом до свидания", "атом до встречи", "атом хорошего дня"
+            ]);
+        }
         if (ExactWakeWordRequested)
         {
             // A custom/larger model can opt into the canonical spelling. The
@@ -63,12 +77,24 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return phrases.Distinct(StringComparer.Ordinal).ToArray();
     }
 
+    private static string[] CreateCancelGrammar()
+    {
+        var phrases = new List<string>
+        {
+            "мефодий остановись", "мефодий замолчи", "мефодий прекрати говорить", "мефодий останови ответ",
+            "мифодий остановись", "мифодий замолчи", "мифодий прекрати говорить", "мифодий останови ответ", "[unk]"
+        };
+        if (LegacyAtomWakeEnabled)
+            phrases.AddRange(["атом остановись", "атом замолчи", "атом прекрати говорить", "атом останови ответ"]);
+        return phrases.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
     // Recorder actions stay deterministic in VoiceIntentParser.  The audio
     // recognizer used after a wake word intentionally has no grammar: a
     // meeting question cannot be represented by the short command grammar.
     internal static IReadOnlyList<string> WakePhrases => WakeGrammar;
     private readonly VoiceStateMachine _state = new();
-    private readonly VoiceIntentParser _parser = new();
+    private readonly VoiceIntentParser _parser = new(LegacyAtomWakeEnabled);
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
     private readonly SpeechResponder _speech = new(BuildIdentity);
@@ -1144,9 +1170,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 lock (_recognitionGate) recognizer.ResetSession();
                 if (text.Length < 2 || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)) continue;
                 var normalized = text.ToLowerInvariant();
-                if (normalized.Contains("мифодий", StringComparison.Ordinal)
-                    || normalized.Contains("мефодий", StringComparison.Ordinal)
-                    || normalized.Contains("атом", StringComparison.Ordinal))
+                if (ContainsWakeWord(normalized))
                 {
                     Interlocked.Increment(ref _liveSegmentsSuppressed);
                     continue;
@@ -1183,9 +1207,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         // Wake/command utterances are handled by the deterministic command
         // path and must not become meeting evidence.
         var normalized = text.ToLowerInvariant();
-        if (normalized.Contains("мифодий", StringComparison.Ordinal)
-            || normalized.Contains("мефодий", StringComparison.Ordinal)
-            || normalized.Contains("атом", StringComparison.Ordinal)) return;
+        if (ContainsWakeWord(normalized)) return;
 
         var startedAt = _liveRecordingStartedAt == default ? DateTimeOffset.UtcNow : _liveRecordingStartedAt;
         var endMs = Math.Max(100, (long)(DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
@@ -1909,10 +1931,17 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         // sub-0.70 result becomes an explicit confirmation request.
         command.Intent == VoiceIntent.StopRecording || command.Confidence >= RequiredConfidence(command.Intent);
 
+    private static bool ContainsWakeWord(string normalized)
+        => normalized.Contains("мифодий", StringComparison.Ordinal)
+            || normalized.Contains("мефодий", StringComparison.Ordinal)
+            || (LegacyAtomWakeEnabled && (normalized.Contains("атом", StringComparison.Ordinal)
+                || normalized.Contains("atom", StringComparison.Ordinal)));
+
     private static bool IsWakeOnly(string text)
     {
         var normalized = text.Trim().TrimEnd('.', ',', '!', '?').ToLowerInvariant();
-        return normalized is "мифодий" or "мефодий" or "атом" or "atom";
+        return normalized is "мифодий" or "мефодий"
+            || (LegacyAtomWakeEnabled && (normalized == "атом" || normalized == "atom"));
     }
 
     private static string? AppendText(string? first, string? second)

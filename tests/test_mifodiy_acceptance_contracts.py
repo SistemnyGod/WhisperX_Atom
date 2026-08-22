@@ -81,3 +81,30 @@ def test_acceptance_document_states_runtime_and_data_safety_boundaries():
     assert "PASSED" in DOC and "BLOCKED" in DOC
     for forbidden in ("credentials", "cookies", "tokens", "аудио", "текст стенограммы"):
         assert forbidden in DOC
+
+
+def test_latency_gate_polls_fast_and_keeps_stage_timings_without_question_text():
+    script = (ROOT / "scripts/e2e-mifodiy-latency.ps1").read_text(encoding="utf-8")
+    assert "PollIntervalMs" in script
+    assert "timeToFirstAudio" in script
+    assert "REQUEST_ACCEPTED" in script and "UTTERANCE_SUBMITTED" in script
+    assert "processingStage" in script and "timings" in script
+    assert "questionSha256" in script
+    assert "question = $Question" in script  # sent to API; output remains hash-only
+    assert "questionText" not in script
+
+
+def test_ambiguous_meeting_explanations_are_not_general_chat():
+    resolver = (ROOT / "apps/server/WhisperX.Atom.Api/AssistantModeResolver.cs").read_text(encoding="utf-8")
+    assert "IsAmbiguousMeetingQuestion" in resolver
+    assert "meeting_scope_no_evidence" in resolver
+    voice = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
+    assert "запись идёт" in voice and "VoiceIntent.GetStatus" in voice
+
+
+def test_atom_wake_is_explicit_compatibility_toggle():
+    runtime = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs").read_text(encoding="utf-8")
+    parser = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
+    assert "WHISPERX_WAKE_COMPAT_ATOM" in runtime
+    assert "LegacyAtomWakeEnabled" in runtime
+    assert "PrimaryWakeWords" in parser and "AllowsLegacyAtom" in parser
