@@ -434,6 +434,8 @@ def test_recording_profiles_preserve_track_metadata_and_use_controlled_mix():
         assert field in spool and field in client
     assert "normalize=1" in assembly
     assert "alimiter=limit=0.95" in assembly
+    assert '"DERIVED_MIX_NO_AEC"' in assembly
+    assert '"master_kind"' in assembly
     assert "ASSEMBLING" in worker and "ASSEMBLED" in worker and "MEDIA_READY" in worker
     settings = read("apps/recorder-agent/AgentStorageSettings.cs")
     contract = read("recording-profile-contract.json")

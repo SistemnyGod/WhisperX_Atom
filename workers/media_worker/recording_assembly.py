@@ -345,6 +345,7 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
     high_drift_online = profile == "ONLINE" and bool(warnings)
     selected_asr_source = "microphone" if profile in {"ROOM", "MIC_ONLY"} and microphone else "loopback" if profile == "SYSTEM_ONLY" and system else "controlled_mix" if profile == "ONLINE" else "single_track"
     mix_strategy = "controlled_online_mix" if profile == "ONLINE" and len(assembled) > 1 else "single_original_track"
+    master_kind = "DERIVED_MIX_NO_AEC" if mix_strategy == "controlled_online_mix" else "CANONICAL_TRACK"
     source: Path | None = None
     if high_drift_online:
         # Drift makes a synchronized mix unsafe. Keep the original tracks and
@@ -370,6 +371,8 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
         "track_count": len(tracks),
         "selected_asr_source": selected_asr_source,
         "mix_strategy": mix_strategy,
+        "master_kind": master_kind,
+        "echo_cancellation": "NONE",
         "drift_tolerance_ms": drift_tolerance,
         "tracks": timeline,
         "warnings": sorted(set(warnings)),

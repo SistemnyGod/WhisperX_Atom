@@ -292,6 +292,12 @@ try {
             rawTerminalFailedCount = [int]$status.rawTerminalFailedCount
             rawBacklogHealth = [string]$status.rawBacklogHealth
             pipelineOverruns = if ($null -ne $attempt) { [int]$attempt.pipelineOverruns } else { 0 }
+            audioQuality = if ($null -ne $attempt) { [ordered]@{
+                nativePeak = if ($null -ne $attempt.nativePeak) { [double]$attempt.nativePeak } else { $null }
+                nativeOverRangeSampleCount = if ($null -ne $attempt.nativeOverRangeSampleCount) { [int64]$attempt.nativeOverRangeSampleCount } else { $null }
+                nativeSampleCount = if ($null -ne $attempt.nativeSampleCount) { [int64]$attempt.nativeSampleCount } else { $null }
+                nativeOverRangeRatio = if ($null -ne $attempt.nativeOverRangeRatio) { [double]$attempt.nativeOverRangeRatio } else { $null }
+            } } else { $null }
             framesProduced = if ($null -ne $attempt) { [int64]$attempt.framesProduced } else { 0 }
             framesConsumed = if ($null -ne $attempt) { [int64]$attempt.framesConsumed } else { 0 }
             currentQueueDepth = if ($null -ne $attempt) { [int]$attempt.currentQueueDepth } else { 0 }
@@ -342,9 +348,16 @@ try {
     $pipelineGatePassed = $report.result.framesBalanced -and $report.result.frameQueueWithinLimit -and $report.result.pipelineOverruns -eq 0
     $rawGatePassed = $report.result.localFinalizeState -eq "LOCAL_READY" -and $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and ([int]$rawEvidence.rawTerminalFailedCount -eq 0) -and $pipelineGatePassed
     $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
+    $qualityMetricsAvailable = $null -ne $report.result.audioQuality -and [int64]$report.result.audioQuality.nativeSampleCount -gt 0
+    $nativeOverRangeRatio = if ($qualityMetricsAvailable) { [double]$report.result.audioQuality.nativeOverRangeRatio } else { $null }
+    # This is a capture-quality gate, not a content-quality gate. Keep the
+    # canonical PCM untouched, but fail closed when a new Host cannot expose
+    # native pre-clamp metrics or reports critical over-range input.
+    $qualityGatePassed = $qualityMetricsAvailable -and $nativeOverRangeRatio -le 0.01
     $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $rawEvidence.localChunkCount -gt 0
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $report.result.playableReady -or -not $archiveGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
+    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $report.result.playableReady -or -not $archiveGatePassed -or -not $qualityGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
+        if (-not $qualityGatePassed) { throw "AUDIOGRAPH_AUDIO_QUALITY_GATE_FAILED: native pre-clamp metrics missing or over-range ratio is critical; report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }

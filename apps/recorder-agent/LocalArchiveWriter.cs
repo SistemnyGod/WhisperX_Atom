@@ -343,7 +343,10 @@ public sealed class LocalArchiveWriter(
             warningsList.Add("ONLINE_MIX_DEGRADED");
         }
         var warnings = warningsList.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var result = new MasterAssemblyResult(recordingProfile, selectedAsrSource, tracks.Count, mixStrategy, tolerance, timeline, warnings, trackAssemblyModes);
+        var masterKind = string.Equals(mixStrategy, "controlled_online_mix", StringComparison.OrdinalIgnoreCase)
+            ? "DERIVED_MIX_NO_AEC"
+            : "CANONICAL_TRACK";
+        var result = new MasterAssemblyResult(recordingProfile, selectedAsrSource, tracks.Count, mixStrategy, masterKind, "NONE", tolerance, timeline, warnings, trackAssemblyModes);
         if (selectedTracks.Count == 1)
         {
             try
@@ -537,5 +540,5 @@ public sealed class LocalArchiveWriter(
     private sealed record ArchiveFileEntry(string Kind, string Name, string RelativePath, long SizeBytes, string Sha256, int SampleRate, int Channels, long? SampleCount);
     private sealed record MasterTrackInput(string Path, string TrackType, int SampleRate, long FirstStartSample, long ExpectedSamples);
     private sealed record MasterTrackTimeline(string TrackType, double StartOffsetMs, double ExpectedDurationMs, long ActualDurationMs, double DriftMs);
-    private sealed record MasterAssemblyResult(string RecordingProfile, string SelectedAsrSource, int TrackCount, string MixStrategy, int DriftToleranceMs, IReadOnlyList<MasterTrackTimeline> Tracks, IReadOnlyList<string> Warnings, IReadOnlyList<string> TrackAssemblyModes);
+    private sealed record MasterAssemblyResult(string RecordingProfile, string SelectedAsrSource, int TrackCount, string MixStrategy, string MasterKind, string EchoCancellation, int DriftToleranceMs, IReadOnlyList<MasterTrackTimeline> Tracks, IReadOnlyList<string> Warnings, IReadOnlyList<string> TrackAssemblyModes);
 }

@@ -37,6 +37,9 @@ def test_signal_metrics_distinguish_silence_and_far_field(tmp_path):
     assert metrics.duration_seconds == 1.0
     assert metrics.active_speech_rms_p90 > metrics.noise_floor_rms_p20
     assert metrics.recommended_profile == "LARGE_ROOM"
+    assert abs(metrics.dc_offset) < 0.01
+    assert metrics.crest_factor is not None and metrics.crest_factor > 1
+    assert metrics.discontinuity_ratio < 0.01
 
 
 def test_language_quality_flags_common_english_hallucination_only_for_russian():

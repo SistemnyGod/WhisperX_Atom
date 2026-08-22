@@ -245,6 +245,9 @@ def test_audiograph_normalizes_observed_float_frames_instead_of_trusting_pcm_met
     assert '"FLOAT32_TO_PCM16"' in engine
     assert "AUDIO_BUFFER_FORMAT_MISMATCH" in engine
     assert "NonFiniteSampleCount" in contracts
+    assert "NativePeak" in engine and "NativePeak" in contracts
+    assert "NativeOverRangeSampleCount" in engine and "NativeOverRangeRatio" in contracts
+    assert "nativeOverRangeRatio" in read("scripts/acceptance-audiograph-local-recording.ps1")
     assert "ObservedBytesPerSample" in contracts
     assert "FormatIntegrityVerified" in contracts
 

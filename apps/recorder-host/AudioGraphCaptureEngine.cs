@@ -96,7 +96,19 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                 long? silence = _silenceStartedAtUtc is null
                     ? null
                     : (long?)(DateTimeOffset.UtcNow - _silenceStartedAtUtc.Value).TotalMilliseconds;
-                return new AudioTelemetrySnapshot(_frameCount, _bytesReceived, _firstFrameLatencyMs, rmsDb, peakDb, _clipping, _lastAudioAtUtc, silence, _frameCount == 0);
+                return new AudioTelemetrySnapshot(
+                    _frameCount,
+                    _bytesReceived,
+                    _firstFrameLatencyMs,
+                    rmsDb,
+                    peakDb,
+                    _clipping,
+                    _lastAudioAtUtc,
+                    silence,
+                    _frameCount == 0,
+                    _attempt.NativePeak > 0 ? _attempt.NativePeak : null,
+                    _attempt.NativeOverRangeSampleCount,
+                    _attempt.NativeSampleCount);
             }
         }
     }
@@ -459,6 +471,9 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                         _attempt.ObservedSampleFormat = normalized.ObservedSampleFormat;
                         _attempt.FormatIntegrityVerified = normalized.FormatIntegrityVerified;
                         _attempt.NonFiniteSampleCount += normalized.NonFiniteSampleCount;
+                        _attempt.NativePeak = Math.Max(_attempt.NativePeak, normalized.NativePeak);
+                        _attempt.NativeOverRangeSampleCount += normalized.NativeOverRangeSampleCount;
+                        _attempt.NativeSampleCount += normalized.NativeSampleCount;
                         _attempt.NormalizationMode = normalized.NormalizationMode;
                     }
 
@@ -625,7 +640,10 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
         string ObservedSampleFormat,
         string NormalizationMode,
         bool FormatIntegrityVerified,
-        long NonFiniteSampleCount);
+        long NonFiniteSampleCount,
+        double NativePeak,
+        long NativeOverRangeSampleCount,
+        long NativeSampleCount);
 
     private sealed class AudioBufferFormatMismatchException(string message, long nonFiniteSampleCount = 0)
         : InvalidOperationException(message)
@@ -674,6 +692,8 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
             var owner = new PooledAudioBuffer(output, samples * sizeof(short));
             var sum = 0d;
             var peak = 0d;
+            var nativePeak = 0d;
+            long overRange = 0;
             var clipping = false;
             long nonFinite = 0;
             try
@@ -686,6 +706,9 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                         nonFinite++;
                         continue;
                     }
+                    var nativeAbsolute = Math.Abs((double)sample);
+                    nativePeak = Math.Max(nativePeak, nativeAbsolute);
+                    if (nativeAbsolute > 1d) overRange++;
                     sample = Math.Clamp(sample, -1f, 1f);
                     var absolute = Math.Abs((double)sample);
                     sum += absolute * absolute;
@@ -699,7 +722,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                 if (nonFinite > 0)
                     throw new AudioBufferFormatMismatchException($"AUDIO_BUFFER_FORMAT_MISMATCH:non_finite_float_samples={nonFinite}", nonFinite);
                 var integrity = expectedFloatLength < 0 || length == expectedFloatLength;
-                return new PooledNormalizedFrame(owner, samples * sizeof(short), Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(float), "FLOAT32", "FLOAT32_TO_PCM16", integrity, 0);
+                return new PooledNormalizedFrame(owner, samples * sizeof(short), Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(float), "FLOAT32", "FLOAT32_TO_PCM16", integrity, 0, nativePeak, overRange, samples);
             }
             catch
             {
@@ -727,7 +750,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                 clipping |= absolute >= 0.999d;
             }
             var integrity = expectedPcmLength < 0 || length == expectedPcmLength;
-            return new PooledNormalizedFrame(owner, usableLength, Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(short), "PCM16", "PCM16_COPY", integrity, 0);
+            return new PooledNormalizedFrame(owner, usableLength, Math.Sqrt(sum / Math.Max(1, samples)), peak, clipping, sizeof(short), "PCM16", "PCM16_COPY", integrity, 0, peak, 0, samples);
         }
 
         throw new InvalidOperationException($"AUDIO_BUFFER_FORMAT_MISMATCH:{properties.Subtype}:{properties.BitsPerSample}:bytes={length}:expectedFloat={expectedFloatLength}:expectedPcm={expectedPcmLength}");

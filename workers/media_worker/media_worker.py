@@ -162,9 +162,11 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "track_count": assembly_result.get("trackCount", assembly_result.get("track_count", len(recording_tracks))),
         "drift_ms": max((abs(value) for value in drift_values), default=0),
         "mix_strategy": assembly_result.get("mixStrategy", assembly_result.get("mix_strategy", "single_original_track")),
+        "master_kind": assembly_result.get("masterKind", assembly_result.get("master_kind", "CANONICAL_TRACK")),
+        "echo_cancellation": assembly_result.get("echoCancellation", assembly_result.get("echo_cancellation", "NONE")),
         "derived_sample_rate": 16000,
         "derived_channels": 1,
-        "warnings": [],
+        "warnings": (["DERIVED_MIX_NO_AEC"] if assembly_result.get("masterKind", assembly_result.get("master_kind")) == "DERIVED_MIX_NO_AEC" else []),
         "recording_tracks": recording_tracks,
         # Keep the independent assembled files discoverable to later
         # normalization/echo/remote-speaker stages. Paths come from the

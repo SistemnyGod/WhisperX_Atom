@@ -174,6 +174,16 @@ public sealed class AudioGraphAttemptDiagnostics
     public long? FirstQuantumLatencyMs { get; set; }
     public long? FirstFrameLatencyMs { get; set; }
 
+    // Native signal diagnostics are measured before Float32 values are
+    // normalized to PCM16. They are optional so older Hosts remain compatible.
+    public double NativePeak { get; set; }
+    public long NativeOverRangeSampleCount { get; set; }
+    public long NativeSampleCount { get; set; }
+
+    public double NativeOverRangeRatio => NativeSampleCount <= 0
+        ? 0d
+        : Math.Clamp((double)NativeOverRangeSampleCount / NativeSampleCount, 0d, 1d);
+
     // Realtime pipeline counters. These are monotonic for the current
     // capture attempt and intentionally remain optional for older Hosts.
     public long FramesProduced { get; set; }
@@ -224,6 +234,9 @@ public sealed class AudioGraphAttemptDiagnostics
         BytesReceived = BytesReceived,
         FirstQuantumLatencyMs = FirstQuantumLatencyMs,
         FirstFrameLatencyMs = FirstFrameLatencyMs,
+        NativePeak = NativePeak,
+        NativeOverRangeSampleCount = NativeOverRangeSampleCount,
+        NativeSampleCount = NativeSampleCount,
         FramesProduced = FramesProduced,
         FramesConsumed = FramesConsumed,
         CurrentQueueDepth = CurrentQueueDepth,
@@ -246,7 +259,10 @@ public sealed record AudioTelemetrySnapshot(
     bool Clipping,
     DateTimeOffset? LastAudioAtUtc,
     long? SilenceDurationMs,
-    bool IsStale = true)
+    bool IsStale = true,
+    double? NativePeakLinear = null,
+    long NativeOverRangeSampleCount = 0,
+    long NativeSampleCount = 0)
 {
     // Desktop's waveform contract is a normalized linear amplitude (0..1),
     // while the legacy health DTO also exposes the human-readable dB value.
@@ -254,6 +270,17 @@ public sealed record AudioTelemetrySnapshot(
     public double? PeakLinear => PeakDb is double peakDb
         ? Math.Clamp(Math.Pow(10d, peakDb / 20d), 0d, 1d)
         : null;
+
+    /// <summary>
+    /// Peak observed before Float32 normalization/clamping. This is optional
+    /// for older capture engines and is intentionally diagnostic-only: it
+    /// never changes the canonical PCM stream.
+    /// </summary>
+    public double? NativePeak => NativePeakLinear;
+
+    public double? NativeOverRangeRatio => NativeSampleCount <= 0
+        ? null
+        : Math.Clamp((double)NativeOverRangeSampleCount / NativeSampleCount, 0d, 1d);
 }
 
 /// <summary>
