@@ -191,7 +191,7 @@ class MemoryProjectionRepository:
             rows = connection.execute(
                 """SELECT f.id,COALESCE(f.owner_user_id,m.owner_id),f.meeting_id,f.transcript_id,f.transcript_version,
                           f.fact_type,f.subject,f.value,f.start_ms,f.end_ms,f.confidence,
-                          f.evidence_segment_ids,f.derivation_type,f.state,COALESCE(f.source_text,''),m.started_at
+                          f.evidence_segment_ids,f.derivation_type,f.state,COALESCE(f.source_text,''),COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at)
                      FROM transcript_facts f
                      JOIN meetings m ON m.id=f.meeting_id
                      JOIN memory_jobs j ON j.transcript_id=f.transcript_id AND j.transcript_version=f.transcript_version
@@ -231,14 +231,14 @@ class MemoryProjectionRepository:
         rows = connection.execute(
             """SELECT f.id,COALESCE(f.owner_user_id,m.owner_id),f.meeting_id,f.transcript_id,f.transcript_version,
                       f.fact_type,f.subject,f.value,f.start_ms,f.end_ms,f.confidence,
-                      f.evidence_segment_ids,f.derivation_type,f.state,COALESCE(f.source_text,''),m.started_at
+                      f.evidence_segment_ids,f.derivation_type,f.state,COALESCE(f.source_text,''),COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at)
                  FROM transcript_facts f
                  JOIN meetings m ON m.id=f.meeting_id
                 WHERE COALESCE(f.owner_user_id,m.owner_id)=%s
                   AND f.state='ACTIVE'
                   AND f.subject IS NOT NULL
                   AND (f.subject_normalized = ANY(%s::text[]) OR f.subject_normalized IS NULL)
-                ORDER BY m.started_at NULLS LAST,f.start_ms,f.id""",
+                ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) NULLS LAST,f.start_ms,f.id""",
             (owner_id, list(keys)),
         ).fetchall()
         values = []

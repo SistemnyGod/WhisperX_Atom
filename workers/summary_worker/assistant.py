@@ -761,7 +761,7 @@ class AssistantRepository:
                            WHERE r.source_fact_id=f.id
                              AND r.relation_type='SUPERSEDES'
                              AND r.invalidated_at IS NULL))
-                    ORDER BY m.started_at DESC NULLS LAST,f.start_ms DESC,f.id
+                    ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) DESC NULLS LAST,f.start_ms DESC,f.id
                     LIMIT 128
                     """,
                     (

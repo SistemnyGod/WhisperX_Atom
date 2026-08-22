@@ -68,7 +68,7 @@ def main() -> int:
                    AND t.version_kind IN ('ENRICHED','V2')
                    AND t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                    {rebuild_status}
-                 ORDER BY m.started_at NULLS LAST,m.id,t.id
+                 ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) NULLS LAST,m.id,t.id
                  LIMIT %s""",
             (limit,),
         ).fetchall()
