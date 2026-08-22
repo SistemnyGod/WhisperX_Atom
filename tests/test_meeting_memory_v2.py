@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from workers.memory_worker.entity_resolver import normalize_entity_name, resolve_entities
+from workers.memory_worker.entity_resolver import canonical_topic_name, normalize_entity_name, resolve_entities
 from workers.memory_worker.fact_extractor import extract_memory_facts
 from workers.memory_worker.indexer import build_memory_index
 from workers.memory_worker.memory_retrieval import build_memory_query_plan, rehydrate_evidence
@@ -76,9 +76,16 @@ def test_entities_are_normalized_without_cross_owner_global_space():
 def test_subject_entities_include_equipment_aliases():
     facts = [_fact("f1", "m1", "DEADLINE", "30 августа", 10, subject="ремонта насоса")]
     entities = resolve_entities(facts)
+    assert any(entity.entity_type == "TOPIC" and entity.normalized_name == "ремонт насос" for entity in entities)
     equipment = next(entity for entity in entities if entity.entity_type == "EQUIPMENT")
     assert "ремонта насоса" in equipment.aliases
     assert "ремонт насос" in equipment.aliases
+
+
+def test_subject_aliases_share_one_cross_meeting_key():
+    assert canonical_topic_name("ремонт второй печи") == "ремонт печь №2"
+    assert canonical_topic_name("ремонта печи №2") == "ремонт печь №2"
+    assert canonical_topic_name("ремонт 2-я печь") == "ремонт печь №2"
 
 
 def test_relation_and_current_state_select_latest_superseding_fact():
@@ -100,9 +107,23 @@ def test_explicit_supersedes_marker_allows_current_state_projection():
     assert [fact.fact_id for fact in current_state([old, new], relations)] == ["new"]
 
 
+def test_current_state_groups_normalized_subject_aliases():
+    old = _fact("old", "m1", "DEADLINE", "25 августа", 10, subject="ремонт второй печи")
+    new = _fact("new", "m2", "DEADLINE", "30 августа", 10, subject="ремонта печи №2")
+    new = MemoryFact(**{**new.__dict__, "source_text": "Срок теперь 30 августа."})
+    relations = resolve_relations([old, new], {"m1": 1, "m2": 2})
+    assert [fact.fact_id for fact in current_state([old, new], relations)] == ["new"]
+
+
 def test_relations_never_link_unrelated_topics_by_fact_type_only():
     first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
     second = _fact("second", "m2", "DEADLINE", "30 августа", 10, subject="поставка насоса")
+    assert resolve_relations([first, second], {"m1": 1, "m2": 2}) == ()
+
+
+def test_relations_never_cross_owner_even_for_same_topic():
+    first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
+    second = MemoryFact(**{**_fact("second", "m2", "DEADLINE", "30 августа", 10, subject="ремонт печи").__dict__, "owner_user_id": "other-owner"})
     assert resolve_relations([first, second], {"m1": 1, "m2": 2}) == ()
 
 
@@ -110,6 +131,35 @@ def test_relations_use_conservative_topic_normalization():
     first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт второй печи")
     second = _fact("second", "m2", "DEADLINE", "30 августа", 10, subject="ремонта печи №2")
     assert len(resolve_relations([first, second], {"m1": 1, "m2": 2})) == 1
+
+
+def test_sequential_cross_meeting_projection_keeps_full_thread():
+    first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт второй печи")
+    second = MemoryFact(**{**_fact("second", "m2", "DEADLINE", "30 августа", 10, subject="ремонта печи №2").__dict__, "source_text": "Срок теперь 30 августа."})
+    relations = resolve_relations([first, second], {"m1": 1, "m2": 2})
+    threads = build_threads([first, second], relations)
+    assert relations[0].source_fact_id == "first"
+    assert relations[0].target_fact_id == "second"
+    assert relations[0].relation_type == "SUPERSEDES"
+    assert threads[0].fact_ids == ("first", "second")
+
+
+def test_conflict_does_not_select_a_winner():
+    first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
+    second = _fact("second", "m2", "DEADLINE", "30 августа", 10, subject="ремонт печи")
+    relations = resolve_relations([first, second], {"m1": 1, "m2": 2})
+    threads = build_threads([first, second], relations)
+    assert relations[0].relation_type == "CONTRADICTS"
+    assert threads[0].state == "CONFLICTED"
+
+
+def test_task_completion_closes_thread():
+    task = _fact("task", "m1", "TASK", "Проверить насос", 10, subject="ремонт насоса")
+    done = MemoryFact(**{**_fact("done", "m2", "STATUS", "Задача выполнена", 10, subject="ремонта насоса").__dict__, "source_text": "Задача выполнена."})
+    relations = resolve_relations([task, done], {"m1": 1, "m2": 2})
+    threads = build_threads([task, done], relations)
+    assert relations[0].relation_type == "CLOSES"
+    assert threads[0].state == "RESOLVED"
 
 
 def test_timeline_uses_meeting_dates_not_segment_start_only():
@@ -152,12 +202,14 @@ def test_memory_migrations_are_additive_and_owner_scoped():
     jobs = (root / "054_memory_jobs.sql").read_text(encoding="utf-8")
     invalidation = (root / "055_memory_invalidation.sql").read_text(encoding="utf-8")
     runtime = (root / "056_memory_runtime.sql").read_text(encoding="utf-8")
+    projection = (root / "057_memory_cross_meeting_projection.sql").read_text(encoding="utf-8")
     assert "owner_user_id" in entities and "fact_entities" in entities
     assert "invalidated_at" in relations and "derivation_type" in relations
     assert "memory_thread_facts" in threads
     assert "UNIQUE(transcript_id, transcript_version)" in jobs
     assert "invalidated_by_version" in invalidation
     assert "lease_expires_at" in runtime and "invalidate_memory_projection_for_fact" in runtime
+    assert "subject_normalized" in projection and "ix_transcript_facts_owner_active_subject" in projection
 
 
 def test_assistant_uses_memory_index_then_safe_transcript_fallback():
@@ -168,6 +220,7 @@ def test_assistant_uses_memory_index_then_safe_transcript_fallback():
     memory_sql = source[source.index("SELECT f.id,f.meeting_id"):source.index("SELECT s.id,t.meeting_id", source.index("SELECT f.id,f.meeting_id"))]
     assert "m.owner_id=%s::uuid" in memory_sql
     assert "f.state='ACTIVE'" in memory_sql
+    assert "f.subject_normalized=%s" in memory_sql
 
 
 def test_memory_runtime_is_wired_without_gpu_dependency():

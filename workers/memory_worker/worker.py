@@ -22,11 +22,15 @@ except ImportError:  # pragma: no cover - worker image installs psycopg
 
 from .indexer import MemoryIndex, build_memory_index
 from .models import MemoryFact
-from .entity_resolver import normalize_entity_name
+from .entity_resolver import canonical_topic_name, normalize_entity_name
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 
 LOGGER = logging.getLogger("whisperx.memory-worker")
+
+MEMORY_MAX_SUBJECTS_PER_JOB = max(1, int(os.getenv("MEMORY_MAX_SUBJECTS_PER_JOB", "64")))
+MEMORY_MAX_FACTS_PER_SUBJECT = max(1, int(os.getenv("MEMORY_MAX_FACTS_PER_SUBJECT", "512")))
+MEMORY_MAX_FACTS_PER_JOB = max(1, int(os.getenv("MEMORY_MAX_FACTS_PER_JOB", "4096")))
 
 
 MEMORY_STAGES = (
@@ -153,7 +157,29 @@ class MemoryProjectionRepository:
                 (stage, max(0, min(100, int(progress))), job_id, self.worker_id),
             )
 
-    def _load_facts(self, payload: Mapping[str, object]) -> tuple[list[MemoryFact], dict[str, int]]:
+    @staticmethod
+    def _fact_from_row(row: tuple[object, ...]) -> MemoryFact:
+        evidence = row[11]
+        if isinstance(evidence, str):
+            try:
+                evidence = json.loads(evidence)
+            except json.JSONDecodeError:
+                evidence = []
+        evidence_ids = tuple(str(item) for item in (evidence or []) if item)
+        return MemoryFact(
+            fact_id=str(row[0]), owner_user_id=str(row[1]), meeting_id=str(row[2]),
+            transcript_id=str(row[3]), transcript_version=int(row[4]), fact_type=str(row[5]),
+            subject=str(row[6]) if row[6] else None, value=str(row[7] or ""),
+            start_ms=int(row[8] or 0), end_ms=int(row[9] or 0), confidence=float(row[10] or 0),
+            evidence_segment_ids=evidence_ids, derivation_type=str(row[12] or "EXPLICIT"),
+            state=str(row[13] or "ACTIVE"), source_text=str(row[14] or ""), meeting_started_at=row[15],
+        )
+
+    @staticmethod
+    def _scope_key(fact: MemoryFact) -> str | None:
+        return canonical_topic_name(fact.subject) if fact.subject else None
+
+    def _load_facts(self, payload: Mapping[str, object]) -> tuple[list[MemoryFact], set[str]]:
         job_id = str(payload["jobId"])
         with self._connection() as connection:
             identity = connection.execute(
@@ -174,38 +200,76 @@ class MemoryProjectionRepository:
                       AND f.state='ACTIVE'""",
                 (job_id, str(payload["transcriptId"]), int(payload["transcriptVersion"])),
             ).fetchall()
-        values: list[MemoryFact] = []
-        starts: dict[str, object] = {}
+            # When a new transcript version invalidates facts, the old subjects
+            # must be rebuilt too; otherwise an old thread can retain stale
+            # metadata or disappear without being recomputed. Keep this query
+            # on the same connection while the scope identity is still open.
+            invalidated_rows = connection.execute(
+                """SELECT f.subject
+                     FROM transcript_facts f
+                    WHERE f.meeting_id=%s AND f.invalidated_by_version=%s
+                      AND f.subject IS NOT NULL""",
+                (str(payload["meetingId"]), int(payload["transcriptVersion"])),
+            ).fetchall()
+        values = [self._fact_from_row(row) for row in rows]
+        keys = {key for fact in values if (key := self._scope_key(fact))}
+        keys.update(canonical_topic_name(str(row[0])) for row in invalidated_rows if row[0])
+        return values, keys
+
+    def _load_scope_in_transaction(
+        self,
+        connection: psycopg.Connection,
+        payload: Mapping[str, object],
+        keys: set[str],
+    ) -> tuple[list[MemoryFact], dict[str, int]]:
+        """Load the complete active owner/topic scope under advisory locks."""
+        if not keys:
+            return [], {}
+        owner_id = str(payload["ownerUserId"])
+        for key in sorted(keys):
+            connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"memory:{owner_id}:{key}",))
+        rows = connection.execute(
+            """SELECT f.id,COALESCE(f.owner_user_id,m.owner_id),f.meeting_id,f.transcript_id,f.transcript_version,
+                      f.fact_type,f.subject,f.value,f.start_ms,f.end_ms,f.confidence,
+                      f.evidence_segment_ids,f.derivation_type,f.state,COALESCE(f.source_text,''),m.started_at
+                 FROM transcript_facts f
+                 JOIN meetings m ON m.id=f.meeting_id
+                WHERE COALESCE(f.owner_user_id,m.owner_id)=%s
+                  AND f.state='ACTIVE'
+                  AND f.subject IS NOT NULL
+                  AND (f.subject_normalized = ANY(%s::text[]) OR f.subject_normalized IS NULL)
+                ORDER BY m.started_at NULLS LAST,f.start_ms,f.id""",
+            (owner_id, list(keys)),
+        ).fetchall()
+        values = []
         for row in rows:
-            evidence = row[11]
-            if isinstance(evidence, str):
-                try:
-                    evidence = json.loads(evidence)
-                except json.JSONDecodeError:
-                    evidence = []
-            evidence_ids = tuple(str(item) for item in (evidence or []) if item)
-            values.append(MemoryFact(
-                fact_id=str(row[0]), owner_user_id=str(row[1]), meeting_id=str(row[2]),
-                transcript_id=str(row[3]), transcript_version=int(row[4]), fact_type=str(row[5]),
-                subject=str(row[6]) if row[6] else None, value=str(row[7] or ""),
-                start_ms=int(row[8] or 0), end_ms=int(row[9] or 0), confidence=float(row[10] or 0),
-                evidence_segment_ids=evidence_ids, derivation_type=str(row[12] or "EXPLICIT"),
-                state=str(row[13] or "ACTIVE"), source_text=str(row[14] or ""), meeting_started_at=row[15],
-            ))
-            starts[str(row[2])] = row[15]
+            fact = self._fact_from_row(row)
+            if self._scope_key(fact) in keys:
+                values.append(fact)
+        starts: dict[str, object] = {}
+        for fact in values:
+            starts[fact.meeting_id] = fact.meeting_started_at
         ordered = sorted(starts, key=lambda meeting_id: (starts[meeting_id] is None, starts[meeting_id], meeting_id))
         return values, {meeting_id: index for index, meeting_id in enumerate(ordered)}
 
     def process(self, payload: Mapping[str, object]) -> MemoryIndexResult:
         job_id = str(payload["jobId"])
-        facts, meeting_order = self._load_facts(payload)
+        _current_facts, subject_keys = self._load_facts(payload)
+        if len(subject_keys) > MEMORY_MAX_SUBJECTS_PER_JOB:
+            return self._complete_scope_review(job_id, "MEMORY_SCOPE_LIMIT_EXCEEDED")
         self._set_stage(job_id, "LINKING_FACTS", 35)
-        result = MemoryIndexWorker().index(facts, meeting_order)
-        if result.index is None:
-            return result
-        self._set_stage(job_id, "BUILDING_THREADS", 70)
         with self._connection() as connection:
             with connection.transaction():
+                facts, meeting_order = self._load_scope_in_transaction(connection, payload, subject_keys)
+                if len(facts) > MEMORY_MAX_FACTS_PER_JOB or any(
+                    sum(1 for fact in facts if self._scope_key(fact) == key) > MEMORY_MAX_FACTS_PER_SUBJECT
+                    for key in subject_keys
+                ):
+                    return self._complete_scope_review_in_transaction(connection, job_id, "MEMORY_SCOPE_LIMIT_EXCEEDED")
+                self._set_stage(job_id, "BUILDING_THREADS", 70)
+                result = MemoryIndexWorker().index(facts, meeting_order)
+                if result.index is None:
+                    return result
                 fact_ids = [fact.fact_id for fact in result.index.facts if fact.fact_id]
                 if fact_ids:
                     connection.execute(
@@ -229,11 +293,18 @@ class MemoryProjectionRepository:
                         continue
                     connection.execute("DELETE FROM fact_entities WHERE fact_id=%s", (fact.fact_id,))
                     if fact.subject:
+                        topic_normalized = canonical_topic_name(fact.subject)
                         normalized = normalize_entity_name(fact.subject)
-                        entity_type = next((entity.entity_type for entity in result.index.entities if entity.normalized_name == normalized and entity.entity_type != "PERSON"), "TOPIC")
-                        entity_id = entity_ids.get((entity_type, normalized))
-                        if entity_id:
-                            connection.execute("INSERT INTO fact_entities(fact_id,entity_id,role,confidence) VALUES(%s,%s,'SUBJECT',%s) ON CONFLICT DO NOTHING", (fact.fact_id, entity_id, fact.confidence))
+                        topic_id = entity_ids.get(("TOPIC", topic_normalized))
+                        if topic_id:
+                            connection.execute("INSERT INTO fact_entities(fact_id,entity_id,role,confidence) VALUES(%s,%s,'SUBJECT',%s) ON CONFLICT DO NOTHING", (fact.fact_id, topic_id, fact.confidence))
+                        # Preserve explicit equipment/project/location links
+                        # without replacing the canonical TOPIC scope.
+                        for entity in result.index.entities:
+                            if entity.entity_type in {"EQUIPMENT", "PROJECT", "LOCATION"} and entity.normalized_name == normalized:
+                                typed_id = entity_ids.get((entity.entity_type, normalized))
+                                if typed_id:
+                                    connection.execute("INSERT INTO fact_entities(fact_id,entity_id,role,confidence) VALUES(%s,%s,'MENTION',%s) ON CONFLICT DO NOTHING", (fact.fact_id, typed_id, fact.confidence))
                     if fact.fact_type == "RESPONSIBLE":
                         entity_id = entity_ids.get(("PERSON", normalize_entity_name(fact.value)))
                         if entity_id:
@@ -245,8 +316,20 @@ class MemoryProjectionRepository:
                              SET confidence=EXCLUDED.confidence,derivation_type=EXCLUDED.derivation_type,invalidated_at=NULL""",
                         (relation.source_fact_id, relation.target_fact_id, relation.relation_type, relation.confidence, relation.derivation_type),
                     )
+                for fact in result.index.facts:
+                    if fact.fact_id and fact.subject:
+                        connection.execute(
+                            "UPDATE transcript_facts SET subject_normalized=%s WHERE id=%s AND subject_normalized IS DISTINCT FROM %s",
+                            (self._scope_key(fact), fact.fact_id, self._scope_key(fact)),
+                        )
                 superseded = {item.source_fact_id for item in result.index.relations if item.relation_type == "SUPERSEDES"}
-                closed = {item.source_fact_id for item in result.index.relations if item.relation_type == "CLOSES"}
+                closed = {
+                    fact_id
+                    for item in result.index.relations
+                    if item.relation_type == "CLOSES"
+                    for fact_id in (item.source_fact_id, item.target_fact_id)
+                }
+                rebuilt_keys = {thread.normalized_title for thread in result.index.threads}
                 for thread in result.index.threads:
                     row = connection.execute(
                         """INSERT INTO memory_threads(owner_user_id,title,normalized_title,state,first_seen_at,last_seen_at,updated_at)
@@ -260,12 +343,38 @@ class MemoryProjectionRepository:
                     for sequence, fact_id in enumerate(thread.fact_ids):
                         role = "HISTORY" if fact_id in superseded else "CLOSED" if fact_id in closed else "CURRENT"
                         connection.execute("INSERT INTO memory_thread_facts(thread_id,fact_id,sequence,role) VALUES(%s,%s,%s,%s) ON CONFLICT(thread_id,fact_id) DO UPDATE SET sequence=EXCLUDED.sequence,role=EXCLUDED.role", (thread_id, fact_id, sequence, role))
+                for missing_key in subject_keys - rebuilt_keys:
+                    empty = connection.execute(
+                        "SELECT id FROM memory_threads WHERE owner_user_id=%s AND normalized_title=%s FOR UPDATE",
+                        (str(payload["ownerUserId"]), missing_key),
+                    ).fetchone()
+                    if empty:
+                        connection.execute("DELETE FROM memory_thread_facts WHERE thread_id=%s", (empty[0],))
+                        connection.execute("DELETE FROM memory_threads WHERE id=%s", (empty[0],))
                 status = result.status
                 connection.execute(
                     "UPDATE memory_jobs SET status=%s,stage=%s,progress=100,error_code=%s,error_message=%s,completed_at=CASE WHEN %s IN ('READY','NEEDS_REVIEW') THEN now() ELSE NULL END,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=%s AND worker_id=%s",
                     (status, result.stage, result.error_code, result.error_code, status, job_id, self.worker_id),
                 )
                 connection.execute("DELETE FROM inbox_messages WHERE message_id=%s AND worker_id=%s", (job_id, self.worker_id))
+        return result
+
+    def _complete_scope_review(self, job_id: str, error_code: str) -> MemoryIndexResult:
+        with self._connection() as connection:
+            with connection.transaction():
+                return self._complete_scope_review_in_transaction(connection, job_id, error_code)
+
+    @staticmethod
+    def _complete_scope_review_in_transaction(connection: psycopg.Connection, job_id: str, error_code: str) -> MemoryIndexResult:
+        result = MemoryIndexResult("NEEDS_REVIEW", "NEEDS_REVIEW", MemoryIndex((), (), (), ()), error_code)
+        connection.execute(
+            """UPDATE memory_jobs
+                  SET status='NEEDS_REVIEW',stage='NEEDS_REVIEW',progress=100,error_code=%s,error_message=%s,
+                      completed_at=now(),worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now()
+                WHERE id=%s""",
+            (error_code, error_code, job_id),
+        )
+        connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (job_id,))
         return result
 
     def schedule_retry(self, job_id: str, error_code: str) -> tuple[bool, int]:

@@ -14,6 +14,11 @@ _EQUIPMENT_RE = re.compile(r"\b(?:печ\w*|насос\w*|привод\w*|ста
 _PROJECT_RE = re.compile(r"\b(?:проект\w*|программ\w*|модернизац\w*|внедрен\w*)\b", re.IGNORECASE)
 _LOCATION_RE = re.compile(r"\b(?:цех\w*|участ\w*|площад\w*|склад\w*|объект\w*|производств\w*)\b", re.IGNORECASE)
 
+# Bump this only when the canonical key algorithm changes.  The value is
+# stored in release metadata/backfill diagnostics so a future key migration
+# cannot silently mix projections produced by different normalizers.
+SUBJECT_NORMALIZER_VERSION = 1
+
 
 def normalize_entity_name(value: str) -> str:
     value = _PUNCT_RE.sub(" ", str(value or "").lower().replace("ё", "е"))
@@ -34,7 +39,10 @@ def canonical_topic_name(value: str) -> str:
     }
     tokens = [replacements.get(token, token) for token in normalized.split()]
     result = " ".join(tokens)
-    result = result.replace("второй печь", "печь №2").replace("вторая печь", "печь №2")
+    result = re.sub(r"\bвтор(?:ой|ая|ую|ой)\s+печ\w*\b", "печь №2", result)
+    result = re.sub(r"\b2\s*-?\s*я\s+печ\w*\b", "печь №2", result)
+    result = re.sub(r"\bпеч\w*\s*№?\s*2\b", "печь №2", result)
+    result = re.sub(r"\bпеч\w*\s+2\s*-?\s*я\b", "печь №2", result)
     return result.strip()
 
 
@@ -76,16 +84,23 @@ def resolve_entities(facts: Iterable[MemoryFact]) -> tuple[MemoryEntity, ...]:
     """
     by_key: dict[tuple[str, str], MemoryEntity] = {}
     for fact in facts:
-        candidates: list[tuple[str, bool]] = []
+        candidates: list[tuple[str, str]] = []
         if fact.fact_type == "RESPONSIBLE":
-            candidates.append((fact.value.strip(), True))
+            candidates.append((fact.value.strip(), "PERSON"))
         if fact.subject:
-            candidates.append((fact.subject.strip(), False))
-        for name, is_responsible in candidates:
-            normalized = normalize_entity_name(name)
+            # Every explicit subject gets a stable TOPIC entity.  A second,
+            # typed entity is also retained when the same phrase explicitly
+            # names equipment/project/location; this lets retrieval scope by
+            # topic while preserving the more specific classification.
+            subject = fact.subject.strip()
+            candidates.append((subject, "TOPIC"))
+            specialized = _entity_type(subject, is_responsible=False)
+            if specialized != "TOPIC":
+                candidates.append((subject, specialized))
+        for name, entity_type in candidates:
+            normalized = canonical_topic_name(name) if entity_type == "TOPIC" else normalize_entity_name(name)
             if not normalized:
                 continue
-            entity_type = _entity_type(name, is_responsible=is_responsible)
             key = (entity_type, normalized)
             by_key.setdefault(key, MemoryEntity(entity_type, name, normalized, _aliases(name)))
     return tuple(by_key.values())

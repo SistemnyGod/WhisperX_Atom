@@ -39,15 +39,38 @@ $assistantSetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Obj
 if ($assistantSetting -and ($assistantSetting -replace '^ASSISTANT_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
 $memorySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^MEETING_MEMORY_ENABLED=' } | Select-Object -First 1
 $includeMemory = -not ($memorySetting -and ($memorySetting -replace '^MEETING_MEMORY_ENABLED=','').Trim().ToLowerInvariant() -eq 'false')
+$embeddingSnapshotManifest = $null
 if ($IncludeLlm) {
     $embeddingRequired = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=' } | Select-Object -First 1
     $embeddingModelHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_ONNX_SHA256=' } | Select-Object -First 1
     $embeddingTokenizerHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=' } | Select-Object -First 1
+    $embeddingRevisionLine = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_MODEL_REVISION=' } | Select-Object -First 1
+    $modelsHostLine = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^WHISPERX_MODELS_HOST=' } | Select-Object -First 1
     $requiredValue = if ($embeddingRequired) { ($embeddingRequired -replace '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=','').Trim() } else { '' }
     $modelHashValue = if ($embeddingModelHash) { ($embeddingModelHash -replace '^ASSISTANT_EMBEDDING_ONNX_SHA256=','').Trim() } else { '' }
     $tokenizerHashValue = if ($embeddingTokenizerHash) { ($embeddingTokenizerHash -replace '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=','').Trim() } else { '' }
+    $embeddingRevision = if ($embeddingRevisionLine) { ($embeddingRevisionLine -replace '^ASSISTANT_EMBEDDING_MODEL_REVISION=','').Trim() } else { '' }
+    $modelsHost = if ($modelsHostLine) { ($modelsHostLine -replace '^WHISPERX_MODELS_HOST=','').Trim() } else { 'C:\WhisperXAtom\Models' }
     if ($requiredValue -ne 'true' -or [string]::IsNullOrWhiteSpace($modelHashValue) -or [string]::IsNullOrWhiteSpace($tokenizerHashValue)) {
         throw 'RELEASE_EMBEDDING_SNAPSHOT_NOT_PINNED: Assistant release requires verified ONNX/tokenizer SHA256 values'
+    }
+    if ([string]::IsNullOrWhiteSpace($embeddingRevision)) { throw 'RELEASE_EMBEDDING_REVISION_MISSING' }
+    $embeddingOnnxHostPath = Join-Path $modelsHost 'embeddings\paraphrase-multilingual-MiniLM-L12-v2.onnx'
+    $embeddingTokenizerHostPath = Join-Path $modelsHost 'embeddings\tokenizer.json'
+    if (-not (Test-Path -LiteralPath $embeddingOnnxHostPath -PathType Leaf) -or -not (Test-Path -LiteralPath $embeddingTokenizerHostPath -PathType Leaf)) {
+        throw "RELEASE_EMBEDDING_SNAPSHOT_FILES_MISSING: $embeddingOnnxHostPath / $embeddingTokenizerHostPath"
+    }
+    $actualOnnxHash = (Get-FileHash -LiteralPath $embeddingOnnxHostPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualTokenizerHash = (Get-FileHash -LiteralPath $embeddingTokenizerHostPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualOnnxHash -ne $modelHashValue.ToLowerInvariant() -or $actualTokenizerHash -ne $tokenizerHashValue.ToLowerInvariant()) {
+        throw 'RELEASE_EMBEDDING_SNAPSHOT_SHA256_MISMATCH'
+    }
+    $embeddingSnapshotManifest = [ordered]@{
+        model = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+        revision = $embeddingRevision
+        onnxSha256 = $actualOnnxHash
+        tokenizerSha256 = $actualTokenizerHash
+        device = 'CPU'
     }
 }
 
@@ -182,6 +205,7 @@ $manifest = [ordered]@{
     images = $imageRecords
     infrastructureImages = $infrastructure
     migrations = $migrationManifest
+    embeddingSnapshot = $embeddingSnapshotManifest
     runtimeScripts = @($runtimeScripts | ForEach-Object {
         $path = Join-Path $stage $_
         [ordered]@{ name = $_; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }

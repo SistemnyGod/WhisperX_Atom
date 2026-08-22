@@ -655,6 +655,8 @@ grounding/RBAC-контур Assistant.
   derived fact.
 - `056_memory_runtime.sql` — leases, retry и безопасная инвалидизация
   relations/thread links для CPU-only worker.
+- `057_memory_cross_meeting_projection.sql` — owner-scoped normalized subject
+  key и bounded cross-meeting projection index.
 
 `workers/memory_worker` содержит детерминированные этапы extraction,
 normalization, relation resolution, temporal selection, thread projection и
@@ -675,13 +677,19 @@ outbox-событие `memory.index`. CPU-only `memory-worker` получает 
 JetStream, захватывает обычный inbox lease и строит projection с повторяемыми
 стадиями `RESOLVING_ENTITIES`, `LINKING_FACTS` и `BUILDING_THREADS`.
 
-В projection попадают только facts текущей версии и владельца. Relations и
-thread-facts являются подсказками поиска; Assistant всегда заново читает
+В projection попадают facts текущей версии и владельца вместе с ACTIVE
+историческими facts тех же нормализованных тем. Для каждой темы worker берёт
+transaction-scoped advisory lock и атомарно перестраивает полный ordered
+thread, поэтому повторная индексация новой встречи не удаляет историю старых.
+Facts без однозначного subject остаются в обычном retrieval и не создают
+threads/relations. Relations и thread-facts являются подсказками поиска; Assistant всегда заново читает
 канонические `transcript_segments`, проверяет RBAC, version/status и evidence
 IDs. `memory-worker` не использует GPU и не влияет на V1, V2 или Summary при
 ошибке.
 
 Сервис включается параметром `MEETING_MEMORY_ENABLED=true` и профилем Compose
 `memory`. Для уже готовых встреч используется ограниченный
-`python -m workers.memory_worker.backfill --preview` с последующим явным
-`--apply`; команда идемпотентна и выводит только идентификаторы и метрики.
+`python -m workers.memory_worker.backfill --stage subjects --preview` с
+последующим `--apply`, затем `--stage jobs --preview/--apply`; при изменении
+алгоритма нормализации используется явный `--rebuild-existing`. Команды
+bounded, идемпотентны и выводят только идентификаторы и метрики.

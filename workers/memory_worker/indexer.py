@@ -48,5 +48,5 @@ def build_memory_index(
     )
     entities = resolve_entities(values)
     relations = resolve_relations(values, meeting_order)
-    threads = build_threads(values)
+    threads = build_threads(values, relations)
     return MemoryIndex(values, entities, relations, threads)

@@ -17,6 +17,7 @@ from whisperx_atom.pipeline_contract import validate_stage_name
 from workers.pipeline_timeline import record_pipeline_event
 from .technical_events import build_technical_intervals, segment_technical_flags
 from workers.summary_worker.fact_extraction import extract_transcript_facts, fact_insert_params
+from workers.memory_worker.entity_resolver import canonical_topic_name
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
 ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
@@ -858,12 +859,13 @@ class JobRepository:
             for fact in facts:
                 params = list(fact_insert_params(fact))
                 params[11] = Jsonb(params[11])
+                subject_normalized = canonical_topic_name(fact.subject) if fact.subject else None
                 connection.execute(
                     """INSERT INTO transcript_facts(
-                         owner_user_id,meeting_id,transcript_id,transcript_version,fact_type,subject,predicate,value,
+                         owner_user_id,meeting_id,transcript_id,transcript_version,fact_type,subject,subject_normalized,predicate,value,
                          speaker_id,start_ms,end_ms,confidence,evidence_segment_ids,state,source_text)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)""",
-                    (owner_user_id, *params),
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
+                    (owner_user_id, *params[:5], subject_normalized, *params[5:]),
                 )
             connection.execute("RELEASE SAVEPOINT transcript_facts_optional")
             return len(facts)

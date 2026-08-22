@@ -736,19 +736,26 @@ class AssistantRepository:
                       AND f.fact_type = ANY(%s::text[])
                       AND (%s::uuid IS NULL OR f.meeting_id=%s::uuid)
                       AND (%s OR m.owner_id=%s::uuid)
-                      AND (%s='' OR f.subject ILIKE ('%%' || %s || '%%')
-                           OR f.value ILIKE ('%%' || %s || '%%')
+                      AND (
+                           %s='' OR f.subject_normalized=%s
                            OR EXISTS (
                                SELECT 1 FROM fact_entities fe
                                JOIN memory_entities me ON me.id=fe.entity_id
                                WHERE fe.fact_id=f.id
-                                 AND (me.normalized_name ILIKE ('%%' || %s || '%%')
-                                      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(me.aliases,'[]'::jsonb)) alias_value
-                                                 WHERE alias_value ILIKE ('%%' || %s || '%%')))
-                           ))
-                      AND (%s <> 'OPEN_ITEMS' OR NOT EXISTS (
-                           SELECT 1 FROM memory_thread_facts mtf
-                           WHERE mtf.fact_id=f.id AND mtf.role='CLOSED'))
+                                 AND (
+                                      me.normalized_name=%s
+                                      OR EXISTS (
+                                          SELECT 1 FROM jsonb_array_elements_text(COALESCE(me.aliases,'[]'::jsonb)) alias_value
+                                          WHERE alias_value=%s
+                                      )
+                                 )
+                           )
+                      )
+                      AND (%s <> 'OPEN_ITEMS' OR EXISTS (
+                           SELECT 1
+                             FROM memory_thread_facts mtf
+                             JOIN memory_threads mt ON mt.id=mtf.thread_id
+                            WHERE mtf.fact_id=f.id AND mt.state='OPEN' AND mtf.role <> 'CLOSED'))
                       AND (%s OR NOT EXISTS (
                            SELECT 1 FROM memory_fact_relations r
                            WHERE r.source_fact_id=f.id
@@ -759,8 +766,8 @@ class AssistantRepository:
                     """,
                     (
                         list(memory_plan.fact_types), meeting_id, meeting_id,
-                        include_all, owner_user_id, topic, topic, topic, topic_lookup,
-                        topic_lookup, memory_plan.temporal_mode, memory_plan.include_superseded,
+                        include_all, owner_user_id, topic_lookup, topic_lookup, topic_lookup, topic_lookup,
+                        memory_plan.temporal_mode, memory_plan.include_superseded,
                     ),
                 ).fetchall()
                 if not fact_rows:
