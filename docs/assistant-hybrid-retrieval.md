@@ -38,15 +38,19 @@ Embedding-код не принимает meeting IDs и не выполняет 
 
 ## Провайдер embeddings
 
-По умолчанию используется `ASSISTANT_EMBEDDING_PROVIDER=auto` (режим
-offline-safe):
+В Server Bundle по умолчанию используется
+`ASSISTANT_EMBEDDING_PROVIDER=onnx`. Провайдер загружает заранее проверенный
+snapshot `paraphrase-multilingual-MiniLM-L12-v2` через `onnxruntime` с
+единственным `CPUExecutionProvider`; сеть и CUDA во время старта не
+используются. Пути к immutable-файлам задаются `ASSISTANT_EMBEDDING_ONNX_PATH`
+и `ASSISTANT_EMBEDDING_TOKENIZER_PATH`.
 
-1. если в образе/локальном кэше доступен `sentence-transformers`, загружается
-   уже подготовленная модель из `ASSISTANT_EMBEDDING_MODEL` (по умолчанию
-   multilingual MiniLM); `auto` не скачивает модель при старте;
-2. при отсутствии optional-пакета или модели включается dependency-free
-   `hashed-local-v1` — нормализованные русские токены, символьные n-граммы и
-   небольшой прозрачный словарь синонимов. Он не отправляет текст по сети.
+Если snapshot ещё не установлен при rolling upgrade, worker не падает: в
+readiness/heartbeat фиксируется `embeddingFallbackReason=onnx_snapshot_missing`,
+а retrieval безопасно переходит на `hashed-local-v1`. Этот fallback не имеет
+права создавать evidence только по cosine similarity. Реальный ONNX-provider
+может создать semantic-only anchor только при `raw cosine >= 0.72` и общем
+hybrid score `>= 0.30`.
 
 Параметры безопасно ограничены и не меняют API:
 
@@ -57,6 +61,11 @@ ASSISTANT_FINAL_TOP_K=12
 ASSISTANT_NEIGHBOUR_LIMIT=36
 ASSISTANT_HYBRID_MIN_SCORE=0.30
 ASSISTANT_HYBRID_EMBEDDING_MIN=0.72
+ASSISTANT_EMBEDDING_PROVIDER=onnx
+ASSISTANT_EMBEDDING_ONNX_PATH=/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx
+ASSISTANT_EMBEDDING_TOKENIZER_PATH=/models/embeddings/tokenizer.json
+ASSISTANT_EMBEDDING_ONNX_SHA256=<sha256>
+ASSISTANT_EMBEDDING_TOKENIZER_SHA256=<sha256>
 ASSISTANT_EMBEDDING_CACHE=4096
 ASSISTANT_EMBEDDING_DIMENSION=384
 ```

@@ -158,7 +158,12 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 ? captureMeeting
                 : activeMeetingId ?? captureContext.MeetingId;
             var conversationId = GetVoiceConversationId(currentUser.Id, requestedMode, requestMeetingId);
+            if (!string.IsNullOrWhiteSpace(assistantCommandId)
+                && !_assistantDelivery.TryAddCommand(assistantCommandId, currentUser.Id.ToString(), assistantTraceId))
+                return new(false, "VOICE_ASSISTANT_QUEUE_FULL", Detail: "assistant_delivery_capacity", TraceId: assistantTraceId, CommandId: assistantCommandId);
             DesktopAssistantRequestAccepted? accepted;
+            using var acceptanceTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            acceptanceTimeout.CancelAfter(TimeSpan.FromSeconds(10));
             try
             {
                 accepted = await _backend.CreateAssistantRequestAsync(
@@ -172,7 +177,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                     captureContext.RecordingSessionId,
                     captureContext.CaptureState,
                     previousResolvedMode: null,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    cancellationToken: acceptanceTimeout.Token).ConfigureAwait(false);
             }
             catch (DesktopApiException exception)
             {
@@ -184,18 +189,17 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                var timedOut = new BrokerResponse(false, "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT",
-                    Detail: "assistant_acceptance_timeout", TraceId: assistantTraceId, CommandId: assistantCommandId);
-                CacheCommand(assistantCommandId, timedOut);
-                return timedOut;
+                var reconciled = await ReconcileAssistantRequestAsync(assistantCommandId, cancellationToken).ConfigureAwait(false);
+                if (reconciled is not null) { accepted = reconciled; goto accepted_request; }
+                return new BrokerResponse(true, RecorderState: "ASSISTANT_RECONCILING", Detail: "assistant_acceptance_pending", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
-            catch (HttpRequestException exception)
+            catch (HttpRequestException)
             {
-                var unreachable = new BrokerResponse(false, "VOICE_ASSISTANT_SERVER_UNREACHABLE",
-                    Detail: exception.GetType().Name, TraceId: assistantTraceId, CommandId: assistantCommandId);
-                CacheCommand(assistantCommandId, unreachable);
-                return unreachable;
+                var reconciled = await ReconcileAssistantRequestAsync(assistantCommandId, cancellationToken).ConfigureAwait(false);
+                if (reconciled is not null) { accepted = reconciled; goto accepted_request; }
+                return new BrokerResponse(true, RecorderState: "ASSISTANT_RECONCILING", Detail: "assistant_acceptance_pending", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
+        accepted_request:
             if (accepted is null)
             {
                 var rejected = new BrokerResponse(false, "VOICE_ASSISTANT_REQUEST_REJECTED", Detail: "assistant_request_rejected", TraceId: assistantTraceId, CommandId: assistantCommandId);
@@ -213,7 +217,9 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             }
             if (Guid.TryParse(accepted.QueryId, out var queryId))
             {
-                if (!_assistantDelivery.TryAdd(queryId, currentUser.Id.ToString(), assistantCommandId, assistantTraceId, accepted.ResolvedMode, accepted.ConversationId))
+                if (!string.IsNullOrWhiteSpace(assistantCommandId))
+                    _assistantDelivery.BindQuery(assistantCommandId, queryId, accepted.ResolvedMode, accepted.ConversationId);
+                else if (!_assistantDelivery.TryAdd(queryId, currentUser.Id.ToString(), assistantCommandId, assistantTraceId, accepted.ResolvedMode, accepted.ConversationId))
                     return new(false, "VOICE_ASSISTANT_QUEUE_FULL", Detail: "assistant_delivery_capacity", TraceId: assistantTraceId, CommandId: assistantCommandId);
             }
             // Acceptance is intentionally silent.  The grounded result is
@@ -378,6 +384,43 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         }
     }
 
+    private async Task<DesktopAssistantRequestAccepted?> ReconcileAssistantRequestAsync(string? commandId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(commandId) || !_backend.HasSession) return null;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(4));
+        while (!timeout.IsCancellationRequested)
+        {
+            try
+            {
+                var accepted = await _backend.GetAssistantRequestByCommandAsync(commandId, timeout.Token).ConfigureAwait(false);
+                if (accepted is not null) return accepted;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { break; }
+            catch (HttpRequestException) { }
+            try { await Task.Delay(TimeSpan.FromMilliseconds(500), timeout.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { break; }
+        }
+        return null;
+    }
+
+    private async Task ReconcilePendingAssistantRequestsAsync(string? userId, CancellationToken cancellationToken)
+    {
+        if (!_backend.HasSession) return;
+        foreach (var item in _assistantDelivery.GetForReconciliation(userId))
+        {
+            if (string.IsNullOrWhiteSpace(item.CommandId)) continue;
+            try
+            {
+                var accepted = await _backend.GetAssistantRequestByCommandAsync(item.CommandId, cancellationToken).ConfigureAwait(false);
+                if (accepted is not null && Guid.TryParse(accepted.QueryId, out var queryId))
+                    _assistantDelivery.BindQuery(item.CommandId, queryId, accepted.ResolvedMode, accepted.ConversationId);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (Exception ex) { _log?.Invoke(ex); }
+        }
+    }
+
     private async Task DeliverAssistantResultsAsync()
     {
         while (!_shutdown.IsCancellationRequested)
@@ -391,6 +434,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                     await Task.Delay(TimeSpan.FromSeconds(3), _shutdown.Token).ConfigureAwait(false);
                     continue;
                 }
+                await ReconcilePendingAssistantRequestsAsync(user.Id.ToString(), _shutdown.Token).ConfigureAwait(false);
                 foreach (var item in _assistantDelivery.GetForUser(user?.Id.ToString()))
                     await TryDeliverAssistantResultAsync(item, _shutdown.Token).ConfigureAwait(false);
             }
@@ -404,12 +448,13 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
     private async Task TryDeliverAssistantResultAsync(AssistantDeliveryEntry pending, CancellationToken cancellationToken)
     {
         if (!_backend.HasSession) return;
-        var query = await _backend.GetAssistantQueryAsync(pending.QueryId, cancellationToken).ConfigureAwait(false);
+        if (pending.QueryId is not Guid pendingQueryId) return;
+        var query = await _backend.GetAssistantQueryAsync(pendingQueryId, cancellationToken).ConfigureAwait(false);
         if (query is null) return;
         var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
         if (!terminal) return;
-        LogMessage($"ASSISTANT_DELIVERY_TERMINAL queryId={pending.QueryId:N} status={query.Status} error={query.ErrorCode ?? "none"}");
-        AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var resultConversation) ? resultConversation : null);
+        LogMessage($"ASSISTANT_DELIVERY_TERMINAL queryId={pendingQueryId:N} status={query.Status} error={query.ErrorCode ?? "none"}");
+        AssistantResultAvailable?.Invoke(pendingQueryId, Guid.TryParse(pending.ConversationId, out var resultConversation) ? resultConversation : null);
         // A worker must never be able to turn a failed grounding decision
         // into a confident spoken fact by populating VoiceAnswer.  For these
         // terminal statuses the broker owns the wording and only emits the
@@ -424,19 +469,19 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                 : AssistantErrorSpeech(query.ErrorCode ?? query.Status);
         if (string.IsNullOrWhiteSpace(voiceAnswer))
         {
-            _assistantDelivery.MarkCompletedWithoutSpeech(pending.QueryId);
-            AssistantResultAvailable?.Invoke(pending.QueryId, Guid.TryParse(pending.ConversationId, out var noSpeechConversation) ? noSpeechConversation : null);
+            _assistantDelivery.MarkCompletedWithoutSpeech(pendingQueryId);
+            AssistantResultAvailable?.Invoke(pendingQueryId, Guid.TryParse(pending.ConversationId, out var noSpeechConversation) ? noSpeechConversation : null);
             return;
         }
         // Claim before sending. If Desktop terminates after this point, the
         // ambiguous dispatch is deliberately not replayed after restart.
         var reconcilingAcceptedPlayback = pending.State == AssistantDeliveryState.Accepted;
-        if (!reconcilingAcceptedPlayback && !_assistantDelivery.TryClaim(pending.QueryId)) return;
+        if (!reconcilingAcceptedPlayback && !_assistantDelivery.TryClaim(pendingQueryId)) return;
         try
         {
             var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("SPEAK_ASSISTANT_RESULT", new
             {
-                queryId = pending.QueryId,
+                queryId = pendingQueryId,
                 commandId = pending.CommandId,
                 traceId = pending.TraceId,
                 voiceAnswer,
@@ -455,29 +500,29 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
                     : null;
                 switch (playbackState?.ToUpperInvariant())
                 {
-                    case "PLAYED": _assistantDelivery.MarkDelivered(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_PLAYED queryId={pending.QueryId:N}"); break;
-                    case "CANCELLED": _assistantDelivery.MarkCancelled(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_CANCELLED queryId={pending.QueryId:N}"); break;
+                    case "PLAYED": _assistantDelivery.MarkDelivered(pendingQueryId); LogMessage($"ASSISTANT_DELIVERY_PLAYED queryId={pendingQueryId:N}"); break;
+                    case "CANCELLED": _assistantDelivery.MarkCancelled(pendingQueryId); LogMessage($"ASSISTANT_DELIVERY_CANCELLED queryId={pendingQueryId:N}"); break;
                     case "FAILED":
                     case "AMBIGUOUS":
-                    case "RESERVED": _assistantDelivery.MarkAmbiguous(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pending.QueryId:N} playbackState={playbackState}"); break;
-                    default: _assistantDelivery.MarkAccepted(pending.QueryId); LogMessage($"ASSISTANT_DELIVERY_ACCEPTED queryId={pending.QueryId:N} playbackState={playbackState ?? "missing"}"); break;
+                    case "RESERVED": _assistantDelivery.MarkAmbiguous(pendingQueryId); LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pendingQueryId:N} playbackState={playbackState}"); break;
+                    default: _assistantDelivery.MarkAccepted(pendingQueryId); LogMessage($"ASSISTANT_DELIVERY_ACCEPTED queryId={pendingQueryId:N} playbackState={playbackState ?? "missing"}"); break;
                 }
             }
             else if (response.Error is "VOICE_HOST_BUSY" or "VOICE_ASSISTANT_QUEUE_FULL" or "VOICE_PLAYBACK_LEDGER_UNAVAILABLE")
             {
-                _assistantDelivery.ResetToPending(pending.QueryId);
-                LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_FAILURE queryId={pending.QueryId:N} error={response.Error}");
+                _assistantDelivery.ResetToPending(pendingQueryId);
+                LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_FAILURE queryId={pendingQueryId:N} error={response.Error}");
             }
             else
             {
-                _assistantDelivery.MarkAmbiguous(pending.QueryId);
-                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pending.QueryId:N} error={response.Error ?? "unknown"}");
+                _assistantDelivery.MarkAmbiguous(pendingQueryId);
+                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS queryId={pendingQueryId:N} error={response.Error ?? "unknown"}");
             }
         }
         catch (VoiceHostIpcException ex) when (!ex.RequestWritten)
         {
-            _assistantDelivery.ResetToPending(pending.QueryId);
-            LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_IPC queryId={pending.QueryId:N} detail={ex.Message}");
+            _assistantDelivery.ResetToPending(pendingQueryId);
+            LogMessage($"ASSISTANT_DELIVERY_RETRYABLE_IPC queryId={pendingQueryId:N} detail={ex.Message}");
         }
         catch (VoiceHostIpcException ex) when (ex.RequestWritten)
         {
@@ -485,21 +530,21 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             // was lost. Query the idempotency tombstone before declaring the
             // dispatch ambiguous; this recovers PLAYED/ACCEPTED without ever
             // synthesizing the answer a second time.
-            if (!await ReconcileAssistantPlaybackAsync(pending.QueryId, cancellationToken).ConfigureAwait(false))
+            if (!await ReconcileAssistantPlaybackAsync(pendingQueryId, cancellationToken).ConfigureAwait(false))
             {
-                _assistantDelivery.MarkAmbiguous(pending.QueryId);
-                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IPC queryId={pending.QueryId:N} detail={ex.Message}");
+                _assistantDelivery.MarkAmbiguous(pendingQueryId);
+                LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IPC queryId={pendingQueryId:N} detail={ex.Message}");
             }
         }
         catch (IOException ex)
         {
-            _assistantDelivery.MarkAmbiguous(pending.QueryId);
-            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IO queryId={pending.QueryId:N} detail={ex.Message}");
+            _assistantDelivery.MarkAmbiguous(pendingQueryId);
+            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_IO queryId={pendingQueryId:N} detail={ex.Message}");
         }
         catch (TimeoutException ex)
         {
-            _assistantDelivery.MarkAmbiguous(pending.QueryId);
-            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_TIMEOUT queryId={pending.QueryId:N} detail={ex.Message}");
+            _assistantDelivery.MarkAmbiguous(pendingQueryId);
+            LogMessage($"ASSISTANT_DELIVERY_AMBIGUOUS_TIMEOUT queryId={pendingQueryId:N} detail={ex.Message}");
         }
     }
 

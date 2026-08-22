@@ -35,8 +35,14 @@ Copy-Item .env.example .env
 | `DIARIZATION_MIN_FREE_VRAM_MB` | Порог освобождения cache перед pyannote | `2048` |
 | `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
 | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
-| `ASSISTANT_EMBEDDING_PROVIDER` | Hybrid retrieval provider (`auto`, `sentence-transformers`, `hash`) | `auto` |
-| `ASSISTANT_EMBEDDING_MODEL` | Локальная sentence-transformers модель при доступном optional runtime | `paraphrase-multilingual-MiniLM-L12-v2` |
+| `LLM_RESIDENT_ENABLED` | Разрешает общий resident Qwen runtime после получения GPU lease | `true` |
+| `LLM_IDLE_UNLOAD_SECONDS` | Автоматическая выгрузка неиспользуемого Qwen | `900` |
+| `LLM_WARMUP_ENABLED` / `LLM_WARMUP_IDLE_SECONDS` | Отменяемый низкоприоритетный прогрев Qwen после простоя | `true` / `30` |
+| `ASSISTANT_EMBEDDING_PROVIDER` | Hybrid retrieval provider (`onnx`, `auto`, `sentence-transformers`, `hash`) | `onnx` |
+| `ASSISTANT_EMBEDDING_ONNX_PATH` | Immutable ONNX snapshot MiniLM (CPU provider only) | `/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx` |
+| `ASSISTANT_EMBEDDING_TOKENIZER_PATH` | Immutable tokenizer snapshot для ONNX | `/models/embeddings/tokenizer.json` |
+| `ASSISTANT_EMBEDDING_ONNX_SHA256` / `ASSISTANT_EMBEDDING_TOKENIZER_SHA256` | Ожидаемые SHA256 snapshot-файлов; при несовпадении provider отклоняется | пусто в шаблоне, заполнить в Server Bundle |
+| `ASSISTANT_EMBEDDING_MODEL` | Legacy локальная sentence-transformers модель при явном opt-in | `paraphrase-multilingual-MiniLM-L12-v2` |
 | `ASSISTANT_FTS_ANCHOR_LIMIT` | Максимум FTS-якорей до semantic rerank | `64` |
 | `ASSISTANT_SEMANTIC_CANDIDATE_LIMIT` | Ограниченный semantic pool после RBAC/scope-фильтра | `512` |
 | `ASSISTANT_FINAL_TOP_K` | Число лучших anchors перед расширением соседями | `12` |

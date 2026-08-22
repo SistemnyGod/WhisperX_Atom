@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
+import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 import logging
 
@@ -632,6 +635,79 @@ async def run() -> None:
     runtime_owner = f"summary-runtime:{socket.gethostname()}:{os.getpid()}:{os.urandom(6).hex()}"
     shared_coordination = GpuRuntimeCoordinator(owner=runtime_owner)
     shared_runtime = LocalLlamaRuntime()
+    embedding_integrity_key: tuple[Any, ...] | None = None
+    embedding_integrity_status = "NOT_CONFIGURED"
+    def embedding_capabilities() -> dict[str, Any]:
+        """Describe the configured retrieval provider without loading a model.
+
+        The heartbeat must stay cheap and deterministic.  The Assistant worker
+        performs the actual ONNX session construction lazily; this probe only
+        reports whether the immutable snapshot is present and what provider
+        will be selected, so readiness never downloads a model or touches CUDA.
+        """
+        nonlocal embedding_integrity_key, embedding_integrity_status
+        requested = os.getenv("ASSISTANT_EMBEDDING_PROVIDER", "auto").strip().lower()
+        onnx_path = os.getenv(
+            "ASSISTANT_EMBEDDING_ONNX_PATH",
+            "/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx",
+        ).strip()
+        tokenizer_path = os.getenv(
+            "ASSISTANT_EMBEDDING_TOKENIZER_PATH",
+            "/models/embeddings/tokenizer.json",
+        ).strip()
+        onnx_sha256 = os.getenv("ASSISTANT_EMBEDDING_ONNX_SHA256", "").strip()
+        tokenizer_sha256 = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_SHA256", "").strip()
+        onnx_ready = Path(onnx_path).is_file() and Path(tokenizer_path).is_file()
+        explicit_onnx = requested in {"onnx", "onnx-cpu", "onnx_cpu"}
+        def stamp(path: str) -> int:
+            try:
+                return Path(path).stat().st_mtime_ns
+            except OSError:
+                return 0
+        key = (onnx_path, tokenizer_path, onnx_sha256, tokenizer_sha256, onnx_ready,
+               stamp(onnx_path) if onnx_ready else 0,
+               stamp(tokenizer_path) if onnx_ready else 0)
+        if key != embedding_integrity_key:
+            embedding_integrity_key = key
+            if not onnx_ready:
+                embedding_integrity_status = "MISSING"
+            elif not (onnx_sha256 and tokenizer_sha256):
+                embedding_integrity_status = "NOT_CONFIGURED"
+            else:
+                try:
+                    def digest(path: str) -> str:
+                        hasher = hashlib.sha256()
+                        with open(path, "rb") as stream:
+                            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                                hasher.update(chunk)
+                        return hasher.hexdigest().lower()
+                    embedding_integrity_status = "VERIFIED" if digest(onnx_path) == onnx_sha256.lower() and digest(tokenizer_path) == tokenizer_sha256.lower() else "MISMATCH"
+                except OSError:
+                    embedding_integrity_status = "ERROR"
+        snapshot_ok = onnx_ready and embedding_integrity_status != "MISMATCH" and embedding_integrity_status != "ERROR"
+        selected = "onnx-cpu:paraphrase-multilingual-MiniLM-L12-v2" if snapshot_ok and (requested == "auto" or explicit_onnx) else "hashed-local-v1"
+        if selected.startswith("onnx-cpu:"):
+            reason = "ready"
+        elif embedding_integrity_status in {"MISMATCH", "ERROR"}:
+            reason = "onnx_snapshot_sha256_mismatch"
+        elif explicit_onnx:
+            reason = "onnx_snapshot_missing"
+        elif requested == "auto":
+            reason = "onnx_snapshot_missing_using_hashed_fallback"
+        else:
+            reason = "provider_configured_hashed_fallback"
+        model_ready = selected.startswith("onnx-cpu:") or requested in {"hash", "hashed", "hashed-local-v1"}
+        return {
+            "embeddingProvider": selected,
+            "embeddingModel": "paraphrase-multilingual-MiniLM-L12-v2" if selected.startswith("onnx-cpu:") else None,
+            "embeddingDevice": "CPU" if selected.startswith("onnx-cpu:") else "CPU_FALLBACK",
+            "embeddingModelReady": model_ready,
+            "embeddingOnnxPath": onnx_path if explicit_onnx or onnx_ready else None,
+            "embeddingTokenizerPath": tokenizer_path if explicit_onnx or onnx_ready else None,
+            "embeddingSnapshotSha256Configured": bool(onnx_sha256 and tokenizer_sha256),
+            "embeddingSnapshotIntegrity": embedding_integrity_status,
+            "embeddingFallbackReason": reason,
+        }
     def summary_capabilities() -> dict[str, Any]:
         model_path = os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf")
         manifest_path = os.getenv("LLM_MODEL_MANIFEST", model_path + ".manifest.json")
@@ -674,6 +750,7 @@ async def run() -> None:
             "llamaRuntimeState": shared_runtime.state,
             "llamaResidentEnabled": shared_runtime.enabled,
             "gpuRequired": os.getenv("LLM_REQUIRE_GPU", "true").lower() in {"1", "true", "yes"},
+            **embedding_capabilities(),
         }
     heartbeat = AsyncHeartbeat("summary-worker", capabilities=summary_capabilities)
     await heartbeat.start()
@@ -733,6 +810,73 @@ async def run() -> None:
                 runtime_owner,
             )
             await asyncio.sleep(poll_interval)
+
+    async def qwen_warmup_watch() -> None:
+        """Warm idle Qwen only when the GPU has no active ASR work.
+
+        Warm-up is deliberately best-effort. It never changes the durable
+        Assistant retry budget and is stopped immediately after the load if a
+        higher-priority ASR/Assistant/V2 request appeared while the process
+        was starting.
+        """
+        if not shared_runtime.enabled or os.getenv("LLM_WARMUP_ENABLED", "true").lower() not in {"1", "true", "yes"}:
+            return
+        idle_seconds = max(30.0, float(os.getenv("LLM_WARMUP_IDLE_SECONDS", "30")))
+        poll_interval = max(2.0, float(os.getenv("LLM_WARMUP_POLL_SECONDS", "5")))
+        last_activity = time.monotonic()
+        while True:
+            await asyncio.sleep(poll_interval)
+            if shared_runtime.state != "STOPPED":
+                last_activity = time.monotonic()
+                continue
+            if time.monotonic() - last_activity < idle_seconds:
+                continue
+            try:
+                if await asyncio.to_thread(shared_coordination.higher_priority_work_active):
+                    last_activity = time.monotonic()
+                    continue
+                # Warm-up takes the lowest-priority lease. This prevents it
+                # from loading CUDA concurrently with ASR/Assistant/V2 and
+                # lets the polling loop cancel a slow model start as soon as
+                # higher-priority durable work appears.
+                warmup_lease = PostgresGpuLease(shared_coordination.conninfo, priority=100, wait_seconds=1)
+                async with warmup_lease:
+                    if await asyncio.to_thread(shared_coordination.higher_priority_work_active):
+                        last_activity = time.monotonic()
+                        continue
+                    cancellation = threading.Event()
+                    start_task = asyncio.create_task(asyncio.to_thread(shared_runtime.ensure_started, cancellation))
+                    try:
+                        while not start_task.done():
+                            await asyncio.sleep(2.0)
+                            if await asyncio.to_thread(shared_coordination.higher_priority_work_active):
+                                cancellation.set()
+                                break
+                        # Shield the thread-backed start from task cancellation;
+                        # on shutdown first signal the cooperative event and
+                        # wait for the child to terminate so no llama startup
+                        # thread survives the worker process lifecycle.
+                        await asyncio.shield(start_task)
+                    except asyncio.CancelledError:
+                        cancellation.set()
+                        try:
+                            await asyncio.shield(start_task)
+                        except (asyncio.CancelledError, RuntimeError):
+                            pass
+                        raise
+                    except RuntimeError as exc:
+                        if str(exc) != "llm_warmup_cancelled":
+                            raise
+                    if await asyncio.to_thread(shared_coordination.higher_priority_work_active):
+                        await asyncio.to_thread(shared_runtime.stop)
+                        await asyncio.to_thread(shared_coordination.mark_llm_stopped, runtime_owner)
+                    else:
+                        await asyncio.to_thread(shared_coordination.mark_llm_resident, runtime_owner, "LLM_WARMUP", f"warmup:{os.getpid()}")
+                last_activity = time.monotonic()
+                set_runtime_state()
+            except Exception:
+                LOGGER.warning("llm_warmup_failed", exc_info=True)
+                last_activity = time.monotonic()
 
     async def consume_summary() -> None:
         while True:
@@ -831,11 +975,13 @@ async def run() -> None:
                     set_runtime_state()
 
     coordination_task = asyncio.create_task(gpu_coordination_watch())
+    warmup_task = asyncio.create_task(qwen_warmup_watch())
     try:
         await asyncio.gather(consume_assistant(), consume_summary())
     finally:
         coordination_task.cancel()
-        await asyncio.gather(coordination_task, return_exceptions=True)
+        warmup_task.cancel()
+        await asyncio.gather(coordination_task, warmup_task, return_exceptions=True)
         await asyncio.to_thread(shared_coordination.mark_llm_stopped, runtime_owner)
         await summary_worker.close()
         await assistant_worker.close()

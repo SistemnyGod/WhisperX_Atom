@@ -37,7 +37,7 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     // Report the configured/effective Silero speaker instead of the old
     // hard-coded default.  This keeps STATUS/diagnostics truthful when the
     // user selected eugene, baya, kseniya or xenia.
-    public string VoiceName => _useFallback ? _windows.VoiceName : _options.Voice;
+    public string VoiceName => _useFallback ? _windows.VoiceName : _silero.VoiceName;
     public string VoiceCulture => _useFallback ? _windows.VoiceCulture : "ru-RU";
     public bool FallbackUsed => _useFallback && !_explicitWindows;
     public string? FallbackReason => _fallbackReason;
@@ -120,7 +120,7 @@ public sealed class TtsEngineRouter : IAsyncDisposable
         return fallback with { FallbackReason = _fallbackReason };
     }
 
-    public TtsRouterSnapshot Snapshot() => new(EngineName, ModelName, VoiceName, VoiceCulture, IsReady, _useFallback, _fallbackReason, ProcessId, LastSynthesisMs, LastModelLoadMs, RestartCount);
+    public TtsRouterSnapshot Snapshot() => new(EngineName, ModelName, VoiceName, VoiceCulture, IsReady, FallbackUsed, _fallbackReason, ProcessId, LastSynthesisMs, LastModelLoadMs, RestartCount);
     public IReadOnlyList<string> GetRussianVoiceNames() => _windows.GetRussianVoiceNames();
     public TtsOptions CurrentOptions => _options;
     public IReadOnlyList<object> GetTtsVoices() =>

@@ -1809,6 +1809,37 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     var question = request.Question?.Trim() ?? string.Empty;
     if (question.Length is 0 or > 2000) return Results.BadRequest(new { error = "assistant_query_invalid" });
+    var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
+    var requestUserId = userId.Value;
+    if (source == "VOICE" && !string.IsNullOrWhiteSpace(request.CommandId))
+    {
+        var replay = await store.GetAssistantQueryByCommandAsync(request.CommandId, requestUserId);
+        if (replay is not null)
+        {
+            if (!string.Equals(replay.Query, question, StringComparison.Ordinal))
+                return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+            return Results.Accepted($"/api/assistant/queries/{replay.Id}", new
+            {
+                queryId = replay.Id,
+                conversationId = replay.ConversationId,
+                resolvedMode = replay.AssistantMode,
+                meetingId = replay.MeetingId,
+                status = replay.Status,
+                source = replay.Source,
+                routerConfidence = replay.RouterConfidence,
+                requestedMode = replay.RequestedMode ?? "AUTO",
+                routingReason = "IDEMPOTENT_REPLAY",
+                confidence = replay.RouterConfidence,
+                acceptedAt = replay.CreatedAt,
+                processingStage = replay.ProcessingStage ?? "QUEUED",
+                traceId = replay.TraceId,
+                commandId = replay.CommandId ?? request.CommandId,
+                replayed = true,
+                pollUrl = $"/api/assistant/queries/{replay.Id}",
+                eventsUrl = $"/api/assistant/queries/{replay.Id}/events"
+            });
+        }
+    }
     if (request.ActiveMeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
         return Results.NotFound();
 
@@ -1849,7 +1880,6 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
             request = request with { ConversationId = null };
     }
 
-    var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
     var resolvedMeetingId = route.MeetingId;
     // Keep voice and text requests in the same scoped conversation. A caller
     // may provide an existing conversation; otherwise create one atomically
@@ -1862,7 +1892,23 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         conversationId = conversation?.Id;
     }
     var requestedMode = string.IsNullOrWhiteSpace(request.RequestedMode) ? "AUTO" : request.RequestedMode.Trim().ToUpperInvariant();
-    var query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, requestedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
+    AssistantQueryRow? query;
+    try
+    {
+        query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, requestedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
+    }
+    catch (AssistantIdempotencyConflictException)
+    {
+        return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+    }
+    catch (PostgresException exception) when (source == "VOICE" && !string.IsNullOrWhiteSpace(request.CommandId) && exception.SqlState == PostgresErrorCodes.UniqueViolation)
+    {
+        var replay = await store.GetAssistantQueryByCommandAsync(request.CommandId, userId.Value);
+        if (replay is null) throw;
+        if (!string.Equals(replay.Query, question, StringComparison.Ordinal))
+            return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+        return Results.Accepted($"/api/assistant/queries/{replay.Id}", new { queryId = replay.Id, conversationId = replay.ConversationId, resolvedMode = replay.AssistantMode, meetingId = replay.MeetingId, status = replay.Status, source = replay.Source, requestedMode = replay.RequestedMode ?? "AUTO", acceptedAt = replay.CreatedAt, processingStage = replay.ProcessingStage ?? "QUEUED", traceId = replay.TraceId, commandId = replay.CommandId ?? request.CommandId, replayed = true, pollUrl = $"/api/assistant/queries/{replay.Id}", eventsUrl = $"/api/assistant/queries/{replay.Id}/events" });
+    }
     if (query is null)
         return route.ResolvedMode == "LIVE_MEETING"
             ? Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." })
@@ -1883,6 +1929,32 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         processingStage = "QUEUED",
         traceId = request.TraceId,
         commandId = request.CommandId,
+        replayed = false,
+        pollUrl = $"/api/assistant/queries/{query.Id}",
+        eventsUrl = $"/api/assistant/queries/{query.Id}/events"
+    });
+});
+app.MapGet("/api/assistant/requests/by-command/{commandId}", async (string commandId, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var query = await store.GetAssistantQueryByCommandAsync(commandId, userId.Value);
+    return query is null ? Results.NotFound(new { error = "assistant_request_not_found" }) : Results.Ok(new
+    {
+        queryId = query.Id,
+        conversationId = query.ConversationId,
+        resolvedMode = query.AssistantMode,
+        meetingId = query.MeetingId,
+        status = query.Status,
+        source = query.Source,
+        routerConfidence = query.RouterConfidence ?? 0d,
+        requestedMode = query.RequestedMode ?? "AUTO",
+        confidence = query.RouterConfidence,
+        routingReason = "IDEMPOTENCY_LOOKUP",
+        acceptedAt = query.CreatedAt,
+        processingStage = query.ProcessingStage ?? query.Status,
+        traceId = query.TraceId,
+        commandId = query.CommandId ?? commandId,
         pollUrl = $"/api/assistant/queries/{query.Id}",
         eventsUrl = $"/api/assistant/queries/{query.Id}/events"
     });

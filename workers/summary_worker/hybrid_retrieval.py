@@ -3,10 +3,8 @@
 The Assistant must remain useful when a question is phrased differently from
 the transcript.  This module combines PostgreSQL Russian FTS with an
 embedding signal and a small lexical signal, then applies a deterministic
-rerank.  The default embedding provider is deliberately local and dependency
-free: stable hashed token/character features.  Deployments may opt into a
-real ``sentence-transformers`` provider through ``ASSISTANT_EMBEDDING_PROVIDER``
-without changing the retrieval or evidence contracts.
+rerank.  Production deployments may use the pinned CPU ONNX MiniLM provider;
+the stable hashed provider remains an explicit evidence-safe fallback.
 
 This module never decides scope.  Callers must provide candidates that have
 already passed meeting/RBAC/quality filters.  Neighbour expansion is likewise
@@ -153,9 +151,95 @@ class SentenceTransformerEmbeddingProvider:
         return [tuple(float(value) for value in row) for row in values]
 
 
+class OnnxEmbeddingProvider:
+    """Run the pinned multilingual MiniLM snapshot on CPU only.
+
+    The provider intentionally receives explicit model/tokenizer files rather
+    than downloading at worker startup. This keeps release images immutable,
+    offline-safe and outside the single CUDA lease used by WhisperX/Qwen.
+    """
+
+    def __init__(self, model_path: str, tokenizer_path: str, model_id: str, model_sha256: str | None = None, tokenizer_sha256: str | None = None) -> None:
+        import numpy as np  # type: ignore
+        import onnxruntime as ort  # type: ignore
+        from tokenizers import Tokenizer  # type: ignore
+
+        def verify(path: str, expected: str | None) -> None:
+            if not expected:
+                return
+            digest = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest().lower() != expected.strip().lower():
+                raise RuntimeError(f"embedding_snapshot_sha256_mismatch:{Path(path).name}")
+
+        verify(model_path, model_sha256)
+        verify(tokenizer_path, tokenizer_sha256)
+        self._np = np
+        self._tokenizer = Tokenizer.from_file(tokenizer_path)
+        self._session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self._inputs = {item.name for item in self._session.get_inputs()}
+        outputs = self._session.get_outputs()
+        if not outputs:
+            raise RuntimeError("ONNX embedding model has no outputs")
+        self._output_name = outputs[0].name
+        shape = outputs[0].shape
+        self.dimension = int(shape[-1]) if shape and isinstance(shape[-1], int) else 384
+        self.name = f"onnx-cpu:{model_id}"
+
+    def _encode(self, text: str) -> tuple[dict[str, Any], list[int]]:
+        encoded = self._tokenizer.encode(text or "")
+        ids = encoded.ids[:128]
+        mask = [1] * len(ids)
+        pad_id = self._tokenizer.token_to_id("[PAD]") or 0
+        while len(ids) < 128:
+            ids.append(pad_id)
+            mask.append(0)
+        values: dict[str, Any] = {
+            "input_ids": self._np.asarray([ids], dtype=self._np.int64),
+        }
+        if "attention_mask" in self._inputs:
+            values["attention_mask"] = self._np.asarray([mask], dtype=self._np.int64)
+        if "token_type_ids" in self._inputs:
+            values["token_type_ids"] = self._np.zeros((1, 128), dtype=self._np.int64)
+        return values, mask
+
+    def embed(self, text: str) -> tuple[float, ...]:
+        values, mask = self._encode(text)
+        output = self._session.run([self._output_name], values)[0]
+        # MiniLM exports last_hidden_state as [batch, tokens, dim], while
+        # some converted snapshots expose an already pooled [batch, dim]
+        # vector.  Accept both shapes so the immutable model snapshot can be
+        # validated without silently falling back to hashed retrieval.
+        hidden = output[0]
+        if getattr(hidden, "ndim", 1) == 1:
+            pooled = hidden
+        else:
+            weights = self._np.asarray(mask, dtype=self._np.float32)[:, None]
+            pooled = (hidden * weights).sum(axis=0) / max(float(weights.sum()), 1.0)
+        norm = float(self._np.linalg.norm(pooled))
+        return tuple(float(value) for value in (pooled / norm if norm else pooled))
+
+    def embed_many(self, texts: list[str]) -> list[tuple[float, ...]]:
+        return [self.embed(text) for text in texts]
+
+
 def create_embedding_provider() -> EmbeddingProvider:
     requested = os.getenv("ASSISTANT_EMBEDDING_PROVIDER", "auto").strip().lower()
     model = os.getenv("ASSISTANT_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2").strip()
+    onnx_path = os.getenv("ASSISTANT_EMBEDDING_ONNX_PATH", "/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx").strip()
+    tokenizer_path = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_PATH", "/models/embeddings/tokenizer.json").strip()
+    onnx_sha256 = os.getenv("ASSISTANT_EMBEDDING_ONNX_SHA256", "").strip()
+    tokenizer_sha256 = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_SHA256", "").strip()
+    if requested in {"onnx", "onnx-cpu", "onnx_cpu"} or (requested == "auto" and Path(onnx_path).is_file() and Path(tokenizer_path).is_file()):
+        try:
+            return OnnxEmbeddingProvider(onnx_path, tokenizer_path, "paraphrase-multilingual-MiniLM-L12-v2", onnx_sha256, tokenizer_sha256)
+        except Exception:
+            if requested in {"onnx", "onnx-cpu", "onnx_cpu"}:
+                # Explicit ONNX remains fail-soft for rolling upgrades, but
+                # the fallback is visible through the provider name.
+                pass
     # ``auto`` is offline-safe: it only probes a model already present in the
     # image/cache. An explicit sentence-transformers provider is the operator
     # opt-in for a model download prepared outside the worker startup path.
@@ -193,6 +277,7 @@ class RankedCandidate:
     embedding_score: float
     lexical_score: float
     score: float
+    raw_cosine: float = 0.0
 
 
 def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
@@ -262,12 +347,13 @@ class HybridRetriever:
         for index, item in enumerate(values):
             candidate_tokens = normalized_tokens(item.text)
             lexical = len(query_tokens & candidate_tokens) / max(1, len(query_tokens))
-            embedding = (_cosine(query_vector, candidate_vectors[index]) + 1.0) / 2.0
+            raw_cosine = _cosine(query_vector, candidate_vectors[index])
+            embedding = (raw_cosine + 1.0) / 2.0
             fts = min(1.0, max(0.0, float(item.fts_rank) / max_fts)) if max_fts > 0 else 0.0
             # FTS remains the strongest exact-match signal; embeddings rescue
             # paraphrases; lexical overlap makes the fallback explainable.
             score = 0.50 * fts + 0.38 * embedding + 0.12 * lexical
-            ranked.append(RankedCandidate(item, fts, embedding, lexical, score))
+            ranked.append(RankedCandidate(item, fts, embedding, lexical, score, raw_cosine))
         ranked.sort(key=lambda item: (-item.score, -item.fts_score, item.candidate.meeting_id, item.candidate.ordinal, item.candidate.segment_id))
         minimum = float(os.getenv("ASSISTANT_HYBRID_MIN_SCORE", "0.30"))
         embedding_minimum = float(os.getenv("ASSISTANT_HYBRID_EMBEDDING_MIN", "0.72"))
@@ -275,11 +361,11 @@ class HybridRetriever:
         # model. It must never create evidence from cosine similarity alone:
         # unrelated segments can collide in the feature hash. A real local
         # embedding provider may use the explicit semantic threshold.
-        semantic_provider = self.provider.name.startswith("sentence-transformers:")
+        semantic_provider = self.provider.name.startswith(("sentence-transformers:", "onnx-cpu:"))
         selected = [
             item for item in ranked
             if item.score >= minimum
-            and (item.fts_score > 0.0 or item.lexical_score > 0.0 or (semantic_provider and item.embedding_score >= embedding_minimum))
+            and (item.fts_score > 0.0 or item.lexical_score > 0.0 or (semantic_provider and item.raw_cosine >= embedding_minimum))
         ][: max(1, min(int(limit), 12))]
         return selected
 

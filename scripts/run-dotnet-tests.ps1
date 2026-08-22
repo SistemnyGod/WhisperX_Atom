@@ -34,13 +34,21 @@ foreach ($projectPath in $Project) {
     # Start-Process joins ArgumentList into a command line; quote the project
     # path explicitly because the workspace path contains spaces.
     $arguments = @("test", ('"' + $resolved + '"'), "-c", $Configuration, "--verbosity", "minimal")
+    $effectiveTimeout = $TimeoutSeconds
+    if ($name -match 'Desktop') {
+        # WinUI/pipe tests can otherwise leave a testhost alive while MSBuild
+        # waits forever.  Ask VSTest for a dump and keep the outer process
+        # bound tighter than the generic server/worker test budget.
+        $effectiveTimeout = [Math]::Min($TimeoutSeconds, 60)
+        $arguments += @("--blame-hang", "--blame-hang-timeout", "60s")
+    }
     if ($NoRestore) { $arguments += "--no-restore" }
-    Write-Host "Running $name (timeout ${TimeoutSeconds}s)"
+    Write-Host "Running $name (timeout ${effectiveTimeout}s)"
     $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+    if (-not $process.WaitForExit($effectiveTimeout * 1000)) {
         try { $process.Kill($true) } catch { }
         Write-Host (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-        Write-Error "DOTNET_TEST_TIMEOUT: $name exceeded ${TimeoutSeconds}s. Logs: $stdoutPath / $stderrPath"
+        Write-Error "DOTNET_TEST_TIMEOUT: $name exceeded ${effectiveTimeout}s. Logs: $stdoutPath / $stderrPath"
         exit 124
     }
     $process.Refresh()

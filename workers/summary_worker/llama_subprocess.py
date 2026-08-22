@@ -30,9 +30,11 @@ class LocalLlamaServer:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
 
-    def start(self) -> None:
+    def start(self, cancellation: threading.Event | None = None) -> None:
         if not self.model_path.is_file():
             raise FileNotFoundError(f"llm_model_not_found:{self.model_path}")
+        if cancellation is not None and cancellation.is_set():
+            raise RuntimeError("llm_warmup_cancelled")
         try:
             gpu_layers = int(self.gpu_layers)
         except ValueError as exc:
@@ -63,6 +65,9 @@ class LocalLlamaServer:
         deadline = time.monotonic() + self.start_timeout
         health_url = f"http://127.0.0.1:{self.port}/health"
         while time.monotonic() < deadline:
+            if cancellation is not None and cancellation.is_set():
+                self.stop()
+                raise RuntimeError("llm_warmup_cancelled")
             if self.process.poll() is not None:
                 code = self.process.returncode
                 self.process = None
@@ -138,7 +143,7 @@ class LocalLlamaRuntime:
                 os.getenv("LLM_CONTEXT_SIZE", "16384"),
             )
 
-    def ensure_started(self) -> LocalLlamaServer:
+    def ensure_started(self, cancellation: threading.Event | None = None) -> LocalLlamaServer:
         fingerprint = self._model_fingerprint()
         runtime = type(self)
         with runtime._gate:
@@ -147,7 +152,7 @@ class LocalLlamaRuntime:
                 if runtime._server is not None:
                     runtime._server.stop()
                 server = LocalLlamaServer()
-                server.start()
+                server.start(cancellation)
                 runtime._server = server
                 runtime._fingerprint = fingerprint
             runtime._last_used = time.monotonic()

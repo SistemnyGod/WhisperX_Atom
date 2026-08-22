@@ -116,6 +116,36 @@ class GpuRuntimeCoordinator:
         """Return false while a durable ASR request is pending."""
         return not self.asr_request_active()
 
+    def higher_priority_work_active(self) -> bool:
+        """Return whether ASR, Assistant, or V2 work is queued or running.
+
+        Qwen warm-up is opportunistic only.  A database/readiness failure is
+        treated conservatively (``True``) so a missing observation can never
+        make the warm-up steal the GPU from durable work.
+        """
+        if not self.enabled:
+            return False
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM jobs
+                        WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH')
+                          AND status IN ('QUEUED','RUNNING')
+                        UNION ALL
+                        SELECT 1
+                        FROM assistant_queries
+                        WHERE status IN ('PENDING','QUEUED','RUNNING','PROCESSING')
+                    )
+                    """
+                ).fetchone()
+            return bool(row and row[0])
+        except Exception:
+            LOGGER.warning("gpu_runtime_coordination_priority_probe_unavailable", exc_info=True)
+            return True
+
     def mark_llm_resident(self, owner: str, workload: str | None = None, request_id: str | None = None) -> bool:
         """Claim resident ownership after the caller holds the GPU lease.
 

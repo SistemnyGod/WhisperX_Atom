@@ -371,3 +371,10 @@ def test_recorder_host_fallback_is_idempotent_and_uses_existing_agent_state():
     assert "--no-restore" in launch
     assert "Get-RunningDesktopProcess" in launch
     assert "DESKTOP_ALREADY_RUNNING_DIFFERENT_BUILD" in launch
+
+
+def test_dotnet_test_runner_bounds_winui_hangs():
+    runner = read(Path("scripts/run-dotnet-tests.ps1"))
+    assert '"--blame-hang"' in runner
+    assert '"--blame-hang-timeout", "60s"' in runner
+    assert "$process.Kill($true)" in runner

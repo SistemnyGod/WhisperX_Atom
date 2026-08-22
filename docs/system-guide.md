@@ -125,12 +125,15 @@ docs/                           архитектура, API/IPC, operations и a
 | `RecorderPipeService` | Named Pipe v6 к Recorder Host |
 | `VoiceHostController` | запуск, health и lifecycle Voice Host |
 | `DesktopVoiceBrokerServer` | принимает голосовые события и доставляет Assistant result |
-| `AssistantDeliveryStore` | durable ledger `queryId`, чтобы restart/timeout не создавал дубль |
+| `AssistantDeliveryStore` | durable ledger opaque `commandId` → `queryId`, чтобы потеря HTTP-ответа, restart/timeout не создавали дубль |
 | `ProcessingJobTracker` | наблюдение pipeline без превращения нормального RUNNING в ошибку |
 | `ClientRuntimeDiagnostics` | безопасный operational snapshot без токенов и содержимого встреч |
 
 После HTTP `202 Accepted` запрос Assistant считается сохранённым. Foreground
-ожидание ограничено; дальнейшее получение результата выполняется в фоне.
+ожидание ограничено; дальнейшее получение результата выполняется в фоне. Если
+ответ потерян, Desktop хранит только `commandId` без вопроса/ответа и
+выполняет авторизованный lookup; повторный POST с тем же ключом возвращает
+исходный `queryId`.
 
 ### Recorder Agent и Recorder Host
 

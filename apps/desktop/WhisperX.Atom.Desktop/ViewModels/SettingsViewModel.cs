@@ -333,6 +333,7 @@ public sealed class SettingsViewModel : ObservableObject
         VoiceAssistantDelivery =
             $"Ответы: pending {metrics.Pending} · приняты {metrics.Accepted} · доставлены {metrics.Delivered} · " +
             $"отменены {metrics.Cancelled} · ambiguous {metrics.Ambiguous} · истекли {metrics.Expired} · " +
+            $"проверяются {metrics.Reconciling} · не приняты {metrics.NotAccepted} · " +
             $"дубли подавлены {metrics.DuplicateSuppressed} · сбои {metrics.Failed}";
     }
 

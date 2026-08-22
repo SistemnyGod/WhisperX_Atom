@@ -11,11 +11,13 @@ public enum AssistantDeliveryState
     Expired = 3,
     Accepted = 4,
     Cancelled = 5,
-    Ambiguous = 6
+    Ambiguous = 6,
+    Reconciling = 7,
+    NotAccepted = 8
 }
 
 public sealed record AssistantDeliveryEntry(
-    Guid QueryId,
+    Guid? QueryId,
     string? UserId,
     string? ConversationId,
     string? CommandId,
@@ -36,7 +38,9 @@ public sealed record AssistantDeliveryMetrics(
     int Ambiguous,
     long DuplicateSuppressed,
     long AmbiguousDispatch,
-    long Failed);
+    long Failed,
+    int Reconciling = 0,
+    int NotAccepted = 0);
 
 /// <summary>
 /// Durable, user-scoped delivery ledger for voice Assistant results.
@@ -90,7 +94,7 @@ public sealed class AssistantDeliveryStore
                 Interlocked.Increment(ref _duplicateSuppressed);
                 return true;
             }
-            if (_entries.Count(item => item.State is AssistantDeliveryState.Pending or AssistantDeliveryState.Dispatching or AssistantDeliveryState.Accepted) >= MaximumActiveEntries)
+            if (_entries.Count(item => item.State is AssistantDeliveryState.Pending or AssistantDeliveryState.Dispatching or AssistantDeliveryState.Accepted or AssistantDeliveryState.Reconciling) >= MaximumActiveEntries)
             {
                 Interlocked.Increment(ref _failed);
                 return false;
@@ -108,6 +112,74 @@ public sealed class AssistantDeliveryStore
         }
     }
 
+    public bool TryAddCommand(string commandId, string? userId, string? traceId)
+    {
+        if (string.IsNullOrWhiteSpace(commandId)) return false;
+        lock (_gate)
+        {
+            PruneLocked();
+            var existingIndex = _entries.FindIndex(item => string.Equals(item.CommandId, commandId, StringComparison.Ordinal)
+                && string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase));
+            if (existingIndex >= 0)
+            {
+                if (_entries[existingIndex].State == AssistantDeliveryState.NotAccepted)
+                {
+                    var retryNow = _clock();
+                    _entries[existingIndex] = _entries[existingIndex] with { State = AssistantDeliveryState.Reconciling, UpdatedAt = retryNow, ExpiresAt = retryNow.Add(TimeSpan.FromMinutes(2)) };
+                    PersistLocked();
+                }
+                return true;
+            }
+            var now = _clock();
+            _entries.Add(new AssistantDeliveryEntry(null, userId, null, commandId, traceId, "AUTO",
+                AssistantDeliveryState.Reconciling, now, now.Add(TimeSpan.FromMinutes(2)), now));
+            if (!PersistLocked())
+            {
+                _entries.RemoveAt(_entries.Count - 1);
+                Interlocked.Increment(ref _failed);
+                return false;
+            }
+            return true;
+        }
+    }
+
+    public void BindQuery(string commandId, Guid queryId, string? mode, string? conversationId)
+    {
+        lock (_gate)
+        {
+            var index = _entries.FindIndex(item => string.Equals(item.CommandId, commandId, StringComparison.Ordinal)
+                && item.State == AssistantDeliveryState.Reconciling);
+            if (index < 0) return;
+            var current = _entries[index];
+            var now = _clock();
+            _entries[index] = current with { QueryId = queryId, Mode = mode ?? current.Mode, ConversationId = conversationId ?? current.ConversationId, State = AssistantDeliveryState.Pending, UpdatedAt = now, ExpiresAt = now.Add(PendingTtl) };
+            PersistLocked();
+        }
+    }
+
+    public IReadOnlyList<AssistantDeliveryEntry> GetForReconciliation(string? userId)
+    {
+        lock (_gate)
+        {
+            PruneLocked();
+            return _entries.Where(item => item.State == AssistantDeliveryState.Reconciling
+                && string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase)).ToArray();
+        }
+    }
+
+    public void MarkNotAccepted(string commandId)
+    {
+        lock (_gate)
+        {
+            var index = _entries.FindIndex(item => string.Equals(item.CommandId, commandId, StringComparison.Ordinal)
+                && item.State == AssistantDeliveryState.Reconciling);
+            if (index < 0) return;
+            var current = _entries[index];
+            _entries[index] = current with { State = AssistantDeliveryState.NotAccepted, ExpiresAt = _clock().Add(TombstoneTtl), UpdatedAt = _clock() };
+            PersistLocked();
+        }
+    }
+
     public IReadOnlyList<AssistantDeliveryEntry> GetForUser(string? userId)
     {
         lock (_gate)
@@ -115,6 +187,7 @@ public sealed class AssistantDeliveryStore
             PruneLocked();
             var now = _clock();
             return _entries.Where(item => string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase)
+                    && item.QueryId is not null
                     && (item.State == AssistantDeliveryState.Pending
                         || item.State == AssistantDeliveryState.Accepted && now - item.UpdatedAt >= PlaybackReconcileAfter))
                 .ToArray();
@@ -242,7 +315,9 @@ public sealed class AssistantDeliveryStore
                 _entries.Count(item => item.State == AssistantDeliveryState.Ambiguous),
                 Interlocked.Read(ref _duplicateSuppressed),
                 Interlocked.Read(ref _ambiguousDispatch),
-                Interlocked.Read(ref _failed));
+                Interlocked.Read(ref _failed),
+                _entries.Count(item => item.State == AssistantDeliveryState.Reconciling),
+                _entries.Count(item => item.State == AssistantDeliveryState.NotAccepted));
         }
     }
 
@@ -251,6 +326,8 @@ public sealed class AssistantDeliveryStore
         lock (_gate)
         {
             var now = _clock();
+            // Keep command-only Reconciling entries across a Desktop restart:
+            // they are the durable lookup key when the HTTP response was lost.
             _entries = _entries.Select(item => item.State is AssistantDeliveryState.Pending or AssistantDeliveryState.Dispatching or AssistantDeliveryState.Accepted
                     ? item with { State = AssistantDeliveryState.Expired, ExpiresAt = now.Add(TombstoneTtl), UpdatedAt = now }
                     : item).ToList();
@@ -309,6 +386,12 @@ public sealed class AssistantDeliveryStore
             if (entry.State == AssistantDeliveryState.Accepted && now - entry.UpdatedAt > TimeSpan.FromMinutes(2))
             {
                 _entries[index] = entry with { State = AssistantDeliveryState.Ambiguous, ExpiresAt = now.Add(TombstoneTtl), UpdatedAt = now };
+                changed = true;
+                continue;
+            }
+            if (entry.State == AssistantDeliveryState.Reconciling && now >= entry.ExpiresAt)
+            {
+                _entries[index] = entry with { State = AssistantDeliveryState.NotAccepted, ExpiresAt = now.Add(TombstoneTtl), UpdatedAt = now };
                 changed = true;
                 continue;
             }

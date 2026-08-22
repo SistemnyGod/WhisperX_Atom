@@ -91,7 +91,7 @@ public sealed record SummaryRegistryRow(MeetingRow Meeting, SummaryRow? Summary)
 public sealed record SpeakerRegistryRow(MeetingRow Meeting, SpeakerRow Speaker);
 public sealed record SpeakerProfileRow(Guid Id, string DisplayName, int EmbeddingDimensions, int Samples, double? Confidence, int MeetingsCount, long DurationMs, string Status, string? EmbeddingModel, DateTime? LastSeenAt);
 public sealed record ActionItemRegistryRow(MeetingRow Meeting, ActionItemRow Item);
-public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", string? RequestedMode = null, double? RouterConfidence = null, string Source = "DESKTOP", string GroundingStatus = "PENDING", JsonDocument? AnswerMetadata = null, Guid? TranscriptId = null, int? TranscriptVersion = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true)
+public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", string? RequestedMode = null, double? RouterConfidence = null, string Source = "DESKTOP", string GroundingStatus = "PENDING", JsonDocument? AnswerMetadata = null, Guid? TranscriptId = null, int? TranscriptVersion = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true, Guid? ConversationId = null)
 {
     // Timings are optional metadata produced by the existing Assistant
     // pipeline. Exposing only this nested object keeps the Desktop contract
@@ -113,6 +113,10 @@ public sealed record AssistantQueryRow(Guid Id, Guid? MeetingId, string Query, s
     }
 };
 public sealed record AssistantRequestRoute(string ResolvedMode, double Confidence, string? ErrorCode = null, string? Clarification = null);
+public sealed class AssistantIdempotencyConflictException(string commandId) : Exception($"Assistant commandId '{commandId}' was already used for a different question")
+{
+    public string CommandId { get; } = commandId;
+}
 /// <summary>
 /// Cheap, scope-safe retrieval signal used by the API router.  It deliberately
 /// contains no transcript text: the worker remains the only component that
@@ -1440,6 +1444,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         query = query?.Trim() ?? string.Empty;
         if (query.Length is 0 or > 2000) return null;
+        var normalizedSource = source.Trim().ToUpperInvariant() is "VOICE" or "SYSTEM" ? source.Trim().ToUpperInvariant() : "DESKTOP";
+        var normalizedCommandId = string.IsNullOrWhiteSpace(commandId) ? null : commandId.Trim();
+        var normalizedTraceId = string.IsNullOrWhiteSpace(traceId) ? null : traceId.Trim();
         var scopeType = string.Equals(requestedMode?.Trim(), "GENERAL_CHAT", StringComparison.OrdinalIgnoreCase)
             ? "GENERAL"
             : meetingId.HasValue ? "MEETING" : "GLOBAL";
@@ -1447,6 +1454,27 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         if (assistantMode is null) return null;
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
+        // A replay must be resolved before any current-context checks.  The
+        // original query is already durable; a later transcript cleanup or a
+        // temporary LIVE context outage must not turn an otherwise safe retry
+        // into a second query (or a misleading context-not-ready response).
+        if (normalizedSource == "VOICE" && userId is Guid owner && normalizedCommandId is not null)
+        {
+            await using var existing = new NpgsqlCommand("SELECT id,query FROM assistant_queries WHERE user_id=@user AND source='VOICE' AND command_id=@command", connection, tx);
+            existing.Parameters.AddWithValue("user", owner);
+            existing.Parameters.AddWithValue("command", normalizedCommandId);
+            await using var existingReader = await existing.ExecuteReaderAsync();
+            if (await existingReader.ReadAsync())
+            {
+                var existingId = existingReader.GetGuid(0);
+                var existingQuery = existingReader.GetString(1);
+                await existingReader.DisposeAsync();
+                await tx.CommitAsync();
+                if (!string.Equals(existingQuery, query, StringComparison.Ordinal))
+                    throw new AssistantIdempotencyConflictException(normalizedCommandId);
+                return await GetAssistantQueryAsync(existingId, userId, includeAll: false);
+            }
+        }
         if (assistantMode == "LIVE_MEETING" && meetingId is Guid liveMeeting)
         {
             if (!await HasLiveMeetingContextAsync(connection, tx, liveMeeting)) return null;
@@ -1457,8 +1485,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
         else if (assistantMode == "MEETING_MEMORY" && !await HasAnyUsableTranscriptAsync(connection, tx)) return null;
         var id = Guid.NewGuid();
-        var normalizedSource = source.Trim().ToUpperInvariant() is "VOICE" or "SYSTEM" ? source.Trim().ToUpperInvariant() : "DESKTOP";
-        await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,assistant_mode,requested_mode,router_confidence,source,grounding_status,answer_metadata,conversation_id,query,status,evidence) VALUES(@id,@user,@meeting,@mode,@requested,@confidence,@source,'PENDING',@metadata::jsonb,@conversation,@query,'QUEUED','[]'::jsonb)", connection, tx);
+        await using var insert = new NpgsqlCommand("INSERT INTO assistant_queries(id,user_id,meeting_id,assistant_mode,requested_mode,router_confidence,source,command_id,trace_id,grounding_status,answer_metadata,conversation_id,query,status,evidence) VALUES(@id,@user,@meeting,@mode,@requested,@confidence,@source,@command,@trace,'PENDING',@metadata::jsonb,@conversation,@query,'QUEUED','[]'::jsonb)", connection, tx);
         insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value);
         insert.Parameters.Add("meeting", NpgsqlDbType.Uuid).Value = (object?)meetingId ?? DBNull.Value;
         insert.Parameters.AddWithValue("query", query);
@@ -1466,8 +1493,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         insert.Parameters.AddWithValue("requested", (object?)requestedMode ?? DBNull.Value);
         insert.Parameters.AddWithValue("confidence", (object?)routerConfidence ?? DBNull.Value);
         insert.Parameters.AddWithValue("source", normalizedSource);
+        insert.Parameters.AddWithValue("command", (object?)(normalizedSource == "VOICE" ? normalizedCommandId : null) ?? DBNull.Value);
+        insert.Parameters.AddWithValue("trace", (object?)normalizedTraceId ?? DBNull.Value);
         var queuedAtUtc = DateTime.UtcNow;
-        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId, traceId, queued_at_utc = queuedAtUtc, acceptedAt = queuedAtUtc, processingStage = "QUEUED" }));
+        insert.Parameters.AddWithValue("metadata", JsonSerializer.Serialize(new { commandId = normalizedCommandId, traceId = normalizedTraceId, queued_at_utc = queuedAtUtc, acceptedAt = queuedAtUtc, processingStage = "QUEUED" }));
         insert.Parameters.AddWithValue("conversation", (object?)conversationId ?? DBNull.Value);
         await insert.ExecuteNonQueryAsync();
         var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), query_id = id, meeting_id = meetingId, assistant_mode = assistantMode, query, kind = "assistant", queued_at_utc = queuedAtUtc });
@@ -1490,7 +1519,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             await updateConversation.ExecuteNonQueryAsync();
         }
         await tx.CommitAsync();
-        return new AssistantQueryRow(id, meetingId, query, "QUEUED", null, null, JsonDocument.Parse("[]"), null, DateTime.UtcNow, null, assistantMode, requestedMode, routerConfidence, normalizedSource);
+        return new AssistantQueryRow(id, meetingId, query, "QUEUED", null, null, JsonDocument.Parse("[]"), null, queuedAtUtc, null, assistantMode, requestedMode, routerConfidence, normalizedSource, ConversationId: conversationId);
     }
 
     public static AssistantRequestRoute RouteAssistantRequest(string query, string? requestedMode, Guid? activeMeetingId, bool privileged)
@@ -1782,13 +1811,26 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,meeting_id,query,status,answer,voice_answer,evidence,error_code,created_at,completed_at,assistant_mode,requested_mode,router_confidence,source,grounding_status,answer_metadata,transcript_id,transcript_version,retry_count,next_retry_at,retryable FROM assistant_queries WHERE id=@id AND (@include_all OR user_id=@user)", connection);
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,query,status,answer,voice_answer,evidence,error_code,created_at,completed_at,assistant_mode,requested_mode,router_confidence,source,grounding_status,answer_metadata,conversation_id,transcript_id,transcript_version,retry_count,next_retry_at,retryable,command_id,trace_id FROM assistant_queries WHERE id=@id AND (@include_all OR user_id=@user)", connection);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("user", (object?)userId ?? DBNull.Value);
         command.Parameters.AddWithValue("include_all", includeAll);
         await using var reader = await command.ExecuteReaderAsync();
-        return !await reader.ReadAsync() ? null : new AssistantQueryRow(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetDateTime(8), reader.IsDBNull(9) ? null : reader.GetDateTime(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetDouble(12), reader.IsDBNull(13) ? "DESKTOP" : reader.GetString(13), reader.IsDBNull(14) ? "PENDING" : reader.GetString(14), reader.IsDBNull(15) ? null : reader.GetFieldValue<JsonDocument>(15), reader.IsDBNull(16) ? null : reader.GetGuid(16), reader.IsDBNull(17) ? null : reader.GetInt32(17), reader.IsDBNull(18) ? 0 : reader.GetInt32(18), reader.IsDBNull(19) ? null : reader.GetDateTime(19), reader.IsDBNull(20) || reader.GetBoolean(20));
-    }    public async Task<SummaryRow?> GetLatestSummaryAsync(Guid meetingId)
+        return !await reader.ReadAsync() ? null : new AssistantQueryRow(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetDateTime(8), reader.IsDBNull(9) ? null : reader.GetDateTime(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetDouble(12), reader.IsDBNull(13) ? "DESKTOP" : reader.GetString(13), reader.IsDBNull(14) ? "PENDING" : reader.GetString(14), reader.IsDBNull(15) ? null : reader.GetFieldValue<JsonDocument>(15), reader.IsDBNull(17) ? null : reader.GetGuid(17), reader.IsDBNull(18) ? null : reader.GetInt32(18), reader.IsDBNull(19) ? 0 : reader.GetInt32(19), reader.IsDBNull(20) ? null : reader.GetDateTime(20), reader.IsDBNull(21) || reader.GetBoolean(21), reader.IsDBNull(16) ? null : reader.GetGuid(16));
+    }
+
+    public async Task<AssistantQueryRow?> GetAssistantQueryByCommandAsync(string commandId, Guid userId)
+    {
+        if (string.IsNullOrWhiteSpace(commandId)) return null;
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id FROM assistant_queries WHERE user_id=@user AND source='VOICE' AND command_id=@command LIMIT 1", connection);
+        command.Parameters.AddWithValue("user", userId);
+        command.Parameters.AddWithValue("command", commandId.Trim());
+        var value = await command.ExecuteScalarAsync();
+        return value is Guid id ? await GetAssistantQueryAsync(id, userId, includeAll: false) : null;
+    }
+
+    public async Task<SummaryRow?> GetLatestSummaryAsync(Guid meetingId)
     {
         await using var connection = await OpenAsync(); await using var command = new NpgsqlCommand("SELECT id,meeting_id,transcript_id,version,status,model_name,prompt_version,source_hash,content,created_at FROM summaries WHERE meeting_id=@id ORDER BY version DESC LIMIT 1", connection); command.Parameters.AddWithValue("id", meetingId); await using var reader = await command.ExecuteReaderAsync(); return !await reader.ReadAsync() ? null : ReadSummary(reader);
     }

@@ -216,7 +216,8 @@ public sealed record DesktopAssistantRequestAccepted(
     DateTimeOffset? AcceptedAt = null,
     string? ProcessingStage = null,
     string? TraceId = null,
-    string? CommandId = null);
+    string? CommandId = null,
+    bool Replayed = false);
 public sealed record DesktopLiveMeetingSegment(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
     string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 
@@ -976,6 +977,16 @@ public sealed class ServerApiClient : IDisposable
         using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/assistant/requests", new { question, requestedMode, source, activeMeetingId, recordingSessionId, captureState, conversationId, previousResolvedMode, commandId, traceId }, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw await CreateApiExceptionAsync(response, "VOICE_ASSISTANT_REQUEST_REJECTED", "Сервер отклонил запрос Мифодия.", cancellationToken).ConfigureAwait(false);
+        return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopAssistantRequestAccepted?> GetAssistantRequestByCommandAsync(string commandId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(commandId)) return null;
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, $"api/assistant/requests/by-command/{Uri.EscapeDataString(commandId)}", null, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        if (!response.IsSuccessStatusCode)
+            throw await CreateApiExceptionAsync(response, "VOICE_ASSISTANT_REQUEST_REJECTED", "Сервер не подтвердил запрос Мифодия.", cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
     }
 
