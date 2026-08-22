@@ -14,13 +14,25 @@ dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --n
 
 ## Реальный Transcript E2E
 
+Перед запуском задайте корень приватного regression corpus. Само аудио не
+хранится в Git, а manifest содержит только относительный путь и SHA256:
+
+```powershell
+$env:REGRESSION_AUDIO_ROOT = "D:\\WhisperX\\regression-audio"
+$audio = Join-Path $env:REGRESSION_AUDIO_ROOT "SUMMIT_ бизнес-центр инструктажи.m4a"
+if (-not (Test-Path -LiteralPath $audio -PathType Leaf)) { throw "REGRESSION_AUDIO_MISSING" }
+```
+
 ```powershell
 .\scripts\e2e-transcript.ps1 `
-  -AudioPath "C:\Users\AI_server\Downloads\SUMMIT_ бизнес-центр инструктажи.m4a" `
+  -AudioPath $audio `
   -Runs 1
 ```
 
-Путь к аудио является локальной подсказкой и не означает, что файл хранится в Git или отправляется во внешний сервис. E2E создаёт отдельный run directory в `artifacts/transcription-mvp`, запускает doctor и сохраняет result/logs/doctor output.
+Путь к аудио разрешается только из `REGRESSION_AUDIO_ROOT`; это локальная
+подсказка и не означает, что файл хранится в Git или отправляется во внешний
+сервис. E2E создаёт отдельный run directory в `artifacts/transcription-mvp`,
+запускает doctor и сохраняет result/logs/doctor output.
 
 Проверять нужно не только exit code:
 
@@ -37,7 +49,7 @@ dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --n
 
 ```powershell
 .\scripts\e2e-transcript.ps1 `
-  -AudioPath "C:\Users\AI_server\Downloads\SUMMIT_ бизнес-центр инструктажи.m4a" `
+  -AudioPath $audio `
   -Runs 5
 ```
 

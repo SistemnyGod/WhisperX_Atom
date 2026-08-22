@@ -37,6 +37,17 @@ $autoSummarySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-O
 if ($autoSummarySetting -and ($autoSummarySetting -replace '^AUTO_SUMMARY_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
 $assistantSetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_ENABLED=' } | Select-Object -First 1
 if ($assistantSetting -and ($assistantSetting -replace '^ASSISTANT_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
+if ($IncludeLlm) {
+    $embeddingRequired = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=' } | Select-Object -First 1
+    $embeddingModelHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_ONNX_SHA256=' } | Select-Object -First 1
+    $embeddingTokenizerHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=' } | Select-Object -First 1
+    $requiredValue = if ($embeddingRequired) { ($embeddingRequired -replace '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=','').Trim() } else { '' }
+    $modelHashValue = if ($embeddingModelHash) { ($embeddingModelHash -replace '^ASSISTANT_EMBEDDING_ONNX_SHA256=','').Trim() } else { '' }
+    $tokenizerHashValue = if ($embeddingTokenizerHash) { ($embeddingTokenizerHash -replace '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=','').Trim() } else { '' }
+    if ($requiredValue -ne 'true' -or [string]::IsNullOrWhiteSpace($modelHashValue) -or [string]::IsNullOrWhiteSpace($tokenizerHashValue)) {
+        throw 'RELEASE_EMBEDDING_SNAPSHOT_NOT_PINNED: Assistant release requires verified ONNX/tokenizer SHA256 values'
+    }
+}
 
 docker version | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "DOCKER_ENGINE_UNAVAILABLE" }

@@ -180,6 +180,33 @@ public sealed class AudioGraphAttemptDiagnostics
     public long NativeOverRangeSampleCount { get; set; }
     public long NativeSampleCount { get; set; }
 
+    // Samples at (or beyond) the PCM16 rails are counted after normalization
+    // as well.  A driver may already hard-clip Float32 to +/-1.0, in which
+    // case NativeOverRangeSampleCount is zero even though the durable stream
+    // is audibly clipped.  Keep this diagnostic-only and never alter PCM.
+    public long NormalizedClippedSampleCount { get; set; }
+    public long NormalizedSampleCount { get; set; }
+    public double NormalizedPeak { get; set; }
+    public double NormalizedSampleSum { get; set; }
+    public double NormalizedSquareSum { get; set; }
+    public long NormalizedSilenceSampleCount { get; set; }
+
+    public double NormalizedClippedRatio => NormalizedSampleCount <= 0
+        ? 0d
+        : Math.Clamp((double)NormalizedClippedSampleCount / NormalizedSampleCount, 0d, 1d);
+
+    public double NormalizedDcOffset => NormalizedSampleCount <= 0
+        ? 0d
+        : NormalizedSampleSum / NormalizedSampleCount;
+
+    public double NormalizedRmsLinear => NormalizedSampleCount <= 0
+        ? 0d
+        : Math.Sqrt(Math.Max(0d, NormalizedSquareSum / NormalizedSampleCount));
+
+    public double NormalizedSilenceRatio => NormalizedSampleCount <= 0
+        ? 0d
+        : Math.Clamp((double)NormalizedSilenceSampleCount / NormalizedSampleCount, 0d, 1d);
+
     public double NativeOverRangeRatio => NativeSampleCount <= 0
         ? 0d
         : Math.Clamp((double)NativeOverRangeSampleCount / NativeSampleCount, 0d, 1d);
@@ -237,6 +264,12 @@ public sealed class AudioGraphAttemptDiagnostics
         NativePeak = NativePeak,
         NativeOverRangeSampleCount = NativeOverRangeSampleCount,
         NativeSampleCount = NativeSampleCount,
+        NormalizedClippedSampleCount = NormalizedClippedSampleCount,
+        NormalizedSampleCount = NormalizedSampleCount,
+        NormalizedPeak = NormalizedPeak,
+        NormalizedSampleSum = NormalizedSampleSum,
+        NormalizedSquareSum = NormalizedSquareSum,
+        NormalizedSilenceSampleCount = NormalizedSilenceSampleCount,
         FramesProduced = FramesProduced,
         FramesConsumed = FramesConsumed,
         CurrentQueueDepth = CurrentQueueDepth,
@@ -262,7 +295,9 @@ public sealed record AudioTelemetrySnapshot(
     bool IsStale = true,
     double? NativePeakLinear = null,
     long NativeOverRangeSampleCount = 0,
-    long NativeSampleCount = 0)
+    long NativeSampleCount = 0,
+    long NormalizedClippedSampleCount = 0,
+    long NormalizedSampleCount = 0)
 {
     // Desktop's waveform contract is a normalized linear amplitude (0..1),
     // while the legacy health DTO also exposes the human-readable dB value.
@@ -281,6 +316,10 @@ public sealed record AudioTelemetrySnapshot(
     public double? NativeOverRangeRatio => NativeSampleCount <= 0
         ? null
         : Math.Clamp((double)NativeOverRangeSampleCount / NativeSampleCount, 0d, 1d);
+
+    public double? NormalizedClippedRatio => NormalizedSampleCount <= 0
+        ? null
+        : Math.Clamp((double)NormalizedClippedSampleCount / NormalizedSampleCount, 0d, 1d);
 }
 
 /// <summary>

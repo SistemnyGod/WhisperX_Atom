@@ -150,6 +150,9 @@ function Test-WhisperXRuntime([object]$Manifest) {
         }
         $headers = @{ "X-WhisperX-Supervisor-Token" = $token }
         $readiness = Invoke-RestMethod -Uri ($origin.TrimEnd('/') + "/api/internal/runtime/readiness") -Headers $headers -TimeoutSec 10
+        if ($null -eq $readiness -or $null -eq $readiness.workers -or [string]::IsNullOrWhiteSpace([string]$readiness.buildIdentity)) {
+            throw "API_READINESS_INVALID"
+        }
         $script:IdentityMismatch = [string]$readiness.buildIdentity -ne [string]$Manifest.buildIdentity
         if ($script:IdentityMismatch -or $readiness.releaseIdentityValid -ne $true) {
             Write-SupervisorLog "Authenticated readiness identity mismatch" "WARN"
@@ -187,7 +190,18 @@ function Test-WhisperXRuntime([object]$Manifest) {
         return $true
     }
     catch {
-        Write-SupervisorLog "Authenticated readiness probe failed" "WARN"
+        # A failed or malformed authenticated probe is an API health failure,
+        # not an unknown state.  Keep the component in the targeted recovery
+        # set so three consecutive failures can restart only the API instead
+        # of silently waiting for a broad reconciliation cycle.
+        $script:UnhealthyServices = @("api")
+        $script:IdentityMismatch = $false
+        $detail = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { "API_READINESS_UNAVAILABLE" }
+        if ($detail -eq "API_READINESS_INVALID") {
+            Write-SupervisorLog "Authenticated readiness probe returned an invalid payload (API_READINESS_INVALID)" "WARN"
+        } else {
+            Write-SupervisorLog "Authenticated readiness probe failed; API targeted recovery is eligible" "WARN"
+        }
         return $false
     }
 }

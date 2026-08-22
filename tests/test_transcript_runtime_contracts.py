@@ -36,6 +36,9 @@ def test_regression_manifest_points_to_local_full_fixture_without_audio_blob():
     assert len(manifest) == 1
     fixture = manifest[0]
     assert fixture["audioNotCommitted"] is True
+    assert fixture["rootEnv"] == "REGRESSION_AUDIO_ROOT"
+    assert fixture["relativePath"] and not Path(fixture["relativePath"]).is_absolute()
+    assert "C:\\Users\\" not in json.dumps(fixture)
     assert fixture["sha256"] == "29fa011349d30e81bf04cc0dbf00460ccf5d45b45121cbd20b683343ead07a2f"
     assert fixture["minimum"]["segments"] >= 5
     assert fixture["minimum"]["qualityScore"] >= 65

@@ -418,7 +418,8 @@ public sealed class AgentPipeHost(
             EncoderCurrentChunkId: encoder.CurrentChunkId,
             EncoderLastSuccessAtUtc: encoder.LastSuccessAtUtc,
             EncoderLastErrorCode: encoder.LastErrorCode,
-            EncoderQueueDepth: encoder.QueueDepth), null, recorder.CurrentMediaTimeMs,
+            EncoderQueueDepth: encoder.QueueDepth,
+            MinimumFreeBytes: watermark.BlockFreeBytes), null, recorder.CurrentMediaTimeMs,
             AgentIpcProtocol.Version, null, sessionStatus);
     }
 

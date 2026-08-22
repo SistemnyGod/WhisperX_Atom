@@ -227,19 +227,25 @@ class OnnxEmbeddingProvider:
 
 def create_embedding_provider() -> EmbeddingProvider:
     requested = os.getenv("ASSISTANT_EMBEDDING_PROVIDER", "auto").strip().lower()
+    require_verified = os.getenv("ASSISTANT_EMBEDDING_REQUIRE_VERIFIED", "false").strip().lower() in {"1", "true", "yes"}
     model = os.getenv("ASSISTANT_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2").strip()
     onnx_path = os.getenv("ASSISTANT_EMBEDDING_ONNX_PATH", "/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx").strip()
     tokenizer_path = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_PATH", "/models/embeddings/tokenizer.json").strip()
     onnx_sha256 = os.getenv("ASSISTANT_EMBEDDING_ONNX_SHA256", "").strip()
     tokenizer_sha256 = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_SHA256", "").strip()
+    if require_verified and requested in {"hash", "hashed", "hashed-local-v1", "sentence-transformers", "sentence_transformers", "local-model"}:
+        raise RuntimeError("EMBEDDING_MODEL_INVALID:verified_onnx_required")
+    if require_verified and (not onnx_sha256 or not tokenizer_sha256):
+        raise RuntimeError("EMBEDDING_MODEL_INVALID:sha256_missing")
     if requested in {"onnx", "onnx-cpu", "onnx_cpu"} or (requested == "auto" and Path(onnx_path).is_file() and Path(tokenizer_path).is_file()):
         try:
             return OnnxEmbeddingProvider(onnx_path, tokenizer_path, "paraphrase-multilingual-MiniLM-L12-v2", onnx_sha256, tokenizer_sha256)
         except Exception:
-            if requested in {"onnx", "onnx-cpu", "onnx_cpu"}:
-                # Explicit ONNX remains fail-soft for rolling upgrades, but
-                # the fallback is visible through the provider name.
-                pass
+            if require_verified or requested in {"onnx", "onnx-cpu", "onnx_cpu"}:
+                # Explicit ONNX is fail-closed for a release bundle.  Local
+                # development may still use the visible hashed fallback.
+                if require_verified:
+                    raise RuntimeError("EMBEDDING_MODEL_INVALID:onnx_snapshot_unavailable")
     # ``auto`` is offline-safe: it only probes a model already present in the
     # image/cache. An explicit sentence-transformers provider is the operator
     # opt-in for a model download prepared outside the worker startup path.
@@ -251,6 +257,8 @@ def create_embedding_provider() -> EmbeddingProvider:
             # Retrieval must not make Assistant unavailable.  The fallback is
             # explicit in diagnostics and still works fully offline.
             pass
+    if require_verified:
+        raise RuntimeError("EMBEDDING_MODEL_INVALID:verified_onnx_required")
     return HashedEmbeddingProvider(int(os.getenv("ASSISTANT_EMBEDDING_DIMENSION", "384")))
 
 

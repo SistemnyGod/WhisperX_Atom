@@ -112,6 +112,8 @@ public sealed class RecordingViewModel : ObservableObject
     private string _encoderState = "UNKNOWN";
     private string _storageWatermarkState = "NORMAL";
     private double _storageFreePercent;
+    private long _storageFreeBytes;
+    private long _storageMinimumFreeBytes;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -367,6 +369,18 @@ public sealed class RecordingViewModel : ObservableObject
         "WARNING" => $"Хранилище: внимание · свободно {_storageFreePercent:F1}%",
         _ => $"Хранилище: нормально · свободно {_storageFreePercent:F1}%"
     };
+    public string StorageRecordingCapacityLabel
+    {
+        get
+        {
+            var available = Math.Max(0L, _storageFreeBytes - _storageMinimumFreeBytes);
+            // Two mono 48 kHz PCM16 tracks are the conservative ONLINE
+            // profile; this is an estimate, not a reservation guarantee.
+            var bytesPerHour = 48000d * 2d * 2d * 3600d;
+            var hours = available / bytesPerHour;
+            return hours < 0.1d ? "Запас записи: менее 6 минут" : $"Запас записи: около {hours:F1} ч";
+        }
+    }
     public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
     public ObservableCollection<string> SessionEvents { get; } = [];
     public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
@@ -1681,6 +1695,8 @@ public sealed class RecordingViewModel : ObservableObject
             _encoderState = health.EncoderState;
             _storageWatermarkState = health.StorageWatermarkState;
             _storageFreePercent = health.StorageFreePercent;
+            _storageFreeBytes = health.FreeBytes;
+            _storageMinimumFreeBytes = health.MinimumFreeBytes;
             RecordingProfileManaged = health.RecordingProfileManaged;
             RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
             if (!_audioTelemetryStreamSupported || State is not (RecordingState.Recording or RecordingState.Paused))
@@ -1715,6 +1731,7 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(RecorderRecoveryLabel));
             OnPropertyChanged(nameof(RawPipelineLabel));
             OnPropertyChanged(nameof(StorageWatermarkLabel));
+            OnPropertyChanged(nameof(StorageRecordingCapacityLabel));
             UpdateMicrophoneSignalFeedback(health);
             ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
             // The AudioGraph Host rejected a legacy NAudio device identity.

@@ -1,7 +1,8 @@
 [
   {
     "name": "summit-business-center-instructions",
-    "path": "C:\\Users\\AI_server\\Downloads\\SUMMIT_ бизнес-центр инструктажи.m4a",
+    "relativePath": "SUMMIT_ бизнес-центр инструктажи.m4a",
+    "rootEnv": "REGRESSION_AUDIO_ROOT",
     "sha256": "29fa011349d30e81bf04cc0dbf00460ccf5d45b45121cbd20b683343ead07a2f",
     "durationSeconds": 2210.794667,
     "format": "m4a/aac",

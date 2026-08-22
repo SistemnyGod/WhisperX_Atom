@@ -45,12 +45,14 @@ snapshot `paraphrase-multilingual-MiniLM-L12-v2` через `onnxruntime` с
 используются. Пути к immutable-файлам задаются `ASSISTANT_EMBEDDING_ONNX_PATH`
 и `ASSISTANT_EMBEDDING_TOKENIZER_PATH`.
 
-Если snapshot ещё не установлен при rolling upgrade, worker не падает: в
-readiness/heartbeat фиксируется `embeddingFallbackReason=onnx_snapshot_missing`,
-а retrieval безопасно переходит на `hashed-local-v1`. Этот fallback не имеет
-права создавать evidence только по cosine similarity. Реальный ONNX-provider
-может создать semantic-only anchor только при `raw cosine >= 0.72` и общем
-hybrid score `>= 0.30`.
+Для development rolling upgrade допускается безопасный fallback на
+`hashed-local-v1`: readiness/heartbeat фиксирует причину деградации, а hash-
+provider не имеет права создавать evidence только по cosine similarity.
+Server Node release работает fail-closed: при
+`ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=true` обязательны оба SHA256, и worker
+не стартует как готовый, если snapshot отсутствует или повреждён. Реальный
+ONNX-provider может создать semantic-only anchor только при `raw cosine >= 0.72`
+и общем hybrid score `>= 0.30`.
 
 Параметры безопасно ограничены и не меняют API:
 
@@ -66,6 +68,7 @@ ASSISTANT_EMBEDDING_ONNX_PATH=/models/embeddings/paraphrase-multilingual-MiniLM-
 ASSISTANT_EMBEDDING_TOKENIZER_PATH=/models/embeddings/tokenizer.json
 ASSISTANT_EMBEDDING_ONNX_SHA256=<sha256>
 ASSISTANT_EMBEDDING_TOKENIZER_SHA256=<sha256>
+ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=true  # только для release Server Node
 ASSISTANT_EMBEDDING_CACHE=4096
 ASSISTANT_EMBEDDING_DIMENSION=384
 ```

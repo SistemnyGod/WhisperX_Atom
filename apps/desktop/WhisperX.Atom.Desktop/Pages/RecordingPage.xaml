@@ -182,6 +182,7 @@
                                 <StackPanel Spacing="2">
                                     <TextBlock Text="Хранилище" Style="{StaticResource CaptionStyle}" />
                                     <TextBlock Text="{Binding StorageWatermarkLabel}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding StorageWatermarkLabel}" />
+                                    <TextBlock Text="{Binding StorageRecordingCapacityLabel}" Style="{StaticResource CaptionStyle}" />
                                 </StackPanel>
                             </Border>
                         </Grid>
@@ -268,6 +269,7 @@
                         <TextBlock Text="{Binding RecorderRecoveryLabel}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                     </Border>
                     <TextBlock Text="{Binding StorageWatermarkLabel}" Style="{StaticResource CaptionStyle}" />
+                    <TextBlock Text="{Binding StorageRecordingCapacityLabel}" Style="{StaticResource CaptionStyle}" />
                     <TextBlock Text="{Binding ArchiveStatusLabel}" Style="{StaticResource CaptionStyle}" />
                 </StackPanel>
             </Expander>

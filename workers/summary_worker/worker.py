@@ -657,6 +657,7 @@ async def run() -> None:
         ).strip()
         onnx_sha256 = os.getenv("ASSISTANT_EMBEDDING_ONNX_SHA256", "").strip()
         tokenizer_sha256 = os.getenv("ASSISTANT_EMBEDDING_TOKENIZER_SHA256", "").strip()
+        require_verified = os.getenv("ASSISTANT_EMBEDDING_REQUIRE_VERIFIED", "false").strip().lower() in {"1", "true", "yes"}
         onnx_ready = Path(onnx_path).is_file() and Path(tokenizer_path).is_file()
         explicit_onnx = requested in {"onnx", "onnx-cpu", "onnx_cpu"}
         def stamp(path: str) -> int:
@@ -684,19 +685,23 @@ async def run() -> None:
                     embedding_integrity_status = "VERIFIED" if digest(onnx_path) == onnx_sha256.lower() and digest(tokenizer_path) == tokenizer_sha256.lower() else "MISMATCH"
                 except OSError:
                     embedding_integrity_status = "ERROR"
-        snapshot_ok = onnx_ready and embedding_integrity_status != "MISMATCH" and embedding_integrity_status != "ERROR"
-        selected = "onnx-cpu:paraphrase-multilingual-MiniLM-L12-v2" if snapshot_ok and (requested == "auto" or explicit_onnx) else "hashed-local-v1"
+        snapshot_ok = onnx_ready and embedding_integrity_status not in {"MISMATCH", "ERROR"}
+        verified_snapshot_ok = snapshot_ok and embedding_integrity_status == "VERIFIED"
+        requires_onnx = require_verified and requested not in {"hash", "hashed", "hashed-local-v1"}
+        selected = "onnx-cpu:paraphrase-multilingual-MiniLM-L12-v2" if snapshot_ok and (requested == "auto" or explicit_onnx) and (not require_verified or verified_snapshot_ok) else ("unavailable" if requires_onnx else "hashed-local-v1")
         if selected.startswith("onnx-cpu:"):
             reason = "ready"
         elif embedding_integrity_status in {"MISMATCH", "ERROR"}:
             reason = "onnx_snapshot_sha256_mismatch"
+        elif require_verified and not verified_snapshot_ok:
+            reason = "onnx_snapshot_verification_required"
         elif explicit_onnx:
             reason = "onnx_snapshot_missing"
         elif requested == "auto":
             reason = "onnx_snapshot_missing_using_hashed_fallback"
         else:
             reason = "provider_configured_hashed_fallback"
-        model_ready = selected.startswith("onnx-cpu:") or requested in {"hash", "hashed", "hashed-local-v1"}
+        model_ready = selected.startswith("onnx-cpu:") or (not require_verified and requested in {"hash", "hashed", "hashed-local-v1"})
         return {
             "embeddingProvider": selected,
             "embeddingModel": "paraphrase-multilingual-MiniLM-L12-v2" if selected.startswith("onnx-cpu:") else None,
@@ -706,6 +711,7 @@ async def run() -> None:
             "embeddingTokenizerPath": tokenizer_path if explicit_onnx or onnx_ready else None,
             "embeddingSnapshotSha256Configured": bool(onnx_sha256 and tokenizer_sha256),
             "embeddingSnapshotIntegrity": embedding_integrity_status,
+            "embeddingVerificationRequired": require_verified,
             "embeddingFallbackReason": reason,
         }
     def summary_capabilities() -> dict[str, Any]:
@@ -758,6 +764,8 @@ async def run() -> None:
         capabilities = summary_capabilities()
         if not capabilities["modelAvailable"] or not capabilities["llamaRuntimeAvailable"]:
             heartbeat.set_state("UNAVAILABLE", capabilities["modelValidationReason"])
+        elif os.getenv("ASSISTANT_EMBEDDING_REQUIRE_VERIFIED", "false").strip().lower() in {"1", "true", "yes"} and not capabilities.get("embeddingModelReady"):
+            heartbeat.set_state("DEGRADED", "EMBEDDING_MODEL_INVALID")
         elif not capabilities["modelManifestValid"]:
             heartbeat.set_state("DEGRADED", capabilities["modelValidationReason"])
         elif capabilities.get("llamaResidentEnabled") and str(capabilities.get("llamaRuntimeState", "")).upper() in {"FAILED", "UNAVAILABLE"}:

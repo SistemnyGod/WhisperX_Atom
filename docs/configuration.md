@@ -42,6 +42,7 @@ Copy-Item .env.example .env
 | `ASSISTANT_EMBEDDING_ONNX_PATH` | Immutable ONNX snapshot MiniLM (CPU provider only) | `/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx` |
 | `ASSISTANT_EMBEDDING_TOKENIZER_PATH` | Immutable tokenizer snapshot для ONNX | `/models/embeddings/tokenizer.json` |
 | `ASSISTANT_EMBEDDING_ONNX_SHA256` / `ASSISTANT_EMBEDDING_TOKENIZER_SHA256` | Ожидаемые SHA256 snapshot-файлов; при несовпадении provider отклоняется | пусто в шаблоне, заполнить в Server Bundle |
+| `ASSISTANT_EMBEDDING_REQUIRE_VERIFIED` | В release fail-closed при отсутствии/невалидности подписанного ONNX snapshot | `false` для development, `true` в Server Bundle |
 | `ASSISTANT_EMBEDDING_MODEL` | Legacy локальная sentence-transformers модель при явном opt-in | `paraphrase-multilingual-MiniLM-L12-v2` |
 | `ASSISTANT_FTS_ANCHOR_LIMIT` | Максимум FTS-якорей до semantic rerank | `64` |
 | `ASSISTANT_SEMANTIC_CANDIDATE_LIMIT` | Ограниченный semantic pool после RBAC/scope-фильтра | `512` |
@@ -53,6 +54,8 @@ Copy-Item .env.example .env
 | `SUPERVISOR_HEALTH_TOKEN` | Отдельный секрет Server Node для ограниченного internal readiness Supervisor; не admin-пароль | генерируется при установке Server Node |
 | `LLM_HEALTH_PORT` | Отдельный LLM diagnostic port | `18080` |
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
+| `WHISPERX_STORAGE_EXPECTED_RECORDING_HOURS` / `WHISPERX_STORAGE_EXPECTED_TRACKS` | Динамический минимальный запас локального диска под восстановимую запись | `2` / `2` |
+| `WHISPERX_STORAGE_RESERVE_OVERHEAD_PERCENT` | Запас сверх расчётного PCM-объёма (SQLite, WAV parts, метаданные) | `25` |
 
 ## Каталоги
 

@@ -47,6 +47,18 @@ $auto = Read-EnvValue 'AUTO_SUMMARY_ENABLED'
 $assistant = Read-EnvValue 'ASSISTANT_ENABLED'
 if ($auto -eq 'true') { $EnableQwen = $true }
 if ($assistant -ne 'false') { $EnableAssistant = $true }
+if ($EnableAssistant -or $EnableQwen) {
+    # A LAN release must never silently downgrade semantic retrieval to the
+    # hashed development fallback.  The worker still supports that fallback
+    # in development, but Server Node startup is fail-closed until the
+    # immutable ONNX snapshot and both digests are pinned.
+    $embeddingRequired = Read-EnvValue 'ASSISTANT_EMBEDDING_REQUIRE_VERIFIED'
+    $embeddingModelHash = Read-EnvValue 'ASSISTANT_EMBEDDING_ONNX_SHA256'
+    $embeddingTokenizerHash = Read-EnvValue 'ASSISTANT_EMBEDDING_TOKENIZER_SHA256'
+    if ($embeddingRequired -ne 'true' -or [string]::IsNullOrWhiteSpace($embeddingModelHash) -or [string]::IsNullOrWhiteSpace($embeddingTokenizerHash)) {
+        throw 'SERVER_EMBEDDING_SNAPSHOT_NOT_PINNED: set ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=true and provide ONNX/tokenizer SHA256 values'
+    }
+}
 $env:WHISPERX_RELEASE_TAG = $tag
 $env:WHISPERX_RELEASE_VERSION = $identity
 $env:WHISPERX_BUILD_IDENTITY = $identity

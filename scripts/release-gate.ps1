@@ -105,8 +105,21 @@ $requiredAcceptanceScenarios = @(
     "recorder-crash-recovery",
     "worker-crash-recovery",
     "windows-reboot-recovery",
+    # These gates require a real installed Windows/server node.  Keeping them
+    # in the release gate prevents software-only CI evidence from being
+    # mistaken for production acceptance.
+    "no-console-start",
+    "audio-quality",
+    "audio-device-loss",
+    "system-audio-device-loss",
+    "low-disk-during-recording",
+    "cold-model-cache",
+    "gpu-oom",
+    "delete-locked-media",
     "endurance-30m",
     "endurance-2h",
+    "4h-recording",
+    "8h-recording",
     "backup-restore",
     "rbac-isolation"
 )

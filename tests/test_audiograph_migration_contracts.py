@@ -247,7 +247,15 @@ def test_audiograph_normalizes_observed_float_frames_instead_of_trusting_pcm_met
     assert "NonFiniteSampleCount" in contracts
     assert "NativePeak" in engine and "NativePeak" in contracts
     assert "NativeOverRangeSampleCount" in engine and "NativeOverRangeRatio" in contracts
+    assert "NormalizedClippedSampleCount" in engine and "NormalizedClippedRatio" in contracts
+    assert "NormalizedDcOffset" in contracts and "NormalizedRmsLinear" in contracts
+    assert "NormalizedSilenceSampleCount" in contracts
     assert "nativeOverRangeRatio" in read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert "normalizedClippedRatio" in read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert "normalizedDcOffset" in read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert 'qualityBand' in read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert 'qualityGatePassed' in read("scripts/acceptance-audiograph-local-recording.ps1")
+    assert 'report["status"]' in read("scripts/acceptance-audiograph-local-recording.ps1")
     assert "ObservedBytesPerSample" in contracts
     assert "FormatIntegrityVerified" in contracts
 

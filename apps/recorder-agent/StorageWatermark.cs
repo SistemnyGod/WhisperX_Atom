@@ -38,6 +38,8 @@ public sealed record StorageRetentionPolicy(
             int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? Math.Clamp(value, 1, 99) : fallback;
         static long ReadBytes(string name, long fallback) =>
             long.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value > 0 ? value : fallback;
+        static int ReadInt(string name, int fallback) =>
+            int.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value > 0 ? Math.Clamp(value, 1, 8) : fallback;
         static TimeSpan ReadHours(string name, double fallback) =>
             double.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value >= 0
                 ? TimeSpan.FromHours(value)
@@ -50,6 +52,19 @@ public sealed record StorageRetentionPolicy(
         var blockBytes = ReadBytes("WHISPERX_STORAGE_BLOCK_FREE_BYTES", 512L * 1024 * 1024);
         if (long.TryParse(Environment.GetEnvironmentVariable("ATOM_AGENT_MIN_FREE_BYTES"), out var legacy) && legacy > 0)
             blockBytes = legacy;
+        // Keep enough room for a recoverable recording even when the static
+        // reserve is left at its legacy 512 MiB value.  Two mono 48 kHz
+        // PCM16 tracks for two hours are about 1.3 GiB; add a configurable
+        // overhead for SQLite/WAV parts and use the larger of the explicit
+        // reserve and the calculated floor.  Set the expected hours/tracks
+        // to match a deployment's recording profile.
+        var expectedHours = ReadHours("WHISPERX_STORAGE_EXPECTED_RECORDING_HOURS", 2).TotalHours;
+        var trackCount = ReadInt("WHISPERX_STORAGE_EXPECTED_TRACKS", 2);
+        var overheadPercent = ReadPercent("WHISPERX_STORAGE_RESERVE_OVERHEAD_PERCENT", 25);
+        var rawBytes = 48000d * 2d * trackCount * expectedHours * 3600d;
+        var calculatedReserve = rawBytes * (1d + overheadPercent / 100d);
+        var calculatedReserveBytes = checked((long)Math.Ceiling(calculatedReserve));
+        blockBytes = Math.Max(blockBytes, calculatedReserveBytes);
         return new StorageRetentionPolicy(
             ReadHours("WHISPERX_RETENTION_TRANSPORT_GRACE_HOURS", 24),
             ReadHours("WHISPERX_RETENTION_RAW_GRACE_HOURS", 24),

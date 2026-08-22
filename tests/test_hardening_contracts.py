@@ -234,6 +234,48 @@ def test_admin_diagnostics_is_safe_and_correlation_oriented():
     assert "summary.Content" not in api.split('"/api/admin/meetings/{id:guid}/diagnostics"', 1)[1].split("app.Map", 1)[0]
 
 
+def test_supervisor_marks_unavailable_or_malformed_readiness_as_api_failure():
+    supervisor = read(Path("scripts/supervise-server-runtime.ps1"))
+    assert "API_READINESS_INVALID" in supervisor
+    assert '$script:UnhealthyServices = @("api")' in supervisor
+    assert "Authenticated readiness probe failed; API targeted recovery is eligible" in supervisor
+
+
+def test_audio_quality_counts_normalized_clipping_separately_from_native_overrange():
+    contracts = read(Path("apps/recorder-agent/AudioContracts.cs"))
+    graph = read(Path("apps/recorder-host/AudioGraphCaptureEngine.cs"))
+    assert "NormalizedClippedSampleCount" in contracts
+    assert "NormalizedClippedRatio" in contracts
+    assert "_attempt.NormalizedClippedSampleCount += normalized.NormalizedClippedSampleCount" in graph
+
+
+def test_storage_reserve_has_dynamic_recoverable_recording_floor():
+    policy = read(Path("apps/recorder-agent/StorageWatermark.cs"))
+    protocol = read(Path("apps/recorder-agent/AgentIpcProtocol.cs"))
+    runtime = read(Path("apps/recorder-host/RecorderHostRuntime.cs"))
+    assert "WHISPERX_STORAGE_EXPECTED_RECORDING_HOURS" in policy
+    assert "WHISPERX_STORAGE_EXPECTED_TRACKS" in policy
+    assert "WHISPERX_STORAGE_RESERVE_OVERHEAD_PERCENT" in policy
+    assert "Math.Max" in policy
+    assert "MinimumFreeBytes" in protocol and "MinimumFreeBytes: watermark.BlockFreeBytes" in runtime
+    recording_view = read(Path("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs"))
+    recording_page = read(Path("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml"))
+    assert "StorageRecordingCapacityLabel" in recording_view and "StorageRecordingCapacityLabel" in recording_page
+
+
+def test_release_can_fail_closed_when_embedding_snapshot_is_not_verified():
+    retrieval = read(Path("workers/summary_worker/hybrid_retrieval.py"))
+    worker = read(Path("workers/summary_worker/worker.py"))
+    launcher = read(Path("scripts/start-server-bundle.ps1"))
+    builder = read(Path("scripts/build-server-bundle.ps1"))
+    assert "ASSISTANT_EMBEDDING_REQUIRE_VERIFIED" in retrieval
+    assert "EMBEDDING_MODEL_INVALID:verified_onnx_required" in retrieval
+    assert "embeddingVerificationRequired" in worker
+    assert "EMBEDDING_MODEL_INVALID" in worker
+    assert "SERVER_EMBEDDING_SNAPSHOT_NOT_PINNED" in launcher
+    assert "RELEASE_EMBEDDING_SNAPSHOT_NOT_PINNED" in builder
+
+
 def test_agent_trace_and_diagnostics_export_are_redacted():
     client = read(Path("apps/recorder-agent/AgentApiClient.cs"))
     export = read(Path("scripts/export-diagnostics.ps1"))

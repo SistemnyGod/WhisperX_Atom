@@ -218,7 +218,10 @@ public sealed record AgentIpcHealth(
     long StorageRetentionArchiveBytesReclaimed = 0,
     long StorageRetentionTemporaryBytesReclaimed = 0,
     long StorageRetentionCandidates = 0,
-    long StorageRetentionFailures = 0);
+    long StorageRetentionFailures = 0,
+    // Calculated absolute reserve, including the configured recoverable
+    // recording horizon.  Older clients ignore this additive tail field.
+    long MinimumFreeBytes = 0);
 
 public sealed record AgentIpcAudioDevice(
     string Id,

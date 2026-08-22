@@ -297,6 +297,14 @@ try {
                 nativeOverRangeSampleCount = if ($null -ne $attempt.nativeOverRangeSampleCount) { [int64]$attempt.nativeOverRangeSampleCount } else { $null }
                 nativeSampleCount = if ($null -ne $attempt.nativeSampleCount) { [int64]$attempt.nativeSampleCount } else { $null }
                 nativeOverRangeRatio = if ($null -ne $attempt.nativeOverRangeRatio) { [double]$attempt.nativeOverRangeRatio } else { $null }
+                normalizedClippedSampleCount = if ($null -ne $attempt.normalizedClippedSampleCount) { [int64]$attempt.normalizedClippedSampleCount } else { $null }
+                normalizedSampleCount = if ($null -ne $attempt.normalizedSampleCount) { [int64]$attempt.normalizedSampleCount } else { $null }
+                normalizedClippedRatio = if ($null -ne $attempt.normalizedClippedRatio) { [double]$attempt.normalizedClippedRatio } else { $null }
+                normalizedPeak = if ($null -ne $attempt.normalizedPeak) { [double]$attempt.normalizedPeak } else { $null }
+                normalizedRmsLinear = if ($null -ne $attempt.normalizedRmsLinear) { [double]$attempt.normalizedRmsLinear } else { $null }
+                normalizedDcOffset = if ($null -ne $attempt.normalizedDcOffset) { [double]$attempt.normalizedDcOffset } else { $null }
+                normalizedSilenceSampleCount = if ($null -ne $attempt.normalizedSilenceSampleCount) { [int64]$attempt.normalizedSilenceSampleCount } else { $null }
+                normalizedSilenceRatio = if ($null -ne $attempt.normalizedSilenceRatio) { [double]$attempt.normalizedSilenceRatio } else { $null }
             } } else { $null }
             framesProduced = if ($null -ne $attempt) { [int64]$attempt.framesProduced } else { 0 }
             framesConsumed = if ($null -ne $attempt) { [int64]$attempt.framesConsumed } else { 0 }
@@ -339,8 +347,6 @@ try {
         }
         safety = [ordered]@{ credentialsIncluded = $false; tokensIncluded = $false; audioIncluded = $false; transcriptIncluded = $false }
     }
-    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
-    Write-Host "AudioGraph local report: $reportPath"
     $deliveryFailed = $report.result.deliveryState -in @("DELIVERY_FAILED", "MEETING_NOT_FOUND")
     $deliveryIncomplete = $ServerDelivery -and $report.result.deliveryState -ne "CONFIRMED"
     $archiveRequired = -not $AllowPendingArchive
@@ -348,16 +354,29 @@ try {
     $pipelineGatePassed = $report.result.framesBalanced -and $report.result.frameQueueWithinLimit -and $report.result.pipelineOverruns -eq 0
     $rawGatePassed = $report.result.localFinalizeState -eq "LOCAL_READY" -and $rawEvidence.rawChunkCount -gt 0 -and $rawEvidence.rawWritingCount -eq 0 -and ([int]$rawEvidence.rawTerminalFailedCount -eq 0) -and $pipelineGatePassed
     $archiveGatePassed = -not $archiveRequired -or ($report.result.flacFileCount -gt 0 -and $report.result.archiveReady -and $report.result.durationWithinTolerance)
-    $qualityMetricsAvailable = $null -ne $report.result.audioQuality -and [int64]$report.result.audioQuality.nativeSampleCount -gt 0
+    $qualityMetricsAvailable = $null -ne $report.result.audioQuality -and [int64]$report.result.audioQuality.nativeSampleCount -gt 0 -and [int64]$report.result.audioQuality.normalizedSampleCount -gt 0
     $nativeOverRangeRatio = if ($qualityMetricsAvailable) { [double]$report.result.audioQuality.nativeOverRangeRatio } else { $null }
+    $normalizedClippedRatio = if ($qualityMetricsAvailable) { [double]$report.result.audioQuality.normalizedClippedRatio } else { $null }
     # This is a capture-quality gate, not a content-quality gate. Keep the
     # canonical PCM untouched, but fail closed when a new Host cannot expose
     # native pre-clamp metrics or reports critical over-range input.
-    $qualityGatePassed = $qualityMetricsAvailable -and $nativeOverRangeRatio -le 0.01
+    $qualityGatePassed = $qualityMetricsAvailable -and $nativeOverRangeRatio -le 0.01 -and $normalizedClippedRatio -le 0.01
     $localChunkGatePassed = $AllowPendingArchive ? $rawGatePassed : $rawEvidence.localChunkCount -gt 0
-    if (-not $report.result.firstFrameConfirmed -or $report.result.localFinalizeState -ne "LOCAL_READY" -or -not $localChunkGatePassed -or -not $report.result.playableReady -or -not $archiveGatePassed -or -not $qualityGatePassed -or $deliveryFailed -or $deliveryIncomplete -or -not $pipelineGatePassed) {
+    $qualityRatio = @($nativeOverRangeRatio, $normalizedClippedRatio) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+    $qualityBand = if (-not $qualityMetricsAvailable) { "UNKNOWN" } elseif ($qualityRatio -le 0.0001) { "GOOD" } elseif ($qualityRatio -le 0.001) { "WARNING" } elseif ($qualityRatio -le 0.01) { "BAD" } else { "CRITICAL" }
+    $localGatePassed = $report.result.firstFrameConfirmed -and $report.result.localFinalizeState -eq "LOCAL_READY" -and $localChunkGatePassed -and $report.result.playableReady -and $archiveGatePassed -and $qualityGatePassed -and -not $deliveryFailed -and -not $deliveryIncomplete -and $pipelineGatePassed
+    $report["status"] = if ($localGatePassed) { "PASSED" } else { "FAILED" }
+    $report.result["qualityMetricsAvailable"] = $qualityMetricsAvailable
+    $report.result["qualityGatePassed"] = $qualityGatePassed
+    $report.result["qualityBand"] = $qualityBand
+    $report.result["pipelineGatePassed"] = $pipelineGatePassed
+    $report.result["rawGatePassed"] = $rawGatePassed
+    $report.result["archiveGatePassed"] = $archiveGatePassed
+    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
+    Write-Host "AudioGraph local report: $reportPath"
+    if (-not $localGatePassed) {
         if ($deliveryIncomplete) { throw "AUDIOGRAPH_SERVER_DELIVERY_GATE_FAILED: deliveryState=$($report.result.deliveryState) error=$($report.result.errorCode) report=$reportPath" }
-        if (-not $qualityGatePassed) { throw "AUDIOGRAPH_AUDIO_QUALITY_GATE_FAILED: native pre-clamp metrics missing or over-range ratio is critical; report=$reportPath" }
+        if (-not $qualityGatePassed) { throw "AUDIOGRAPH_AUDIO_QUALITY_GATE_FAILED: capture quality metrics missing or clipping ratio is critical; report=$reportPath" }
         throw "AUDIOGRAPH_LOCAL_RECORDING_GATE_FAILED: report=$reportPath"
     }
 }

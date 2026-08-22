@@ -229,6 +229,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var effectiveSystemDevice = _systemEngine.SelectedDevice;
         var encoder = _encoderRuntimeState.Snapshot();
         var retention = _retentionMetrics.Snapshot;
+        var freeBytes = drive?.IsReady == true ? drive.AvailableFreeSpace : 0;
+        var totalBytes = drive?.IsReady == true ? drive.TotalSize : 0;
+        var watermark = StorageRetentionPolicy.FromEnvironment().Evaluate(freeBytes, totalBytes);
         var rawHealth = new RawChunkBacklog(0, 0, 0, 0, 0);
         try { rawHealth = await _spool.GetRawChunkBacklogAsync(cancellationToken: cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogDebug(ex, "Raw backlog is not available while Host is starting."); }
@@ -258,8 +261,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             // FreeBytes/TotalBytes describe the raw spool because that is the
             // resource required for CaptureReady. ArchiveRoot is a separate,
             // best-effort derived-output location.
-            FreeBytes: drive?.IsReady == true ? drive.AvailableFreeSpace : 0,
-            TotalBytes: drive?.IsReady == true ? drive.TotalSize : 0,
+            FreeBytes: freeBytes,
+            TotalBytes: totalBytes,
             Error: _initializationError
                 ?? (systemAudioUnavailable ? "AUDIO_SYSTEM_AUDIO_UNAVAILABLE" : null)
                 ?? _lastCaptureFailureCode,
@@ -344,7 +347,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             StorageRetentionArchiveBytesReclaimed: retention.LastArchiveBytesReclaimed,
             StorageRetentionTemporaryBytesReclaimed: retention.LastTemporaryBytesReclaimed,
             StorageRetentionCandidates: retention.LastRetentionCandidates,
-            StorageRetentionFailures: retention.FailedRuns);
+            StorageRetentionFailures: retention.FailedRuns,
+            MinimumFreeBytes: watermark.BlockFreeBytes);
         return new AgentIpcResponse(
             _initializationError is null && !systemAudioUnavailable && _lastCaptureFailureCode is null,
             _engine.State.ToString(),
