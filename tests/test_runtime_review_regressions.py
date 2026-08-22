@@ -397,10 +397,11 @@ def test_server_periodically_reconciles_interrupted_recordings_and_failed_asr():
 def test_server_startup_recovery_does_not_close_a_live_recording_session():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     launcher = read("scripts/start-whisperx-lan-server.ps1")
-    for source in (api, launcher):
-        assert "activeSessionId" in source
-        assert "session.local_session_id IS NULL" in source
-        assert "deviceHealth" in source
+    assert "activeSessionId" in api
+    assert "session.local_session_id IS NULL" in api
+    assert "deviceHealth" in api
+    assert "OperationalRecoveryService" in api
+    assert "does not know job stages" in launcher
 
 
 def test_operations_snapshot_does_not_report_a_confirmed_long_running_session_as_stale():

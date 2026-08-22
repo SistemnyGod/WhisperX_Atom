@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using NAudio.Wave;
 
 namespace WhisperX.Atom.Recorder.Host;
 
@@ -31,6 +32,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
     private readonly LiveAudioBroadcaster _liveAudio;
     private readonly StorageRetentionMetrics _retentionMetrics;
+    private readonly WasapiRawDiagnosticCaptureEngine _rawDiagnostic;
     private readonly ILogger<RecorderHostRuntime> _logger;
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly SemaphoreSlim _recoveryGate = new(1, 1);
@@ -45,6 +47,9 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private volatile bool _recoveryInProgress;
     private volatile string _recoveryState = "NOT_STARTED";
     private volatile string? _lastCaptureFailureCode;
+    private volatile string? _lastStopReason;
+    private volatile bool _stoppedAutomatically;
+    private string? _lastLowDiskStoppedSessionId;
     private DateTimeOffset _lastOrphanScanAtUtc = DateTimeOffset.MinValue;
 
     public RecorderHostRuntime(
@@ -63,6 +68,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         RawFinalizerQueueMetrics rawFinalizerMetrics,
         LiveAudioBroadcaster liveAudio,
         StorageRetentionMetrics retentionMetrics,
+        WasapiRawDiagnosticCaptureEngine rawDiagnostic,
         ILogger<RecorderHostRuntime> logger)
     {
         _spool = spool;
@@ -80,6 +86,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _rawFinalizerMetrics = rawFinalizerMetrics;
         _liveAudio = liveAudio;
         _retentionMetrics = retentionMetrics;
+        _rawDiagnostic = rawDiagnostic;
         _logger = logger;
         _engine.CaptureFailed += OnCaptureFailed;
         _systemEngine.CaptureFailed += OnCaptureFailed;
@@ -309,7 +316,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 AgentIpcProtocol.ConcurrentRequestsCapability,
                 AgentIpcProtocol.DeviceEventStreamCapability,
                 AgentIpcProtocol.AudioTelemetryStreamCapability,
-                AgentIpcProtocol.IndependentSystemAudioTrackCapability
+                AgentIpcProtocol.IndependentSystemAudioTrackCapability,
+                AgentIpcProtocol.AudioCaptureAbCapability
             },
             EffectiveMicrophoneDeviceName: effectiveDevice?.Name,
             EffectiveSystemAudioDeviceId: effectiveSystemDevice?.Id,
@@ -348,7 +356,13 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             StorageRetentionTemporaryBytesReclaimed: retention.LastTemporaryBytesReclaimed,
             StorageRetentionCandidates: retention.LastRetentionCandidates,
             StorageRetentionFailures: retention.FailedRuns,
-            MinimumFreeBytes: watermark.BlockFreeBytes);
+            MinimumFreeBytes: watermark.BlockFreeBytes,
+            CaptureReserveBytes: watermark.CaptureReserveBytes,
+            PostProcessingReserveBytes: watermark.PostProcessingReserveBytes,
+            EmergencyStopFreeBytes: watermark.EmergencyStopFreeBytes,
+            StorageCaptureStatus: watermark.State.ToString(),
+            LastStopReason: _lastStopReason,
+            StoppedAutomatically: _stoppedAutomatically);
         return new AgentIpcResponse(
             _initializationError is null && !systemAudioUnavailable && _lastCaptureFailureCode is null,
             _engine.State.ToString(),
@@ -472,7 +486,10 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             CaptureReady: captureReady,
             EncodingReady: ffmpegReady && ffprobeReady,
             DeliveryReady: _api.IsConfigured && string.Equals(_api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase),
-            Ffprobe: ffprobeReady);
+            Ffprobe: ffprobeReady,
+            CaptureReserveBytes: watermark.CaptureReserveBytes,
+            PostProcessingReserveBytes: watermark.PostProcessingReserveBytes,
+            EmergencyStopFreeBytes: watermark.EmergencyStopFreeBytes);
         return healthResponse with { Ok = true, Error = null, Preflight = preflight };
     }
 
@@ -682,6 +699,31 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         finally { _audioOperationGate.Release(); }
     }
 
+    /// <summary>
+    /// Exactly-once emergency boundary used by the storage watchdog. The
+    /// normal STOP path remains the single implementation of local durable
+    /// finalization; this method only adds the stable reason exposed to UI.
+    /// </summary>
+    public async Task<AgentIpcResponse> StopForLowDiskAsync(CancellationToken cancellationToken = default)
+    {
+        var session = _sessionId;
+        if (string.IsNullOrWhiteSpace(session))
+            return Error("RECORDING_NOT_ACTIVE");
+        lock (_audioOperationGate)
+        {
+            if (string.Equals(_lastLowDiskStoppedSessionId, session, StringComparison.Ordinal))
+                return Error("LOW_DISK_STOP_ALREADY_REQUESTED");
+            _lastLowDiskStoppedSessionId = session;
+            _lastStopReason = "LOW_DISK_EMERGENCY";
+            _stoppedAutomatically = true;
+        }
+        var response = await StopAsync(cancellationToken).ConfigureAwait(false);
+        try { await _spool.SetStopReasonAsync(session, "LOW_DISK_EMERGENCY", true, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Could not persist low-disk stop reason for {SessionId}", session); }
+        _deliveryWake.Signal();
+        return response;
+    }
+
     private async Task PersistFailedLocalLifecycleAsync(string sessionId, Exception exception, string fallbackCode)
     {
         var durability = await _spool.GetLocalDurabilityAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
@@ -813,6 +855,43 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             return new AgentIpcResponse(result.Ready, result.CaptureState, null, result.ErrorCode, null, null, null, AgentIpcProtocol.Version, null, null, legacyCompatible, result);
         }
         finally { _audioOperationGate.Release(); }
+    }
+
+    public async Task<AgentIpcResponse> RunAudioCaptureAbAsync(
+        string? deviceId,
+        int durationSeconds,
+        bool keepAudio,
+        CancellationToken cancellationToken)
+    {
+        if (_sessionId is not null)
+            return new AgentIpcResponse(false, "RECORDING", _sessionId,
+                "AUDIO_AB_RECORDING_ACTIVE", null);
+
+        var runId = Guid.NewGuid().ToString("N");
+        var diagnosticDirectory = Path.Combine(DataRoot(), "diagnostics", "audio-ab", runId);
+        var graph = await ProbeAsync(deviceId, cancellationToken, Math.Clamp(durationSeconds, 1, 30) * 1000).ConfigureAwait(false);
+        if (_sessionId is not null)
+            return new AgentIpcResponse(false, "RECORDING", _sessionId,
+                "AUDIO_AB_RECORDING_ACTIVE", null);
+        string? graphHash = null;
+        var graphPcm = _engine.LastProbePcm16;
+        if (graphPcm.Length > 0)
+        {
+            Directory.CreateDirectory(diagnosticDirectory);
+            var graphPath = Path.Combine(diagnosticDirectory, "audiograph.wav");
+            using (var writer = new WaveFileWriter(graphPath, new WaveFormat(SampleRate, 16, 1)))
+                writer.Write(graphPcm, 0, graphPcm.Length);
+            graphHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(graphPath))).ToLowerInvariant();
+        }
+        var raw = await _rawDiagnostic.CaptureAsync(deviceId, durationSeconds, keepAudio, diagnosticDirectory, cancellationToken).ConfigureAwait(false);
+        var report = raw with { AudioGraphSha256 = graphHash, AudioGraphQuality = graph.AudioGraphProbe?.Quality };
+        return new AgentIpcResponse(
+            report.Success,
+            report.Success ? "AUDIO_AB_READY" : "AUDIO_AB_FAILED",
+            null,
+            report.ErrorCode,
+            null,
+            AudioCaptureAb: report);
     }
 
     public async Task<AgentIpcResponse> ProbeSystemAsync(string? deviceId, CancellationToken cancellationToken, int durationMs = 3000)
@@ -2079,6 +2158,11 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 "TEST_AUDIO_SOURCE" or "MICROPHONE_TEST" => ReadBool(request.Payload, "systemAudio")
                     ? await _runtime.ProbeSystemAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false)
                     : await _runtime.ProbeAsync(ReadString(request.Payload, "deviceId"), cancellationToken, ReadDurationMs(request.Payload)).ConfigureAwait(false),
+                "RUN_AUDIO_CAPTURE_AB" => await _runtime.RunAudioCaptureAbAsync(
+                    ReadString(request.Payload, "deviceId"),
+                    ReadDurationSeconds(request.Payload),
+                    ReadBool(request.Payload, "keepAudio"),
+                    cancellationToken).ConfigureAwait(false),
                 "SET_AUDIO_DEVICES" or "SELECT_AUDIO_DEVICE" => await _runtime.SetAudioDevicesAsync(
                     ReadString(request.Payload, "microphoneDeviceId") ?? ReadString(request.Payload, "deviceId"),
                     ReadString(request.Payload, "systemAudioDeviceId"), cancellationToken).ConfigureAwait(false),
@@ -2154,4 +2238,11 @@ public sealed class RecorderHostPipeServer : BackgroundService
            && value.TryGetInt32(out var durationMs)
             ? Math.Clamp(durationMs, 1000, 10000)
             : 3000;
+
+    private static int ReadDurationSeconds(JsonElement payload)
+        => payload.TryGetProperty("durationSeconds", out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetInt32(out var seconds)
+            ? Math.Clamp(seconds, 1, 30)
+            : 10;
 }

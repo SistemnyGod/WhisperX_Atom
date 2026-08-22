@@ -6,6 +6,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# LAN/client release builds must not inherit a stale desktop proxy (for
+# example 127.0.0.1:9). NuGet restore and self-contained publish use the same
+# process environment; clear proxy variables before invoking dotnet so a
+# disconnected local proxy cannot turn a valid offline cache into a false
+# release failure. This does not change the runtime API proxy policy.
+foreach ($proxyVariable in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')) {
+    Remove-Item "Env:$proxyVariable" -ErrorAction SilentlyContinue
+}
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:MSBuildEnableWorkloadResolver = 'false'
 $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ([string]::IsNullOrWhiteSpace($gitCommit) -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
     throw "Unable to resolve a full release commit; refusing to publish an unidentified runtime."

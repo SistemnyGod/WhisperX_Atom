@@ -213,7 +213,7 @@ public sealed class SpoolStore
         await using var command = connection.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', acoustic_profile TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT, archive_error_code TEXT, archive_error_detail TEXT, archive_retry_count INTEGER NOT NULL DEFAULT 0, archive_next_retry_at TEXT, playable_audio_state TEXT NOT NULL DEFAULT 'NOT_REQUIRED', playable_audio_path TEXT, playable_audio_error TEXT, playable_audio_created_at TEXT, playable_audio_retry_count INTEGER NOT NULL DEFAULT 0, playable_audio_next_retry_at TEXT);
+             CREATE TABLE IF NOT EXISTS recording_sessions(id TEXT PRIMARY KEY, meeting_id TEXT, title TEXT, owner_user_id TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, total_samples INTEGER NOT NULL DEFAULT 0, local_finalize_state TEXT NOT NULL DEFAULT 'PENDING', delivery_state TEXT NOT NULL DEFAULT 'NOT_REQUESTED', meeting_bind_state TEXT NOT NULL DEFAULT 'UNBOUND', delivery_mode TEXT NOT NULL DEFAULT 'AUTO', acoustic_profile TEXT NOT NULL DEFAULT 'AUTO', archive_path TEXT, last_error_code TEXT, last_error_detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, media_asset_id TEXT, processing_job_id TEXT, trace_id TEXT, pipeline_correlation_id TEXT NOT NULL, server_accepted_at TEXT, media_validated_at TEXT, transport_purge_after TEXT, local_archive_purge_after TEXT, local_archive_purged_at TEXT, archive_error_code TEXT, archive_error_detail TEXT, archive_retry_count INTEGER NOT NULL DEFAULT 0, archive_next_retry_at TEXT, playable_audio_state TEXT NOT NULL DEFAULT 'NOT_REQUIRED', playable_audio_path TEXT, playable_audio_error TEXT, playable_audio_created_at TEXT, playable_audio_retry_count INTEGER NOT NULL DEFAULT 0, playable_audio_next_retry_at TEXT, stop_reason TEXT, stopped_automatically INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS recording_chunks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, track_id TEXT NOT NULL, sequence INTEGER NOT NULL, local_path TEXT NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, channels INTEGER NOT NULL, track_type TEXT NOT NULL DEFAULT 'room-microphone', size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, next_attempt_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, confirmed_at TEXT, UNIQUE(track_id, sequence));
              CREATE TABLE IF NOT EXISTS recording_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, event_type TEXT NOT NULL, media_time_ms INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, synced_at TEXT);
              CREATE TABLE IF NOT EXISTS recording_pending_events(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -276,7 +276,9 @@ public sealed class SpoolStore
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_retry_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_next_retry_at TEXT",
             "ALTER TABLE recording_sessions ADD COLUMN playable_audio_purge_after TEXT",
-            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_purged_at TEXT"
+            "ALTER TABLE recording_sessions ADD COLUMN playable_audio_purged_at TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN stop_reason TEXT",
+            "ALTER TABLE recording_sessions ADD COLUMN stopped_automatically INTEGER NOT NULL DEFAULT 0"
         })
         {
             await using var stateMigration = connection.CreateCommand();
@@ -657,6 +659,18 @@ public sealed class SpoolStore
         command.Parameters.AddWithValue("$httpStatus", (object?)errorHttpStatus ?? DBNull.Value);
         command.Parameters.AddWithValue("$retryable", (object?)(errorRetryable.HasValue ? (errorRetryable.Value ? 1 : 0) : null) ?? DBNull.Value);
         command.Parameters.AddWithValue("$trace", (object?)traceId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", sessionId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task SetStopReasonAsync(string sessionId, string reason, bool stoppedAutomatically, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET stop_reason=$reason,stopped_automatically=$automatic WHERE id=$id";
+        command.Parameters.AddWithValue("$reason", reason);
+        command.Parameters.AddWithValue("$automatic", stoppedAutomatically ? 1 : 0);
         command.Parameters.AddWithValue("$id", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

@@ -69,6 +69,8 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
     private int _failureRaised;
     private AudioGraphAttemptDiagnostics _attempt = new();
     private volatile bool _probeMode;
+    private readonly List<byte> _probePcm16 = new();
+    private const int MaxProbeBytes = 16 * 1024 * 1024;
 
     public AudioGraphCaptureEngine(AudioGraphDeviceCatalog catalog)
     {
@@ -139,6 +141,15 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
 
     public ChannelReader<AudioFrame> Frames => _frames.Reader;
 
+    /// <summary>
+    /// Returns the last probe's normalized PCM only for the diagnostic A/B
+    /// command. Normal recording never populates this buffer.
+    /// </summary>
+    public byte[] LastProbePcm16
+    {
+        get { lock (_gate) return _probePcm16.ToArray(); }
+    }
+
     public ChannelReader<AudioFrame> PrepareFrameChannel()
     {
         if (State is AudioCaptureState.Recording or AudioCaptureState.Paused)
@@ -207,7 +218,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
             }
             return BuildProbeResult(0, "AUDIO_CAPTURE_BUSY", "Audio capture is active; stop the current session before probing a device.");
         }
-        lock (_gate) _attempt = new AudioGraphAttemptDiagnostics();
+        lock (_gate)
+        {
+            _attempt = new AudioGraphAttemptDiagnostics();
+            _probePcm16.Clear();
+        }
         var started = Stopwatch.GetTimestamp();
         AudioDeviceProbeResult? result = null;
         var startedHere = false;
@@ -513,6 +528,11 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                     }
                     else
                     {
+                        lock (_gate)
+                        {
+                            if (_probePcm16.Count + normalized.Length <= MaxProbeBytes)
+                                _probePcm16.AddRange(normalized.Buffer.Buffer.AsSpan(0, normalized.Length).ToArray());
+                        }
                         normalized.Buffer.Dispose();
                         normalizedOwner = null;
                     }
@@ -529,6 +549,13 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                     _rmsSum += normalized.Rms;
                     _peak = Math.Max(_peak, normalized.Peak);
                     _clipping |= normalized.Clipping;
+                    if (normalized.SilenceSampleCount > 0)
+                    {
+                        _attempt.ZeroRunCount++;
+                        _attempt.LongestZeroRunSamples = Math.Max(
+                            _attempt.LongestZeroRunSamples,
+                            normalized.SilenceSampleCount);
+                    }
                     _lastAudioAtUtc = DateTimeOffset.UtcNow;
                     _silenceStartedAtUtc = normalized.Rms < 0.003d ? _silenceStartedAtUtc ?? DateTimeOffset.UtcNow : null;
                 }
@@ -593,6 +620,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
         attempt.FinalErrorCode ??= errorCode;
         attempt.FinalErrorDetail ??= errorDetail;
         attempt.FinalCaptureState ??= State.ToString();
+        var quality = AudioQualityAnalyzer.FromDiagnostics(attempt, sampleRate: SampleRate);
         return new AudioDeviceProbeResult(
             selected?.Id,
             selected?.Name,
@@ -615,7 +643,8 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
             errorCode,
             errorDetail,
             errorCode is null ? telemetry.FrameCount > 0 ? "READY" : "NO_PACKETS" : "FAILED",
-            attempt);
+            attempt,
+            quality);
     }
 
     private void CaptureOutputFormat(AudioEncodingProperties properties)

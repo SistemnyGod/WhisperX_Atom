@@ -114,6 +114,9 @@ public sealed class RecordingViewModel : ObservableObject
     private double _storageFreePercent;
     private long _storageFreeBytes;
     private long _storageMinimumFreeBytes;
+    private long _storageCaptureReserveBytes;
+    private long _storagePostProcessingReserveBytes;
+    private long _storageEmergencyStopFreeBytes;
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -365,6 +368,7 @@ public sealed class RecordingViewModel : ObservableObject
     public string StorageWatermarkLabel => _storageWatermarkState switch
     {
         "BLOCK_RECORDING" => $"Хранилище: запись заблокирована · свободно {_storageFreePercent:F1}%",
+        "EMERGENCY" => $"Хранилище: аварийный уровень · свободно {_storageFreePercent:F1}%",
         "CRITICAL" => $"Хранилище: критический уровень · свободно {_storageFreePercent:F1}%",
         "WARNING" => $"Хранилище: внимание · свободно {_storageFreePercent:F1}%",
         _ => $"Хранилище: нормально · свободно {_storageFreePercent:F1}%"
@@ -373,7 +377,10 @@ public sealed class RecordingViewModel : ObservableObject
     {
         get
         {
-            var available = Math.Max(0L, _storageFreeBytes - _storageMinimumFreeBytes);
+            var reserve = _storageCaptureReserveBytes > 0
+                ? _storageCaptureReserveBytes + _storagePostProcessingReserveBytes
+                : _storageMinimumFreeBytes;
+            var available = Math.Max(0L, _storageFreeBytes - reserve);
             // Two mono 48 kHz PCM16 tracks are the conservative ONLINE
             // profile; this is an estimate, not a reservation guarantee.
             var bytesPerHour = 48000d * 2d * 2d * 3600d;
@@ -981,35 +988,38 @@ public sealed class RecordingViewModel : ObservableObject
     {
         if (!CanRunRoomAcousticCheck) return;
         IsRoomAcousticCheckRunning = true;
-        RoomAcousticCheckStatus = "Идёт 10-секундная проверка: скажите фразу у микрофона и с дальнего места…";
+        RoomAcousticCheckStatus = "Сначала 3 секунды тишины: не говорите…";
         try
         {
-            var response = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 10);
-            var probe = response.AudioGraphProbe;
-            var test = response.AudioSourceTest;
-            var ready = probe?.Ready ?? test?.Success == true;
-            var signal = probe?.SignalDetected ?? test?.SignalDetected == true;
-            var rmsDb = probe?.AverageRmsDb ?? test?.AverageRmsDb;
-            var peakDb = probe?.PeakDb ?? test?.PeakDb;
+            var silenceResponse = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 3);
+            var silenceProbe = silenceResponse.AudioGraphProbe;
+            if (silenceProbe is null || !silenceProbe.Ready)
+            {
+                RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(silenceProbe?.ErrorCode ?? silenceResponse.Error ?? "AUDIO_TEST_FAILED")}.";
+                return;
+            }
+            RoomAcousticCheckStatus = "Теперь 7 секунд скажите обычным голосом на рабочем расстоянии…";
+            var speechResponse = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 7);
+            var speechProbe = speechResponse.AudioGraphProbe;
+            var speechQuality = speechProbe?.Quality;
+            if (speechQuality is not null && silenceProbe.Quality is not null)
+            {
+                speechQuality = AudioQualityAnalyzer.Combine(silenceProbe.Quality, speechQuality);
+            }
+            var ready = speechProbe?.Ready == true;
+            var signal = speechProbe?.SignalDetected == true;
             if (!ready)
             {
-                RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(probe?.ErrorCode ?? test?.ErrorCode ?? response.Error ?? "AUDIO_TEST_FAILED")}.";
+                RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(speechProbe?.ErrorCode ?? speechResponse.Error ?? "AUDIO_TEST_FAILED")}.";
             }
-            else if (!signal || rmsDb is null)
+            else if (!signal || speechQuality is null)
             {
                 RoomAcousticCheckStatus = "Нужен конференц-микрофон: полезный сигнал не обнаружен.";
             }
-            else if (rmsDb.Value < -55 || (peakDb is double peak && peak < -30))
-            {
-                RoomAcousticCheckStatus = $"Слабый сигнал ({rmsDb.Value:0} dBFS, пик {peakDb:0} dBFS). Для дальних мест выберите профиль «Большой кабинет».";
-            }
-            else if (rmsDb.Value < -38)
-            {
-                RoomAcousticCheckStatus = $"Подходит с усилением ({rmsDb.Value:0} dBFS, пик {peakDb:0} dBFS). Рекомендуется профиль «Большой кабинет».";
-            }
             else
             {
-                RoomAcousticCheckStatus = $"Подходит ({rmsDb.Value:0} dBFS, пик {peakDb:0} dBFS).";
+                var grade = speechQuality.Grade.ToString();
+                RoomAcousticCheckStatus = $"Качество: {grade}. Шум {speechQuality.NoiseFloorDb:0} dBFS, речь {speechQuality.SpeechRmsDb:0} dBFS, SNR {speechQuality.EstimatedSnrDb:0.0} dB, clipping {speechQuality.NormalizedClippingRatio:0.###}%. {speechQuality.Recommendation}";
             }
             await RefreshAsync();
         }
@@ -1697,6 +1707,11 @@ public sealed class RecordingViewModel : ObservableObject
             _storageFreePercent = health.StorageFreePercent;
             _storageFreeBytes = health.FreeBytes;
             _storageMinimumFreeBytes = health.MinimumFreeBytes;
+            _storageCaptureReserveBytes = health.CaptureReserveBytes;
+            _storagePostProcessingReserveBytes = health.PostProcessingReserveBytes;
+            _storageEmergencyStopFreeBytes = health.EmergencyStopFreeBytes;
+            if (health.StoppedAutomatically && string.Equals(health.LastStopReason, "LOW_DISK_EMERGENCY", StringComparison.OrdinalIgnoreCase))
+                WarningMessage = "Запись безопасно остановлена из-за нехватки места на диске.";
             RecordingProfileManaged = health.RecordingProfileManaged;
             RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
             if (!_audioTelemetryStreamSupported || State is not (RecordingState.Recording or RecordingState.Paused))

@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$SkipPublish,
+    [switch]$NoRestore,
     [string]$ServerOrigin = "http://192.168.2.194:8080"
 )
 $ErrorActionPreference = "Stop"
@@ -15,7 +16,11 @@ $publish = Join-Path $repoRoot "scripts\publish-desktop.ps1"
 $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
 $artifact = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
 if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
-    & $publish
+    if ($NoRestore) {
+        & $publish -NoRestore
+    } else {
+        & $publish
+    }
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($null -eq $iscc) {

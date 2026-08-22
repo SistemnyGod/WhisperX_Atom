@@ -12,6 +12,8 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $logRoot = Join-Path $repo "artifacts\test-logs"
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+$tempRoot = Join-Path $repo "artifacts\test-temp\dotnet"
+New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 
 if ($Project.Count -eq 0) {
     $Project = @(Get-ChildItem -Path $repo -Recurse -Filter "*Tests.csproj" -File -ErrorAction SilentlyContinue |
@@ -29,6 +31,8 @@ foreach ($projectPath in $Project) {
     $name = [IO.Path]::GetFileNameWithoutExtension($resolved)
     $stdoutPath = Join-Path $logRoot "$name.stdout.log"
     $stderrPath = Join-Path $logRoot "$name.stderr.log"
+    $runTemp = Join-Path $tempRoot ("{0}-{1}" -f $name, [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $runTemp | Out-Null
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
     # Start-Process joins ArgumentList into a command line; quote the project
@@ -41,26 +45,50 @@ foreach ($projectPath in $Project) {
         # bound tighter than the generic server/worker test budget.
         $effectiveTimeout = [Math]::Min($TimeoutSeconds, 60)
         $arguments += @("--blame-hang", "--blame-hang-timeout", "60s")
+        # The installed SDK image does not contain the workload locator SDKs.
+        # Desktop test projects do not need workload discovery, so disable it
+        # explicitly instead of allowing an MSB4276 build failure.
+        $arguments += @(
+            "-p:MSBuildEnableWorkloadResolver=false",
+            "-p:EnableMsixTooling=false",
+            "-p:DisableMsixProjectCapabilityAddedByProject=true",
+            "-p:DisableHasPackageAndPublishMenuAddedByProject=true",
+            "-p:UseSharedCompilation=false",
+            "-m:1",
+            "-nodeReuse:false"
+        )
     }
     if ($NoRestore) { $arguments += "--no-restore" }
     Write-Host "Running $name (timeout ${effectiveTimeout}s)"
-    $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    if (-not $process.WaitForExit($effectiveTimeout * 1000)) {
-        try { $process.Kill($true) } catch { }
-        Write-Host (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-        Write-Error "DOTNET_TEST_TIMEOUT: $name exceeded ${effectiveTimeout}s. Logs: $stdoutPath / $stderrPath"
-        exit 124
-    }
-    $process.Refresh()
-    $exitCode = [int]$process.ExitCode
+    try {
+        $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru `
+            -Environment @{ TEMP = $runTemp; TMP = $runTemp; HTTP_PROXY = ''; HTTPS_PROXY = ''; ALL_PROXY = ''; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBuildEnableWorkloadResolver = 'false' }
+        if (-not $process.WaitForExit($effectiveTimeout * 1000)) {
+            $children = @(Get-CimInstance Win32_Process -Filter ("ParentProcessId={0}" -f $process.Id) -ErrorAction SilentlyContinue |
+                Select-Object ProcessId, Name, CommandLine)
+            $children | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $logRoot "$name.timeout-processes.json") -Encoding utf8
+            try { $process.Kill($true) } catch { }
+            $process.WaitForExit(5000) | Out-Null
+            Write-Host (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+            Write-Host (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+            Write-Error "DOTNET_TEST_TIMEOUT: $name exceeded ${effectiveTimeout}s. Logs: $stdoutPath / $stderrPath"
+            exit 124
+        }
+        $process.Refresh()
+        $exitCode = [int]$process.ExitCode
 
-    $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
-    $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
-    if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout }
-    if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Host $stderr }
-    if ($exitCode -ne 0) {
-        Write-Error "DOTNET_TEST_FAILED: $name exit=$exitCode. Logs: $stdoutPath / $stderrPath"
-        exit $exitCode
+        $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host $stdout }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Host $stderr }
+        if ($exitCode -ne 0) {
+            Write-Error "DOTNET_TEST_FAILED: $name exit=$exitCode. Logs: $stdoutPath / $stderrPath"
+            exit $exitCode
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $runTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

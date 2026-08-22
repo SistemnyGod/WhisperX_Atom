@@ -19,6 +19,7 @@ Copy-Item .env.example .env
 | `GPU_WORKER_RUNTIME` | Диагностическая метка runtime | `host` |
 | `WHISPERX_MODEL` | WhisperX model profile | `large-v3` по шаблону |
 | `WHISPERX_MODEL_REPOSITORY` | Pinned faster-whisper repository | `Systran/faster-whisper-large-v3` |
+| `WHISPERX_MODEL_PATH` / `WHISPERX_MODEL_SHA256` | Release Doctor: exact canonical WhisperX model file and expected SHA256 | пусто в шаблоне, обязательно заполнить в Server Bundle |
 | `DEVICE` | Torch device | `cuda` |
 | `COMPUTE_TYPE` | faster-whisper compute type | `float16` |
 | `BATCH_SIZE` | ASR batch size | `2` для 8 GB VRAM |
@@ -33,6 +34,7 @@ Copy-Item .env.example .env
 | `DIARIZATION_CPU_FALLBACK` | Повторить диаризацию на CPU после CUDA OOM | `true` |
 | `DIARIZATION_RELEASE_ASR_ON_LOW_VRAM` | Освободить ASR/alignment cache перед pyannote при низком VRAM | `true` |
 | `DIARIZATION_MIN_FREE_VRAM_MB` | Порог освобождения cache перед pyannote | `2048` |
+| `DIARIZATION_MODEL_PATH` / `DIARIZATION_MODEL_SHA256` | Release Doctor: exact pyannote/diarization model snapshot and expected SHA256 | пусто в шаблоне, обязательно заполнить в Server Bundle |
 | `AUTO_SUMMARY_ENABLED` | Автоматический запуск Qwen после качественной V2 | `true` для LAN-профиля |
 | `ASSISTANT_ENABLED` | Включает единый текстовый/голосовой Assistant-контур | `true` для LAN-профиля |
 | `LLM_RESIDENT_ENABLED` | Разрешает общий resident Qwen runtime после получения GPU lease | `true` |
@@ -56,6 +58,8 @@ Copy-Item .env.example .env
 | `LLM_BASE_URL` | Адрес llama-server для LLM режима | Включается отдельно |
 | `WHISPERX_STORAGE_EXPECTED_RECORDING_HOURS` / `WHISPERX_STORAGE_EXPECTED_TRACKS` | Динамический минимальный запас локального диска под восстановимую запись | `2` / `2` |
 | `WHISPERX_STORAGE_RESERVE_OVERHEAD_PERCENT` | Запас сверх расчётного PCM-объёма (SQLite, WAV parts, метаданные) | `25` |
+| `WHISPERX_STORAGE_POSTPROCESSING_RESERVE_BYTES` | Резерв под WAV/FLAC/temp после завершения захвата | `1073741824` |
+| `WHISPERX_STORAGE_EMERGENCY_STOP_FREE_BYTES` | Нижний порог свободного места во время активной записи | `1207959552` |
 
 ## Каталоги
 

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     # Long gates are intentional: the release plan requires 30 s, 15 min and 60 min runs.
-    [ValidateRange(10, 3600)]
+    [ValidateRange(10, 28800)]
     [int]$Seconds = 30,
     [ValidateRange(10, 180)]
     [int]$FinalizeTimeoutSeconds = 90,

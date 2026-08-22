@@ -419,7 +419,11 @@ public sealed class AgentPipeHost(
             EncoderLastSuccessAtUtc: encoder.LastSuccessAtUtc,
             EncoderLastErrorCode: encoder.LastErrorCode,
             EncoderQueueDepth: encoder.QueueDepth,
-            MinimumFreeBytes: watermark.BlockFreeBytes), null, recorder.CurrentMediaTimeMs,
+            MinimumFreeBytes: watermark.BlockFreeBytes,
+            CaptureReserveBytes: watermark.CaptureReserveBytes,
+            PostProcessingReserveBytes: watermark.PostProcessingReserveBytes,
+            EmergencyStopFreeBytes: watermark.EmergencyStopFreeBytes,
+            StorageCaptureStatus: watermark.State.ToString()), null, recorder.CurrentMediaTimeMs,
             AgentIpcProtocol.Version, null, sessionStatus);
     }
 
@@ -468,7 +472,10 @@ public sealed class AgentPipeHost(
                 CaptureReady: ready,
                 EncodingReady: ffmpeg && ffprobe,
                 DeliveryReady: api.IsConfigured && string.Equals(api.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase),
-                Ffprobe: ffprobe));
+                Ffprobe: ffprobe,
+                CaptureReserveBytes: watermark.CaptureReserveBytes,
+                PostProcessingReserveBytes: watermark.PostProcessingReserveBytes,
+                EmergencyStopFreeBytes: watermark.EmergencyStopFreeBytes));
     }
 
     private async Task<AgentIpcResponse> SessionStatusAsync(string sessionId, CancellationToken cancellationToken)

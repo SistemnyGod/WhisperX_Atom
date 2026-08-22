@@ -14,6 +14,7 @@ public static class AgentIpcProtocol
     public const string ConcurrentRequestsCapability = "CONCURRENT_REQUESTS";
     public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
     public const string AudioTelemetryStreamCapability = "AUDIO_TELEMETRY_STREAM_V1";
+    public const string AudioCaptureAbCapability = "AUDIO_CAPTURE_AB_V1";
     // The current-user Host can persist a render-loopback source as a second
     // track without changing the v6 wire shape. Older clients simply ignore
     // this additive capability and continue using the room microphone track.
@@ -98,7 +99,8 @@ public sealed record AgentIpcResponse(
     int CurrentProtocolVersion = AgentIpcProtocol.Version,
     string? ErrorDetail = null,
     AgentIpcAudioTelemetry? AudioTelemetry = null,
-    IReadOnlyList<LocalSessionSummary>? LocalSessions = null)
+    IReadOnlyList<LocalSessionSummary>? LocalSessions = null,
+    AudioCaptureAbResult? AudioCaptureAb = null)
 {
     /// <summary>
     /// True when the local IPC endpoint answered with a state payload. Health
@@ -221,7 +223,13 @@ public sealed record AgentIpcHealth(
     long StorageRetentionFailures = 0,
     // Calculated absolute reserve, including the configured recoverable
     // recording horizon.  Older clients ignore this additive tail field.
-    long MinimumFreeBytes = 0);
+    long MinimumFreeBytes = 0,
+    long CaptureReserveBytes = 0,
+    long PostProcessingReserveBytes = 0,
+    long EmergencyStopFreeBytes = 0,
+    string StorageCaptureStatus = "NORMAL",
+    string? LastStopReason = null,
+    bool StoppedAutomatically = false);
 
 public sealed record AgentIpcAudioDevice(
     string Id,
@@ -276,7 +284,10 @@ public sealed record AgentPreflightResult(
     bool CaptureReady = false,
     bool EncodingReady = true,
     bool DeliveryReady = true,
-    bool Ffprobe = true);
+    bool Ffprobe = true,
+    long CaptureReserveBytes = 0,
+    long PostProcessingReserveBytes = 0,
+    long EmergencyStopFreeBytes = 0);
 
 public sealed record RecordingSessionStatus(
     string SessionId,

@@ -354,6 +354,8 @@ def test_installer_requires_pinned_ffmpeg_payload_and_manifest():
     assert "ffmpeg-manifest.json" in publish
     assert "Get-FileHash" in publish
     assert "sha256" in staging
+    assert "Remove-Item \"Env:$proxyVariable\"" in publish
+    assert "MSBuildEnableWorkloadResolver" in publish
 
 
 def test_firewall_allows_private_lan_and_blocks_public_profile():

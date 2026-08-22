@@ -53,6 +53,7 @@ builder.Services.AddSingleton<AudioGraphCaptureEngine>();
 builder.Services.AddSingleton<IAudioCaptureEngine>(services => services.GetRequiredService<AudioGraphCaptureEngine>());
 builder.Services.AddSingleton<SystemAudioDeviceCatalog>();
 builder.Services.AddSingleton<SystemAudioCaptureEngine>();
+builder.Services.AddSingleton<WasapiRawDiagnosticCaptureEngine>();
 builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
 builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
 builder.Services.AddSingleton<RecorderHostRuntime>();
@@ -66,6 +67,7 @@ builder.Services.AddHostedService<LiveAudioPipeServer>();
 builder.Services.AddHostedService<GlobalRawEncoderWorker>();
 builder.Services.AddHostedService<PlayableAudioWorker>();
 builder.Services.AddHostedService<StorageRetentionWorker>();
+builder.Services.AddHostedService<StorageCaptureWatchdog>();
 builder.Services.AddHostedService<RecorderHostWorker>();
 
 await builder.Build().RunAsync();

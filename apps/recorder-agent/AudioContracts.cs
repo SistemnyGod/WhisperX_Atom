@@ -6,7 +6,11 @@ namespace WhisperX.Atom.Recorder;
 public enum AudioEngineKind
 {
     LegacyWasapi,
-    AudioGraph
+    AudioGraph,
+    // Diagnostic-only capture path. It is never selected as the canonical
+    // recorder engine and is appended to preserve the existing numeric wire
+    // values.
+    WasapiRawDiagnostic
 }
 
 public enum AudioSelectionMode
@@ -123,11 +127,25 @@ public sealed record AudioDeviceProbeResult(
     string? ErrorCode = null,
     string? ErrorDetail = null,
     string CaptureState = "UNKNOWN",
-    AudioGraphAttemptDiagnostics? AttemptDiagnostics = null)
+    AudioGraphAttemptDiagnostics? AttemptDiagnostics = null,
+    AudioQualityAssessment? Quality = null)
 {
     public bool Ready => EndpointFound && EndpointActive && AccessGranted && FormatResolved
         && StreamOpened && StreamStarted && FrameCount > 0 && BytesReceived > 0;
 }
+
+public sealed record AudioCaptureAbResult(
+    bool Success,
+    string? DeviceId,
+    int DurationSeconds,
+    bool RawModeSupported,
+    string? ErrorCode,
+    string? AudioGraphSha256 = null,
+    string? RawSha256 = null,
+    AudioQualityAssessment? AudioGraphQuality = null,
+    AudioQualityAssessment? RawQuality = null,
+    string? DiagnosticDirectory = null,
+    bool AudioDeletedByDefault = true);
 
 /// <summary>
 /// Persistent diagnostics for one AudioGraph attempt. This is deliberately a
@@ -190,6 +208,13 @@ public sealed class AudioGraphAttemptDiagnostics
     public double NormalizedSampleSum { get; set; }
     public double NormalizedSquareSum { get; set; }
     public long NormalizedSilenceSampleCount { get; set; }
+
+    // Optional continuity diagnostics. Zero means that this older capture
+    // engine did not expose a separate zero-run counter; pipeline overruns
+    // are still treated as confirmed dropouts by AudioQualityAnalyzer.
+    public long DropoutCount { get; set; }
+    public long ZeroRunCount { get; set; }
+    public long LongestZeroRunSamples { get; set; }
 
     public double NormalizedClippedRatio => NormalizedSampleCount <= 0
         ? 0d
@@ -270,6 +295,9 @@ public sealed class AudioGraphAttemptDiagnostics
         NormalizedSampleSum = NormalizedSampleSum,
         NormalizedSquareSum = NormalizedSquareSum,
         NormalizedSilenceSampleCount = NormalizedSilenceSampleCount,
+        DropoutCount = DropoutCount,
+        ZeroRunCount = ZeroRunCount,
+        LongestZeroRunSamples = LongestZeroRunSamples,
         FramesProduced = FramesProduced,
         FramesConsumed = FramesConsumed,
         CurrentQueueDepth = CurrentQueueDepth,

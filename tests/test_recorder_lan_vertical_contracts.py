@@ -103,10 +103,15 @@ def test_lan_doctor_checks_core_processing_legacy_and_qwen_state():
 
 def test_lan_start_recovers_inherited_runnable_work_before_gpu_workers():
     startup = read("scripts/start-whisperx-lan-server.ps1")
-    assert "STARTUP_RECOVERY_FAILED" in startup
-    assert "WORKER_RESTART_RECOVERY" in startup
-    assert "RETRY_LIMIT_EXCEEDED" in startup
-    assert "ADMIN_REVIEW" in startup
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    # Recovery is a single API-owned state machine. The LAN launcher only
+    # starts immutable services and must not duplicate SQL/job recovery.
+    assert "OperationalRecoveryService" in api
+    assert "ReconcileInterruptedWorkAsync" in api
+    assert "WORKER_RESTART_RECOVERY" in api
+    assert "RETRY_LIMIT_EXCEEDED" in api
+    assert "ADMIN_REVIEW" in api
+    assert "does not know job stages" in startup
     assert "STARTUP_QUEUE_GUARD_BLOCKED" not in startup
     assert 'postgres", "nats", "api", "tusd", "lan-gateway' in startup
     assert 'media-worker", "gpu-worker' in startup
