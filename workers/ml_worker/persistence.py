@@ -794,6 +794,14 @@ class JobRepository:
             # just persisted.  A missing 049 migration must never make V1/V2
             # persistence fail, hence the savepoint and best-effort insert.
             self._persist_derived_facts(connection, meeting_id, str(transcript_id), version, version_kind)
+            if str(version_kind).upper() in {"ENRICHED", "V2"} and os.getenv("MEETING_MEMORY_ENABLED", "true").lower() in {"1", "true", "yes"}:
+                self._ensure_memory_job_and_outbox(
+                    connection,
+                    meeting_id,
+                    str(transcript_id),
+                    int(version),
+                    str(result.get("correlation_id") or correlation_id) if (result.get("correlation_id") or correlation_id) else None,
+                )
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not summary_blocked:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
                 prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v2")
@@ -831,6 +839,7 @@ class JobRepository:
     def _persist_derived_facts(connection: psycopg.Connection[Any], meeting_id: str, transcript_id: str, transcript_version: int, version_kind: str) -> int:
         if not transcript_id or str(version_kind).upper() not in {"ASR_DRAFT", "ENRICHED", "GENERATED", "REPROCESSED"}:
             return 0
+
         try:
             connection.execute("SAVEPOINT transcript_facts_optional")
             rows = connection.execute(
@@ -852,8 +861,8 @@ class JobRepository:
                 connection.execute(
                     """INSERT INTO transcript_facts(
                          owner_user_id,meeting_id,transcript_id,transcript_version,fact_type,subject,predicate,value,
-                         speaker_id,start_ms,end_ms,confidence,evidence_segment_ids,state)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                         speaker_id,start_ms,end_ms,confidence,evidence_segment_ids,state,source_text)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)""",
                     (owner_user_id, *params),
                 )
             connection.execute("RELEASE SAVEPOINT transcript_facts_optional")
@@ -869,6 +878,68 @@ class JobRepository:
                 LOGGER.debug("transcript fact savepoint cleanup failed", exc_info=True)
             LOGGER.debug("derived transcript facts unavailable", exc_info=True)
             return 0
+
+    @staticmethod
+    def _ensure_memory_job_and_outbox(
+        connection: psycopg.Connection[Any],
+        meeting_id: str,
+        transcript_id: str,
+        transcript_version: int,
+        correlation_id: str | None,
+    ) -> str | None:
+        """Create one owner-scoped Memory job and its durable NATS event.
+
+        This is best-effort during rolling upgrades: a missing 056 migration
+        cannot make a successfully persisted V2 transcript fail.
+        """
+        try:
+            connection.execute("SAVEPOINT memory_job_optional")
+            owner_row = connection.execute("SELECT owner_id FROM meetings WHERE id=%s", (meeting_id,)).fetchone()
+            owner_user_id = owner_row[0] if owner_row else None
+            if owner_user_id is None:
+                raise ValueError("memory_owner_missing")
+            row = connection.execute(
+                """INSERT INTO memory_jobs(
+                         owner_user_id,meeting_id,transcript_id,transcript_version,status,stage,
+                         progress,attempt,pipeline_correlation_id,next_retry_at)
+                       VALUES(%s,%s,%s,%s,'QUEUED','QUEUED',0,0,%s,NULL)
+                       ON CONFLICT(transcript_id,transcript_version) DO UPDATE
+                         SET pipeline_correlation_id=COALESCE(memory_jobs.pipeline_correlation_id, EXCLUDED.pipeline_correlation_id),
+                             updated_at=now()
+                       RETURNING id,status""",
+                (owner_user_id, meeting_id, transcript_id, int(transcript_version), correlation_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("memory_job_not_created")
+            job_id, status = str(row[0]), str(row[1]).upper()
+            if status not in {"READY", "NEEDS_REVIEW"}:
+                exists = connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='memory.index' AND payload->>'jobId'=%s)",
+                    (job_id,),
+                ).fetchone()[0]
+                if not exists:
+                    payload = json.dumps({
+                        "jobId": job_id,
+                        "meetingId": meeting_id,
+                        "transcriptId": transcript_id,
+                        "transcriptVersion": int(transcript_version),
+                        "ownerUserId": str(owner_user_id),
+                        "pipelineCorrelationId": correlation_id,
+                    })
+                    connection.execute(
+                        "INSERT INTO outbox_messages(id,topic,payload) VALUES(gen_random_uuid(),'memory.index',%s::jsonb)",
+                        (payload,),
+                    )
+            connection.execute("RELEASE SAVEPOINT memory_job_optional")
+            return job_id
+        except Exception:
+            try:
+                connection.execute("ROLLBACK TO SAVEPOINT memory_job_optional")
+                connection.execute("RELEASE SAVEPOINT memory_job_optional")
+            except Exception:
+                LOGGER.debug("memory job savepoint cleanup failed", exc_info=True)
+            LOGGER.debug("memory indexing unavailable during V2 persistence", exc_info=True)
+            return None
 
     @staticmethod
     def _ensure_summary_job_and_outbox(

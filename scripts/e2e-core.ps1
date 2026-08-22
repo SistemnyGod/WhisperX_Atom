@@ -189,6 +189,10 @@ function Restart-ProcessingWorkers {
     $composeArgs += @("--profile", "llm")
     $services += "summary-worker"
   }
+  if ($env:MEETING_MEMORY_ENABLED -ne "false") {
+    $composeArgs += @("--profile", "memory")
+    $services += "memory-worker"
+  }
   $composeArgs += @("restart") + $services
   Write-Host ("restarting workers: {0}" -f ($services -join ", "))
   & docker @composeArgs
@@ -199,6 +203,7 @@ if ($StartCore) {
   $composeArgs = @("compose", "-f", "compose.dev.yml", "--profile", "core")
   if ($WithGpu) { $composeArgs += "--profile"; $composeArgs += "gpu" }
   if ($WithLlm) { $composeArgs += "--profile"; $composeArgs += "llm" }
+  if ($env:MEETING_MEMORY_ENABLED -ne "false") { $composeArgs += "--profile"; $composeArgs += "memory" }
   $composeArgs += @("up", "-d")
   & docker @composeArgs
   if ($LASTEXITCODE -ne 0) { throw "Unable to start Compose profile" }

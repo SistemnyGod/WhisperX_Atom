@@ -37,6 +37,8 @@ $autoSummarySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-O
 if ($autoSummarySetting -and ($autoSummarySetting -replace '^AUTO_SUMMARY_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
 $assistantSetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_ENABLED=' } | Select-Object -First 1
 if ($assistantSetting -and ($assistantSetting -replace '^ASSISTANT_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
+$memorySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^MEETING_MEMORY_ENABLED=' } | Select-Object -First 1
+$includeMemory = -not ($memorySetting -and ($memorySetting -replace '^MEETING_MEMORY_ENABLED=','').Trim().ToLowerInvariant() -eq 'false')
 if ($IncludeLlm) {
     $embeddingRequired = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=' } | Select-Object -First 1
     $embeddingModelHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_ONNX_SHA256=' } | Select-Object -First 1
@@ -62,8 +64,10 @@ $env:APP_VERSION = $identity
 $compose = @('--project-name','whisperx-atom','--env-file',(Join-Path $repo $EnvFile),'-f',(Join-Path $repo 'compose.dev.yml'),'-f',(Join-Path $repo 'compose.lan.yml'))
 $profiles = @('--profile','core','--profile','gpu','--profile','lan')
 if ($IncludeLlm) { $profiles += @('--profile','llm') }
+if ($includeMemory) { $profiles += @('--profile','memory') }
 $appServices = @('api','outbox-relay','import-worker','media-worker','gpu-worker')
 if ($IncludeLlm) { $appServices += 'summary-worker' }
+if ($includeMemory) { $appServices += 'memory-worker' }
 
 if (-not $SkipBuild) {
     # A release tag is immutable for a commit.  Reuse a pre-existing image only

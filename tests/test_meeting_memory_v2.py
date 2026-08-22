@@ -43,12 +43,42 @@ def test_memory_facts_are_explicit_and_keep_canonical_evidence():
     assert facts[0].evidence_segment_ids == ("seg-1",)
 
 
+def test_fact_extractor_keeps_explicit_subject_for_relations():
+    facts = extract_memory_facts(
+        [{"id": "seg-1", "startMs": 1000, "endMs": 2000, "text": "Ответственным за ремонт второй печи назначен Иванов."}],
+        owner_user_id="owner-a",
+        meeting_id="meeting-a",
+        transcript_id="transcript-a",
+        transcript_version=2,
+    )
+    assert facts[0].subject == "ремонт второй печи"
+
+
+def test_fact_extractor_does_not_guess_subject_from_ambiguous_decision():
+    facts = extract_memory_facts(
+        [{"id": "seg-1", "startMs": 1000, "endMs": 2000, "text": "Решили перенести срок."}],
+        owner_user_id="owner-a",
+        meeting_id="meeting-a",
+        transcript_id="transcript-a",
+        transcript_version=2,
+    )
+    assert facts[0].subject is None
+
+
 def test_entities_are_normalized_without_cross_owner_global_space():
     assert normalize_entity_name("Печь №2") == "печь №2"
     facts = [_fact("f1", "m1", "RESPONSIBLE", "Иванов", 10)]
     entities = resolve_entities(facts)
     assert entities[0].entity_type == "PERSON"
     assert entities[0].normalized_name == "иванов"
+
+
+def test_subject_entities_include_equipment_aliases():
+    facts = [_fact("f1", "m1", "DEADLINE", "30 августа", 10, subject="ремонта насоса")]
+    entities = resolve_entities(facts)
+    equipment = next(entity for entity in entities if entity.entity_type == "EQUIPMENT")
+    assert "ремонта насоса" in equipment.aliases
+    assert "ремонт насос" in equipment.aliases
 
 
 def test_relation_and_current_state_select_latest_superseding_fact():
@@ -74,6 +104,12 @@ def test_relations_never_link_unrelated_topics_by_fact_type_only():
     first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
     second = _fact("second", "m2", "DEADLINE", "30 августа", 10, subject="поставка насоса")
     assert resolve_relations([first, second], {"m1": 1, "m2": 2}) == ()
+
+
+def test_relations_use_conservative_topic_normalization():
+    first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт второй печи")
+    second = _fact("second", "m2", "DEADLINE", "30 августа", 10, subject="ремонта печи №2")
+    assert len(resolve_relations([first, second], {"m1": 1, "m2": 2})) == 1
 
 
 def test_timeline_uses_meeting_dates_not_segment_start_only():
@@ -115,11 +151,13 @@ def test_memory_migrations_are_additive_and_owner_scoped():
     threads = (root / "053_memory_threads.sql").read_text(encoding="utf-8")
     jobs = (root / "054_memory_jobs.sql").read_text(encoding="utf-8")
     invalidation = (root / "055_memory_invalidation.sql").read_text(encoding="utf-8")
+    runtime = (root / "056_memory_runtime.sql").read_text(encoding="utf-8")
     assert "owner_user_id" in entities and "fact_entities" in entities
     assert "invalidated_at" in relations and "derivation_type" in relations
     assert "memory_thread_facts" in threads
     assert "UNIQUE(transcript_id, transcript_version)" in jobs
     assert "invalidated_by_version" in invalidation
+    assert "lease_expires_at" in runtime and "invalidate_memory_projection_for_fact" in runtime
 
 
 def test_assistant_uses_memory_index_then_safe_transcript_fallback():
@@ -130,3 +168,20 @@ def test_assistant_uses_memory_index_then_safe_transcript_fallback():
     memory_sql = source[source.index("SELECT f.id,f.meeting_id"):source.index("SELECT s.id,t.meeting_id", source.index("SELECT f.id,f.meeting_id"))]
     assert "m.owner_id=%s::uuid" in memory_sql
     assert "f.state='ACTIVE'" in memory_sql
+
+
+def test_memory_runtime_is_wired_without_gpu_dependency():
+    root = Path(__file__).resolve().parents[1]
+    worker = (root / "workers" / "memory_worker" / "worker.py").read_text(encoding="utf-8")
+    compose = (root / "compose.dev.yml").read_text(encoding="utf-8")
+    outbox = (root / "workers" / "outbox_relay" / "worker.py").read_text(encoding="utf-8")
+    assert "memory.index" in worker and "memory-worker" in compose
+    assert '"memory.index"' in outbox
+    assert "GPU" not in worker.split("async def run", 1)[0]
+
+
+def test_memory_worker_payload_is_owner_and_version_scoped():
+    worker = (Path(__file__).resolve().parents[1] / "workers" / "memory_worker" / "worker.py").read_text(encoding="utf-8")
+    assert "memory_payload_scope_mismatch" in worker
+    assert "f.transcript_version=%s" in worker
+    assert "COALESCE(f.owner_user_id,m.owner_id)=j.owner_user_id" in worker

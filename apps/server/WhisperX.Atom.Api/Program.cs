@@ -523,6 +523,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     // or WhisperX/ASR readiness look unhealthy.
     var autoSummaryEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
     var assistantEnabled = configuration.GetValue("ASSISTANT_ENABLED", true);
+    var memoryEnabled = !string.Equals(configuration["MEETING_MEMORY_ENABLED"], "false", StringComparison.OrdinalIgnoreCase);
     var qwenEnabled = autoSummaryEnabled || assistantEnabled;
     var qwenMode = autoSummaryEnabled
         ? "AUTO_SUMMARY_ENABLED"
@@ -537,7 +538,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
 
     var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     var identityMismatch = false;
-    foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker" })
+    foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "memory-worker" })
     {
         var required = requiredWorkerNames.Contains(name);
         if (!fresh.TryGetValue(name, out var item) || !IsFreshWorker(item, checkedAt))
@@ -615,6 +616,16 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             : summaryBusy || asrBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : asrBusy ? "gpu_asr_active" : "gpu_lease_busy", mode = qwenMode }
             : new { status = "READY", reason = "summary_worker_ready", mode = qwenMode };
     }
+    var memoryWorker = fresh.TryGetValue("memory-worker", out var memoryWorkerItem) && IsFreshWorker(memoryWorkerItem, checkedAt);
+    var memory = !memoryEnabled
+        ? new { status = "DISABLED", reason = "meeting_memory_disabled" }
+        : !memoryWorker
+            ? new { status = "DEGRADED", reason = "memory_worker_stale" }
+            : !IsIdentityMatch(memoryWorkerItem!, expectedBuildIdentity)
+                ? new { status = "DEGRADED", reason = "memory_worker_identity_mismatch" }
+                : string.Equals(memoryWorkerItem!.Status, "READY", StringComparison.OrdinalIgnoreCase)
+                    ? new { status = "READY", reason = "memory_worker_ready" }
+                    : new { status = "DEGRADED", reason = memoryWorkerItem.LastErrorCode ?? "memory_worker_not_ready" };
     var gpuWorkerFailed = gpuWorker is null
         || string.Equals(gpuWorker.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
         || string.Equals(gpuWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
@@ -658,6 +669,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
                 gpu = gpuStatus
             },
             hfDiarization = new { status = hf },
+            memory,
             recorder = new { status = "OPTIONAL" },
             qwen
         },
@@ -674,8 +686,10 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             orphanedGpuJobs = operations.OrphanedGpuJobs,
             activeInboxLeases = operations.ActiveInboxLeases,
             oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
-            queuedAssistantQueries = operations.QueuedAssistantQueries,
-            queuedAsrJobs = operations.QueuedAsrJobs
+                queuedAssistantQueries = operations.QueuedAssistantQueries,
+                queuedAsrJobs = operations.QueuedAsrJobs,
+                queuedMemoryJobs = operations.QueuedMemoryJobs,
+                failedMemoryJobs24h = operations.FailedMemoryJobs24h
         },
         llmRuntime = llmRuntime is null ? null : new
         {
@@ -732,6 +746,8 @@ app.MapGet("/api/internal/runtime/readiness", async (HttpContext context, Unifie
                 oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
                 queuedAssistantQueries = operations.QueuedAssistantQueries,
                 queuedAsrJobs = operations.QueuedAsrJobs,
+                queuedMemoryJobs = operations.QueuedMemoryJobs,
+                failedMemoryJobs24h = operations.FailedMemoryJobs24h,
                 pendingOutbox = operations.PendingOutbox
             },
             qwen = llm is null ? null : new

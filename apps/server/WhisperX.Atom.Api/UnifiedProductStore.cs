@@ -149,7 +149,9 @@ public sealed record OperationsSnapshot(
     long ActiveInboxLeases = 0,
     double OldestGpuProgressAgeSeconds = 0,
     long QueuedAssistantQueries = 0,
-    long QueuedAsrJobs = 0);
+    long QueuedAsrJobs = 0,
+    long QueuedMemoryJobs = 0,
+    long FailedMemoryJobs24h = 0);
 public sealed record LlmRuntimeSnapshot(string? Owner, DateTimeOffset? OwnerHeartbeatAt, bool Active, string? ActiveWorkload, string? ActiveRequestId);
 public sealed record WorkerRuntimeRow(string WorkerName, string InstanceId, string Status, DateTime LastSeenAt, Guid? CurrentJobId, string Version, JsonDocument Capabilities, string? LastErrorCode);
 public sealed record AuditEventRow(Guid Id, Guid? ActorUserId, string? ActorUsername, Guid? MeetingId, string EntityType, Guid? EntityId, string EventType, JsonDocument? BeforeState, JsonDocument? AfterState, DateTime CreatedAt);
@@ -2112,6 +2114,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             return Convert.ToInt64(await command.ExecuteScalarAsync());
         }
 
+        async Task<long> OptionalScalarLongAsync(string sql)
+        {
+            try { return await ScalarLongAsync(sql); }
+            catch (PostgresException) { return 0; }
+            catch (NpgsqlException) { return 0; }
+        }
+
         var queuedJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'");
         var runningJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'");
         var failedJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE status='FAILED' AND updated_at >= now()-interval '24 hours'");
@@ -2119,6 +2128,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var activeGpuJobs = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE') AND status IN ('QUEUED','RUNNING')");
         var failedGpuJobs24h = await ScalarLongAsync("SELECT COUNT(*) FROM jobs WHERE type IN ('TRANSCRIBE','TRANSCRIBE_ASR','TRANSCRIBE_REPROCESS','TRANSCRIPT_ENRICH','SUMMARIZE') AND status='FAILED' AND updated_at >= now()-interval '24 hours' AND (error_code LIKE 'GPU_%' OR error_code LIKE 'CUDA_%')");
         var pendingOutbox = await ScalarLongAsync("SELECT COUNT(*) FROM outbox_messages WHERE published_at IS NULL");
+        var queuedMemoryJobs = await OptionalScalarLongAsync("SELECT COUNT(*) FROM memory_jobs WHERE status IN ('QUEUED','RUNNING')");
+        var failedMemoryJobs24h = await OptionalScalarLongAsync("SELECT COUNT(*) FROM memory_jobs WHERE status='FAILED' AND updated_at >= now()-interval '24 hours'");
         var activeAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE status <> 'OFFLINE' AND last_seen_at >= now()-interval '90 seconds'");
         var unavailableAgents = await ScalarLongAsync("SELECT COUNT(*) FROM recorder_agents WHERE last_seen_at IS NULL OR last_seen_at < now()-interval '90 seconds'");
         // A long-running recording is not stale merely because its row is
@@ -2165,11 +2176,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using (var reader = await gpuOwnership.ExecuteReaderAsync())
         {
             if (!await reader.ReadAsync())
-                return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow);
+                return new OperationsSnapshot(queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h, pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow, QueuedMemoryJobs: queuedMemoryJobs, FailedMemoryJobs24h: failedMemoryJobs24h);
             return new OperationsSnapshot(
                 queuedJobs, runningJobs, failedJobs24h, staleLeases, activeGpuJobs, failedGpuJobs24h,
                 pendingOutbox, activeAgents, unavailableAgents, staleRecordingSessions, DateTimeOffset.UtcNow,
-                reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetDouble(3), reader.GetInt64(4), reader.GetInt64(5));
+                reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetDouble(3), reader.GetInt64(4), reader.GetInt64(5), queuedMemoryJobs, failedMemoryJobs24h);
         }
     }
 

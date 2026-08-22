@@ -6,6 +6,7 @@ import re
 from typing import Iterable, Mapping
 
 from .models import MemoryFact, MemoryRelation
+from .entity_resolver import canonical_topic_name
 
 
 _SUPERSEDES = re.compile(r"\b(?:теперь|новый|новая|перенесли|изменили|передали|заменили)\b", re.IGNORECASE)
@@ -22,7 +23,21 @@ def resolve_relations(
     answer; callers must rehydrate both facts' evidence segments.
     """
     values = [fact for fact in facts if fact.state == "ACTIVE" and fact.fact_id]
-    order = dict(meeting_order or {meeting_id: index for index, meeting_id in enumerate(sorted({fact.meeting_id for fact in values}))})
+    if meeting_order is not None:
+        order = dict(meeting_order)
+    else:
+        # The DB adapter normally supplies meeting_order from meetings.started_at.
+        # This fallback is deterministic for pure tests but is never exposed as
+        # user-facing chronology.
+        dated = sorted({
+            (fact.meeting_started_at, fact.meeting_id)
+            for fact in values
+            if fact.meeting_started_at is not None
+        }, key=lambda item: (item[0], item[1]))
+        if dated:
+            order = {meeting_id: index for index, (_started, meeting_id) in enumerate(dated)}
+        else:
+            order = {meeting_id: index for index, meeting_id in enumerate(sorted({fact.meeting_id for fact in values}))}
     result: list[MemoryRelation] = []
     for newer in values:
         for older in values:
@@ -33,7 +48,7 @@ def resolve_relations(
                     continue
             elif order.get(newer.meeting_id, 0) <= order.get(older.meeting_id, 0):
                 continue
-            same_subject = bool(newer.subject and older.subject and newer.subject.lower() == older.subject.lower())
+            same_subject = bool(newer.subject and older.subject and canonical_topic_name(newer.subject) == canonical_topic_name(older.subject))
             # Never link facts from unrelated topics merely because their
             # types match. Subject/entity linking must be explicit first;
             # otherwise a deadline from one meeting could supersede a

@@ -35,7 +35,7 @@ async def run() -> None:
     await heartbeat.start()
     await asyncio.to_thread(reset_media_leases)
     jetstream = client.jetstream()
-    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant", "memory.index"])
     subscription = await jetstream.pull_subscribe("media.ingest", durable="whisperx-media")
     heartbeat.set_state("READY")
     root = Path(os.getenv("MEDIA_ROOT", "/data"))

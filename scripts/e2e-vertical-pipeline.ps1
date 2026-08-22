@@ -49,12 +49,12 @@ try {
     if ($effectiveGpuMode -eq "host") {
       & (Join-Path $PSScriptRoot "stop-host-gpu-worker.ps1")
       if ($LASTEXITCODE -ne 0) { throw "VERTICAL_HOST_GPU_STOP_FAILED:$LASTEXITCODE" }
-      & docker compose -f $compose --profile core --profile llm restart media-worker summary-worker
+      & docker compose -f $compose --profile core --profile llm --profile memory restart media-worker summary-worker memory-worker
       if ($LASTEXITCODE -ne 0) { throw "VERTICAL_WORKER_RESTART_FAILED:$LASTEXITCODE" }
       & (Join-Path $PSScriptRoot "start-host-gpu-worker.ps1")
       if ($LASTEXITCODE -ne 0) { throw "VERTICAL_HOST_GPU_START_FAILED:$LASTEXITCODE" }
     } else {
-      & docker compose -f $compose --profile core --profile gpu --profile llm restart media-worker gpu-worker summary-worker
+      & docker compose -f $compose --profile core --profile gpu --profile llm --profile memory restart media-worker gpu-worker summary-worker memory-worker
       if ($LASTEXITCODE -ne 0) { throw "VERTICAL_WORKER_RESTART_FAILED:$LASTEXITCODE" }
     }
   }

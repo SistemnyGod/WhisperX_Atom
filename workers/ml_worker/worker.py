@@ -575,7 +575,7 @@ async def run() -> None:
     if recovered:
         LOGGER.warning("recovered stale GPU jobs count=%s", recovered)
     jetstream = client.jetstream()
-    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant", "memory.index"])
     subscription = await jetstream.pull_subscribe("ml.transcribe", durable="whisperx-gpu")
     heartbeat.set_state("READY")
     while True:

@@ -129,6 +129,7 @@ $profiles = @('--profile','core','--profile','gpu','--profile','lan')
 # Assistant and automatic summaries share the Summary Worker/Qwen profile.
 # Enabling only ASSISTANT_ENABLED must therefore start the same profile.
 if ($EnableQwen -or $EnableAssistant) { $profiles += @('--profile','llm') }
+if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $profiles += @('--profile','memory') }
 $configText = (& docker @compose @profiles config | Out-String)
 if ($LASTEXITCODE -ne 0) { throw 'SERVER_RELEASE_COMPOSE_INVALID' }
 if ($configText -match '(?im)image:\s*[^\r\n]*:(dev|latest)\b') { throw 'SERVER_RELEASE_COMPOSE_UNPINNED_IMAGE' }
@@ -166,7 +167,9 @@ if ($rollbackLines.Count -gt 1) { $rollbackLines -join "`r`n" | Set-Content -Lit
 # Quiesce only the two GPU owners before migration/recovery. PostgreSQL, NATS,
 # media, recordings, archives and all volumes remain online.
 $gpuQuiesced = $false
-& docker @compose @profiles stop gpu-worker summary-worker
+$quiesceServices = @("gpu-worker", "summary-worker")
+if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $quiesceServices += "memory-worker" }
+& docker @compose @profiles stop @quiesceServices
 if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_QUIESCE_FAILED' }
 $gpuQuiesced = $true
 try {
@@ -184,7 +187,7 @@ try {
 } catch {
     if ($gpuQuiesced) {
         $rollbackCompose = if (Test-Path -LiteralPath $rollbackPath) { $compose + @('-f',$rollbackPath) } else { $compose }
-        & docker @rollbackCompose @profiles up -d --no-deps --pull never gpu-worker summary-worker
+        & docker @rollbackCompose @profiles up -d --no-deps --pull never @quiesceServices
         if ($LASTEXITCODE -ne 0) { Write-Warning 'SERVER_GPU_RESTORE_AFTER_PRESTART_FAILURE_FAILED=true' }
     }
     throw

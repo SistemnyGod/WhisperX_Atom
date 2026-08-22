@@ -156,17 +156,21 @@ try {
 
     $workerCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
     if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $workerCompose += @("--profile", "llm") }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $workerCompose += @("--profile", "memory") }
     $workerCompose += @("up", "-d", "--pull", "never")
     if ($Rebuild) { $workerCompose += "--build" }
     $workerServices = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
     if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $workerServices += "summary-worker" }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $workerServices += "memory-worker" }
     $workerCompose += $workerServices
     & docker @workerCompose
     if ($LASTEXITCODE -ne 0) { throw "LAN_WORKER_START_FAILED" }
 
     $requiredServices = if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "lan-gateway") } else { @("postgres", "nats", "api", "tusd", "outbox-relay", "import-worker", "media-worker", "gpu-worker", "lan-gateway") }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $requiredServices += "memory-worker" }
     $psArgs = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
     if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $psArgs += @("--profile", "llm") }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $psArgs += @("--profile", "memory") }
     $psArgs += @("ps", "--format", "{{.Service}} {{.State}}")
     $stateText = (& docker @psArgs | Out-String)
     $degraded = @($requiredServices | Where-Object { $stateText -notmatch ("(?m)^" + [regex]::Escape($_) + "\s+running") })
@@ -178,6 +182,7 @@ try {
     # during startup or has lost its database connection.
     $healthCompose = $composeBase + @("--profile", "core", "--profile", "gpu", "--profile", "lan")
     if ($EnableQwen -or $EnableAssistant -or $assistantEnabled -eq "true") { $healthCompose += @("--profile", "llm") }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $healthCompose += @("--profile", "memory") }
     function Test-WorkerHealthy([string]$service) {
         $containerId = ((& docker @healthCompose ps -q $service 2>$null | Select-Object -First 1) | Out-String).Trim()
         if ([string]::IsNullOrWhiteSpace($containerId)) { return $false }

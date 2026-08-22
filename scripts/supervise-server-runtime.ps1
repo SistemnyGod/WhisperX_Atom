@@ -117,6 +117,7 @@ function Test-RequiredContainersRunning([object]$Manifest) {
     $running = @(& docker @compose ps --services --status running 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $required = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker")
     if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $required += "summary-worker" }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $required += "memory-worker" }
     foreach ($service in $required) {
         if ($running -notcontains $service) { return $false }
     }
@@ -161,6 +162,7 @@ function Test-WhisperXRuntime([object]$Manifest) {
 
         $required = @("outbox-relay", "import-worker", "media-worker", "gpu-worker")
         if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $required += "summary-worker" }
+        if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $required += "memory-worker" }
         $unhealthy = [System.Collections.Generic.List[string]]::new()
         foreach ($workerName in $required) {
             $worker = @($readiness.workers | Where-Object { $_.name -eq $workerName }) | Select-Object -First 1
@@ -255,6 +257,7 @@ function Invoke-TargetedRecovery([object]$Manifest) {
     if ($script:RecoveryCycles -ge 2) {
         $reconcile = @("api", "outbox-relay", "import-worker", "media-worker", "gpu-worker")
         if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $reconcile += "summary-worker" }
+        if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $reconcile += "memory-worker" }
         Write-SupervisorLog "Targeted recovery did not restore readiness; reconciling WhisperX services" "ERROR"
         & docker @compose up -d --no-deps --pull never @reconcile 2>&1 | Out-Null
         $script:RecoveryCycles = 0

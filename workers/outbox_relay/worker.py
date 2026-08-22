@@ -282,7 +282,7 @@ async def run() -> None:
     heartbeat = AsyncHeartbeat("outbox-relay", capabilities=lambda: {"natsConnected": True, "outboxRelay": "ready"})
     await heartbeat.start()
     jetstream = client.jetstream()
-    subjects = ["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"]
+    subjects = ["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant", "memory.index"]
     # Existing development streams may have been created before a new subject
     # was introduced. Update the subject set instead of silently keeping stale
     # configuration (which would block the oldest outbox message forever).

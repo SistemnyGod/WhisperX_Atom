@@ -423,6 +423,35 @@ services:
       nats:
         condition: service_healthy
 
+  memory-worker:
+    profiles: ["memory"]
+    image: whisperx-atom-memory-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/memory_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      NATS_URL: nats://nats:4222
+      WORKER_INSTANCE_ID: memory-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      MEMORY_WORKER_ENABLED: ${MEETING_MEMORY_ENABLED:-true}
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
   # Optional diagnostics only. The product UI is the Windows Desktop app.
   web:
     profiles: ["diagnostic-web"]

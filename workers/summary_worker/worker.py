@@ -793,7 +793,7 @@ async def run() -> None:
         else:
             heartbeat.set_state("READY")
     jetstream = client.jetstream()
-    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant"])
+    await ensure_stream(jetstream, name="WHISPERX", subjects=["media.ingest", "ml.transcribe", "llm.summarize", "llm.assistant", "memory.index"])
     summary_subscription = await jetstream.pull_subscribe("llm.summarize", durable="summary-worker")
     assistant_subscription = await jetstream.pull_subscribe("llm.assistant", durable="assistant-worker")
     set_runtime_state()

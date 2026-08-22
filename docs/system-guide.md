@@ -653,6 +653,8 @@ grounding/RBAC-контур Assistant.
 - `054_memory_jobs.sql` — отдельная фоновая очередь индексации;
 - `055_memory_invalidation.sql` — версия, породившая invalidation старого
   derived fact.
+- `056_memory_runtime.sql` — leases, retry и безопасная инвалидизация
+  relations/thread links для CPU-only worker.
 
 `workers/memory_worker` содержит детерминированные этапы extraction,
 normalization, relation resolution, temporal selection, thread projection и
@@ -665,3 +667,21 @@ canonical evidence rehydration. Стадии Memory Worker: `QUEUED`,
 миграций или индекса автоматически используется существующий bounded FTS /
 embedding retrieval. Memory-кандидат без `evidence_segment_ids`, stale fact,
 чужой meeting или недоступный по RBAC сегмент не передаётся в Qwen.
+
+## 15. Meeting Memory v2 runtime
+
+После сохранения V2 `ml-worker` атомарно создаёт один `MEMORY_INDEX` job и
+outbox-событие `memory.index`. CPU-only `memory-worker` получает событие через
+JetStream, захватывает обычный inbox lease и строит projection с повторяемыми
+стадиями `RESOLVING_ENTITIES`, `LINKING_FACTS` и `BUILDING_THREADS`.
+
+В projection попадают только facts текущей версии и владельца. Relations и
+thread-facts являются подсказками поиска; Assistant всегда заново читает
+канонические `transcript_segments`, проверяет RBAC, version/status и evidence
+IDs. `memory-worker` не использует GPU и не влияет на V1, V2 или Summary при
+ошибке.
+
+Сервис включается параметром `MEETING_MEMORY_ENABLED=true` и профилем Compose
+`memory`. Для уже готовых встреч используется ограниченный
+`python -m workers.memory_worker.backfill --preview` с последующим явным
+`--apply`; команда идемпотентна и выводит только идентификаторы и метрики.

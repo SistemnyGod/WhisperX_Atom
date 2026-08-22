@@ -25,6 +25,9 @@ class MemoryFact:
     # Internal extraction context only. It is intentionally omitted from
     # ``to_dict`` and must not be written to memory acceptance artifacts.
     source_text: str = ""
+    # Runtime-only chronology supplied by the database adapter. UUID ordering
+    # must never be presented as meeting chronology.
+    meeting_started_at: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

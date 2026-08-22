@@ -33,6 +33,10 @@ services:
       ASSISTANT_ENABLED: "${ASSISTANT_ENABLED:-true}"
       AUTO_SUMMARY_PROFILE: "MEETING_PROTOCOL_RU"
 
+  memory-worker:
+    environment:
+      MEMORY_WORKER_ENABLED: "${MEETING_MEMORY_ENABLED:-true}"
+
   lan-gateway:
     profiles: ["lan"]
     image: caddy:2.8.4-alpine

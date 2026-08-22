@@ -20,3 +20,6 @@ services:
   summary-worker:
     image: whisperx-atom-summary-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
     build: !reset null
+  memory-worker:
+    image: whisperx-atom-memory-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
