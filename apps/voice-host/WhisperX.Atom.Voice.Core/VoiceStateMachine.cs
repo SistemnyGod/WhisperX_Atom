@@ -168,6 +168,15 @@ public sealed class VoiceStateMachine
         return true;
     }
 
+    public bool TryBeginBargeIn()
+    {
+        lock (_gate)
+        {
+            if (!_enabled || _state != VoiceHostState.Responding) return false;
+            return TransitionUnsafe(VoiceHostState.Capturing, "barge-in-wake");
+        }
+    }
+
     private VoiceHostSnapshot CreateSnapshot() => new(
         _state,
         _enabled,

@@ -51,6 +51,33 @@ def test_lexical_overlap_remains_a_valid_hashed_anchor_without_fts():
     assert results[0].lexical_score > 0
 
 
+class _VerifiedSemanticProvider:
+    """Small deterministic stand-in for the verified ONNX CPU provider."""
+
+    name = "onnx-cpu:test-snapshot"
+    dimension = 2
+
+    def embed(self, text: str) -> tuple[float, ...]:
+        # The candidate is intentionally semantic-only: it has no FTS rank
+        # and no shared lexical token with the query.  A raw cosine of 0.8 is
+        # above the production 0.72 threshold and must be accepted only for a
+        # real provider identity.
+        return (1.0, 0.0) if "насос" in text.lower() else (0.8, 0.6)
+
+
+def test_verified_semantic_provider_can_create_semantic_only_anchor():
+    retriever = HybridRetriever(_VerifiedSemanticProvider())
+    results = retriever.rank(
+        "оборудование",
+        [candidate("semantic", 0, "Насос работает стабильно.")],
+    )
+    assert results
+    assert results[0].candidate.segment_id == "semantic"
+    assert results[0].fts_score == 0
+    assert results[0].lexical_score == 0
+    assert results[0].raw_cosine >= 0.72
+
+
 def test_neighbours_stay_inside_same_meeting_and_transcript():
     retriever = HybridRetriever(HashedEmbeddingProvider())
     anchor = candidate("anchor", 1, "Решили перенести ремонт на пятницу.")

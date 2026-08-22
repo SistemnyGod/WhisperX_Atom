@@ -290,6 +290,13 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             return testResponse;
         }
 
+        if (intent.ToUpperInvariant() is "GETSERVERSTATUS" or "GETPIPELINESTATUS" or "GETSTORAGESTATUS")
+        {
+            var localStatus = await GetLocalStatusAsync(intent.ToUpperInvariant(), traceId, commandId, cancellationToken).ConfigureAwait(false);
+            CacheCommand(commandId, localStatus);
+            return localStatus;
+        }
+
         AgentIpcResponse response;
         try
         {
@@ -341,6 +348,60 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             response.SessionId, localReady, spoken, response.ErrorDetail, traceId, commandId);
         CacheCommand(commandId, brokerResponse);
         return brokerResponse;
+    }
+
+    private async Task<BrokerResponse> GetLocalStatusAsync(string intent, string? traceId, string? commandId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            switch (intent)
+            {
+                case "GETSERVERSTATUS":
+                {
+                    if (!_backend.HasSession)
+                        return new(false, "VOICE_ASSISTANT_AUTH_REQUIRED", SpokenText: "Для проверки сервера требуется вход в Desktop.", TraceId: traceId, CommandId: commandId);
+                    var status = await _backend.GetSystemStatusAsync(cancellationToken).ConfigureAwait(false);
+                    if (status is null)
+                        return new(false, "VOICE_ASSISTANT_SERVER_UNREACHABLE", SpokenText: "Сервер недоступен.", TraceId: traceId, CommandId: commandId);
+                    return new(true, RecorderState: status.Ready ? "READY" : "DEGRADED",
+                        SpokenText: status.Ready ? "Сервер доступен и готов." : "Сервер отвечает, но ещё не готов.",
+                        Detail: $"postgres={status.Postgres}", TraceId: traceId, CommandId: commandId);
+                }
+                case "GETPIPELINESTATUS":
+                {
+                    if (!_backend.HasSession)
+                        return new(false, "VOICE_ASSISTANT_AUTH_REQUIRED", SpokenText: "Для проверки обработки требуется вход в Desktop.", TraceId: traceId, CommandId: commandId);
+                    var readiness = await _backend.GetProcessingReadinessAsync(cancellationToken).ConfigureAwait(false);
+                    if (readiness is null)
+                        return new(false, "VOICE_ASSISTANT_SERVER_UNREACHABLE", SpokenText: "Состояние обработки пока недоступно.", TraceId: traceId, CommandId: commandId);
+                    var busy = readiness.Components.ValueKind == JsonValueKind.Object
+                        && readiness.Components.EnumerateObject().Any(p => p.Value.ValueKind == JsonValueKind.Object
+                            && p.Value.TryGetProperty("status", out var s)
+                            && string.Equals(s.GetString(), "BUSY", StringComparison.OrdinalIgnoreCase));
+                    var spoken = !readiness.Ready
+                        ? "Обработка требует восстановления."
+                        : busy ? "Обработка доступна, часть GPU сейчас занята." : "Обработка готова.";
+                    return new(true, RecorderState: readiness.Ready ? "READY" : "DEGRADED", SpokenText: spoken,
+                        Detail: busy ? "BUSY" : "READY", TraceId: traceId, CommandId: commandId);
+                }
+                case "GETSTORAGESTATUS":
+                {
+                    var health = await _commands.StatusAsync(cancellationToken).ConfigureAwait(false);
+                    if (!health.Ok || health.Health is null)
+                        return new(false, health.Error ?? "VOICE_RECORDER_UNAVAILABLE", SpokenText: "Состояние локального хранилища недоступно.", TraceId: traceId, CommandId: commandId);
+                    var freeGb = health.Health.FreeBytes / 1024d / 1024d / 1024d;
+                    return new(true, RecorderState: "READY", SpokenText: $"Свободно на диске: {freeGb:0.0} гигабайт.",
+                        Detail: $"freeBytes={health.Health.FreeBytes};totalBytes={health.Health.TotalBytes}", TraceId: traceId, CommandId: commandId);
+                }
+                default:
+                    return new(false, "VOICE_COMMAND_REJECTED", TraceId: traceId, CommandId: commandId);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            return new(false, "VOICE_STATUS_UNAVAILABLE", Detail: exception.GetType().Name, TraceId: traceId, CommandId: commandId);
+        }
     }
 
     private void CacheCommand(string? commandId, BrokerResponse response)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 from dataclasses import dataclass
@@ -15,9 +16,11 @@ from .speaker_registry import default_display_label, match_profile, normalize_em
 from whisperx_atom.pipeline_contract import validate_stage_name
 from workers.pipeline_timeline import record_pipeline_event
 from .technical_events import build_technical_intervals, segment_technical_flags
+from workers.summary_worker.fact_extraction import extract_transcript_facts, fact_insert_params
 
 ASR_JOB_TYPES = ("TRANSCRIBE", "TRANSCRIBE_ASR", "TRANSCRIBE_REPROCESS")
 ENRICHMENT_JOB_TYPE = "TRANSCRIPT_ENRICH"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -787,6 +790,10 @@ class JobRepository:
                     "INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) VALUES(gen_random_uuid(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(transcript_id,ordinal) DO UPDATE SET text=excluded.text,end_ms=excluded.end_ms,speaker_id=excluded.speaker_id,speaker_label=excluded.speaker_label,confidence=excluded.confidence,words=excluded.words,segment_kind=excluded.segment_kind,is_hidden=excluded.is_hidden",
                     (transcript_id, ordinal, start_ms, end_ms, speakers.get(label) if label else None, label or "UNKNOWN", str(segment.get("text", "")).strip(), segment.get("confidence"), Jsonb(segment.get("words", [])), technical_kind if technical_hidden else str(segment.get("segment_kind", "SPEECH")), bool(segment.get("is_hidden", False)) or technical_hidden),
                 )
+            # Derived facts are an optional index over the exact transcript
+            # just persisted.  A missing 049 migration must never make V1/V2
+            # persistence fail, hence the savepoint and best-effort insert.
+            self._persist_derived_facts(connection, meeting_id, str(transcript_id), version, version_kind)
             if os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"} and not summary_blocked:
                 summary_profile = os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper()
                 prompt_version = os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v2")
@@ -819,6 +826,49 @@ class JobRepository:
             if version_kind == "ENRICHED":
                 self._record_pipeline_event(connection, meeting_id, "V2_READY", str(job[2]) if job[2] else None)
             return True
+
+    @staticmethod
+    def _persist_derived_facts(connection: psycopg.Connection[Any], meeting_id: str, transcript_id: str, transcript_version: int, version_kind: str) -> int:
+        if not transcript_id or str(version_kind).upper() not in {"ASR_DRAFT", "ENRICHED", "GENERATED", "REPROCESSED"}:
+            return 0
+        try:
+            connection.execute("SAVEPOINT transcript_facts_optional")
+            rows = connection.execute(
+                "SELECT id,start_ms,end_ms,text,speaker_id FROM transcript_segments WHERE transcript_id=%s AND COALESCE(is_hidden,false)=false ORDER BY ordinal",
+                (transcript_id,),
+            ).fetchall()
+            facts = extract_transcript_facts(
+                rows,
+                meeting_id=meeting_id,
+                transcript_id=transcript_id,
+                transcript_version=int(transcript_version),
+            )
+            connection.execute("DELETE FROM transcript_facts WHERE transcript_id=%s AND transcript_version=%s", (transcript_id, int(transcript_version)))
+            owner_row = connection.execute("SELECT owner_id FROM meetings WHERE id=%s", (meeting_id,)).fetchone()
+            owner_user_id = owner_row[0] if owner_row else None
+            for fact in facts:
+                params = list(fact_insert_params(fact))
+                params[11] = Jsonb(params[11])
+                connection.execute(
+                    """INSERT INTO transcript_facts(
+                         owner_user_id,meeting_id,transcript_id,transcript_version,fact_type,subject,predicate,value,
+                         speaker_id,start_ms,end_ms,confidence,evidence_segment_ids,state)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                    (owner_user_id, *params),
+                )
+            connection.execute("RELEASE SAVEPOINT transcript_facts_optional")
+            return len(facts)
+        except Exception:
+            # Roll back only the optional index operation.  The surrounding
+            # transcript transaction remains usable on rolling deployments
+            # where migration 049 has not been applied yet.
+            try:
+                connection.execute("ROLLBACK TO SAVEPOINT transcript_facts_optional")
+                connection.execute("RELEASE SAVEPOINT transcript_facts_optional")
+            except Exception:
+                LOGGER.debug("transcript fact savepoint cleanup failed", exc_info=True)
+            LOGGER.debug("derived transcript facts unavailable", exc_info=True)
+            return 0
 
     @staticmethod
     def _ensure_summary_job_and_outbox(

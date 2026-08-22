@@ -61,6 +61,43 @@ class SummaryWorkerTests(unittest.TestCase):
         self.assertEqual(12, compact["properties"]["items"]["maxItems"])
         self.assertEqual(4000, schema["properties"]["answer"]["maxLength"])
 
+    def test_llama_streaming_response_is_normalized_and_reports_first_token(self):
+        class StreamResponse:
+            def __init__(self):
+                self.lines = [
+                    'data: {"choices":[{"delta":{"content":"{\\"answer\\":\\"ok\\"}"}}]}',
+                    "data: [DONE]",
+                ]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_lines(self):
+                for line in self.lines:
+                    yield line
+
+        class StreamClient:
+            def stream(self, method, url, json):
+                return StreamResponse()
+
+        async def invoke():
+            client = LlamaCppClient("http://llama")
+            client._client = StreamClient()
+            return await client.invoke_json(
+                [{"role": "user", "content": "test"}],
+                {"type": "object", "properties": {"answer": {"type": "string"}}},
+            ), client.last_first_token_ms
+
+        result, first_token_ms = asyncio.run(invoke())
+        self.assertEqual("ok", result["answer"])
+        self.assertIsNotNone(first_token_ms)
+
     def test_valid_v2_evidence_is_checked_without_being_marked_for_review(self):
         result = validate_evidence_v2(
             {

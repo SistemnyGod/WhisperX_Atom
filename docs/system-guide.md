@@ -215,6 +215,43 @@ AssistantQuery.
 `Farewell` (`пока`, `до свидания`, `до встречи` и утверждённые варианты)
 обрабатывается локально, не требует сервера и не меняет состояние записи.
 
+Три диагностические фразы также являются локальными fast paths:
+`«Мифодий, состояние сервера»`, `«Мифодий, состояние обработки»` и
+`«Мифодий, свободное место»`. Они читают соответственно API readiness,
+processing readiness и Recorder Health; Qwen, retrieval и conversation для них
+не запускаются.
+
+Во время TTS режим `VOICE_BARGE_IN_MODE=WAKE_ONLY` слушает только wake word.
+После двух уверенных срабатываний текущий ответ отменяется, старый playback
+помечается `CANCELLED`, а Voice Host сразу принимает новую фразу. Произвольная
+речь без wake word не прерывает ответ; `VOICE_BARGE_IN_MODE=OFF` возвращает
+только прежнюю команду «Мифодий, замолчи».
+
+Snapshot Voice Host содержит optional timestamps wake/utterance/Assistant/TTS
+и очередные/synthesis/playback timings. Они предназначены для корреляции по
+`traceId`, `commandId` и `queryId`; текст вопросов и ответов в telemetry не
+сохраняется.
+
+Для серии latency-запросов используется
+`scripts/e2e-mifodiy-latency-batch.ps1`. Он опрашивает Assistant каждые 100 мс,
+сохраняет только хэши вопросов, ID, статусы и timings, а в summary считает
+p50/p95 принятия и полного ответа.
+
+Для локального обезличенного QA-корпуса используется схема
+`docs/mifodiy-qa-case.schema.json` и runner `scripts/run-mifodiy-qa.ps1`.
+Сначала выполняется безопасная проверка без сервера:
+
+```powershell
+.\scripts\run-mifodiy-qa.ps1 -CorpusPath .\qa\mifodiy -ValidateOnly
+```
+
+При runtime-прогоне runner принимает только явно заданные meeting IDs и
+сохраняет в отчёт хэши вопросов, идентификаторы, режимы, статусы, evidence
+count и timings. Тексты вопросов/ответов, стенограммы и персональные данные в
+отчёт не попадают; production QA-корпус хранится локально и не входит в Git
+или release bundle. Для детерминированного preflight reasoning используется
+отдельная синтетическая матрица из 400 кейсов.
+
 TTS-контур:
 
 1. `SpeechResponder` выбирает локальный `TtsEngineRouter`.
@@ -224,6 +261,23 @@ TTS-контур:
    Silero/модели/целостности.
 5. Playback получает один `responseId`; отменённый ответ не воспроизводится
    повторно.
+
+### Mifodiy Intelligence v2
+
+После выбора scope через `AssistantModeResolver` worker строит отдельный
+`AssistantQueryPlan`: intent, topic, person, требуемые поля, follow-up и
+политику ответа. План не является evidence и не может заменить сегменты
+стенограммы. Для `RESPONSIBLE`, `DEADLINE`, `DECISION`, `CAUSE`, `TASK`,
+`STATUS`, `TIMELINE`, `COMPARISON` и `SUMMARY` retrieval получает собственные
+ключи и размер соседнего окна; для причин окно шире, но причинная связь всё
+равно должна быть явно произнесена в стенограмме.
+
+Состояние follow-up (`topic`, `intent`, `person`, `dateRange`, последний вопрос)
+хранится в `assistant_conversation_state` и используется только для нового
+плана retrieval. Ответ Мифодия никогда не становится источником факта.
+`transcript_facts` — производный индекс с обязательными
+`transcript_version` и `evidence_segment_ids`; при смене версии стенограммы
+старые derived facts должны быть инвалидированы и пересчитаны.
 
 ## 5. Серверные модули
 
@@ -544,3 +598,70 @@ server off → START → STOP → local WAV READY → restart Desktop
 - [Мифодий: текущее состояние](mifodiy-current-state.md);
 - [Конфигурация](configuration.md);
 - [Операционный host runtime](operations-host-runtime.md).
+
+## 13. Mifodiy Intelligence v2
+
+После того как `AssistantModeResolver` определил scope (`GENERAL_CHAT`,
+`CURRENT_MEETING`, `LIVE_MEETING` или `MEETING_MEMORY`), Assistant строит
+детерминированный `AssistantQueryPlan`. Он содержит intent, тему, человека,
+срок, follow-up и обязательные поля ответа. План не является evidence и не
+может расширить meeting/RBAC scope.
+
+`RetrievalPlan` выбирает лимиты и окно соседних сегментов по intent. Полученные
+сегменты группируются в evidence bundles с исходными `segmentId`, временными
+границами и `transcriptVersion`; candidate facts в bundle являются только
+производным индексом. `AnswerPlan` передаёт Qwen явную политику: использовать
+только подтверждённые источники, не выводить причинность из соседних фраз,
+сообщать противоречия и возвращать `PARTIAL`, если обязательное поле не найдено.
+
+Миграция `049_transcript_facts.sql` добавляет индекс явных decision/task/
+responsible/deadline/cause/status фактов. Каждый факт ссылается на transcript,
+его версию и сегменты; при появлении более новой версии старые rows получают
+`INVALIDATED` и не используются как источник истины. Миграция
+`050_assistant_conversation_state.sql` хранит только структурированный
+follow-up state (тема, intent, человек, диапазон дат, последний вопрос и
+meeting scope), никогда текст ответа Assistant и не заменяет transcript
+evidence.
+
+В ответном metadata доступны `queryPlan`, `retrievalPlan`, `answerPlan`,
+`sourceRanges`, `supportedFields` и `missingFields`. Это позволяет Desktop
+показать источник и честно сообщить о неполном ответе, не проговаривая
+неподтверждённый факт.
+
+Для локальной проверки intent используется синтетический reasoning corpus:
+`scripts/run-mifodiy-reasoning-qa.py`. Он генерирует матрицу из 400 кейсов
+(детальная таблица плана содержит именно 400, хотя в заголовке этапа указано
+«300+»), проверяет уникальность категорий и сохраняет только SHA256 вопросов,
+intent и метрики. Производственный runner
+`scripts/run-mifodiy-qa.ps1` по-прежнему запускается отдельно и требует
+явной авторизации; реальные вопросы, ответы и стенограммы в отчёт не попадают.
+
+## 14. Meeting Memory v2 (foundation)
+
+Meeting Memory v2 — это owner-scoped индекс подтверждённых фактов, а не
+память ответов Qwen. Источником истины остаются `transcript_segments` и
+canonical V1/V2. Индекс используется только для поиска кандидатов, после чего
+фрагменты повторно поднимаются из canonical transcript и проходят обычный
+grounding/RBAC-контур Assistant.
+
+Добавленные additive-миграции:
+
+- `051_memory_entities.sql` — нормализованные сущности и связи fact/entity;
+- `052_memory_fact_relations.sql` — `SUPERSEDES`, `CONTRADICTS`, `CLOSES` и
+  другие derived relations;
+- `053_memory_threads.sql` — длительные owner-scoped темы и их факты;
+- `054_memory_jobs.sql` — отдельная фоновая очередь индексации;
+- `055_memory_invalidation.sql` — версия, породившая invalidation старого
+  derived fact.
+
+`workers/memory_worker` содержит детерминированные этапы extraction,
+normalization, relation resolution, temporal selection, thread projection и
+canonical evidence rehydration. Стадии Memory Worker: `QUEUED`,
+`EXTRACTING_FACTS`, `RESOLVING_ENTITIES`, `LINKING_FACTS`,
+`REBUILDING_THREADS`, `READY`, `NEEDS_REVIEW`, `FAILED`. Падение индексации не
+переводит готовую V1/V2/Summary в ошибку.
+
+Для `MEETING_MEMORY` Assistant сначала пробует memory index. При отсутствии
+миграций или индекса автоматически используется существующий bounded FTS /
+embedding retrieval. Memory-кандидат без `evidence_segment_ids`, stale fact,
+чужой meeting или недоступный по RBAC сегмент не передаётся в Qwen.

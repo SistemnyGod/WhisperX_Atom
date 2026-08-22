@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -19,6 +20,12 @@ from workers.gpu_runtime_coordination import GpuRuntimeCoordinator
 from .llama_subprocess import LocalLlamaRuntime
 from .summarizer import LlamaCppClient
 from .hybrid_retrieval import HybridRetriever, RetrievalCandidate
+from .answer_planner import assess_requested_fields, build_answer_plan, missing_field_text
+from .evidence_reasoner import detect_conflicts
+from .evidence_bundles import build_evidence_bundles
+from .query_understanding import AssistantQueryPlan, understand_query
+from .retrieval_planner import build_retrieval_plan
+from workers.memory_worker.memory_retrieval import MemoryQueryPlan, build_memory_query_plan
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
 
@@ -232,6 +239,8 @@ class AssistantRepository:
         self._hybrid = HybridRetriever()
         self._last_retrieval_metadata: dict[str, Any] = {}
         self._live_provenance: dict[str, tuple[str, str | None, str | None]] = {}
+        self._last_query_plan: dict[str, Any] = {}
+        self._last_answer_plan: dict[str, Any] = {}
 
     def close(self) -> None:
         self._db.close()
@@ -239,6 +248,61 @@ class AssistantRepository:
     def clear_retrieval_metadata(self) -> None:
         self._last_retrieval_metadata = {}
         self._live_provenance = {}
+        self._last_query_plan = {}
+        self._last_answer_plan = {}
+
+    def set_query_plan(self, plan: dict[str, Any]) -> None:
+        self._last_query_plan = dict(plan or {})
+
+    def set_answer_plan(self, plan: dict[str, Any]) -> None:
+        self._last_answer_plan = dict(plan or {})
+
+    @property
+    def semantic_provider(self) -> Any:
+        return self._hybrid.provider
+
+    def conversation_state(self, conversation_id: str | None, user_id: str | None) -> dict[str, Any] | None:
+        if not conversation_id or not user_id:
+            return None
+        try:
+            with self._db.connection() as connection:
+                row = connection.execute(
+                    """SELECT last_intent,last_topic,last_person,last_date_range,last_user_question,last_meeting_id
+                       FROM assistant_conversation_state WHERE conversation_id=%s AND user_id=%s""",
+                    (conversation_id, user_id),
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "intent": row[0], "topic": row[1], "person": row[2],
+                    "dateRange": row[3], "lastUserQuestion": row[4], "meetingId": str(row[5]) if row[5] else None,
+                }
+        except Exception:
+            # Rolling deployments may run the worker before migration 050.
+            # Query understanding is additive and must never make Assistant
+            # unavailable when the optional state table is not present.
+            return None
+
+    def save_conversation_state(self, conversation_id: str | None, user_id: str | None, meeting_id: str | None, question: str, plan: dict[str, Any]) -> None:
+        if not conversation_id or not user_id:
+            return
+        try:
+            with self._db.connection() as connection:
+                connection.execute(
+                    """INSERT INTO assistant_conversation_state(
+                         conversation_id,user_id,last_meeting_id,last_intent,last_topic,last_person,
+                         last_date_range,last_user_question,updated_at)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,now())
+                       ON CONFLICT(conversation_id) DO UPDATE SET
+                         user_id=EXCLUDED.user_id,last_meeting_id=EXCLUDED.last_meeting_id,
+                         last_intent=EXCLUDED.last_intent,last_topic=EXCLUDED.last_topic,
+                         last_person=EXCLUDED.last_person,last_date_range=EXCLUDED.last_date_range,
+                         last_user_question=EXCLUDED.last_user_question,updated_at=now()""",
+                    (conversation_id, user_id, meeting_id, plan.get("intent"), plan.get("topic"),
+                     plan.get("person"), plan.get("dateRange"), question[:2000]),
+                )
+        except Exception:
+            LOGGER.debug("conversation state persistence unavailable", exc_info=True)
 
     def claim(self, message_id: str, query_id: str) -> bool:
         with self._db.connection() as connection:
@@ -471,7 +535,7 @@ class AssistantRepository:
                     )
                 return "EXPIRED" if expired else "NOOP"
 
-    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         """Retrieve scope-safe evidence with Russian FTS + embeddings.
 
         SQL remains responsible for RBAC, meeting boundaries and transcript
@@ -548,7 +612,7 @@ class AssistantRepository:
                         allowed_meetings.append(value)
                 candidates = [item for item in candidates if item.meeting_id in allowed_meetings]
                 ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
-            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=neighbour_limit)
+            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=neighbour_limit, window=neighbour_window)
             score_by_id = {item.candidate.segment_id: item.score for item in ranked}
             selected.sort(key=lambda item: (-score_by_id.get(item.segment_id, 0.0), item.meeting_id, item.ordinal, item.segment_id))
             rows = [
@@ -565,6 +629,8 @@ class AssistantRepository:
                 'selectedCount': len(rows),
                 'neighboursIncluded': max(0, len(rows) - len(ranked)),
                 'scopeMeetingId': meeting_id,
+                'neighbourWindow': max(0, min(int(neighbour_window), 4)),
+                'queryPlan': self._last_query_plan or None,
             }
             low_quality = False
             if not rows and meeting_id:
@@ -600,6 +666,167 @@ class AssistantRepository:
             allowed = {line.split(' ', 1)[0].removeprefix('[SEG-') for line in context.splitlines()}
             valid = {key: value for key, value in valid.items() if key in allowed}
         return context, valid, ('ASR_DRAFT' if kinds and kinds <= {'ASR_DRAFT', 'V1'} else 'ENRICHED'), ('LOW_TRANSCRIPT_QUALITY' if low_quality else None)
+
+    def context_for_plan(self, meeting_id: str | None, queries: tuple[str, ...], owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+        """Retrieve separate evidence bundles for a comparison plan.
+
+        Each query uses the existing scope/RBAC/quality-filtered ``context``
+        path.  The merge only de-duplicates segment IDs; it never allows one
+        topic to select evidence from another meeting.
+        """
+        unique_queries = tuple(dict.fromkeys(value.strip() for value in queries if value and value.strip()))
+        if len(unique_queries) <= 1:
+            return self.context(meeting_id, unique_queries[0] if unique_queries else "", owner_user_id, include_all, neighbour_window)
+        contexts: list[str] = []
+        merged: dict[str, tuple[str, int, int, str, str, str, int]] = {}
+        kinds: set[str] = set()
+        reasons: list[str] = []
+        metadata_parts: list[dict[str, Any]] = []
+        for query in unique_queries[:4]:
+            context, valid, transcript_kind, reason = self.context(meeting_id, query, owner_user_id, include_all, neighbour_window)
+            if context:
+                contexts.append(context)
+            merged.update({key: value for key, value in valid.items() if key not in merged})
+            kinds.add(transcript_kind)
+            if reason:
+                reasons.append(reason)
+            metadata_parts.append(dict(self._last_retrieval_metadata))
+        self._last_retrieval_metadata = {
+            "method": "HYBRID_COMPARISON_BUNDLES",
+            "embeddingProvider": self._hybrid.provider.name,
+            "scopeMeetingId": meeting_id,
+            "subQueries": list(unique_queries[:4]),
+            "bundleCount": len(metadata_parts),
+            "anchorCount": sum(int(item.get("anchorCount", 0) or 0) for item in metadata_parts),
+            "candidateCount": sum(int(item.get("candidateCount", 0) or 0) for item in metadata_parts),
+            "selectedCount": len(merged),
+            "neighbourWindow": max(0, min(int(neighbour_window), 4)),
+            "queryPlan": self._last_query_plan or None,
+        }
+        return "\n".join(contexts), merged, ("ASR_DRAFT" if kinds and kinds <= {"ASR_DRAFT", "V1"} else "ENRICHED"), (reasons[0] if reasons and not merged else None)
+
+    def memory_context(
+        self,
+        meeting_id: str | None,
+        query: str,
+        owner_user_id: str | None,
+        include_all: bool,
+        memory_plan: MemoryQueryPlan,
+        neighbour_window: int = 1,
+    ) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None] | None:
+        """Use the memory index only as a bounded canonical-segment locator.
+
+        ``None`` means that the additive memory schema is not available or
+        has no matching indexed facts; the caller must use the existing FTS /
+        embedding fallback.  Returned context is always rehydrated from
+        ``transcript_segments`` after the meeting/RBAC/version gates.
+        """
+        topic = (memory_plan.topic or "").strip()
+        try:
+            with self._db.connection() as connection:
+                fact_rows = connection.execute(
+                    """
+                    SELECT f.id,f.meeting_id,f.transcript_id,f.transcript_version,
+                           f.evidence_segment_ids,f.fact_type,m.created_at
+                    FROM transcript_facts f
+                    JOIN meetings m ON m.id=f.meeting_id
+                    WHERE f.state='ACTIVE'
+                      AND f.fact_type = ANY(%s::text[])
+                      AND (%s::uuid IS NULL OR f.meeting_id=%s::uuid)
+                      AND (%s OR m.owner_id=%s::uuid)
+                      AND (%s='' OR f.subject ILIKE ('%%' || %s || '%%')
+                           OR f.value ILIKE ('%%' || %s || '%%')
+                           OR EXISTS (
+                               SELECT 1 FROM fact_entities fe
+                               JOIN memory_entities me ON me.id=fe.entity_id
+                               WHERE fe.fact_id=f.id
+                                 AND (me.normalized_name ILIKE ('%%' || %s || '%%')
+                                      OR me.aliases @> to_jsonb(%s::text))
+                           ))
+                      AND (%s OR NOT EXISTS (
+                           SELECT 1 FROM memory_fact_relations r
+                           WHERE r.source_fact_id=f.id
+                             AND r.relation_type='SUPERSEDES'
+                             AND r.invalidated_at IS NULL))
+                    ORDER BY m.created_at DESC,f.start_ms DESC,f.id
+                    LIMIT 128
+                    """,
+                    (
+                        list(memory_plan.fact_types), meeting_id, meeting_id,
+                        include_all, owner_user_id, topic, topic, topic, topic,
+                        topic, memory_plan.include_superseded,
+                    ),
+                ).fetchall()
+                if not fact_rows:
+                    return None
+                segment_ids: list[str] = []
+                for row in fact_rows:
+                    raw_ids = row[4]
+                    if isinstance(raw_ids, str):
+                        try:
+                            raw_ids = json.loads(raw_ids)
+                        except json.JSONDecodeError:
+                            raw_ids = []
+                    if isinstance(raw_ids, list):
+                        segment_ids.extend(str(value) for value in raw_ids if value)
+                segment_ids = list(dict.fromkeys(segment_ids))[:128]
+                if not segment_ids:
+                    return None
+                rows = connection.execute(
+                    """
+                    SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,t.id AS transcript_id,
+                           t.version AS transcript_version,
+                           COALESCE(ms.display_name,s.speaker_label,'Спикер N') AS speaker,
+                           s.text,t.version_kind,s.ordinal
+                    FROM transcript_segments s
+                    JOIN transcripts t ON t.id=s.transcript_id
+                    JOIN meetings m ON m.id=t.meeting_id
+                    LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id
+                    WHERE s.id = ANY(%s::uuid[])
+                      AND (%s::uuid IS NULL OR t.meeting_id=%s::uuid)
+                      AND (%s OR m.owner_id=%s::uuid)
+                      AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                      AND t.status IN ('READY','PARTIAL_READY')
+                      AND COALESCE(s.is_hidden,false)=false
+                    ORDER BY m.created_at DESC,t.meeting_id,t.version,s.ordinal
+                    LIMIT 64
+                    """,
+                    (segment_ids, meeting_id, meeting_id, include_all, owner_user_id),
+                ).fetchall()
+                if not rows:
+                    return None
+        except Exception:
+            # Migrations 051–055 are additive. A rolling worker must continue
+            # using the proven hybrid transcript retrieval until they exist.
+            LOGGER.debug("memory index unavailable; using transcript fallback", exc_info=True)
+            return None
+
+        valid: dict[str, tuple[str, int, int, str, str, str, int]] = {}
+        lines: list[str] = []
+        for row in rows:
+            segment_id = str(row[0])
+            valid[segment_id] = (
+                str(row[1]), int(row[2]), int(row[3]), str(row[7] or "").strip(),
+                str(row[8] or "ASR_DRAFT").upper(), str(row[4]), int(row[5]),
+            )
+            if valid[segment_id][3]:
+                lines.append(f"[SEG-{segment_id} {int(row[2])//1000}s {row[6]}] {valid[segment_id][3]}")
+        if not valid:
+            return None
+        self._last_retrieval_metadata = {
+            "method": "MEMORY_INDEX_CANONICAL_REHYDRATION",
+            "factTypes": list(memory_plan.fact_types),
+            "temporalMode": memory_plan.temporal_mode,
+            "includeSuperseded": memory_plan.include_superseded,
+            "candidateCount": len(fact_rows),
+            "selectedCount": len(valid),
+            "anchorCount": len(valid),
+            "scopeMeetingId": meeting_id,
+            "neighbourWindow": max(0, min(int(neighbour_window), 4)),
+            "canonicalEvidence": True,
+        }
+        transcript_kind = "ASR_DRAFT" if all(value[4] in {"ASR_DRAFT", "V1"} for value in valid.values()) else "ENRICHED"
+        return "\n".join(lines), valid, transcript_kind, None
 
     def _legacy_fts_context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         # Retrieval is performed by PostgreSQL's Russian FTS instead of
@@ -851,6 +1078,10 @@ class AssistantRepository:
         claim_ids = [str(item).removeprefix("SEG-") for claim in claims if isinstance(claim, dict) for item in (claim.get("evidenceIds") or [])]
         evidence_ids = claim_ids or [str(value).removeprefix("SEG-") for value in result.get("evidence_segment_ids", [])]
         evidence_ids = list(dict.fromkeys(value for value in evidence_ids if value in valid))[:8]
+        query_plan = AssistantQueryPlan.from_mapping(self._last_query_plan)
+        supported_fields, missing_fields = ([], [])
+        if query_plan and assistant_mode != "GENERAL_CHAT":
+            supported_fields, missing_fields = assess_requested_fields(query_plan, valid, evidence_ids)
         answer = str(result.get("answer", "")).strip()
         voice = str(result.get("voice_answer", answer)).strip()
         voice = re.split(r"(?<=[.!?])\s+", voice)
@@ -883,8 +1114,9 @@ class AssistantRepository:
             voice = "Пока нет свежего фрагмента совещания для ответа."
         elif evidence_ids and answer and claims_are_semantically_grounded(result, valid, assistant_mode):
             provisional = transcript_kind in {"ASR_DRAFT", "LIVE_PROVISIONAL"}
-            status = "ANSWERED_WITH_WARNING" if provisional else "READY"
-            grounding_status = "WARNING" if provisional else "GROUNDED"
+            partial = bool(supported_fields and missing_fields)
+            status = "ANSWERED_WITH_WARNING" if provisional or partial else "READY"
+            grounding_status = "WARNING" if provisional or partial else "GROUNDED"
             error_code = None
             # Speak only text that has already passed the claim/evidence gate.
             # This prevents a separate, ungrounded voice channel while still
@@ -892,6 +1124,10 @@ class AssistantRepository:
             claim_voice = [str(claim.get("text", "")).strip() for claim in claims if isinstance(claim, dict) and str(claim.get("text", "")).strip()]
             if assistant_mode != "GENERAL_CHAT" and claim_voice:
                 voice = " ".join(claim_voice[:3])[:500].strip()
+            if partial:
+                suffix = " ".join(missing_field_text(field) for field in missing_fields[:2])
+                answer = f"{answer} {suffix}".strip()
+                voice = " ".join(re.split(r"(?<=[.!?])\s+", f"{voice} {suffix}".strip())[:3])[:500].strip()
         elif evidence_ids and answer:
             status = "GROUNDING_REJECTED"
             grounding_status = "REJECTED"
@@ -913,7 +1149,8 @@ class AssistantRepository:
                 item.update({"sourceTrackType": source_type, "sourceTrackId": source_id, "channelRole": channel_role})
             evidence.append(item)
         with self._db.connection() as connection:
-            metadata = {"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"}, "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "processingStage": "READY" if status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"} else status, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}
+            answer_type = "PARTIAL" if supported_fields and missing_fields else (self._last_answer_plan.get("answerType") or "DIRECT_FACT")
+            metadata = {"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"}, "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "queryPlan": self._last_query_plan or None, "answerPlan": self._last_answer_plan or None, "answerType": answer_type, "supportedFields": supported_fields, "missingFields": missing_fields, "sourceRanges": [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2], "transcriptVersion": valid[value][6]} for value in evidence_ids], "processingStage": "READY" if status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"} else status, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}
             row = connection.execute(
                 """UPDATE assistant_queries
                    SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,
@@ -1048,9 +1285,21 @@ class AssistantWorker:
             # turn as a retrieval key; assistant text remains context for the
             # prompt, never a factual evidence source.
             history = await asyncio.to_thread(self.repository.history, conversation_id, user_message_id)
-            retrieval_query = self._retrieval_query_for_follow_up(query, history)
+            state = await asyncio.to_thread(self.repository.conversation_state, conversation_id, owner_user_id)
+            previous_plan = AssistantQueryPlan.from_mapping(state)
+            query_plan = understand_query(query, previous_plan, self.repository.semantic_provider)
+            retrieval_plan = build_retrieval_plan(query_plan, self._retrieval_query_for_follow_up(query, history))
+            query_plan_metadata = query_plan.to_dict()
+            query_plan_metadata["retrievalPlan"] = retrieval_plan.to_dict()
+            self.repository.set_query_plan(query_plan_metadata)
+            await asyncio.to_thread(self.repository.save_conversation_state, conversation_id, owner_user_id, meeting_id, query, query_plan.to_dict())
+            retrieval_query = retrieval_plan.query
+            answer_plan = build_answer_plan(query_plan)
+            self.repository.set_answer_plan(answer_plan)
             if assistant_mode == "GENERAL_CHAT":
                 self.repository.clear_retrieval_metadata()
+                self.repository.set_query_plan(query_plan_metadata)
+                self.repository.set_answer_plan(answer_plan)
                 context, valid, transcript_kind, context_error = "", {}, "GENERAL", None
                 system_prompt = (
                     "Отвечай по-русски как доброжелательный универсальный помощник. "
@@ -1059,7 +1308,7 @@ class AssistantWorker:
                     "Для обычного чата evidence_segment_ids и claims должны быть пустыми массивами. "
                     "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
-                user_content = f"Вопрос: {query}"
+                user_content = f"Вопрос: {query}\n\nПлан запроса (не является источником фактов): {answer_plan}"
             elif assistant_mode == "LIVE_MEETING":
                 retrieval_started = time.perf_counter()
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, retrieval_query)
@@ -1068,17 +1317,43 @@ class AssistantWorker:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
                     return
                 await asyncio.to_thread(self.repository.snapshot_evidence, query_id, valid)
+                evidence_bundles = build_evidence_bundles(valid, query_plan)
+                answer_plan = build_answer_plan(query_plan, detect_conflicts(valid, query_plan), evidence_bundles)
+                self.repository.set_answer_plan(answer_plan)
                 system_prompt = (
                     "Отвечай по-русски только по свежим provisional ASR-фрагментам текущего совещания. "
                     "Это оперативный черновой контекст, не финальная стенограмма: не добавляй факты, которых нет в сегментах. "
                     "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds. "
                     "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
-                user_content = f"Вопрос: {query}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
+                user_content = f"Вопрос: {query}\nПлан запроса (не evidence): {answer_plan}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
             else:
                 retrieval_started = time.perf_counter()
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
-                context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.context, meeting_id, retrieval_query, owner_user_id, include_all)
+                comparison_queries = tuple(
+                    f"{topic} {' '.join(query_plan.retrieval_terms)}".strip()
+                    for topic in retrieval_plan.split_topics
+                )
+                memory_result = None
+                if assistant_mode == "MEETING_MEMORY" and not comparison_queries:
+                    memory_plan = build_memory_query_plan(query_plan.intent, retrieval_query, query_plan.topic)
+                    query_plan_metadata["memoryPlan"] = memory_plan.to_dict()
+                    self.repository.set_query_plan(query_plan_metadata)
+                    memory_result = await asyncio.to_thread(
+                        self.repository.memory_context,
+                        meeting_id,
+                        retrieval_query,
+                        owner_user_id,
+                        include_all,
+                        memory_plan,
+                        retrieval_plan.neighbour_window,
+                    )
+                if memory_result is not None:
+                    context, valid, transcript_kind, context_error = memory_result
+                else:
+                    context_loader = self.repository.context_for_plan if comparison_queries else self.repository.context
+                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window)
+                    context, valid, transcript_kind, context_error = await asyncio.to_thread(context_loader, *context_args)
                 timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:
                     await asyncio.to_thread(self.repository.persist, query_id, {}, valid, assistant_mode, transcript_kind, context_error, meeting_id)
@@ -1087,12 +1362,15 @@ class AssistantWorker:
                 # A failed Qwen request remains diagnosable and cannot alter
                 # the evidence it actually received.
                 await asyncio.to_thread(self.repository.snapshot_evidence, query_id, valid)
+                evidence_bundles = build_evidence_bundles(valid, query_plan)
+                answer_plan = build_answer_plan(query_plan, detect_conflicts(valid, query_plan), evidence_bundles)
+                self.repository.set_answer_plan(answer_plan)
                 system_prompt = (
                     "Отвечай по-русски. Используй только приведённые сегменты стенограмм. "
                     "Не выдумывай факты. Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. Каждый claim обязан содержать evidenceIds. "
                     "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
-                user_content = f"Вопрос: {query}\n\nКонтекст стенограмм:\n{context}"
+                user_content = f"Вопрос: {query}\nПлан запроса (не evidence): {answer_plan}\n\nКонтекст стенограмм:\n{context}"
             messages = [
                 {"role": "system", "content": system_prompt},
                 *history,
@@ -1127,6 +1405,8 @@ class AssistantWorker:
                         retry_max_output_tokens=int(os.getenv("ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS", "512")),
                         retry_instruction="Повтори ответ строго одним валидным JSON; используй только существующие evidenceIds и короткий voice_answer.",
                     )
+                    if client.last_first_token_ms is not None:
+                        timings["first_token_ms"] = round(client.last_first_token_ms, 3)
                     timings["generation_ms"] = round((time.perf_counter() - generation_started) * 1000.0, 3)
                     await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GROUNDING")
                     retrieval_anchors = int(self._last_retrieval_metadata.get("anchorCount", 0) or 0)
@@ -1146,6 +1426,8 @@ class AssistantWorker:
                             retry_max_output_tokens=int(os.getenv("ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS", "512")),
                             retry_instruction="Исправь grounding: используй только существующие evidenceIds, числа и даты из контекста; voice_answer не более трёх предложений.",
                         )
+                        if client.last_first_token_ms is not None:
+                            timings["grounding_retry_first_token_ms"] = round(client.last_first_token_ms, 3)
                         timings["generation_ms"] = round(timings.get("generation_ms", 0.0) + (time.perf_counter() - retry_started) * 1000.0, 3)
                     grounding_started = time.perf_counter()
                     if assistant_mode != "GENERAL_CHAT":

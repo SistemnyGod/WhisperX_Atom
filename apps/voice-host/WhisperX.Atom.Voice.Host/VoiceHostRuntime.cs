@@ -31,9 +31,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     // for an explicit legacy/development rollout.
     internal static readonly bool LegacyAtomWakeEnabled = IsTruthy(
         Environment.GetEnvironmentVariable("WHISPERX_WAKE_COMPAT_ATOM"));
+    private static readonly bool WakeBargeInEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("VOICE_BARGE_IN_MODE"), "OFF", StringComparison.OrdinalIgnoreCase);
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
     private static readonly string[] CancelGrammar = CreateCancelGrammar();
+    private static readonly string[] BargeGrammar = CreateBargeGrammar();
+
+    private static string[] CreateBargeGrammar() => LegacyAtomWakeEnabled
+        ? ["мефодий", "мифодий", "атом", "atom", "[unk]"]
+        : ["мефодий", "мифодий", "[unk]"];
 
     private static bool IsTruthy(string? value) =>
         string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
@@ -53,7 +60,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             "мефодий останови запись", "мефодий пока", "мефодий ну пока", "мефодий ладно пока",
             "мефодий до свидания", "мефодий до встречи", "мефодий всего доброго", "мефодий хорошего дня",
             "мефодий спокойной ночи", "мефодий увидимся", "мефодий спасибо пока", "мефодий спасибо до свидания",
+            "мефодий состояние сервера", "мефодий сервер доступен", "мефодий сервер работает", "мефодий состояние обработки", "мефодий статус обработки",
+            "мефодий как идёт обработка", "мефодий как идет обработка", "мефодий какая стадия обработки", "мефодий стенограмма готова", "мефодий состояние диска", "мефодий свободное место", "мефодий сколько места", "мефодий сколько осталось места",
             "мифодий начни запись", "мифодий запусти запись", "мифодий останови запись", "мифодий подтверждаю",
+            "мифодий состояние сервера", "мифодий сервер доступен", "мифодий сервер работает", "мифодий состояние обработки", "мифодий статус обработки",
+            "мифодий как идёт обработка", "мифодий как идет обработка", "мифодий какая стадия обработки", "мифодий стенограмма готова", "мифодий состояние диска", "мифодий свободное место", "мифодий сколько места", "мифодий сколько осталось места",
             "мифодий пока", "мифодий до свидания", "мифодий до встречи", "мифодий хорошего дня", "[unk]"
         };
         if (LegacyAtomWakeEnabled)
@@ -71,7 +82,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 "мифодий", "мифодий начни запись", "мифодий запусти запись", "мифодий останови запись", "мифодий подтверждаю",
                 "мифодий пока", "мифодий ну пока", "мифодий ладно пока", "мифодий до свидания", "мифодий до встречи",
                 "мифодий всего доброго", "мифодий хорошего дня", "мифодий спокойной ночи", "мифодий увидимся",
-                "мифодий спасибо пока", "мифодий спасибо до свидания"
+                "мифодий спасибо пока", "мифодий спасибо до свидания", "мифодий состояние сервера", "мифодий сервер доступен", "мифодий сервер работает",
+                "мифодий состояние обработки", "мифодий статус обработки", "мифодий как идёт обработка", "мифодий как идет обработка",
+                "мифодий какая стадия обработки", "мифодий стенограмма готова", "мифодий состояние диска", "мифодий свободное место",
+                "мифодий сколько места", "мифодий сколько осталось места"
             ]);
         }
         return phrases.Distinct(StringComparer.Ordinal).ToArray();
@@ -102,6 +116,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _utteranceRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
+    private readonly VoskRecognizer? _bargeRecognizer;
     private readonly VoskRecognizer? _liveRecognizer;
     private readonly VoskRecognizer? _liveLocalRecognizer;
     private readonly VoskRecognizer? _liveRemoteRecognizer;
@@ -191,10 +206,22 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private double? _wakeLatencyMs;
     private double? _intentLatencyMs;
     private double? _recorderAckLatencyMs;
+    private DateTimeOffset? _lastWakeAtUtc;
+    private DateTimeOffset? _lastUtteranceAtUtc;
+    private DateTimeOffset? _lastAssistantAcceptedAtUtc;
+    private DateTimeOffset? _lastTtsStartedAtUtc;
+    private DateTimeOffset? _lastTtsFinishedAtUtc;
+    private double? _lastTtsQueueWaitMs;
+    private double? _lastTtsSynthesisMs;
+    private double? _lastTtsPlaybackMs;
+    private string? _lastAssistantQueryId;
     private DateTimeOffset _wakeSpeechStartedAt;
     private long _audioQueueDrops;
     private int _audioQueueDepth;
     private int _wakePartialHits;
+    private int _bargeHits;
+    private DateTimeOffset _lastBargeHitAtUtc;
+    private bool _bargeDucked;
     private int _audioQueueOverflow;
     private VoiceCalibrationAccumulator? _calibration;
     private VoiceCommand? _pendingStop;
@@ -235,6 +262,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 _wakeRecognizer = new VoskRecognizer(modelPath, grammar: WakeGrammar);
                 _utteranceRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _cancelRecognizer = new VoskRecognizer(modelPath, grammar: CancelGrammar);
+                _bargeRecognizer = new VoskRecognizer(modelPath, grammar: BargeGrammar);
                 _liveRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _liveLocalRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
                 _liveRemoteRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
@@ -330,6 +358,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 TtsRestartCount = _speech.TtsRestartCount,
                 VoiceNoiseFloorDb = _vad.NoiseFloorDb,
                 VoiceVadThresholdDb = _vad.ThresholdDb,
+                LastWakeAtUtc = _lastWakeAtUtc,
+                LastUtteranceAtUtc = _lastUtteranceAtUtc,
+                LastAssistantAcceptedAtUtc = _lastAssistantAcceptedAtUtc,
+                LastTtsStartedAtUtc = _lastTtsStartedAtUtc,
+                LastTtsFinishedAtUtc = _lastTtsFinishedAtUtc,
+                LastTtsQueueWaitMs = _lastTtsQueueWaitMs,
+                LastTtsSynthesisMs = _lastTtsSynthesisMs,
+                LastTtsPlaybackMs = _lastTtsPlaybackMs,
+                LastAssistantQueryId = _lastAssistantQueryId,
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
         }
@@ -606,6 +643,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 var queryId = ReadString(payload, "queryId");
                 var commandId = ReadString(payload, "commandId");
                 var traceId = ReadString(payload, "traceId");
+                _lastAssistantQueryId = queryId;
                 if (string.IsNullOrWhiteSpace(answer) || status is not ("READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "LOW_TRANSCRIPT_QUALITY" or "GROUNDING_REJECTED" or "FAILED" or "LLM_UNAVAILABLE"))
                     return new VoiceHostResponse(false, Error: "VOICE_COMMAND_REJECTED");
                 if (!string.IsNullOrWhiteSpace(queryId) && TryGetAssistantTombstone(queryId, out var previous))
@@ -957,6 +995,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             if (_wakePartialHits >= 2 && _state.TryWake())
             {
                 _wakeStartedAt = now;
+                _lastWakeAtUtc = now;
                 _wakeLatencyMs = _wakeSpeechStartedAt == default ? null : (now - _wakeSpeechStartedAt).TotalMilliseconds;
                 QueueVoiceLedgerEvent("VOICE_WAKE_DETECTED", new
                 {
@@ -1000,6 +1039,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             }
             var confidence = utterance.Confidence > 0 ? utterance.Confidence : wakeResult.Confidence;
             var command = _parser.Parse(text, confidence, MinimumConfidence());
+            _lastUtteranceAtUtc = DateTimeOffset.UtcNow;
             if (confidence < MinimumConfidence())
             {
                 _lastErrorCode = "VOICE_CONFIDENCE_TOO_LOW";
@@ -1034,12 +1074,79 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private async Task ProcessCancelPcmAsync(byte[] pcm, CancellationToken cancellationToken)
     {
+        if (!WakeBargeInEnabled)
+        {
+            VoiceRecognitionResult disabledResult;
+            lock (_recognitionGate) disabledResult = _cancelRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
+            if (disabledResult.IsEndpoint) lock (_recognitionGate) _cancelRecognizer?.ResetSession();
+            if (!disabledResult.IsEndpoint || string.IsNullOrWhiteSpace(disabledResult.Text)) return;
+            var disabledCommand = _parser.Parse(disabledResult.Text, disabledResult.Confidence, 0.70);
+            if (disabledCommand.Intent == VoiceIntent.StopSpeaking && disabledResult.Confidence >= 0.70)
+                await CancelSpeechAsync("StopSpeaking", cancellationToken).ConfigureAwait(false);
+            return;
+        }
         VoiceRecognitionResult result;
-        lock (_recognitionGate) result = _cancelRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
-        if (!result.IsEndpoint || string.IsNullOrWhiteSpace(result.Text)) return;
-        var command = _parser.Parse(result.Text, result.Confidence, 0.70);
-        lock (_recognitionGate) _cancelRecognizer?.ResetSession();
-        if (command.Intent != VoiceIntent.StopSpeaking || result.Confidence < 0.70) return;
+        VoiceRecognitionResult barge;
+        if (_bargeHits == 1 && _lastBargeHitAtUtc != default
+            && DateTimeOffset.UtcNow - _lastBargeHitAtUtc > TimeSpan.FromSeconds(1.5))
+        {
+            _bargeHits = 0;
+            _lastBargeHitAtUtc = default;
+            if (_bargeDucked)
+            {
+                _speech.RestorePlaybackVolume();
+                _bargeDucked = false;
+            }
+        }
+        lock (_recognitionGate)
+        {
+            result = _cancelRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
+            barge = _bargeRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
+        }
+        if (result.IsEndpoint && !string.IsNullOrWhiteSpace(result.Text))
+        {
+            var command = _parser.Parse(result.Text, result.Confidence, 0.70);
+            lock (_recognitionGate) _cancelRecognizer?.ResetSession();
+            if (command.Intent == VoiceIntent.StopSpeaking && result.Confidence >= 0.70)
+            {
+                await CancelSpeechAsync("StopSpeaking", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+        if (!barge.IsEndpoint || string.IsNullOrWhiteSpace(barge.Text)) return;
+        lock (_recognitionGate) _bargeRecognizer?.ResetSession();
+        if (!_parser.HasWakeWord(barge.Text) || barge.Confidence < 0.75)
+        {
+            _bargeHits = 0;
+            _lastBargeHitAtUtc = default;
+            if (_bargeDucked)
+            {
+                _speech.RestorePlaybackVolume();
+                _bargeDucked = false;
+            }
+            return;
+        }
+        _lastBargeHitAtUtc = DateTimeOffset.UtcNow;
+        _bargeHits++;
+        if (_bargeHits == 1)
+        {
+            _speech.DuckPlayback(20);
+            _bargeDucked = true;
+            return;
+        }
+        _bargeHits = 0;
+        _lastBargeHitAtUtc = default;
+        _bargeDucked = false;
+        _speech.CancelAll();
+        if (_state.TryBeginBargeIn())
+        {
+            BeginCommandSession();
+            QueueVoiceLedgerEvent("VOICE_BARGE_IN", new { eventId = Guid.NewGuid().ToString("N"), capturedAtUtc = DateTimeOffset.UtcNow, confidence = barge.Confidence });
+        }
+    }
+
+    private async Task CancelSpeechAsync(string reason, CancellationToken cancellationToken)
+    {
         var traceId = Guid.NewGuid().ToString("N");
         var commandId = Guid.NewGuid().ToString("N");
         _lastTraceId = traceId;
@@ -1047,10 +1154,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _lastIntent = VoiceIntent.StopSpeaking.ToString();
         await TryRecordVoiceEventAsync("VOICE_COMMAND", new
         {
-            eventId = Guid.NewGuid().ToString("N"), intent = command.Intent.ToString(), commandId, traceId,
-            confidence = result.Confidence, capturedAtUtc = DateTimeOffset.UtcNow
+            eventId = Guid.NewGuid().ToString("N"), intent = VoiceIntent.StopSpeaking.ToString(), commandId, traceId,
+            reason, confidence = 1.0, capturedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken).ConfigureAwait(false);
         _speech.CancelAll();
+        _speech.RestorePlaybackVolume();
+        _bargeHits = 0;
+        _lastBargeHitAtUtc = default;
+        _bargeDucked = false;
         _lastErrorCode = null;
     }
 
@@ -1434,6 +1545,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.MarkDecision => await SendRecorderAsync("DECISION", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.MarkActionItem => await SendRecorderAsync("ACTION_ITEM", new { label = command.Parameter }, cancellationToken, traceId, commandId, command.Confidence),
                 VoiceIntent.GetStatus => await SendRecorderAsync("STATUS", new { }, cancellationToken, traceId, commandId, command.Confidence),
+                VoiceIntent.GetServerStatus => await SendLocalStatusAsync("SERVER", cancellationToken, traceId, commandId),
+                VoiceIntent.GetPipelineStatus => await SendLocalStatusAsync("PIPELINE", cancellationToken, traceId, commandId),
+                VoiceIntent.GetStorageStatus => await SendLocalStatusAsync("STORAGE", cancellationToken, traceId, commandId),
                 VoiceIntent.Farewell => new VoiceResponse(FarewellText(command.Parameter ?? command.Text), true, true, CommandId: commandId, TraceId: traceId),
                 // Greetings are deterministic local UX.  Keeping the exact
                 // phrase out of Assistant avoids a cold Qwen load for a
@@ -1589,6 +1703,26 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return new VoiceResponse(text, true, true, result.SessionId, commandId, traceId);
     }
 
+    private async Task<VoiceResponse> SendLocalStatusAsync(string statusKind, CancellationToken cancellationToken, string? traceId, string? commandId)
+    {
+        if (_desktopBroker is null)
+            return new VoiceResponse("Статус доступен только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId);
+        var intent = statusKind switch
+        {
+            "SERVER" => VoiceIntent.GetServerStatus.ToString(),
+            "PIPELINE" => VoiceIntent.GetPipelineStatus.ToString(),
+            _ => VoiceIntent.GetStorageStatus.ToString()
+        };
+        var response = await _desktopBroker.ExecuteAsync(intent, statusKind, 1.0, false, cancellationToken, traceId, commandId).ConfigureAwait(false);
+        _lastTraceId = response.TraceId ?? traceId ?? _lastTraceId;
+        if (!response.Ok)
+        {
+            _lastErrorCode = response.ErrorCode ?? "VOICE_STATUS_UNAVAILABLE";
+            return new VoiceResponse(response.SpokenText ?? VoiceErrorText(_lastErrorCode), true, false, CommandId: commandId, TraceId: traceId);
+        }
+        return new VoiceResponse(response.SpokenText ?? "Состояние доступно.", true, true, CommandId: commandId, TraceId: traceId);
+    }
+
     private void UpdateLiveRecordingState(string command, string? sessionId)
     {
         switch (command)
@@ -1684,6 +1818,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var result = await _desktopBroker.AskAssistantAsync(normalizedQuestion, "AUTO", false, cancellationToken, traceId, commandId);
         if (result.Ok && !string.IsNullOrWhiteSpace(result.QueryId))
         {
+            _lastAssistantAcceptedAtUtc = DateTimeOffset.UtcNow;
+            _lastAssistantQueryId = result.QueryId;
             // Keep the server query identity on the silent acceptance ACK.
             // The grounded answer is delivered later through ASSISTANT_RESULT
             // and is the only Assistant text that enters the TTS queue.
@@ -1740,6 +1876,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             text,
             async () =>
             {
+                _lastTtsStartedAtUtc = DateTimeOffset.UtcNow;
                 // Suppress both provisional recognizers only when audio really
                 // starts. Queue wait and synthesis must not erase live speech.
                 Volatile.Write(ref _liveTtsSuppressionUntilTicks, long.MaxValue);
@@ -1787,6 +1924,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         finally
         {
             var cancelled = playback.State == SpeechPlaybackState.Cancelled || _shutdown.IsCancellationRequested;
+            _lastTtsFinishedAtUtc = DateTimeOffset.UtcNow;
+            _lastTtsQueueWaitMs = playback.QueueWaitMs;
+            _lastTtsSynthesisMs = playback.SynthesisMs;
+            _lastTtsPlaybackMs = playback.PlaybackMs;
+            _speech.RestorePlaybackVolume();
             var finishedSaved = await TryRecordVoiceEventAsync("SYSTEM_RESPONSE_FINISHED", new { eventId = Guid.NewGuid().ToString("N"), responseId, queryId, commandId, traceId, localSessionId, playbackStarted = playback.Started, playbackState = playback.State.ToString().ToUpperInvariant(), cancelled }, CancellationToken.None, localSessionId);
             if (!finishedSaved)
                 _logger?.LogWarning("SYSTEM_RESPONSE_FINISHED event could not be persisted. ResponseId={ResponseId}", responseId);
@@ -1855,6 +1997,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _wakeRecognizer?.ResetSession();
             _utteranceRecognizer?.ResetSession();
             _cancelRecognizer?.ResetSession();
+            _bargeRecognizer?.ResetSession();
         }
         _commandSession = false;
         _pendingRecognizedText = null;
@@ -1862,6 +2005,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _pendingConfidenceSegments = 0;
         _speechSeen = false;
         _wakePartialHits = 0;
+        _bargeHits = 0;
+        _lastBargeHitAtUtc = default;
+        if (_bargeDucked) _speech.RestorePlaybackVolume();
+        _bargeDucked = false;
         _wakeSpeechStartedAt = default;
         _commandStartedAt = default;
         _frameAssembler.Reset();
@@ -2128,6 +2275,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _utteranceRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
         _cancelRecognizer?.Dispose();
+        _bargeRecognizer?.Dispose();
         _liveRecognizer?.Dispose();
         _liveLocalRecognizer?.Dispose();
         _liveRemoteRecognizer?.Dispose();

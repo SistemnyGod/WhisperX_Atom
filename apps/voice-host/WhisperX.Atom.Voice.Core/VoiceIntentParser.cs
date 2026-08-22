@@ -102,6 +102,13 @@ public sealed class VoiceIntentParser
                 "подробнее", "расскажи подробнее", "объясни подробнее") => VoiceIntent.ElaborateAnswer,
             var value when IsExact(value,
                 "вернись к предыдущему вопросу", "повтори предыдущий вопрос") => VoiceIntent.PreviousQuestion,
+            var value when IsExact(value,
+                "состояние сервера", "сервер доступен", "сервер работает") => VoiceIntent.GetServerStatus,
+            var value when IsExact(value,
+                "состояние обработки", "статус обработки", "как идёт обработка", "как идет обработка",
+                "какая стадия обработки", "стенограмма готова") => VoiceIntent.GetPipelineStatus,
+            var value when IsExact(value,
+                "состояние диска", "свободное место", "сколько места", "сколько осталось места") => VoiceIntent.GetStorageStatus,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
             // AssistantQuery is the canonical conversational intent.

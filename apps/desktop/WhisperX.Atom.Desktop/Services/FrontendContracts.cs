@@ -149,7 +149,7 @@ public sealed record DesktopAssistantConversation(string Id, string Title, strin
         _ => "Совещание"
     };
 }
-public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null)
+public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null, JsonDocument? AnswerMetadata = null)
 {
     public bool IsUser => Role.Equals("USER", StringComparison.OrdinalIgnoreCase);
     public string StatusText => UiStatusMapper.Text(Status);

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whisperx-atom.local/schemas/mifodiy-qa-case.schema.json",
+  "title": "Mifodiy anonymized QA case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["caseId", "question", "expectedMode", "expectedOutcome", "allowedMeetingIds"],
+  "properties": {
+    "caseId": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "expectedMode": { "enum": ["AUTO", "GENERAL_CHAT", "CURRENT_MEETING", "LIVE_MEETING", "MEETING_MEMORY"] },
+    "expectedOutcome": { "enum": ["ANSWER", "NO_EVIDENCE", "GROUNDING_REJECTED", "LOCAL_STATUS"] },
+    "expectedIntent": { "enum": ["FACT_LOOKUP", "DECISION", "RESPONSIBLE", "DEADLINE", "TASK", "CAUSE", "STATUS", "TIMELINE", "COMPARISON", "SUMMARY", "FOLLOW_UP"] },
+    "answerType": { "enum": ["DIRECT_FACT", "MULTI_FACT", "SUMMARY", "COMPARISON", "CONTRADICTION", "PARTIAL", "NO_EVIDENCE"] },
+    "mustNotInfer": { "type": "array", "items": { "type": "string", "maxLength": 40 }, "maxItems": 16 },
+    "allowedMeetingIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "maxItems": 32 },
+    "activeMeetingId": { "type": ["string", "null"], "format": "uuid" },
+    "evidenceSegmentIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "maxItems": 64 },
+    "expectedClaims": { "type": "array", "items": { "type": "string", "maxLength": 500 }, "maxItems": 32 },
+    "category": { "type": "string", "maxLength": 80 }
+  }
+}

@@ -40,6 +40,9 @@ public sealed class AssistantViewModel : ObservableObject
     private string _errorText = string.Empty;
     private string _answerText = string.Empty;
     private string _voiceAnswerText = string.Empty;
+    private string _answerTypeText = string.Empty;
+    private string _sourceSummaryText = string.Empty;
+    private string _missingFieldsText = string.Empty;
     private string _roleText = string.Empty;
     private AssistantContextOption? _selectedContext;
     private AssistantModeOption? _selectedMode;
@@ -67,6 +70,9 @@ public sealed class AssistantViewModel : ObservableObject
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
     public string AnswerText { get => _answerText; private set => SetProperty(ref _answerText, value); }
     public string VoiceAnswerText { get => _voiceAnswerText; private set => SetProperty(ref _voiceAnswerText, value); }
+    public string AnswerTypeText { get => _answerTypeText; private set => SetProperty(ref _answerTypeText, value); }
+    public string SourceSummaryText { get => _sourceSummaryText; private set => SetProperty(ref _sourceSummaryText, value); }
+    public string MissingFieldsText { get => _missingFieldsText; private set => SetProperty(ref _missingFieldsText, value); }
     public string RoleText { get => _roleText; private set => SetProperty(ref _roleText, value); }
     public bool HasConversations => Conversations.Count > 0;
     public bool HasMessages => Messages.Count > 0;
@@ -392,6 +398,20 @@ public sealed class AssistantViewModel : ObservableObject
     {
         AnswerText = message is { IsUser: false } ? message.Content : string.Empty;
         VoiceAnswerText = message is { IsUser: false } ? message.VoiceAnswer ?? string.Empty : string.Empty;
+        AnswerTypeText = string.Empty;
+        SourceSummaryText = string.Empty;
+        MissingFieldsText = string.Empty;
+        if (message is { IsUser: false, AnswerMetadata: not null } metadata && metadata.AnswerMetadata.RootElement.ValueKind == JsonValueKind.Object)
+        {
+            var root = metadata.AnswerMetadata.RootElement;
+            AnswerTypeText = root.TryGetProperty("answerType", out var answerType) && answerType.ValueKind == JsonValueKind.String
+                ? answerType.GetString() ?? string.Empty
+                : string.Empty;
+            if (root.TryGetProperty("sourceRanges", out var sourceRanges) && sourceRanges.ValueKind == JsonValueKind.Array)
+                SourceSummaryText = sourceRanges.GetArrayLength() == 0 ? string.Empty : $"Источники: {sourceRanges.GetArrayLength()} фрагм.";
+            if (root.TryGetProperty("missingFields", out var missingFields) && missingFields.ValueKind == JsonValueKind.Array)
+                MissingFieldsText = string.Join(", ", missingFields.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item))!);
+        }
         Evidence.Clear();
         if (message?.Evidence.RootElement.ValueKind == JsonValueKind.Array)
         {

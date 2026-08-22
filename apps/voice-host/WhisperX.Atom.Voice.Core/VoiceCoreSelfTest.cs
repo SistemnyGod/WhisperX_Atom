@@ -55,6 +55,11 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, остановись").Intent == VoiceIntent.StopSpeaking, "stop speech intent");
         Assert(parser.Parse("Мифодий, запись идёт?").Intent == VoiceIntent.GetStatus, "recording status fast path");
         Assert(parser.Parse("Мифодий, сколько идет запись").Intent == VoiceIntent.GetStatus, "recording duration fast path");
+        Assert(parser.Parse("Мифодий, состояние сервера").Intent == VoiceIntent.GetServerStatus, "server status fast path");
+        Assert(parser.Parse("Мифодий, состояние обработки").Intent == VoiceIntent.GetPipelineStatus, "pipeline status fast path");
+        Assert(parser.Parse("Мифодий, стенограмма готова").Intent == VoiceIntent.GetPipelineStatus, "transcript status fast path");
+        Assert(parser.Parse("Мифодий, свободное место").Intent == VoiceIntent.GetStorageStatus, "storage status fast path");
+        Assert(parser.Parse("Мифодий, сколько осталось места").Intent == VoiceIntent.GetStorageStatus, "storage remaining fast path");
 
         var commands = new (string Text, VoiceIntent Intent)[]
         {
@@ -99,6 +104,14 @@ public static class VoiceCoreSelfTest
         Assert(twoPhase.TryRespond("\u0421\u043b\u0443\u0448\u0430\u044e", VoiceHostState.Capturing), "two-phase response transition");
         twoPhase.FinishResponse();
         Assert(twoPhase.Snapshot.State == VoiceHostState.Capturing, "two-phase response returns to capture");
+
+        var barge = new VoiceStateMachine();
+        barge.Enable(true);
+        Assert(barge.TryWake(), "barge wake setup");
+        Assert(barge.BeginCapture(), "barge capture setup");
+        Assert(barge.TryRespond("Ответ", VoiceHostState.Listening), "barge response setup");
+        Assert(barge.TryBeginBargeIn(), "barge-in transition");
+        Assert(barge.Snapshot.State == VoiceHostState.Capturing, "barge returns to capture");
 
         var degraded = new VoiceStateMachine();
         degraded.Enable(true);

@@ -70,6 +70,14 @@ public sealed class SpeechAudioPlayer : IAsyncDisposable
         }
     }
 
+    public void SetVolume(int volume)
+    {
+        lock (_gate)
+        {
+            if (_reader is not null) _reader.Volume = Math.Clamp(volume, 0, 100) / 100f;
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
         Stop();

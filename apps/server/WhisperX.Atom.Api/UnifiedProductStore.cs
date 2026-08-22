@@ -129,7 +129,7 @@ public sealed record AssistantRetrievalProbe(int MatchCount, double BestRank)
 }
 public sealed record LiveMeetingAppendResult(Guid RecordingSessionId, int AcceptedCount);
 public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY");
-public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null);
+public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null, JsonDocument? AnswerMetadata = null);
 public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(
@@ -1841,16 +1841,18 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         DateTime? acceptedAt = null;
         string? traceId = null;
         string? commandId = null;
+        JsonDocument? answerMetadata = null;
         if (!reader.IsDBNull(11))
         {
             var metadata = reader.GetFieldValue<JsonDocument>(11);
+            answerMetadata = metadata;
             if (metadata.RootElement.TryGetProperty("timings", out var value)) timings = value.Clone();
             if (metadata.RootElement.TryGetProperty("processingStage", out var stage) && stage.ValueKind == JsonValueKind.String) processingStage = stage.GetString();
             if (metadata.RootElement.TryGetProperty("acceptedAt", out var accepted) && accepted.ValueKind == JsonValueKind.String && DateTime.TryParse(accepted.GetString(), out var parsed)) acceptedAt = parsed;
             if (metadata.RootElement.TryGetProperty("traceId", out var trace) && trace.ValueKind == JsonValueKind.String) traceId = trace.GetString();
             if (metadata.RootElement.TryGetProperty("commandId", out var command) && command.ValueKind == JsonValueKind.String) commandId = command.GetString();
         }
-        return new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), timings, processingStage, acceptedAt, traceId, commandId);
+        return new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetFieldValue<JsonDocument>(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetGuid(8), reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10), timings, processingStage, acceptedAt, traceId, commandId, answerMetadata);
     }
 
     public async Task<AssistantQueryRow?> GetAssistantQueryAsync(Guid id, Guid? userId, bool includeAll)

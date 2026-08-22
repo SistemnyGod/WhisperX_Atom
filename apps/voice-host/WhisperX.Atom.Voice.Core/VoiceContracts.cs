@@ -43,7 +43,12 @@ public enum VoiceIntent
     RepeatAnswer,
     ShortenAnswer,
     ElaborateAnswer,
-    PreviousQuestion
+    PreviousQuestion,
+    // Local, deterministic status fast paths. Keep appended for IPC
+    // compatibility; they never create an Assistant query.
+    GetServerStatus,
+    GetPipelineStatus,
+    GetStorageStatus
 }
 
 public sealed record VoiceCommand(
@@ -123,7 +128,16 @@ public sealed record VoiceHostSnapshot(
     string? TtsFallbackReason = null,
     int TtsRestartCount = 0,
     double? VoiceNoiseFloorDb = null,
-    double? VoiceVadThresholdDb = null);
+    double? VoiceVadThresholdDb = null,
+    DateTimeOffset? LastWakeAtUtc = null,
+    DateTimeOffset? LastUtteranceAtUtc = null,
+    DateTimeOffset? LastAssistantAcceptedAtUtc = null,
+    DateTimeOffset? LastTtsStartedAtUtc = null,
+    DateTimeOffset? LastTtsFinishedAtUtc = null,
+    double? LastTtsQueueWaitMs = null,
+    double? LastTtsSynthesisMs = null,
+    double? LastTtsPlaybackMs = null,
+    string? LastAssistantQueryId = null);
 
 public sealed record VoiceResponse(
     string Text,

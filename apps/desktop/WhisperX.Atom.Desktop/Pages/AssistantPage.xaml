@@ -71,7 +71,12 @@
                         <TextBox x:Name="QuestionBox" Header="Вопрос" PlaceholderText="Задайте вопрос помощнику" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
                         <Button x:Name="AskButton" Grid.Column="1" Content="Спросить" VerticalAlignment="Bottom" Style="{StaticResource PrimaryButtonStyle}" Click="AskButton_Click" />
                     </Grid>
-                    <TextBlock x:Name="StatusText" Grid.Row="3" Text="" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                    <StackPanel Grid.Row="3" Spacing="3">
+                        <TextBlock x:Name="StatusText" Text="" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding AnswerTypeText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding SourceSummaryText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding MissingFieldsText}" Foreground="{StaticResource WarningBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                    </StackPanel>
                 </Grid>
             </Border>
 

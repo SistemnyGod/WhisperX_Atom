@@ -200,7 +200,7 @@ public sealed record DesktopPipelineRun(
     DateTime? CreatedAt = null,
     DateTime? UpdatedAt = null,
     string? RecordingState = null);
-public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null);
+public sealed record DesktopAssistantQuery(string Id, string? MeetingId, string Query, string Status, string? Answer, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, DateTime CreatedAt, DateTime? CompletedAt, string AssistantMode = "MEETING_MEMORY", JsonDocument? Timings = null, int RetryCount = 0, DateTime? NextRetryAt = null, bool Retryable = true, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null, JsonDocument? AnswerMetadata = null);
 public sealed record DesktopAssistantRequestAccepted(
     string QueryId,
     string? ConversationId,

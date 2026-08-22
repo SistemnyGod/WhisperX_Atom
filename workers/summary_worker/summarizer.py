@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -651,6 +652,7 @@ class LlamaCppClient:
         self._model = model
         self._timeout = timeout_seconds
         self._client: Any | None = None
+        self.last_first_token_ms: float | None = None
 
     @property
     def model(self) -> str:
@@ -711,6 +713,7 @@ class LlamaCppClient:
         retry_tokens = max_tokens if retry_max_output_tokens is None else max(128, min(4096, int(retry_max_output_tokens)))
         client = await self._get_client()
         for attempt in range(2):
+            self.last_first_token_ms = None
             request_messages = messages
             if attempt:
                 request_messages = [
@@ -729,9 +732,16 @@ class LlamaCppClient:
                 # llama.cpp grammar compiler (see _llama_grammar_schema).
                 "response_format": {"type": "json_object", "schema": self._llama_grammar_schema(schema)},
             }
-            response = await client.post(self._url, json=body)
-            response.raise_for_status()
-            payload = response.json()
+            response = await self._post_with_optional_stream(client, body)
+            # Streaming is assembled into the same OpenAI-compatible payload
+            # shape as the regular response.  Keep the normal response object
+            # path for older llama.cpp/httpx clients, but do not try to call
+            # ``raise_for_status``/``json`` on the assembled dictionary.
+            if isinstance(response, dict):
+                payload = response
+            else:
+                response.raise_for_status()
+                payload = response.json()
             choice = payload["choices"][0]
             content = choice["message"]["content"]
             if choice.get("finish_reason") == "length" and attempt == 0:
@@ -748,3 +758,51 @@ class LlamaCppClient:
                     raise ValueError("llm_invalid_json")
                 continue
         raise ValueError("llm_invalid_json")
+
+    async def _post_with_optional_stream(self, client: Any, body: dict[str, Any]) -> Any:
+        """Use llama.cpp SSE when enabled, retaining a normal HTTP fallback.
+
+        The fallback keeps older llama.cpp builds compatible while exposing a
+        real first-token measurement whenever the server supports streaming.
+        """
+        enabled = os.getenv("LLM_STREAMING_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+        if not enabled:
+            return await client.post(self._url, json=body)
+        started = time.perf_counter()
+        try:
+            stream_body = dict(body)
+            stream_body["stream"] = True
+            content: list[str] = []
+            finish_reason: str | None = None
+            async with client.stream("POST", self._url, json=stream_body) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = event.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    token = delta.get("content")
+                    if isinstance(token, str) and token:
+                        if self.last_first_token_ms is None:
+                            self.last_first_token_ms = (time.perf_counter() - started) * 1000.0
+                        content.append(token)
+                    if choice.get("finish_reason"):
+                        finish_reason = choice.get("finish_reason")
+            if not content:
+                raise ValueError("llm_stream_empty")
+            return {"choices": [{"message": {"content": "".join(content)}, "finish_reason": finish_reason}]}
+        except Exception:
+            # A server may reject stream=true even though the regular API is
+            # healthy. Keep the request useful and leave first_token unset.
+            self.last_first_token_ms = None
+            return await client.post(self._url, json=body)

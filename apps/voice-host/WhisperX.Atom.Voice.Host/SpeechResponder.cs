@@ -42,6 +42,7 @@ public sealed class SpeechResponder : IDisposable
     private int _sampleRate = 48000;
     private int _cpuThreads = 4;
     private bool _fallbackEnabled = true;
+    private int _duckedVolume = -1;
 
     public SpeechResponder() : this(CreateDefaultRouter(string.Empty)) { }
     internal SpeechResponder(string expectedBuildIdentity) : this(CreateDefaultRouter(expectedBuildIdentity)) { }
@@ -168,6 +169,27 @@ public sealed class SpeechResponder : IDisposable
             _player.Stop();
             while (_queue.Reader.TryRead(out var request)) { Interlocked.Decrement(ref _queueDepth); request.Completion.TrySetResult(new SpeechPlaybackResult(SpeechPlaybackState.Cancelled, false, "TTS_AUDIO_CANCELLED")); }
             Volatile.Write(ref _busy, 0);
+        }
+    }
+
+    public void DuckPlayback(int percent)
+    {
+        lock (_gate)
+        {
+            if (_duckedVolume < 0) _duckedVolume = _volume;
+            _volume = Math.Clamp(percent, 0, 100);
+            _player.SetVolume(_volume);
+        }
+    }
+
+    public void RestorePlaybackVolume()
+    {
+        lock (_gate)
+        {
+            if (_duckedVolume < 0) return;
+            _volume = _duckedVolume;
+            _player.SetVolume(_volume);
+            _duckedVolume = -1;
         }
     }
 

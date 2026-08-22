@@ -378,13 +378,19 @@ class HybridRetriever:
         return selected
 
     @staticmethod
-    def expand_neighbours(anchors: Iterable[RankedCandidate], candidates: Iterable[RetrievalCandidate], limit: int = 36) -> list[RetrievalCandidate]:
+    def expand_neighbours(
+        anchors: Iterable[RankedCandidate],
+        candidates: Iterable[RetrievalCandidate],
+        limit: int = 36,
+        window: int = 1,
+    ) -> list[RetrievalCandidate]:
         values = list(candidates)
         by_position = {(item.meeting_id, item.transcript_id, item.ordinal): item for item in values}
         selected: dict[str, RetrievalCandidate] = {}
+        radius = max(0, min(int(window), 4))
         for ranked in anchors:
             item = ranked.candidate
-            for ordinal in (item.ordinal - 1, item.ordinal, item.ordinal + 1):
+            for ordinal in range(item.ordinal - radius, item.ordinal + radius + 1):
                 neighbour = by_position.get((item.meeting_id, item.transcript_id, ordinal))
                 if neighbour is not None:
                     selected[neighbour.segment_id] = neighbour
