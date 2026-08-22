@@ -32,7 +32,20 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhen
 # still means the current ordinary user's logon session; it does not elevate
 # the supervisor or run it as SYSTEM.
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+}
+catch {
+    # Task registration changes the machine-wide Task Scheduler database even
+    # though the task itself is deliberately owned by the ordinary server
+    # user.  Surface a stable, actionable error instead of leaking the raw
+    # COM exception (typically 0x80070005) into the release gate.
+    $message = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { "TASK_SCHEDULER_REGISTRATION_FAILED" }
+    if ($message -match '(?i)access is denied|0x80070005|unauthorized') {
+        throw "SERVER_STARTUP_TASK_REGISTRATION_DENIED: run this installer from an elevated Administrator PowerShell; task owner remains $($principal.UserId)"
+    }
+    throw "SERVER_STARTUP_TASK_REGISTRATION_FAILED: $message"
+}
 $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $registered) { throw "SERVER_STARTUP_TASK_NOT_REGISTERED" }
 if ($registered.Principal.UserId -ne $principal.UserId -or $registered.Settings.MultipleInstances -ne "IgnoreNew") { throw "SERVER_STARTUP_TASK_CONFIGURATION_INVALID" }
