@@ -2,7 +2,8 @@
 param(
     [string]$BundleRoot = "C:\Program Files\WhisperX Atom Server",
     [string]$ConfigRoot = "C:\ProgramData\WhisperXAtom\Server",
-    [string]$TaskName = "WhisperX Atom Server Runtime"
+    [string]$TaskName = "WhisperX Atom Server Runtime",
+    [switch]$ElevatedRelaunch
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,33 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw "SERVER_CONFI
 $manifestData = Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json
 if ([string]::IsNullOrWhiteSpace([string]$manifestData.buildIdentity) -or [string]$manifestData.buildIdentity -match '(?i)dev|dirty') { throw "SERVER_MANIFEST_IDENTITY_INVALID" }
 & (Join-Path $PSScriptRoot "ensure-supervisor-health-token.ps1") -EnvFile $envFile
+
+# Register-ScheduledTask writes the machine-wide Task Scheduler database. A
+# normal interactive launch is supported: when the current account belongs to
+# Administrators but the PowerShell token is not elevated, relaunch this same
+# script through UAC and wait for its exit code. The elevated process still
+# resolves WindowsIdentity from the same user, so the task remains
+# Interactive/Limited and never runs as SYSTEM.
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = [Security.Principal.WindowsPrincipal]::new($currentIdentity)
+$isElevated = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isAdminMember = $currentIdentity.Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }
+if (-not $ElevatedRelaunch -and $isAdminMember -and -not $isElevated) {
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $relaunchArgs = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
+        '-BundleRoot', $BundleRoot, '-ConfigRoot', $ConfigRoot,
+        '-TaskName', $TaskName, '-ElevatedRelaunch'
+    )
+    try {
+        $child = Start-Process -FilePath $powershell -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
+    }
+    catch {
+        throw 'SERVER_STARTUP_TASK_ELEVATION_CANCELLED: approve the UAC prompt or run this installer from an elevated Administrator PowerShell'
+    }
+    if ($child.ExitCode -ne 0) { throw "SERVER_STARTUP_TASK_ELEVATED_INSTALL_FAILED: exit=$($child.ExitCode)" }
+    exit 0
+}
 $dockerCandidates = @(
     (Join-Path ${env:ProgramFiles} "Docker\Docker\Docker Desktop.exe"),
     (Join-Path ${env:LocalAppData} "Docker\Docker Desktop.exe")
