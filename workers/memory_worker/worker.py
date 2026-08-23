@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
@@ -149,6 +150,62 @@ class MemoryProjectionRepository:
                 "UPDATE inbox_messages SET lease_expires_at=now()+interval '30 minutes' WHERE message_id=%s AND worker_id=%s",
                 (job_id, self.worker_id),
             )
+
+    def recover_expired_leases(self) -> int:
+        """Return stale RUNNING memory jobs to QUEUED after a worker crash."""
+        with self._connection() as connection:
+            with connection.transaction():
+                rows = connection.execute(
+                    """UPDATE memory_jobs
+                          SET status='QUEUED',stage='QUEUED',progress=0,
+                              worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,
+                              started_stage_at=NULL,updated_at=now()
+                        WHERE status='RUNNING' AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at < now()
+                    RETURNING id"""
+                ).fetchall()
+                for row in rows:
+                    connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (row[0],))
+                return len(rows)
+
+    def recover_starved_jobs(self) -> int:
+        """Recreate a missing memory.index outbox event after relay loss.
+
+        A queued job is eligible only after a bounded quiet period and only
+        when no outbox event for that job remains.  This makes relay/consumer
+        loss self-healing without producing duplicate events while an existing
+        event is still pending or published.
+        """
+        with self._connection() as connection:
+            with connection.transaction():
+                rows = connection.execute(
+                    """SELECT j.id,j.owner_user_id,j.meeting_id,j.transcript_id,
+                              j.transcript_version,j.pipeline_correlation_id
+                         FROM memory_jobs j
+                        WHERE j.status='QUEUED'
+                          AND COALESCE(j.next_retry_at,j.updated_at) <= now()-interval '60 seconds'
+                          AND NOT EXISTS (
+                                SELECT 1 FROM outbox_messages o
+                                 WHERE o.topic='memory.index'
+                                   AND o.payload->>'jobId'=j.id::text)
+                        ORDER BY j.updated_at,j.id
+                        LIMIT 32
+                        FOR UPDATE OF j SKIP LOCKED"""
+                ).fetchall()
+                for row in rows:
+                    payload = json.dumps({
+                        "jobId": str(row[0]),
+                        "meetingId": str(row[2]),
+                        "transcriptId": str(row[3]),
+                        "transcriptVersion": int(row[4]),
+                        "ownerUserId": str(row[1]),
+                        "pipelineCorrelationId": str(row[5]) if row[5] else None,
+                    })
+                    connection.execute(
+                        "INSERT INTO outbox_messages(id,topic,payload) VALUES(%s,'memory.index',%s::jsonb)",
+                        (uuid.uuid4(), payload),
+                    )
+                return len(rows)
 
     def _set_stage(self, job_id: str, stage: str, progress: int) -> None:
         with self._connection() as connection:
@@ -409,6 +466,12 @@ async def run() -> None:
     subscription = await jetstream.pull_subscribe("memory.index", durable="memory-worker")
     heartbeat.set_state("READY")
     while True:
+        starved = await asyncio.to_thread(repository.recover_starved_jobs)
+        if starved:
+            LOGGER.warning("requeued_starved_memory_jobs count=%s", starved)
+        recovered = await asyncio.to_thread(repository.recover_expired_leases)
+        if recovered:
+            LOGGER.warning("recovered_expired_memory_leases count=%s", recovered)
         for message in await fetch_available(subscription, nats.errors.TimeoutError, timeout=5):
             job_id: str | None = None
             try:

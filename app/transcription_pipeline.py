@@ -130,6 +130,7 @@ class PipelineConfig:
     asr_model: str
     asr_model_repository: str
     asr_model_revision: str
+    asr_model_path: str
     asr_backend: str
     language: str | None
     device: str
@@ -148,6 +149,7 @@ class PipelineConfig:
     hf_token: str
     diarization_model: str
     diarization_model_revision: str
+    diarization_model_path: str
     model_local_only: bool
     use_glossary: bool
     glossary_rules_raw: str
@@ -187,6 +189,7 @@ class PipelineConfig:
             asr_model=os.getenv("WHISPERX_MODEL", "large-v3"),
             asr_model_repository=os.getenv("WHISPERX_MODEL_REPOSITORY", "Systran/faster-whisper-large-v3"),
             asr_model_revision=(os.getenv("WHISPERX_MODEL_REVISION") or "").strip(),
+            asr_model_path=(os.getenv("WHISPERX_MODEL_PATH") or "").strip(),
             asr_backend=os.getenv("ASR_BACKEND", "whisperx").lower(),
             language=language,
             device=device,
@@ -211,6 +214,7 @@ class PipelineConfig:
             hf_token=(os.getenv("HF_TOKEN") or "").strip(),
             diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip(),
             diarization_model_revision=(os.getenv("DIARIZATION_MODEL_REVISION") or "").strip(),
+            diarization_model_path=(os.getenv("DIARIZATION_MODEL_PATH") or "").strip(),
             model_local_only=_as_bool("WHISPERX_MODEL_LOCAL_ONLY", runtime_profile in {"production", "release"}),
             use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
@@ -263,6 +267,7 @@ class ModelCacheManager:
         compute_type: str,
         backend: str,
         *,
+        model_path: str | None = None,
         language: str | None,
         beam_size: int,
         vad_onset: float,
@@ -270,8 +275,11 @@ class ModelCacheManager:
         initial_prompt: str,
         hotwords: str,
     ):
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            raise FileNotFoundError(f"ASR_MODEL_PATH_NOT_FOUND:{explicit_path}")
         resolved_model = self._resolve_snapshot(
-            model_repository if model_repository and not Path(model).is_dir() else model,
+            explicit_path or (model_repository if model_repository and not Path(model).is_dir() else model),
             model_revision,
             local_only=model_local_only,
             label="ASR_MODEL",
@@ -328,9 +336,12 @@ class ModelCacheManager:
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._align[key]
 
-    def get_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool):
+    def get_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool, model_path: str | None = None):
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            raise FileNotFoundError(f"DIARIZATION_MODEL_PATH_NOT_FOUND:{explicit_path}")
         resolved_model = self._resolve_snapshot(
-            model_name,
+            explicit_path or model_name,
             model_revision,
             local_only=model_local_only,
             label="DIARIZATION_MODEL",
@@ -358,8 +369,11 @@ class ModelCacheManager:
                     pass
         return had_models
 
-    def release_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool) -> bool:
-        resolved_model = self._resolve_snapshot(model_name, model_revision, local_only=model_local_only, label="DIARIZATION_MODEL")
+    def release_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool, model_path: str | None = None) -> bool:
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            return False
+        resolved_model = self._resolve_snapshot(explicit_path or model_name, model_revision, local_only=model_local_only, label="DIARIZATION_MODEL")
         key = (device, hf_token, resolved_model)
         existed = key in self._diarizer
         self._diarizer.pop(key, None)
@@ -618,6 +632,7 @@ class TranscriptionPipeline:
                 self.config.device,
                 self.config.compute_type,
                 "faster-whisper",
+                model_path=self.config.asr_model_path,
                 language=self.config.language,
                 beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
                 initial_prompt=self.config.initial_prompt,
@@ -675,6 +690,7 @@ class TranscriptionPipeline:
             self.config.device,
             self.config.compute_type,
             "whisperx",
+            model_path=self.config.asr_model_path,
             language=self.config.language,
             beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
             initial_prompt=self.config.initial_prompt,
@@ -746,6 +762,7 @@ class TranscriptionPipeline:
                 self.config.diarization_model,
                 self.config.diarization_model_revision,
                 self.config.model_local_only,
+                self.config.diarization_model_path,
             )
             return diarizer(
                 audio_path,
@@ -767,6 +784,7 @@ class TranscriptionPipeline:
                     self.config.diarization_model,
                     self.config.diarization_model_revision,
                     self.config.model_local_only,
+                    self.config.diarization_model_path,
                 )
                 ctx.diarization_runtime["device"] = "cpu"
                 ctx.diarization_runtime["cpu_fallback"] = True

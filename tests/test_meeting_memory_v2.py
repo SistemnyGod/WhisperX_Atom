@@ -181,6 +181,30 @@ def test_task_completion_closes_thread():
     assert threads[0].state == "RESOLVED"
 
 
+def test_negated_completion_does_not_close_thread():
+    task = _fact("task", "m1", "TASK", "Подготовить ведомость", 10, subject="ремонт насоса")
+    not_done = MemoryFact(**{**_fact("not-done", "m2", "STATUS", "Ведомость не подготовлена", 10, subject="ремонта насоса").__dict__, "source_text": "Ведомость не подготовлена."})
+    relations = resolve_relations([task, not_done], {"m1": 1, "m2": 2})
+    assert all(item.relation_type != "CLOSES" for item in relations)
+    assert build_threads([task, not_done], relations)[0].state == "OPEN"
+
+
+def test_completed_task_can_be_reopened_by_latest_fact():
+    task = _fact("task", "m1", "TASK", "Проверить насос", 10, subject="ремонт насоса")
+    done = MemoryFact(**{**_fact("done", "m2", "STATUS", "Задача выполнена", 10, subject="ремонта насоса").__dict__, "source_text": "Задача выполнена."})
+    reopened = MemoryFact(**{**_fact("reopened", "m3", "TASK", "Снова проверить насос", 10, subject="ремонта насоса").__dict__, "source_text": "Проблему обнаружили снова, нужно повторно проверить насос."})
+    relations = resolve_relations([task, done, reopened], {"m1": 1, "m2": 2, "m3": 3})
+    thread = build_threads([task, done, reopened], relations)[0]
+    assert thread.state == "REOPENED"
+
+
+def test_negated_change_does_not_create_supersedes():
+    old = _fact("old", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
+    unchanged = MemoryFact(**{**_fact("same", "m2", "DEADLINE", "30 августа", 10, subject="ремонт печи").__dict__, "source_text": "Срок не перенесли, он 30 августа."})
+    relations = resolve_relations([old, unchanged], {"m1": 1, "m2": 2})
+    assert relations[0].relation_type == "CONTRADICTS"
+
+
 def test_timeline_uses_meeting_dates_not_segment_start_only():
     first = _fact("first", "m-first", "DECISION", "заказать двигатель", 5000)
     second = _fact("second", "m-second", "DECISION", "перенести ремонт", 1000)
@@ -194,6 +218,12 @@ def test_memory_query_plan_and_rehydration_fail_closed():
     assert plan.include_superseded is True
     facts = [_fact("a", "m1", "DEADLINE", "25 августа", 10), _fact("b", "m2", "DEADLINE", "30 августа", 10, state="INVALIDATED")]
     assert rehydrate_evidence(facts, {"seg-a", "seg-foreign"}) == ("seg-a",)
+
+
+def test_first_seen_memory_questions_use_chronological_plan():
+    plan = build_memory_query_plan("FACT_LOOKUP", "Когда впервые обсуждали замену двигателя?", "двигатель")
+    assert plan.temporal_mode == "FIRST_SEEN"
+    assert plan.include_superseded is True
 
 
 def test_threads_ignore_invalidated_facts_and_keep_ids():
@@ -248,6 +278,8 @@ def test_memory_runtime_is_wired_without_gpu_dependency():
     compose = (root / "compose.dev.yml").read_text(encoding="utf-8")
     outbox = (root / "workers" / "outbox_relay" / "worker.py").read_text(encoding="utf-8")
     assert "memory.index" in worker and "memory-worker" in compose
+    assert "recover_expired_leases" in worker
+    assert "recover_starved_jobs" in worker
     assert '"memory.index"' in outbox
     assert "GPU" not in worker.split("async def run", 1)[0]
 

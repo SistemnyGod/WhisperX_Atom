@@ -51,6 +51,45 @@ def test_core_release_images_do_not_use_latest_or_major_only_tags():
     assert '"rollForward": "disable"' in read("global.json")
 
 
+def test_container_gpu_receives_pinned_model_contract_and_read_only_model_mount():
+    compose = read("compose.dev.yml")
+    for field in (
+        "WHISPERX_MODEL_REPOSITORY",
+        "WHISPERX_MODEL_REVISION",
+        "WHISPERX_MODEL_PATH",
+        "WHISPERX_MODEL_SHA256",
+        "WHISPERX_MODEL_LOCAL_ONLY",
+        "DIARIZATION_MODEL",
+        "DIARIZATION_MODEL_REVISION",
+        "DIARIZATION_MODEL_PATH",
+        "DIARIZATION_MODEL_SHA256",
+    ):
+        assert f"{field}:" in compose
+    assert "${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro" in compose
+
+
+def test_gpu_heartbeat_attests_model_contract_without_secrets():
+    worker = read("workers/ml_worker/worker.py")
+    for field in ("asrModelRevision", "asrModelPath", "asrModelSha256", "diarizationModelRevision", "diarizationModelPath", "diarizationModelSha256"):
+        assert field in worker
+    assert "HF_TOKEN" in worker
+    assert "hfToken" not in worker
+
+
+def test_supervisor_activates_memory_profile_when_memory_is_enabled():
+    supervisor = read("scripts/supervise-server-runtime.ps1")
+    assert 'Read-EnvValue "MEETING_MEMORY_ENABLED"' in supervisor
+    assert '@("--profile", "memory")' in supervisor
+    assert "asrModelRevision" in supervisor
+    assert "diarizationModelRevision" in supervisor
+
+
+def test_internal_readiness_exposes_safe_gpu_model_attestation():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    internal = api.split('app.MapGet("/api/internal/runtime/readiness"', 1)[1]
+    assert "capabilities = worker.Capabilities" in internal
+
+
 def test_release_gate_requires_all_live_acceptance_scenarios():
     gate = read("scripts/release-gate.ps1")
     for scenario in (

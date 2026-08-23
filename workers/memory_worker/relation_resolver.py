@@ -12,6 +12,8 @@ from .entity_resolver import canonical_topic_name, normalize_entity_name
 
 _SUPERSEDES = re.compile(r"\b(?:теперь|новый|новая|перенесли|изменили|передали|заменили)\b", re.IGNORECASE)
 _CLOSES = re.compile(r"\b(?:готово|сделано|сделана|выполнено|выполнена|завершено|завершена|закрыли|закрыта|подготовил)\b", re.IGNORECASE)
+_NEGATED_SUPERSEDES = re.compile(r"\bне\s+(?:перенос\w*|перенес\w*|измен\w*|переда\w*|замен\w*)\b", re.IGNORECASE)
+_NEGATED_CLOSES = re.compile(r"\bне\s+(?:готов\w*|сдела\w*|выполн\w*|заверш\w*|закры\w*|подготов\w*)\b", re.IGNORECASE)
 
 
 def normalize_fact_value(fact_type: str, value: str) -> str:
@@ -24,6 +26,16 @@ def normalize_fact_value(fact_type: str, value: str) -> str:
     if fact_type == "RESPONSIBLE":
         return normalized
     return " ".join(normalized.split())
+
+
+def is_explicit_closure(text: str) -> bool:
+    """Return true only for affirmative completion language.
+
+    A negated verb must never close a task just because its positive stem is
+    present (for example, ``не подготовил`` contains ``подготовил``).
+    """
+    value = text or ""
+    return bool(_CLOSES.search(value)) and not bool(_NEGATED_CLOSES.search(value))
 
 
 def resolve_relations(
@@ -73,14 +85,14 @@ def resolve_relations(
                 if old_value == new_value:
                     relation = "CONFIRMS"
                 else:
-                    relation = "SUPERSEDES" if _SUPERSEDES.search(relation_text) else "CONTRADICTS"
+                    relation = "SUPERSEDES" if _SUPERSEDES.search(relation_text) and not _NEGATED_SUPERSEDES.search(relation_text) else "CONTRADICTS"
                 result.append(MemoryRelation(previous_same_type.fact_id, newer.fact_id, relation, 0.70, "DERIVED"))
                 continue
 
             # A completion/status fact closes the most recent open task for
             # the same normalized topic, even when the extractor assigned a
             # different fact type to the closing utterance.
-            if _CLOSES.search(relation_text) and newer.fact_type in {"TASK", "STATUS"}:
+            if is_explicit_closure(relation_text) and newer.fact_type in {"TASK", "STATUS"}:
                 previous_task = next(
                     (candidate for candidate in reversed(ordered[:position]) if candidate.fact_type in {"TASK", "STATUS"}),
                     None,

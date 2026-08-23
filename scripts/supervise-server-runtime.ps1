@@ -99,6 +99,7 @@ function Get-ComposeArguments([object]$Manifest) {
     $env:APP_VERSION = $identity
     $arguments = @("compose", "--project-name", "whisperx-atom", "--env-file", $envFile, "-f", (Join-Path $bundle "compose.dev.yml"), "-f", (Join-Path $bundle "compose.lan.yml"), "-f", (Join-Path $bundle "compose.release.yml"), "--profile", "core", "--profile", "gpu", "--profile", "lan")
     if ((Read-EnvValue "AUTO_SUMMARY_ENABLED") -eq "true" -or (Read-EnvValue "ASSISTANT_ENABLED") -ne "false") { $arguments += @("--profile", "llm") }
+    if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $arguments += @("--profile", "memory") }
     return $arguments
 }
 
@@ -179,6 +180,25 @@ function Test-WhisperXRuntime([object]$Manifest) {
                 Write-SupervisorLog ("Authenticated readiness worker identity mismatch: " + $workerName) "WARN"
                 $script:IdentityMismatch = $true
                 $unhealthy.Add($workerName)
+            }
+        }
+
+        # A healthy heartbeat alone is not enough for a model release.  When
+        # the manifest pins model revisions, compare them with the GPU
+        # worker's attested runtime configuration and fail closed on drift.
+        $gpuReadiness = @($readiness.workers | Where-Object { $_.name -eq "gpu-worker" }) | Select-Object -First 1
+        $expectedAsrRevision = Read-EnvValue "WHISPERX_MODEL_REVISION"
+        $expectedDiarRevision = Read-EnvValue "DIARIZATION_MODEL_REVISION"
+        if ($null -ne $gpuReadiness -and $null -ne $gpuReadiness.capabilities) {
+            if (-not [string]::IsNullOrWhiteSpace($expectedAsrRevision) -and [string]$gpuReadiness.capabilities.asrModelRevision -ne $expectedAsrRevision) {
+                Write-SupervisorLog "GPU ASR model revision attestation mismatch" "ERROR"
+                $script:IdentityMismatch = $true
+                $unhealthy.Add("gpu-worker")
+            }
+            if (-not [string]::IsNullOrWhiteSpace($expectedDiarRevision) -and [string]$gpuReadiness.capabilities.diarizationModelRevision -ne $expectedDiarRevision) {
+                Write-SupervisorLog "GPU diarization model revision attestation mismatch" "ERROR"
+                $script:IdentityMismatch = $true
+                $unhealthy.Add("gpu-worker")
             }
         }
 

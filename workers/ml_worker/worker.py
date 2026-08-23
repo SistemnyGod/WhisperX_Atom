@@ -517,6 +517,17 @@ async def run() -> None:
             "cudaAvailable": False,
             "hfConfigured": bool(os.getenv("HF_TOKEN")),
             "runtime": os.getenv("GPU_WORKER_RUNTIME", "container"),
+            # Publish the exact model contract consumed by the pipeline.  The
+            # supervisor/Doctor can now compare runtime configuration with the
+            # release manifest instead of trusting only image identity.
+            "asrModelRepository": os.getenv("WHISPERX_MODEL_REPOSITORY", "Systran/faster-whisper-large-v3"),
+            "asrModelRevision": os.getenv("WHISPERX_MODEL_REVISION", ""),
+            "asrModelPath": os.getenv("WHISPERX_MODEL_PATH", ""),
+            "asrModelSha256": os.getenv("WHISPERX_MODEL_SHA256", ""),
+            "diarizationModel": os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
+            "diarizationModelRevision": os.getenv("DIARIZATION_MODEL_REVISION", ""),
+            "diarizationModelPath": os.getenv("DIARIZATION_MODEL_PATH", ""),
+            "diarizationModelSha256": os.getenv("DIARIZATION_MODEL_SHA256", ""),
         }
         try:
             import torch
@@ -553,8 +564,17 @@ async def run() -> None:
                     device = os.getenv("DEVICE", "cuda").strip().lower() or "cuda"
                     if device == "cuda" and not capabilities.get("cudaAvailable"):
                         device = "cpu"
+                diarization_model = (
+                    os.getenv("DIARIZATION_MODEL_PATH", "").strip()
+                    or os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip()
+                )
                 probe = await asyncio.wait_for(
-                    asyncio.to_thread(DiarizationPipeline, use_auth_token=os.environ["HF_TOKEN"], device=device),
+                    asyncio.to_thread(
+                        DiarizationPipeline,
+                        model_name=diarization_model,
+                        use_auth_token=os.environ["HF_TOKEN"],
+                        device=device,
+                    ),
                     timeout=float(os.getenv("DIARIZATION_READINESS_TIMEOUT_SECONDS", "120")),
                 )
                 del probe

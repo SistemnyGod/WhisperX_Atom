@@ -29,7 +29,10 @@ class MemoryQueryPlan:
 
 def build_memory_query_plan(intent: str, query: str, topic: str | None = None) -> MemoryQueryPlan:
     normalized = " ".join(re.sub(r"[^\wА-Яа-яЁё-]+", " ", query or "").lower().split())
-    if intent == "TIMELINE" or any(word in normalized for word in ("как менялся", "история", "сначала", "потом")):
+    if any(word in normalized for word in ("впервые", "первый раз", "когда начали")):
+        fact_types = ("DEADLINE", "RESPONSIBLE", "DECISION", "STATUS", "TASK", "CAUSE")
+        temporal_mode, include_superseded = "FIRST_SEEN", True
+    elif intent == "TIMELINE" or any(word in normalized for word in ("как менялся", "история", "сначала", "потом")):
         fact_types = ("DEADLINE", "RESPONSIBLE", "DECISION", "STATUS", "TASK")
         temporal_mode, include_superseded = "HISTORY", True
     elif any(word in normalized for word in ("открыт", "невыполн", "остается", "осталось")):

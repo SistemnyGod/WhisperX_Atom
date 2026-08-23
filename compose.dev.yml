@@ -232,6 +232,15 @@ services:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       HF_TOKEN: ${HF_TOKEN:-}
       WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
+      WHISPERX_MODEL_REPOSITORY: ${WHISPERX_MODEL_REPOSITORY:-Systran/faster-whisper-large-v3}
+      WHISPERX_MODEL_REVISION: ${WHISPERX_MODEL_REVISION:-}
+      WHISPERX_MODEL_PATH: ${WHISPERX_MODEL_PATH:-}
+      WHISPERX_MODEL_SHA256: ${WHISPERX_MODEL_SHA256:-}
+      WHISPERX_MODEL_LOCAL_ONLY: ${WHISPERX_MODEL_LOCAL_ONLY:-false}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      DIARIZATION_MODEL_REVISION: ${DIARIZATION_MODEL_REVISION:-}
+      DIARIZATION_MODEL_PATH: ${DIARIZATION_MODEL_PATH:-}
+      DIARIZATION_MODEL_SHA256: ${DIARIZATION_MODEL_SHA256:-}
       DEVICE: ${DEVICE:-cuda}
       COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
       BATCH_SIZE: ${BATCH_SIZE:-8}
@@ -281,6 +290,7 @@ services:
       - '${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data'
       - '${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox'
       - '${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive'
+      - '${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro'
       - model_cache:/root/.cache/huggingface
     deploy:
       resources:

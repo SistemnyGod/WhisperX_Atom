@@ -25,6 +25,7 @@ from .evidence_reasoner import detect_conflicts
 from .evidence_bundles import build_evidence_bundles
 from .query_understanding import AssistantQueryPlan, understand_query
 from .retrieval_planner import build_retrieval_plan
+from .grounding import claims_are_semantically_grounded as _claims_are_semantically_grounded_v3
 from workers.memory_worker.memory_retrieval import MemoryQueryPlan, build_memory_query_plan
 from workers.memory_worker.entity_resolver import canonical_topic_name
 
@@ -133,9 +134,24 @@ def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tu
 _GROUNDING_STOPWORDS = {
     "это", "этот", "эта", "эти", "что", "как", "кто", "где", "когда", "были", "было",
     "будет", "есть", "для", "при", "или", "и", "в", "во", "на", "по", "из", "с", "со",
-    "у", "к", "о", "об", "за", "не", "нет", "да", "так", "мы", "они", "он", "она", "их",
+    "у", "к", "о", "об", "за", "да", "так", "мы", "они", "он", "она", "их",
     "его", "её", "может", "можно", "нужно", "решили", "говорили", "сказал", "сказали",
 }
+
+# Polarity is evidence, not filler.  Removing ``не``/``нет`` makes a claim
+# such as "ремонт не переносим" indistinguishable from "ремонт переносим".
+_POLARITY_PATTERNS = (
+    ("NEGATED_COMPLETION", re.compile(r"\bне\s+(?:готов\w*|сдела\w*|выполн\w*|заверш\w*|закры\w*|подготов\w*)\b", re.IGNORECASE)),
+    ("NEGATED_CHANGE", re.compile(r"\bне\s+(?:перенос\w*|измен\w*|замен\w*|переда\w*)\b", re.IGNORECASE)),
+    ("NEGATION", re.compile(r"\b(?:не|нет|никогда|невозможно|отсутств\w*)\b", re.IGNORECASE)),
+    ("COMPLETION", re.compile(r"\b(?:готов\w*|сдела\w*|выполн\w*|заверш\w*|закры\w*|подготов\w*)\b", re.IGNORECASE)),
+    ("CHANGE", re.compile(r"\b(?:перенос\w*|измен\w*|замен\w*|переда\w*)\b", re.IGNORECASE)),
+)
+
+_PROTECTED_NUMBER_RE = re.compile(
+    r"(?<![\w])(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{1,2}\s+(?:январ\w*|феврал\w*|март\w*|апрел\w*|ма[яй]\w*|июн\w*|июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)|\d+(?:[.,]\d+)?)(?![\w])",
+    re.IGNORECASE,
+)
 
 # LIVE retrieval must fail closed when a question contains only conversational
 # filler (for example "что сейчас решили?").  Without this small second set,
@@ -175,6 +191,35 @@ def _grounding_tokens(value: str) -> set[str]:
     return result
 
 
+def _polarity_markers(value: str) -> frozenset[str]:
+    normalized = (value or "").lower().replace("ё", "е")
+    return frozenset(name for name, pattern in _POLARITY_PATTERNS if pattern.search(normalized))
+
+
+def _polarity_compatible(claim: str, evidence: str) -> bool:
+    claim_markers = _polarity_markers(claim)
+    evidence_markers = _polarity_markers(evidence)
+    # Explicitly opposite forms must never pass on lexical overlap alone.
+    for negative, positive in (
+        ("NEGATED_COMPLETION", "COMPLETION"),
+        ("NEGATED_CHANGE", "CHANGE"),
+    ):
+        if (negative in claim_markers) != (negative in evidence_markers):
+            return False
+        if (positive in claim_markers) != (positive in evidence_markers):
+            return False
+    if ("NEGATION" in claim_markers) != ("NEGATION" in evidence_markers):
+        return False
+    return True
+
+
+def _protected_number_tokens(value: str) -> set[str]:
+    return {
+        " ".join(match.group(0).lower().replace(",", ".").split())
+        for match in _PROTECTED_NUMBER_RE.finditer(value or "")
+    }
+
+
 def _named_tokens(value: str) -> set[str]:
     """Return likely proper names/identifiers for strict evidence checks."""
     return {
@@ -204,6 +249,8 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
             if str(item).removeprefix("SEG-") in valid
         ).lower()
         claim_text = str(claim.get("text", "")).lower()
+        if not _polarity_compatible(claim_text, evidence_text):
+            return False
         claim_tokens = {token for token in _grounding_tokens(claim_text) if not token.startswith("seg-")}
         evidence_tokens = _grounding_tokens(evidence_text)
         if claim_tokens and not (claim_tokens & evidence_tokens):
@@ -212,8 +259,8 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
         evidence_lower = evidence_text.lower()
         if any(name not in evidence_lower for name in claim_names):
             return False
-        numeric_tokens = set(re.findall(r"\d+(?:[.,]\d+)?", claim_text))
-        if any(token not in evidence_text for token in numeric_tokens):
+        numeric_tokens = _protected_number_tokens(claim_text)
+        if not numeric_tokens.issubset(_protected_number_tokens(evidence_text)):
             return False
     # The UI answer and shorter spoken answer are a paraphrase channel, not a
     # second claim list. Keep the hard checks for protected values while
@@ -225,12 +272,20 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
         if str(item).removeprefix("SEG-") in valid
     ).lower()
     for value in (str(result.get("answer", "")), str(result.get("voice_answer", ""))):
-        protected = set(re.findall(r"\d+(?:[.,]\d+)?", value))
+        protected = set(re.findall(r"\b[\w-]*\d[\w-]*\b", value.lower()))
         protected.update(re.findall(r"\b[\w-]*\d[\w-]*\b", value.lower()))
         protected.update(_named_tokens(value))
-        if any(token.lower() not in cited for token in protected):
+        if not _protected_number_tokens(value).issubset(_protected_number_tokens(cited)):
+            return False
+        if any(not re.search(rf"(?<!\w){re.escape(token.lower())}(?!\w)", cited) for token in protected):
             return False
     return True
+
+
+# Keep the historical symbol/import contract while using the dependency-light
+# implementation.  This prevents importing the full worker in unit tests and
+# makes the grounding gate independently testable.
+claims_are_semantically_grounded = _claims_are_semantically_grounded_v3
 
 
 class AssistantRepository:
@@ -376,7 +431,7 @@ class AssistantRepository:
         with self._db.connection() as connection:
             with connection.transaction():
                 rows = connection.execute(
-                    """
+                    f"""
                     UPDATE assistant_queries
                     SET status='LLM_UNAVAILABLE',
                         error_code='ASSISTANT_QUEUE_TIMEOUT',
@@ -729,8 +784,12 @@ class AssistantRepository:
         topic_lookup = canonical_topic_name(topic) if topic else ""
         try:
             with self._db.connection() as connection:
+                # Historical questions need chronological evidence.  Keep
+                # newest-first for current state/open items, but select the
+                # oldest facts first for FIRST_SEEN and full timelines.
+                order_direction = "ASC" if memory_plan.temporal_mode in {"FIRST_SEEN", "HISTORY", "CHANGES"} else "DESC"
                 fact_rows = connection.execute(
-                    """
+                    f"""
                     SELECT f.id,f.meeting_id,f.transcript_id,f.transcript_version,
                            f.evidence_segment_ids,f.fact_type,m.created_at
                     FROM transcript_facts f
@@ -758,13 +817,13 @@ class AssistantRepository:
                            SELECT 1
                              FROM memory_thread_facts mtf
                              JOIN memory_threads mt ON mt.id=mtf.thread_id
-                            WHERE mtf.fact_id=f.id AND mt.state='OPEN' AND mtf.role <> 'CLOSED'))
+                            WHERE mtf.fact_id=f.id AND mt.state IN ('OPEN','REOPENED') AND mtf.role <> 'CLOSED'))
                       AND (%s OR NOT EXISTS (
                            SELECT 1 FROM memory_fact_relations r
                            WHERE r.source_fact_id=f.id
                              AND r.relation_type='SUPERSEDES'
                              AND r.invalidated_at IS NULL))
-                    ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) DESC NULLS LAST,f.start_ms DESC,f.id
+                     ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) {order_direction} NULLS LAST,f.start_ms {order_direction},f.id
                     LIMIT 128
                     """,
                     (
@@ -805,7 +864,7 @@ class AssistantRepository:
                       AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                       AND t.status IN ('READY','PARTIAL_READY')
                       AND COALESCE(s.is_hidden,false)=false
-                    ORDER BY m.created_at DESC,t.meeting_id,t.version,s.ordinal
+                    ORDER BY m.created_at {order_direction},t.meeting_id,t.version,s.ordinal
                     LIMIT 64
                     """,
                     (segment_ids, meeting_id, meeting_id, include_all, owner_user_id),

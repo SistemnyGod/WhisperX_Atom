@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 from typing import Iterable
 
 from .models import MemoryFact, MemoryThread
 from .entity_resolver import canonical_topic_name
-from .relation_resolver import normalize_fact_value
+from .relation_resolver import is_explicit_closure, normalize_fact_value
+
+
+_REOPENED_MARKER = re.compile(
+    r"\b(?:снова|опять|повторно|возобнов\w*|заново)\b|\b(?:проблема|задача)\s+(?:снова|опять)\b",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_reopen(text: str) -> bool:
+    """Recognize affirmative reopening language, not a historical mention."""
+    return bool(_REOPENED_MARKER.search(text or ""))
 
 
 def build_threads(facts: Iterable[MemoryFact], relations: Iterable[object] = ()) -> tuple[MemoryThread, ...]:
@@ -100,9 +112,10 @@ def build_threads(facts: Iterable[MemoryFact], relations: Iterable[object] = ())
         )
         latest = ordered[-1]
         latest_text = (getattr(latest, "source_text", "") or latest.value).lower()
-        state = "CONFLICTED" if has_conflict else "RESOLVED" if has_close or (
+        reopened = has_close and is_explicit_reopen(latest_text)
+        state = "CONFLICTED" if has_conflict else "REOPENED" if reopened else "RESOLVED" if has_close or (
             latest.fact_type in {"TASK", "STATUS"}
-            and any(marker in latest_text for marker in ("готов", "сделан", "выполн", "заверш", "закрыт"))
+            and is_explicit_closure(latest_text)
         ) else "OPEN"
         result.append(MemoryThread(
             title=ordered[0].subject or ordered[0].value[:120],

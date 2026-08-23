@@ -736,7 +736,10 @@ app.MapGet("/api/internal/runtime/readiness", async (HttpContext context, Unifie
                 version = worker.Version,
                 currentJobId = worker.CurrentJobId,
                 lastSeenAt = worker.LastSeenAt,
-                lastErrorCode = worker.LastErrorCode
+                lastErrorCode = worker.LastErrorCode,
+                // Safe model attestation only: worker capabilities contain
+                // revisions, paths and hashes, never HF tokens or user data.
+                capabilities = worker.Capabilities
             }),
             queue = new
             {
