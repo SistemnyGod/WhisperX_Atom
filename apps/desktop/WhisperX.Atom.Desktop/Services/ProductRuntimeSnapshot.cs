@@ -132,5 +132,6 @@ public sealed record ProductRuntimeSnapshot(
 
     private static bool HasCurrentHostCapabilities(AgentIpcHealth? health) =>
         health?.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true
-        && health.Capabilities.Contains(AgentIpcProtocol.DeviceEventStreamCapability, StringComparer.OrdinalIgnoreCase);
+        && health.Capabilities.Contains(AgentIpcProtocol.DeviceEventStreamCapability, StringComparer.OrdinalIgnoreCase)
+        && health.Capabilities.Contains(AgentIpcProtocol.StableTrackBindingCapability, StringComparer.OrdinalIgnoreCase);
 }

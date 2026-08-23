@@ -8,7 +8,6 @@ flowchart LR
     Desktop[WinUI 3 Desktop\n.NET 10]
     Host[AudioGraph Recorder Host\ncurrent-user]
     Legacy[Recorder Service\nmanual fallback]
-    GPU[Host GPU Worker\nPython + WhisperX + CUDA]
     Archive[Durable PCM + FLAC + SQLite spool]
   end
   subgraph Docker[Docker LAN core]
@@ -17,7 +16,7 @@ flowchart LR
     NATS[(NATS JetStream)]
     TUS[tusd]
     Media[Media Worker]
-    ContainerGPU[Optional GPU Worker]
+    ContainerGPU[GPU Worker\nWhisperX + CUDA]
   end
   Desktop <-->|Named Pipe v6| Host
   Legacy -.->|manual only| Host
@@ -28,17 +27,16 @@ flowchart LR
   API --> NATS
   TUS --> API
   Media --> NATS
-  GPU --> NATS
-  ContainerGPU -. fallback .-> NATS
+  ContainerGPU --> NATS
 ```
 
 ## Что является текущим runtime
 
-Поддерживаемая конфигурация — Docker core + current-user AudioGraph capture +
-host ML. Windows запускает Desktop, AudioGraph Recorder Host из Program Files и
-host GPU Worker. Legacy Recorder Service остаётся остановленным ручным fallback.
-WhisperX и CUDA загружаются из локального Python окружения; container GPU Worker
-остаётся резервным режимом.
+Поддерживаемая конфигурация для LAN — Docker core + current-user AudioGraph capture +
+container GPU Worker. Серверный Windows Node запускает Docker Desktop и immutable
+Server Bundle; клиентский Windows Node запускает Desktop, AudioGraph Recorder Host,
+Voice Host и TtsHost. Legacy Recorder Service и host GPU Worker остаются только
+диагностическими/ручными fallback-режимами и не являются частью release gate.
 
 ## Границы ответственности
 

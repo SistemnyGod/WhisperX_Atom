@@ -335,6 +335,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         return (bool)(await command.ExecuteScalarAsync())!;
     }
 
+    public async Task<bool> AgentSupportsStableTrackBindingAsync(Guid agentId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT COALESCE(capabilities ? 'stableTrackBindingV1', false) OR COALESCE(capabilities ? 'STABLE_TRACK_BINDING_V1', false) FROM recorder_agents WHERE id=@agent",
+            connection);
+        command.Parameters.AddWithValue("agent", agentId);
+        return (bool?)await command.ExecuteScalarAsync() ?? false;
+    }
+
     public async Task<IReadOnlyList<AgentRow>> ListAgentsAsync()
     {
         var result = new List<AgentRow>(); await using var connection = await OpenAsync();

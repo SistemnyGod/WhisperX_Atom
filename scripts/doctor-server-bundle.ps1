@@ -15,13 +15,24 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "SERVER_
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ([string]$manifest.buildIdentity -match 'dev|dirty') { throw "SERVER_RELEASE_IDENTITY_INVALID" }
 $identity = [string]$manifest.buildIdentity
+$tag = [string]$manifest.releaseTag
+if ([string]::IsNullOrWhiteSpace($tag) -or $tag -match 'dev|dirty|latest') { throw "SERVER_RELEASE_TAG_INVALID" }
 function Read-EnvValue([string]$name) {
     $line = Get-Content -LiteralPath $envFile -Encoding utf8 | Where-Object { $_ -match "^$name=" } | Select-Object -First 1
     if ($null -eq $line) { return $null }
     return ($line -replace "^$name=", '').Trim()
 }
+$env:WHISPERX_RELEASE_TAG = $tag
+$env:WHISPERX_RELEASE_VERSION = $identity
+$env:WHISPERX_BUILD_IDENTITY = $identity
+$env:WHISPERX_REVISION = [string]$manifest.commit
+$env:APP_VERSION = $identity
 $compose = @('compose','--project-name','whisperx-atom','--env-file',$envFile,'-f',(Join-Path $bundle 'compose.dev.yml'),'-f',(Join-Path $bundle 'compose.lan.yml'),'-f',(Join-Path $bundle 'compose.release.yml'))
-$profiles = @('--profile','core','--profile','gpu','--profile','llm','--profile','lan')
+$profiles = @('--profile','core','--profile','gpu','--profile','lan')
+$assistantEnabled = (Read-EnvValue 'ASSISTANT_ENABLED') -ne 'false'
+$summaryEnabled = (Read-EnvValue 'AUTO_SUMMARY_ENABLED') -eq 'true'
+if ($assistantEnabled -or $summaryEnabled) { $profiles += @('--profile','llm') }
+if ((Read-EnvValue 'MEETING_MEMORY_ENABLED') -ne 'false') { $profiles += @('--profile','memory') }
 $configText = (& docker @compose @profiles config | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "SERVER_RELEASE_COMPOSE_INVALID" }
 if ($configText -match '(?im)image:\s*[^\r\n]*:(dev|latest)\b') { throw "SERVER_RELEASE_COMPOSE_UNPINNED_IMAGE" }
@@ -44,7 +55,14 @@ if ([string]::IsNullOrWhiteSpace($healthToken)) {
 } else {
     try {
         $headers = @{ 'X-WhisperX-Supervisor-Token' = $healthToken }
-        $readiness = Invoke-RestMethod -Method Get -Uri ($apiBase.TrimEnd('/') + '/api/internal/runtime/readiness') -Headers $headers -TimeoutSec 10
+        $proxyEnvironment = @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')
+        $savedProxy = @{}
+        foreach ($proxyName in $proxyEnvironment) { $savedProxy[$proxyName] = [Environment]::GetEnvironmentVariable($proxyName, 'Process'); [Environment]::SetEnvironmentVariable($proxyName, '', 'Process') }
+        try {
+            $readiness = Invoke-RestMethod -Method Get -Uri ($apiBase.TrimEnd('/') + '/api/internal/runtime/readiness') -Headers $headers -TimeoutSec 10
+        } finally {
+            foreach ($proxyName in $proxyEnvironment) { [Environment]::SetEnvironmentVariable($proxyName, $savedProxy[$proxyName], 'Process') }
+        }
         $reportedIdentity = [string]$readiness.buildIdentity
         if ([string]::IsNullOrWhiteSpace($reportedIdentity)) {
             $readinessStatus = 'FAILED'; $readinessReason = 'RUNTIME_IDENTITY_MISSING'

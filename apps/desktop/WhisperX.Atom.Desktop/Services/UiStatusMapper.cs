@@ -64,6 +64,7 @@ public static class UiStatusMapper
             ["TRANSCRIBING"] = new("TRANSCRIBING", "Транскрибация", UiStatusKind.Processing),
             ["READY_FOR_ASR"] = new("READY_FOR_ASR", "Ожидает транскрибации", UiStatusKind.Processing),
             ["WAITING_FOR_GPU"] = new("WAITING_FOR_GPU", "Ожидает GPU", UiStatusKind.Warning),
+            ["GPU_PRIORITY_WAIT_RETRY_PENDING"] = new("GPU_PRIORITY_WAIT_RETRY_PENDING", "V2 ожидает освобождения GPU", UiStatusKind.Warning),
             ["ALIGNING"] = new("ALIGNING", "Выравнивание", UiStatusKind.Processing),
             ["DIARIZING"] = new("DIARIZING", "Диаризация", UiStatusKind.Processing),
             ["SUMMARIZING"] = new("SUMMARIZING", "Стенограмма готова · формируется саммари", UiStatusKind.Processing),

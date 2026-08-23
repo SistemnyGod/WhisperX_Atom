@@ -15,6 +15,10 @@ public static class AgentIpcProtocol
     public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
     public const string AudioTelemetryStreamCapability = "AUDIO_TELEMETRY_STREAM_V1";
     public const string AudioCaptureAbCapability = "AUDIO_CAPTURE_AB_V1";
+    // Stable localTrackId binding is required for exactly-once server track
+    // creation.  The API rejects recording writes from agents that do not
+    // advertise this capability instead of allowing an unsafe legacy bind.
+    public const string StableTrackBindingCapability = "STABLE_TRACK_BINDING_V1";
     // The current-user Host can persist a render-loopback source as a second
     // track without changing the v6 wire shape. Older clients simply ignore
     // this additive capability and continue using the room microphone track.

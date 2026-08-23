@@ -259,7 +259,7 @@ public static class AgentStatusFormatter
                 "RECORDER_HOST_INIT_FAILED" => "Recorder Agent: Host не завершил инициализацию; откройте диагностику",
                 "SPOOL_READONLY" => "Recorder Agent: локальное хранилище доступно только для чтения",
                 "RECORDER_RUNTIME_LEASE_HELD" => "Recorder Agent: другой Host или legacy Service уже владеет хранилищем",
-                "RECORDER_HOST_BUILD_MISMATCH" or "RECORDER_HOST_DUPLICATE" or "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" => "Recorder Agent: конфликт установленного Host; требуется оставить одну актуальную сборку",
+                "RECORDER_HOST_BUILD_MISMATCH" or "RECORDER_HOST_DUPLICATE" or "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "RECORDER_UPGRADE_REQUIRED" or "LOCAL_TRACK_ID_REQUIRED" => "Recorder Agent: требуется установить одну актуальную сборку клиента",
                 "AUDIO_INPUT_NODE_CREATE_FAILED" => "Recorder Agent: Windows не создала вход микрофона",
                 "AUDIO_GRAPH_UNRECOVERABLE" => "Recorder Agent: AudioGraph аварийно остановил захват",
             "AUDIO_PIPELINE_OVERRUN" => "Recorder Agent: обработка аудиокадров не успевает за захватом",

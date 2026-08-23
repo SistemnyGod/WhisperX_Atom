@@ -125,7 +125,8 @@ public sealed class RecorderServiceController(IRecorderService recorder)
                 || string.Equals(health.RuntimeBuildIdentity, expectedBuild, StringComparison.OrdinalIgnoreCase);
             var hasConcurrentHostCapabilities = health?.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true;
             var hasEventStreamCapability = health?.Capabilities?.Contains(AgentIpcProtocol.DeviceEventStreamCapability, StringComparer.OrdinalIgnoreCase) == true;
-            var capabilityError = hasConcurrentHostCapabilities && hasEventStreamCapability ? null : "RECORDER_HOST_UPDATE_REQUIRED";
+            var hasStableTrackBinding = health?.Capabilities?.Contains(AgentIpcProtocol.StableTrackBindingCapability, StringComparer.OrdinalIgnoreCase) == true;
+            var capabilityError = hasConcurrentHostCapabilities && hasEventStreamCapability && hasStableTrackBinding ? null : "RECORDER_HOST_UPDATE_REQUIRED";
             var pipeResponsive = health is not null;
             var error = response.Error;
             if (process.Count > 1)

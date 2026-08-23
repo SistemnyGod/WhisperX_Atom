@@ -1393,6 +1393,8 @@ app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest r
 app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
 {
     if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (!await store.AgentSupportsStableTrackBindingAsync(agentId))
+        return Results.Json(new { error = "RECORDER_UPGRADE_REQUIRED", requiredCapability = "STABLE_TRACK_BINDING_V1", retryable = false }, statusCode: StatusCodes.Status426UpgradeRequired);
     if (request.TrackType is not ("room-microphone" or "system-audio"))
         return Results.BadRequest(new { error = "recording_track_type_invalid" });
     if (request.SampleRate is < 8000 or > 192000 || request.Channels is < 1 or > 8)
@@ -1402,6 +1404,8 @@ app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid se
     if (request.ValidBitsPerSample is not null && (request.ValidBitsPerSample < 1 || request.ValidBitsPerSample > request.BitsPerSample.GetValueOrDefault(32)))
         return Results.BadRequest(new { error = "recording_track_valid_bits_invalid" });
     var localTrackId = string.IsNullOrWhiteSpace(request.LocalTrackId) ? null : request.LocalTrackId.Trim();
+    if (localTrackId is null)
+        return Results.BadRequest(new { error = "LOCAL_TRACK_ID_REQUIRED", requiredCapability = "STABLE_TRACK_BINDING_V1" });
     if (localTrackId is not null && localTrackId.Length > 200)
         return Results.BadRequest(new { error = "recording_track_local_id_invalid" });
     var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample, localTrackId);

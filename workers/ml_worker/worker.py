@@ -141,6 +141,11 @@ def resolve_storage_path(storage_key: str) -> Path:
 
 def error_code_for(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
+    # Waiting behind a higher-priority workload is normal scheduling, not a
+    # terminal GPU failure.  Keep this distinct so V2 can be durably requeued
+    # without discarding an already available V1 transcript.
+    if "gpu_lease_priority_timeout" in text:
+        return "GPU_PRIORITY_TIMEOUT"
     if "asr_input_mismatch" in text:
         return "ASR_INPUT_MISMATCH"
     if "no speech" in text or "no_speech_detected" in text:
@@ -459,6 +464,19 @@ class GpuWorker:
             except Exception as exc:
                 LOGGER.exception("job=%s failed", job_id)
                 failure_code = error_code_for(exc)
+                if failure_code == "GPU_PRIORITY_TIMEOUT" and enrichment_job:
+                    scheduled_attempt = self._repository.schedule_retry(
+                        job_id,
+                        "V2 waited for a higher-priority GPU workload",
+                        "GPU_PRIORITY_WAIT_RETRY_PENDING",
+                        message_id=str(message.get("message_id", "")),
+                        max_attempts=int(os.getenv("GPU_PRIORITY_RETRY_MAX_ATTEMPTS", "5")),
+                    )
+                    if scheduled_attempt is not None:
+                        failure_code = "GPU_PRIORITY_WAIT_RETRY_PENDING"
+                        if self._heartbeat:
+                            self._heartbeat.set_state("READY", failure_code)
+                        raise RetryScheduled(retry_delay_seconds(scheduled_attempt)) from exc
                 if is_retryable_error_code(failure_code):
                     scheduled_attempt = self._repository.schedule_retry(
                         job_id,

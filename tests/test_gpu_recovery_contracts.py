@@ -45,6 +45,15 @@ def test_recovery_command_is_preview_by_default_and_preserves_results():
     assert "SERVER_GPU_RECOVERY_APPLY_FAILED" in launcher
 
 
+def test_v2_priority_timeout_is_delayed_retryable_and_does_not_become_terminal_gpu_failure():
+    worker = read("workers/ml_worker/worker.py")
+    assert '"gpu_lease_priority_timeout"' in worker
+    assert 'return "GPU_PRIORITY_TIMEOUT"' in worker
+    assert 'if failure_code == "GPU_PRIORITY_TIMEOUT" and enrichment_job' in worker
+    assert '"GPU_PRIORITY_WAIT_RETRY_PENDING"' in worker
+    assert 'raise RetryScheduled(retry_delay_seconds(scheduled_attempt))' in worker
+
+
 def test_readiness_surfaces_orphaned_gpu_ownership_and_assistant_queue():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
     store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")

@@ -288,6 +288,7 @@ public sealed class AgentApiClient : IDisposable
                 systemAudio = health.SystemAudio,
                 manifest = true,
                 spool = true,
+                stableTrackBindingV1 = true,
                 deviceHealth = health
             }
         });

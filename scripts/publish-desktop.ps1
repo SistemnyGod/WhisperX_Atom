@@ -64,15 +64,23 @@ $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 # runtime files beside the exe avoids single-file extraction into a temp folder
 # and keeps the Inno Setup payload transparent to endpoint protection.
 $identityArg = "-p:WhisperXBuildIdentity=$buildIdentity"
-$desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false", "-p:NuGetAudit=false", $identityArg, "-o", $desktopOut) + $publishRestoreArgs
-$servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $serviceOut) + $publishRestoreArgs
-$recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
-$voiceHostPublishArgs = @($voiceHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $voiceHostOut) + $publishRestoreArgs
-$updaterPublishArgs = @($updaterProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-p:NuGetAudit=false", $identityArg, "-o", $updaterOut) + $publishRestoreArgs
+$restoreProperties = @("-p:NuGetAudit=false", "-p:RestoreIgnoreFailedSources=true")
+$desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:WindowsPackageType=None", "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false") + $restoreProperties + @($identityArg, "-o", $desktopOut) + $publishRestoreArgs
+$servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $serviceOut) + $publishRestoreArgs
+$recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
+$voiceHostPublishArgs = @($voiceHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $voiceHostOut) + $publishRestoreArgs
+$updaterPublishArgs = @($updaterProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $updaterOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
-    & dotnet publish @Arguments
-    $exitCode = [int]$LASTEXITCODE
-    if ($exitCode -ne 0) { throw "dotnet publish failed with exit code $exitCode" }
+    $proxyNames = @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')
+    $saved = @{}
+    foreach ($name in $proxyNames) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process'); [Environment]::SetEnvironmentVariable($name, '', 'Process') }
+    try {
+        & dotnet publish @Arguments
+        $exitCode = [int]$LASTEXITCODE
+        if ($exitCode -ne 0) { throw "dotnet publish failed with exit code $exitCode" }
+    } finally {
+        foreach ($name in $proxyNames) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
 }
 Invoke-Publish $desktopPublishArgs
 Invoke-Publish $servicePublishArgs

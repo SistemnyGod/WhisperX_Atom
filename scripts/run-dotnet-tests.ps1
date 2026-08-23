@@ -37,7 +37,7 @@ foreach ($projectPath in $Project) {
 
     # Start-Process joins ArgumentList into a command line; quote the project
     # path explicitly because the workspace path contains spaces.
-    $arguments = @("test", ('"' + $resolved + '"'), "-c", $Configuration, "--verbosity", "minimal")
+    $arguments = @("test", ('"' + $resolved + '"'), "-c", $Configuration, "--verbosity", "minimal", "-p:NuGetAudit=false", "-p:RestoreIgnoreFailedSources=true")
     $effectiveTimeout = $TimeoutSeconds
     if ($name -match 'Desktop') {
         # WinUI/pipe tests can otherwise leave a testhost alive while MSBuild
@@ -60,10 +60,27 @@ foreach ($projectPath in $Project) {
     }
     if ($NoRestore) { $arguments += "--no-restore" }
     Write-Host "Running $name (timeout ${effectiveTimeout}s)"
+    $childEnvironment = @{ TEMP = $runTemp; TMP = $runTemp; HTTP_PROXY = ''; HTTPS_PROXY = ''; ALL_PROXY = ''; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBuildEnableWorkloadResolver = 'false' }
     try {
-        $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo `
-            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru `
-            -Environment @{ TEMP = $runTemp; TMP = $runTemp; HTTP_PROXY = ''; HTTPS_PROXY = ''; ALL_PROXY = ''; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBuildEnableWorkloadResolver = 'false' }
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo `
+                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -Environment $childEnvironment
+        } else {
+            # Windows PowerShell 5.1 has no Start-Process -Environment. Set
+            # process-scoped values only while creating the child; restore the
+            # caller environment immediately afterwards.
+            $savedEnvironment = @{}
+            foreach ($entry in $childEnvironment.GetEnumerator()) {
+                $savedEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
+                [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+            }
+            try {
+                $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo `
+                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+            } finally {
+                foreach ($entry in $savedEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+            }
+        }
         if (-not $process.WaitForExit($effectiveTimeout * 1000)) {
             $children = @(Get-CimInstance Win32_Process -Filter ("ParentProcessId={0}" -f $process.Id) -ErrorAction SilentlyContinue |
                 Select-Object ProcessId, Name, CommandLine)

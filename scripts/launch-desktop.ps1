@@ -205,7 +205,7 @@ if ([string]::IsNullOrWhiteSpace($desktopExe)) {
             "publish", $project, "--configuration", $Configuration, "--runtime", "win-x64",
             "--self-contained", "true", "-p:WindowsPackageType=None",
             "-p:WindowsAppSDKSelfContained=true", "-p:PublishSingleFile=false",
-            "-p:NuGetAudit=false", "--output", $publishedDesktop, "--no-restore"
+            "-p:NuGetAudit=false", "-p:RestoreIgnoreFailedSources=true", "--output", $publishedDesktop, "--no-restore"
         )
         & $dotnet.Source @publishArgs
         $publishExitCode = if (Get-Variable LASTEXITCODE -ErrorAction SilentlyContinue) { [int]$LASTEXITCODE } else { 0 }

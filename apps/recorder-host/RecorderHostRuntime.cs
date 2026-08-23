@@ -317,7 +317,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 AgentIpcProtocol.DeviceEventStreamCapability,
                 AgentIpcProtocol.AudioTelemetryStreamCapability,
                 AgentIpcProtocol.IndependentSystemAudioTrackCapability,
-                AgentIpcProtocol.AudioCaptureAbCapability
+                AgentIpcProtocol.AudioCaptureAbCapability,
+                AgentIpcProtocol.StableTrackBindingCapability
             },
             EffectiveMicrophoneDeviceName: effectiveDevice?.Name,
             EffectiveSystemAudioDeviceId: effectiveSystemDevice?.Id,
