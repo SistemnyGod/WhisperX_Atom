@@ -330,7 +330,21 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
 
     private void OnRecordingStopped(object? _, StoppedEventArgs args)
     {
-        if (args.Exception is not null) RaiseFailure(MapError(args.Exception), args.Exception.Message, true);
+        if (args.Exception is null) return;
+        var detail = args.Exception.ToString();
+        // WASAPI reports physical render-endpoint removal through the stopped
+        // callback on some drivers instead of the endpoint catalog. Preserve
+        // the stable device-loss contract so ONLINE never degrades silently
+        // to microphone-only capture.
+        if (detail.Contains("AUDCLNT_E_DEVICE_INVALIDATED", StringComparison.OrdinalIgnoreCase)
+            || detail.Contains("device invalid", StringComparison.OrdinalIgnoreCase)
+            || detail.Contains("device removed", StringComparison.OrdinalIgnoreCase))
+        {
+            SetState(AudioCaptureState.DeviceLost);
+            RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST", args.Exception.Message, true);
+            return;
+        }
+        RaiseFailure(MapError(args.Exception), args.Exception.Message, true);
     }
 
     private AudioDeviceProbeResult BuildProbeResult(long durationMs, string? error, string? detail, AudioTelemetrySnapshot telemetry)

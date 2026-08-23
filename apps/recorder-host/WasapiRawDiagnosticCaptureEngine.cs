@@ -42,7 +42,11 @@ public sealed class WasapiRawDiagnosticCaptureEngine
             };
             client = await AudioClient.ActivateAsync(endpoint.ID, properties).ConfigureAwait(false);
             var native = client.MixFormat;
-            client.Initialize(AudioClientShareMode.Shared, AudioClientStreamFlags.EventCallback,
+            // This diagnostic reader polls GetNextPacketSize. EventCallback
+            // requires SetEventHandle before Initialize and would make RAW
+            // capture fail with AUDCLNT_E_EVENTHANDLE_NOT_SET on otherwise
+            // supported devices. Use polling mode deliberately.
+            client.Initialize(AudioClientShareMode.Shared, AudioClientStreamFlags.None,
                 10_000_000, 0, native, Guid.Empty);
             var capture = client.AudioCaptureClient;
             var nativeBytes = new List<byte>(Math.Max(1, native.AverageBytesPerSecond * durationSeconds));

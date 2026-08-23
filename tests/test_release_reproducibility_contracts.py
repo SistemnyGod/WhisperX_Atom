@@ -92,3 +92,12 @@ def test_acceptance_registry_is_single_source_and_uses_container_gpu_release():
     assert "acceptance-scenarios.json" in gate
     assert "acceptance-scenarios.json" in bundle
     assert 'gpuWorkerMode' in gate and "container" in gate
+
+
+def test_runtime_doctor_publishes_fields_consumed_by_release_gate():
+    doctor = read("scripts/doctor-whisperx.ps1")
+    gate = read("scripts/release-gate.ps1")
+    assert "gpuWorkerMode = $mode" in doctor
+    assert "gpuWorker = if ($mode -eq \"container\")" in doctor
+    assert "Get-JsonProperty $runtimeReport 'gpuWorkerMode'" in gate
+    assert "Get-JsonProperty $runtimeReport $component" in gate

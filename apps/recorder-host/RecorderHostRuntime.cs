@@ -875,6 +875,15 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             return new AgentIpcResponse(false, "RECORDING", _sessionId,
                 "AUDIO_AB_RECORDING_ACTIVE", null);
 
+        // Both engines must capture the same confirmed two-phase window. The
+        // RAW adapter already clamps this defensively, but normalizing here
+        // prevents AudioGraph and RAW from receiving different durations when
+        // an older client sends a too-small or malformed duration.
+        silenceSeconds = Math.Clamp(silenceSeconds, 0d, 10d);
+        speechSeconds = Math.Clamp(speechSeconds, 1d, 30d);
+        var minimumDurationSeconds = (int)Math.Ceiling(silenceSeconds + speechSeconds);
+        durationSeconds = Math.Clamp(Math.Max(durationSeconds, minimumDurationSeconds), minimumDurationSeconds, 40);
+
         var runId = Guid.NewGuid().ToString("N");
         var diagnosticDirectory = Path.Combine(DataRoot(), "diagnostics", "audio-ab", runId);
         var graph = await ProbeAsync(deviceId, cancellationToken, Math.Clamp(durationSeconds, 1, 40) * 1000).ConfigureAwait(false);

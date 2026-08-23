@@ -33,6 +33,24 @@ def test_probe_and_ab_capability_are_additive_and_ab_is_explicit():
     assert "AudioGraphSha256 = graphHash" in runtime
 
 
+def test_raw_diagnostic_capture_uses_polling_without_unbound_event_callback():
+    raw = read("apps/recorder-host/WasapiRawDiagnosticCaptureEngine.cs")
+    assert "AudioClientStreamFlags.None" in raw
+    assert "AudioClientStreamFlags.EventCallback" not in raw
+
+
+def test_ab_runtime_normalizes_duration_for_both_capture_engines():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    assert "minimumDurationSeconds" in runtime
+    assert "Math.Max(durationSeconds, minimumDurationSeconds)" in runtime
+
+
+def test_system_audio_stopped_callback_maps_invalidated_endpoint_to_device_loss():
+    source = read("apps/recorder-host/SystemAudioCaptureEngine.cs")
+    assert "AUDCLNT_E_DEVICE_INVALIDATED" in source
+    assert 'RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST"' in source
+
+
 def test_storage_watchdog_has_emergency_exactly_once_boundary():
     storage = read("apps/recorder-agent/StorageWatermark.cs")
     watchdog = read("apps/recorder-host/StorageCaptureWatchdog.cs")

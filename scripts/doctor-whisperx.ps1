@@ -89,6 +89,10 @@ $state = [ordered]@{
     desktop = $desktop
     qwen = $qwenStatus
     automaticSummary = $expectSummary
+    # These explicit fields are consumed by the LAN release gate. Keep the
+    # older runtime/hostGpuWorker fields below for existing diagnostics.
+    gpuWorkerMode = $mode
+    gpuWorker = if ($mode -eq "container") { $whisperStatus } else { $hostStatus }
     runtime = $mode
     hostGpuWorkerPid = if ($hostLiveStatus -and $hostLiveStatus.pid) { $hostLiveStatus.pid } elseif ($hostDetails -and $hostDetails.pid) { $hostDetails.pid } else { $null }
     lastHeartbeat = if ($gpuWorker) { $gpuWorker.lastSeenAt } else { $null }
