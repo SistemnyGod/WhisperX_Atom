@@ -22,6 +22,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$scenarioRegistryPath = Join-Path $PSScriptRoot 'acceptance-scenarios.json'
+$scenarioRegistry = if (Test-Path -LiteralPath $scenarioRegistryPath) { Get-Content -LiteralPath $scenarioRegistryPath -Raw | ConvertFrom-Json } else { @() }
+$scenarioDefinition = @($scenarioRegistry | Where-Object { [string]$_.name -ieq $Scenario -or @($_.aliases) -contains $Scenario } | Select-Object -First 1)
+if ($scenarioDefinition.Count -eq 1) { $Scenario = [string]$scenarioDefinition[0].name }
 $BundleRoot = if ($BundleRoot) { [IO.Path]::GetFullPath($BundleRoot) } else { $repo }
 $root = if ($OutputRoot) {
     if ([IO.Path]::IsPathRooted($OutputRoot)) { [IO.Path]::GetFullPath($OutputRoot) } else { [IO.Path]::GetFullPath((Join-Path $repo $OutputRoot)) }

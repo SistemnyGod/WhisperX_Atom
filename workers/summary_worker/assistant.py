@@ -239,6 +239,7 @@ class AssistantRepository:
         self._db = DatabaseConnectionPool(self.conninfo, "assistant-worker")
         self._hybrid = HybridRetriever()
         self._last_retrieval_metadata: dict[str, Any] = {}
+        self._last_meeting_metadata: dict[str, dict[str, Any]] = {}
         self._live_provenance: dict[str, tuple[str, str | None, str | None]] = {}
         self._last_query_plan: dict[str, Any] = {}
         self._last_answer_plan: dict[str, Any] = {}
@@ -248,6 +249,7 @@ class AssistantRepository:
 
     def clear_retrieval_metadata(self) -> None:
         self._last_retrieval_metadata = {}
+        self._last_meeting_metadata = {}
         self._live_provenance = {}
         self._last_query_plan = {}
         self._last_answer_plan = {}
@@ -546,6 +548,7 @@ class AssistantRepository:
         """
         fts_anchor_limit = max(8, min(int(os.getenv("ASSISTANT_FTS_ANCHOR_LIMIT", "64")), 512))
         semantic_candidate_limit = max(32, min(int(os.getenv("ASSISTANT_SEMANTIC_CANDIDATE_LIMIT", "512")), 4096))
+        lookback_days = max(1, min(int(os.getenv("ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS", "365")), 3650))
         with self._db.connection() as connection:
             rows = connection.execute(
                 """
@@ -564,7 +567,7 @@ class AssistantRepository:
                       AND t.status IN ('READY','PARTIAL_READY')
                       AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
-                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-interval '90 days')
+                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-make_interval(days => %s))
                 ), fts_anchors AS (
                     SELECT base.*,
                            ts_rank_cd(base.search_vector, websearch_to_tsquery('russian', %s)) AS rank
@@ -588,7 +591,7 @@ class AssistantRepository:
                 FROM bounded
                 ORDER BY (rank > 0) DESC,rank DESC,meeting_created_at DESC,meeting_id,ordinal
                 """,
-                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query, query, fts_anchor_limit, semantic_candidate_limit),
+                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, query, query, fts_anchor_limit, semantic_candidate_limit),
             ).fetchall()
 
             candidates = [
@@ -790,7 +793,8 @@ class AssistantRepository:
                     SELECT s.id,t.meeting_id,s.start_ms,s.end_ms,t.id AS transcript_id,
                            t.version AS transcript_version,
                            COALESCE(ms.display_name,s.speaker_label,'Спикер N') AS speaker,
-                           s.text,t.version_kind,s.ordinal
+                           s.text,t.version_kind,s.ordinal,m.title,
+                           COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) AS meeting_started_at
                     FROM transcript_segments s
                     JOIN transcripts t ON t.id=s.transcript_id
                     JOIN meetings m ON m.id=t.meeting_id
@@ -818,12 +822,13 @@ class AssistantRepository:
         lines: list[str] = []
         for row in rows:
             segment_id = str(row[0])
+            self._last_meeting_metadata[str(row[1])] = {"meetingTitle": str(row[10] or ""), "meetingStartedAt": row[11].isoformat() if hasattr(row[11], "isoformat") else str(row[11] or "")}
             valid[segment_id] = (
                 str(row[1]), int(row[2]), int(row[3]), str(row[7] or "").strip(),
                 str(row[8] or "ASR_DRAFT").upper(), str(row[4]), int(row[5]),
             )
             if valid[segment_id][3]:
-                lines.append(f"[SEG-{segment_id} {int(row[2])//1000}s {row[6]}] {valid[segment_id][3]}")
+                lines.append(f"[MEETING {row[1]} title={row[10]!s} startedAt={self._last_meeting_metadata[str(row[1])]['meetingStartedAt']}]\n[SEG-{segment_id} {int(row[2])//1000}s {row[6]}] {valid[segment_id][3]}")
         if not valid:
             return None
         self._last_retrieval_metadata = {
@@ -837,6 +842,7 @@ class AssistantRepository:
             "scopeMeetingId": meeting_id,
             "neighbourWindow": max(0, min(int(neighbour_window), 4)),
             "canonicalEvidence": True,
+            "meetingMetadata": list(self._last_meeting_metadata.values()),
         }
         transcript_kind = "ASR_DRAFT" if all(value[4] in {"ASR_DRAFT", "V1"} for value in valid.values()) else "ENRICHED"
         return "\n".join(lines), valid, transcript_kind, None
@@ -865,7 +871,7 @@ class AssistantRepository:
                       AND t.status IN ('READY','PARTIAL_READY')
                       AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
-                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-interval '90 days')
+                      AND (%s::uuid IS NOT NULL OR m.created_at >= now()-make_interval(days => %s))
                 ), hits AS (
                     SELECT meeting_id,ordinal FROM source
                     WHERE search_vector @@ websearch_to_tsquery('russian', %s)
@@ -882,7 +888,7 @@ class AssistantRepository:
                 ORDER BY rank DESC,meeting_id,ordinal
                 LIMIT 36
                 """,
-                (query, meeting_id, meeting_id, include_all, owner_user_id, meeting_id, query),
+                (query, meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, query),
             ).fetchall()
             low_quality = False
             if not rows and meeting_id:
@@ -1163,7 +1169,7 @@ class AssistantRepository:
             evidence.append(item)
         with self._db.connection() as connection:
             answer_type = "PARTIAL" if supported_fields and missing_fields else (self._last_answer_plan.get("answerType") or "DIRECT_FACT")
-            metadata = {"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"}, "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "queryPlan": self._last_query_plan or None, "answerPlan": self._last_answer_plan or None, "answerType": answer_type, "supportedFields": supported_fields, "missingFields": missing_fields, "sourceRanges": [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2], "transcriptVersion": valid[value][6]} for value in evidence_ids], "processingStage": "READY" if status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"} else status, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}
+            metadata = {"evidenceCount": len(evidence_ids), "assistantMode": assistant_mode, "transcriptKind": transcript_kind, "provisional": transcript_kind == "LIVE_PROVISIONAL", "canonicalTranscript": transcript_kind != "LIVE_PROVISIONAL", "claimsValidated": status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"}, "retrieval": self._last_retrieval_metadata if assistant_mode != "GENERAL_CHAT" else None, "queryPlan": self._last_query_plan or None, "answerPlan": self._last_answer_plan or None, "answerType": answer_type, "supportedFields": supported_fields, "missingFields": missing_fields, "sourceRanges": [{"meetingId": valid[value][0], "segmentId": value, "startMs": valid[value][1], "endMs": valid[value][2], "transcriptVersion": valid[value][6], "meetingTitle": self._last_meeting_metadata.get(valid[value][0], {}).get("meetingTitle"), "meetingStartedAt": self._last_meeting_metadata.get(valid[value][0], {}).get("meetingStartedAt")} for value in evidence_ids], "processingStage": "READY" if status in {"READY", "ANSWERED", "ANSWERED_WITH_WARNING"} else status, "legacyErrorCode": LEGACY_EMPTY_CONTEXT_ERROR if error_code == "NO_EVIDENCE" else None}
             row = connection.execute(
                 """UPDATE assistant_queries
                    SET status=%s,answer=%s,voice_answer=%s,evidence=%s::jsonb,error_code=%s,grounding_status=%s,

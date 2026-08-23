@@ -1436,6 +1436,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenAsync();
+        var memoryLookbackDays = int.TryParse(Environment.GetEnvironmentVariable("ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS"), out var configuredLookback)
+            ? Math.Clamp(configuredLookback, 1, 3650)
+            : 365;
         await using var command = new NpgsqlCommand("""
             WITH hits AS (
                 SELECT ts_rank_cd(
@@ -1445,7 +1448,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 JOIN transcripts t ON t.id=s.transcript_id
                 JOIN meetings m ON m.id=t.meeting_id
                 WHERE (@include_all OR m.owner_id=@owner)
-                  AND m.created_at>=now()-interval '90 days'
+                  AND m.created_at>=now()-make_interval(days => @lookbackDays)
                   AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                   AND t.status IN ('READY','PARTIAL_READY')
                   AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY[
@@ -1459,6 +1462,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             """, connection);
         command.Parameters.AddWithValue("owner", (object?)userId ?? DBNull.Value);
         command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("lookbackDays", memoryLookbackDays);
         command.Parameters.AddWithValue("query", NormalizeAssistantProbeQuery(query));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return !await reader.ReadAsync(cancellationToken)

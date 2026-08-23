@@ -798,6 +798,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             {
                 _logger.LogWarning(stopException, "Recorder capture failure shutdown was incomplete. Session={SessionId}", sessionId);
             }
+            if (string.Equals(failure.ErrorCode, "AUDIO_SYSTEM_AUDIO_DEVICE_LOST", StringComparison.Ordinal))
+            {
+                try { await _spool.SetStopReasonAsync(sessionId, "SYSTEM_AUDIO_DEVICE_LOST", true, CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception stopReasonException) { _logger.LogWarning(stopReasonException, "Could not persist system-audio loss reason. Session={SessionId}", sessionId); }
+            }
             await PersistFailedLocalLifecycleAsync(sessionId, exception, failure.ErrorCode).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
@@ -820,7 +825,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         try
         {
             var mode = string.IsNullOrWhiteSpace(deviceId) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed;
-            var boundedDurationMs = Math.Clamp(durationMs, 1000, 10000);
+            var boundedDurationMs = Math.Clamp(durationMs, 1000, 40000);
             var result = await _engine.ProbeAsync(mode, deviceId, TimeSpan.FromMilliseconds(boundedDurationMs), cancellationToken).ConfigureAwait(false);
             var legacyCompatible = new AudioSourceTestResult(
                 result.Ready,
@@ -862,6 +867,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         string? deviceId,
         int durationSeconds,
         bool keepAudio,
+        double silenceSeconds,
+        double speechSeconds,
         CancellationToken cancellationToken)
     {
         if (_sessionId is not null)
@@ -870,11 +877,12 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
 
         var runId = Guid.NewGuid().ToString("N");
         var diagnosticDirectory = Path.Combine(DataRoot(), "diagnostics", "audio-ab", runId);
-        var graph = await ProbeAsync(deviceId, cancellationToken, Math.Clamp(durationSeconds, 1, 30) * 1000).ConfigureAwait(false);
+        var graph = await ProbeAsync(deviceId, cancellationToken, Math.Clamp(durationSeconds, 1, 40) * 1000).ConfigureAwait(false);
         if (_sessionId is not null)
             return new AgentIpcResponse(false, "RECORDING", _sessionId,
                 "AUDIO_AB_RECORDING_ACTIVE", null);
         string? graphHash = null;
+        AudioQualityAssessment? graphQuality = graph.AudioGraphProbe?.Quality;
         var graphPcm = _engine.LastProbePcm16;
         if (graphPcm.Length > 0)
         {
@@ -883,9 +891,18 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             using (var writer = new WaveFileWriter(graphPath, new WaveFormat(SampleRate, 16, 1)))
                 writer.Write(graphPcm, 0, graphPcm.Length);
             graphHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(graphPath))).ToLowerInvariant();
+            var graphSamples = new short[graphPcm.Length / 2];
+            Buffer.BlockCopy(graphPcm, 0, graphSamples, 0, graphPcm.Length);
+            var graphSilenceCount = Math.Min(graphSamples.Length, (int)Math.Round(SampleRate * silenceSeconds));
+            var graphSpeechStart = Math.Min(graphSamples.Length, graphSilenceCount);
+            var graphSpeechCount = Math.Min(graphSamples.Length - graphSpeechStart, (int)Math.Round(SampleRate * speechSeconds));
+            if (graphSilenceCount > 0 && graphSpeechCount > 0)
+                graphQuality = AudioQualityAnalyzer.AnalyzePcm16(
+                    graphSamples.AsSpan(graphSpeechStart, graphSpeechCount),
+                    graphSamples.AsSpan(0, graphSilenceCount));
         }
-        var raw = await _rawDiagnostic.CaptureAsync(deviceId, durationSeconds, keepAudio, diagnosticDirectory, cancellationToken).ConfigureAwait(false);
-        var report = raw with { AudioGraphSha256 = graphHash, AudioGraphQuality = graph.AudioGraphProbe?.Quality };
+        var raw = await _rawDiagnostic.CaptureAsync(deviceId, durationSeconds, keepAudio, diagnosticDirectory, silenceSeconds, speechSeconds, cancellationToken).ConfigureAwait(false);
+        var report = raw with { AudioGraphSha256 = graphHash, AudioGraphQuality = graphQuality, SilenceSeconds = silenceSeconds, SpeechSeconds = speechSeconds, NoiseWindowConfirmed = graphQuality is not null && raw.NoiseWindowConfirmed, PhaseMetadata = "SILENCE_THEN_SPEECH" };
         return new AgentIpcResponse(
             report.Success,
             report.Success ? "AUDIO_AB_READY" : "AUDIO_AB_FAILED",
@@ -2163,6 +2180,8 @@ public sealed class RecorderHostPipeServer : BackgroundService
                     ReadString(request.Payload, "deviceId"),
                     ReadDurationSeconds(request.Payload),
                     ReadBool(request.Payload, "keepAudio"),
+                    ReadDouble(request.Payload, "silenceSeconds", 3),
+                    ReadDouble(request.Payload, "speechSeconds", 10),
                     cancellationToken).ConfigureAwait(false),
                 "SET_AUDIO_DEVICES" or "SELECT_AUDIO_DEVICE" => await _runtime.SetAudioDevicesAsync(
                     ReadString(request.Payload, "microphoneDeviceId") ?? ReadString(request.Payload, "deviceId"),
@@ -2244,6 +2263,13 @@ public sealed class RecorderHostPipeServer : BackgroundService
         => payload.TryGetProperty("durationSeconds", out var value)
            && value.ValueKind == JsonValueKind.Number
            && value.TryGetInt32(out var seconds)
-            ? Math.Clamp(seconds, 1, 30)
+            ? Math.Clamp(seconds, 1, 40)
             : 10;
+
+    private static double ReadDouble(JsonElement payload, string name, double fallback)
+        => payload.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetDouble(out var number)
+            ? Math.Clamp(number, 0, 30)
+            : fallback;
 }

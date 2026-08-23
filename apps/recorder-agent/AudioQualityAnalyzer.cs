@@ -208,7 +208,7 @@ public static class AudioQualityAnalyzer
         if (samples.IsEmpty)
             return new();
         double sum = 0, square = 0, peak = 0;
-        long clipped = 0, zeroRuns = 0, longest = 0, current = 0;
+        long clipped = 0, zeroRuns = 0, silentSamples = 0, longest = 0, current = 0;
         const double silence = 0.003;
         for (var i = 0; i < samples.Length; i++)
         {
@@ -218,14 +218,14 @@ public static class AudioQualityAnalyzer
             sum += value;
             square += value * value;
             if (abs >= 0.999969d) clipped++;
-            if (abs <= silence) current++;
+            if (abs <= silence) { silentSamples++; current++; }
             else if (current > 0) { zeroRuns++; longest = Math.Max(longest, current); current = 0; }
         }
         if (current > 0) { zeroRuns++; longest = Math.Max(longest, current); }
         return new(
             Math.Sqrt(square / samples.Length), peak, sum / samples.Length,
             (double)clipped / samples.Length,
-            (double)zeroRuns / Math.Max(1, samples.Length),
+            (double)silentSamples / Math.Max(1, samples.Length),
             zeroRuns,
             sampleRate <= 0 ? 0 : (long)Math.Round(longest * 1000d / sampleRate), 0);
     }

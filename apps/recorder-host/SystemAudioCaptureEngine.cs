@@ -275,8 +275,17 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
     private void OnDeviceChanged(object? _, AudioDeviceChangedEventArgs args)
     {
         if (args.Device is not null && string.Equals(args.Device.Id, SelectedDevice?.Id, StringComparison.OrdinalIgnoreCase)
-            && (args.EventType == "DEVICE_REMOVED" || args.Device.RuntimeStatus == "DEVICE_LOST"))
+            && (args.EventType == "DEVICE_REMOVED" || args.Device.RuntimeStatus == "DEVICE_LOST")
+            && State is AudioCaptureState.Starting or AudioCaptureState.Recording or AudioCaptureState.Paused)
+        {
+            // A selected render endpoint disappearing must not silently turn an
+            // ONLINE recording into an incomplete mic-only session.  Raise the
+            // normal exactly-once failure path; RecorderHostRuntime closes the
+            // durable chunks and persists a stable stop reason.
             SetState(AudioCaptureState.DeviceLost);
+            try { _capture?.StopRecording(); } catch { }
+            RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST", "The selected system-audio endpoint was removed.", true);
+        }
         DeviceStateChanged?.Invoke(this, args);
     }
 

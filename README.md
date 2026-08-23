@@ -23,7 +23,7 @@ WhisperX Atom — локальная система записи совещан�
 
 ## Быстрый старт
 
-1. Установите Docker Desktop, .NET 10 SDK и Python 3.12 с рабочим CUDA/WhisperX окружением. FFmpeg/ffprobe нужны для фонового FLAC/master, но их временная недоступность не блокирует локальную запись.
+1. Для локальной разработки допустим host GPU; для LAN-релиза GPU Worker запускается только в immutable container image. Установите Docker Desktop, .NET 10 SDK и Python 3.12 с рабочим CUDA/WhisperX окружением. FFmpeg/ffprobe нужны для фонового FLAC/master, но их временная недоступность не блокирует локальную запись.
 2. Создайте локальную конфигурацию:
 
    ```powershell
@@ -39,7 +39,7 @@ WhisperX Atom — локальная система записи совещан�
    .\scripts\run-whisperx.ps1
    ```
 
-   По умолчанию используется `GPU_WORKER_MODE=host`: PostgreSQL, NATS, API, tusd и серверные workers запускаются в Docker, а WhisperX/CUDA GPU Worker — напрямую на Windows.
+   В Local Development по умолчанию можно использовать `GPU_WORKER_MODE=host` для диагностики. В LAN Release обязательно `GPU_WORKER_MODE=container`: PostgreSQL, NATS, API, tusd и все WhisperX workers, включая CUDA GPU Worker, запускаются из immutable Compose/Bundle.
 
 4. Проверьте состояние без обращения к Docker Registry:
 
@@ -66,10 +66,10 @@ WhisperX Atom — локальная система записи совещан�
 ## Режимы GPU
 
 ```powershell
-# Рекомендуемый режим: CUDA и WhisperX на Windows-хосте
+# Local Development only: CUDA и WhisperX на Windows-хосте
 .\scripts\run-whisperx.ps1 -GpuMode host
 
-# Резервный режим: GPU Worker в Docker; требует доступного CUDA-образа
+# LAN Release: GPU Worker в Docker; требует immutable CUDA-образа
 .\scripts\run-whisperx.ps1 -GpuMode container
 ```
 

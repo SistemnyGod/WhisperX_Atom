@@ -98,6 +98,14 @@ def test_relation_and_current_state_select_latest_superseding_fact():
     assert {fact.fact_id for fact in current_state([old, new], relations)} == {"old", "new"}
 
 
+def test_equal_repeated_value_is_confirmation_not_conflict():
+    first = _fact("first", "m1", "DEADLINE", "30 августа", 10, subject="ремонт печи")
+    second = _fact("second", "m2", "DEADLINE", "30   августа", 10, subject="ремонт печи")
+    relations = resolve_relations([first, second], {"m1": 1, "m2": 2})
+    assert relations[0].relation_type == "CONFIRMS"
+    assert build_threads([first, second], relations)[0].state == "OPEN"
+
+
 def test_explicit_supersedes_marker_allows_current_state_projection():
     old = _fact("old", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
     new = _fact("new", "m2", "DEADLINE", "30 августа", 10, subject="ремонт печи")
@@ -105,6 +113,17 @@ def test_explicit_supersedes_marker_allows_current_state_projection():
     relations = resolve_relations([old, new], {"m1": 1, "m2": 2})
     assert relations[0].relation_type == "SUPERSEDES"
     assert [fact.fact_id for fact in current_state([old, new], relations)] == ["new"]
+
+
+def test_later_explicit_change_resolves_previous_conflict():
+    first = _fact("first", "m1", "DEADLINE", "25 августа", 10, subject="ремонт печи")
+    conflicting = _fact("conflicting", "m2", "DEADLINE", "30 августа", 10, subject="ремонт печи")
+    final = MemoryFact(**{**_fact("final", "m3", "DEADLINE", "5 сентября", 10, subject="ремонт печи").__dict__, "source_text": "Срок теперь 5 сентября."})
+    relations = resolve_relations([first, conflicting, final], {"m1": 1, "m2": 2, "m3": 3})
+    assert any(item.relation_type == "CONTRADICTS" for item in relations)
+    assert any(item.relation_type == "SUPERSEDES" for item in relations)
+    assert build_threads([first, conflicting, final], relations)[0].state == "OPEN"
+    assert [fact.fact_id for fact in current_state([first, conflicting, final], relations, {"m1": "2026-08-01", "m2": "2026-08-02", "m3": "2026-08-03"})] == ["final"]
 
 
 def test_current_state_groups_normalized_subject_aliases():

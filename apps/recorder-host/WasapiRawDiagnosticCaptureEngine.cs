@@ -19,9 +19,13 @@ public sealed class WasapiRawDiagnosticCaptureEngine
         int durationSeconds,
         bool keepAudio,
         string diagnosticDirectory,
+        double silenceSeconds = 3,
+        double speechSeconds = 10,
         CancellationToken cancellationToken = default)
     {
-        durationSeconds = Math.Clamp(durationSeconds, 1, 30);
+        silenceSeconds = Math.Clamp(silenceSeconds, 0, 10);
+        speechSeconds = Math.Clamp(speechSeconds, 1, 30);
+        durationSeconds = Math.Clamp(durationSeconds, (int)Math.Ceiling(silenceSeconds + speechSeconds), 40);
         Directory.CreateDirectory(diagnosticDirectory);
         var endpoint = ResolveEndpoint(deviceId);
         if (endpoint is null)
@@ -83,13 +87,21 @@ public sealed class WasapiRawDiagnosticCaptureEngine
             var hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
             var samples = new short[pcm.Length / 2];
             Buffer.BlockCopy(pcm, 0, samples, 0, pcm.Length);
-            var quality = AudioQualityAnalyzer.AnalyzePcm16(samples,
-                samples.AsSpan(0, Math.Min(samples.Length, 48000 * 3)));
+            var silenceCount = Math.Min(samples.Length, (int)Math.Round(48000 * silenceSeconds));
+            var speechStart = Math.Min(samples.Length, silenceCount);
+            var speechCount = Math.Min(samples.Length - speechStart, (int)Math.Round(48000 * speechSeconds));
+            var quality = AudioQualityAnalyzer.AnalyzePcm16(
+                samples.AsSpan(speechStart, speechCount),
+                samples.AsSpan(0, silenceCount));
             if (!keepAudio) TryDeleteDirectory(diagnosticDirectory);
             return new AudioCaptureAbResult(true, endpoint.ID, durationSeconds, true, null,
                 RawSha256: hash, RawQuality: quality,
                 DiagnosticDirectory: keepAudio ? diagnosticDirectory : null,
-                AudioDeletedByDefault: !keepAudio);
+                AudioDeletedByDefault: !keepAudio,
+                SilenceSeconds: silenceSeconds,
+                SpeechSeconds: speechCount / 48000d,
+                NoiseWindowConfirmed: silenceCount > 0 && speechCount > 0,
+                PhaseMetadata: "SILENCE_THEN_SPEECH");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

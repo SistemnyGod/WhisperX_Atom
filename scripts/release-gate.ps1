@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot "WhisperX.Runtime.ps1")
 Set-WhisperXRuntimeEnvironment -RepoPath $repo
+$scenarioRegistryPath = Join-Path $PSScriptRoot 'acceptance-scenarios.json'
+$scenarioRegistry = if (Test-Path -LiteralPath $scenarioRegistryPath) { Get-Content -LiteralPath $scenarioRegistryPath -Raw | ConvertFrom-Json } else { @() }
 
 $transcriptionRoot = Join-Path $repo "artifacts\transcription-mvp"
 $coreEvidencePath = Join-Path $repo "artifacts\acceptance\core-e2e-v1.json"
@@ -44,13 +46,15 @@ $coreEvidence = if (Test-Path -LiteralPath $coreEvidencePath -PathType Leaf) {
 # the current local recording.
 $results = if ($null -ne $coreEvidence) { @($coreEvidence) } else { @() }
 
-$coreComponents = @("postgres", "nats", "api", "mediaWorker", "hostGpuWorker", "cuda", "whisperX")
+$coreComponents = @("postgres", "nats", "api", "mediaWorker", "gpuWorker", "cuda", "whisperX")
 $runtimeReady = $true
 $runtimeReasons = [System.Collections.Generic.List[string]]::new()
 if ($null -eq $runtimeReport) {
     $runtimeReady = $false
     $runtimeReasons.Add("DOCTOR_REPORT_MISSING")
 } else {
+    $gpuMode = [string](Get-JsonProperty $runtimeReport 'gpuWorkerMode')
+    if ($gpuMode -ne 'container') { $runtimeReady = $false; $runtimeReasons.Add("RUNTIME_GPU_MODE_$gpuMode") }
     foreach ($component in $coreComponents) {
         $componentStatus = [string](Get-JsonProperty $runtimeReport $component)
         if ($componentStatus -ne "READY") {
@@ -99,34 +103,17 @@ $summaryReady = @($chains | Where-Object { $_.summaryReady }).Count -gt 0
 $summaryTerminalUsable = @($chains | Where-Object { $_.summaryTerminalUsable }).Count -gt 0
 $summaryQualityGreen = @($chains | Where-Object { $_.summaryQualityGreen }).Count -gt 0
 
-$requiredAcceptanceScenarios = @(
-    "e2e-5m",
-    "server-offline-recovery",
-    "recorder-crash-recovery",
-    "worker-crash-recovery",
-    "windows-reboot-recovery",
-    # These gates require a real installed Windows/server node.  Keeping them
-    # in the release gate prevents software-only CI evidence from being
-    # mistaken for production acceptance.
-    "no-console-start",
-    "no-console-20x10s",
-    "audio-quality",
-    "audio-quality-ab",
-    "audio-device-loss",
-    "system-audio-device-loss",
-    "low-disk-during-recording",
-    "cold-model-cache",
-    "gpu-oom",
-    "delete-locked-media",
-    "endurance-30m",
-    "endurance-2h",
-    "4h-recording",
-    "8h-recording",
-    "backup-restore",
-    "rbac-isolation"
-)
+# Canonical registry entries: e2e-5m, server-offline-recovery,
+# recorder-crash-recovery, worker-crash-recovery, windows-reboot-recovery,
+# no-console-start, no-console-20x10s, audio-quality, audio-quality-ab,
+# audio-device-loss, system-audio-device-loss, low-disk-during-recording,
+# cold-model-runtime (legacy alias cold-model-cache), gpu-oom,
+# delete-locked-media, endurance-30m, endurance-2h, 4h-recording,
+# 8h-recording, backup-restore, rbac-isolation.
+$requiredAcceptanceScenarios = @($scenarioRegistry | Where-Object { @($_.requiredFor) -contains 'full' } | ForEach-Object { [string]$_.name })
 $acceptanceRoot = Join-Path $repo "artifacts\acceptance"
 $acceptanceBlockers = [System.Collections.Generic.List[string]]::new()
+if ($requiredAcceptanceScenarios.Count -eq 0) { $acceptanceBlockers.Add('ACCEPTANCE_SCENARIO_REGISTRY_MISSING') }
 foreach ($scenario in $requiredAcceptanceScenarios) {
     $scenarioRoot = Join-Path $acceptanceRoot $scenario
     $evidence = @(Get-ChildItem -LiteralPath $scenarioRoot -Recurse -File -Filter "*.json" -ErrorAction SilentlyContinue)

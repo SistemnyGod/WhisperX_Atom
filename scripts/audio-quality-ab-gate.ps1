@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidateRange(10,20)][int]$Pairs = 10,
-    [ValidateRange(1,30)][int]$DurationSeconds = 10,
+    [ValidateRange(13,40)][int]$DurationSeconds = 13,
+    [ValidateRange(0,10)][double]$SilenceSeconds = 3,
+    [ValidateRange(1,30)][double]$SpeechSeconds = 10,
     [string]$DeviceId = '',
     [string]$RatingsPath = '',
     [string]$OutputRoot = '',
@@ -32,7 +34,7 @@ for ($index = 1; $index -le $Pairs; $index++) {
     $pairRoot = Join-Path $child ("pair-{0:D2}" -f $index)
     $started = [DateTime]::UtcNow
     try {
-        $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $repo 'scripts\run-audio-capture-ab.ps1'),'-DurationSeconds',$DurationSeconds,'-OutputRoot',$pairRoot)
+        $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $repo 'scripts\run-audio-capture-ab.ps1'),'-DurationSeconds',$DurationSeconds,'-SilenceSeconds',$SilenceSeconds,'-SpeechSeconds',$SpeechSeconds,'-OutputRoot',$pairRoot)
         if ($DeviceId) { $args += @('-DeviceId',$DeviceId) }
         if ($KeepAudio) { $args += '-KeepAudio' }
         & powershell.exe @args | Out-Null
@@ -43,6 +45,7 @@ for ($index = 1; $index -le $Pairs; $index++) {
         $report = Get-Content -LiteralPath $reportFile.FullName -Raw | ConvertFrom-Json
         $ab = Value $report 'response' | ForEach-Object { Value $_ 'audioCaptureAb' }
         if ($null -eq $ab -or -not [bool](Value $ab 'success')) { throw "PAIR_NOT_SUCCESSFUL: $(Value $ab 'errorCode')" }
+        if (-not [bool](Value $ab 'noiseWindowConfirmed')) { throw 'PAIR_NO_CONFIRMED_NOISE_WINDOW' }
         $graph = Value $ab 'audioGraphQuality'; $raw = Value $ab 'rawQuality'
         $graphGrade = [string](Value $graph 'grade'); $rawGrade = [string](Value $raw 'grade')
         $graphSnr = Number $graph 'estimatedSnrDb'; $rawSnr = Number $raw 'estimatedSnrDb'
@@ -50,7 +53,7 @@ for ($index = 1; $index -le $Pairs; $index++) {
         $graphDrop = Number $graph 'dropoutCount'; $rawDrop = Number $raw 'dropoutCount'
         $graphHash = [string](Value $ab 'audioGraphSha256'); $rawHash = [string](Value $ab 'rawSha256')
         if (-not $graphHash -or -not $rawHash -or $graphHash -eq $rawHash) { throw 'PAIR_AUDIO_HASH_INVALID' }
-        $pairs.Add([ordered]@{ pair=$index; audioGraphSha256=$graphHash; rawSha256=$rawHash; audioGraphGrade=$graphGrade; rawGrade=$rawGrade; audioGraphSnrDb=$graphSnr; rawSnrDb=$rawSnr; audioGraphClipping=$graphClip; rawClipping=$rawClip; audioGraphDropouts=$graphDrop; rawDropouts=$rawDrop })
+        $pairs.Add([ordered]@{ pair=$index; audioGraphSha256=$graphHash; rawSha256=$rawHash; audioGraphGrade=$graphGrade; rawGrade=$rawGrade; audioGraphSnrDb=$graphSnr; rawSnrDb=$rawSnr; audioGraphClipping=$graphClip; rawClipping=$rawClip; audioGraphDropouts=$graphDrop; rawDropouts=$rawDrop; silenceSeconds=$SilenceSeconds; speechSeconds=$SpeechSeconds; noiseWindowConfirmed=$true })
     } catch { Add-Check ("pair-{0:D2}" -f $index) 'FAILED' $_.Exception.Message }
 }
 $valid = @($pairs)

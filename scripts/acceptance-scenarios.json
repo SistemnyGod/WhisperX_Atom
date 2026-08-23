@@ -1,0 +1,23 @@
+[
+  {"name":"e2e-5m","aliases":[],"nodeRole":"Client","requiredFor":["core","full"]},
+  {"name":"server-offline-recovery","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"recorder-crash-recovery","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"worker-crash-recovery","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"windows-reboot-recovery","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"no-console-start","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"no-console-20x10s","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"audio-quality","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"audio-quality-ab","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"audio-device-loss","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"system-audio-device-loss","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"low-disk-during-recording","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"cold-model-runtime","aliases":["cold-model-cache"],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"gpu-oom","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"delete-locked-media","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"endurance-30m","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"endurance-2h","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"4h-recording","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"8h-recording","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"backup-restore","aliases":[],"nodeRole":"Server","requiredFor":["full"]},
+  {"name":"rbac-isolation","aliases":[],"nodeRole":"Server","requiredFor":["full"]}
+]

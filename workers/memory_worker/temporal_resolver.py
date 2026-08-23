@@ -40,7 +40,10 @@ def current_state(
         value = dates.get(fact.meeting_id, fact.meeting_started_at)
         return (value is None, value, fact.start_ms, fact.end_ms, fact.fact_id or "")
 
-    superseded = {relation.source_fact_id for relation in relations if relation.relation_type == "SUPERSEDES"}
+    superseded = {
+        relation.source_fact_id for relation in relations
+        if relation.relation_type in {"SUPERSEDES", "CONFIRMS"}
+    }
     groups: dict[tuple[str, str], list[MemoryFact]] = defaultdict(list)
     for fact in values:
         subject_key = canonical_topic_name(fact.subject) if fact.subject else ""
@@ -49,7 +52,22 @@ def current_state(
         groups[(fact.fact_type, subject_key)].append(fact)
     selected: list[MemoryFact] = []
     for group in groups.values():
-        eligible = [fact for fact in group if fact.fact_id not in superseded]
+        ordered_group = sorted(group, key=chronology)
+        group_ids = {fact.fact_id for fact in ordered_group}
+        position_by_id = {fact.fact_id: index for index, fact in enumerate(ordered_group)}
+        type_by_id = {fact.fact_id: fact.fact_type for fact in ordered_group}
+        group_superseded = set(superseded)
+        for relation in relations:
+            if relation.relation_type != "SUPERSEDES" or relation.target_fact_id not in group_ids:
+                continue
+            target_position = position_by_id.get(relation.target_fact_id)
+            target_type = type_by_id.get(relation.target_fact_id)
+            if target_position is not None:
+                group_superseded.update(
+                    fact.fact_id for fact in ordered_group[:target_position]
+                    if fact.fact_type == target_type and fact.fact_id
+                )
+        eligible = [fact for fact in ordered_group if fact.fact_id not in group_superseded]
         values_by_text = {" ".join(fact.value.lower().replace("ё", "е").split()) for fact in (eligible or group)}
         # Without an explicit SUPERSEDES relation, retain conflicting values
         # for the answer planner instead of silently treating the newest row

@@ -2,7 +2,9 @@
 param(
     [string]$PipeName = 'WhisperXAtomRecorderHost',
     [string]$DeviceId = '',
-    [ValidateRange(1,30)][int]$DurationSeconds = 10,
+    [ValidateRange(13,40)][int]$DurationSeconds = 13,
+    [ValidateRange(0,10)][double]$SilenceSeconds = 3,
+    [ValidateRange(1,30)][double]$SpeechSeconds = 10,
     [switch]$KeepAudio,
     [string]$OutputRoot = ''
 )
@@ -17,7 +19,7 @@ try {
     $reader = [System.IO.StreamReader]::new($pipe, [Text.Encoding]::UTF8, $false, 4096, $true)
     $writer = [System.IO.StreamWriter]::new($pipe, [Text.Encoding]::UTF8, 4096, $true)
     $writer.AutoFlush = $true
-    $payload = [ordered]@{ deviceId = if ($DeviceId) { $DeviceId } else { $null }; durationSeconds = $DurationSeconds; keepAudio = [bool]$KeepAudio }
+    $payload = [ordered]@{ deviceId = if ($DeviceId) { $DeviceId } else { $null }; durationSeconds = $DurationSeconds; silenceSeconds = $SilenceSeconds; speechSeconds = $SpeechSeconds; keepAudio = [bool]$KeepAudio }
     $writer.WriteLine(([ordered]@{ command = 'RUN_AUDIO_CAPTURE_AB'; protocolVersion = 6; payload = $payload } | ConvertTo-Json -Compress -Depth 8))
     $response = $reader.ReadLine() | ConvertFrom-Json
     $report = [ordered]@{

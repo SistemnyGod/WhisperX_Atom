@@ -1712,6 +1712,8 @@ public sealed class RecordingViewModel : ObservableObject
             _storageEmergencyStopFreeBytes = health.EmergencyStopFreeBytes;
             if (health.StoppedAutomatically && string.Equals(health.LastStopReason, "LOW_DISK_EMERGENCY", StringComparison.OrdinalIgnoreCase))
                 WarningMessage = "Запись безопасно остановлена из-за нехватки места на диске.";
+            else if (health.StoppedAutomatically && string.Equals(health.LastStopReason, "SYSTEM_AUDIO_DEVICE_LOST", StringComparison.OrdinalIgnoreCase))
+                WarningMessage = "Запись безопасно остановлена: системное аудиоустройство отключилось. Проверьте устройство и начните новую запись.";
             RecordingProfileManaged = health.RecordingProfileManaged;
             RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
             if (!_audioTelemetryStreamSupported || State is not (RecordingState.Recording or RecordingState.Paused))
@@ -1946,6 +1948,7 @@ public sealed class RecordingViewModel : ObservableObject
             "AUDIO_CAPTURE_BUSY" => "Запись уже выполняется. Остановите текущую запись перед проверкой или сменой микрофона.",
             "SELECTED_DEVICE_UNAVAILABLE" or "AUDIO_DEVICE_NOT_READY" or "AUDIO_DEVICE_NOT_FOUND" => "Выбранный микрофон недоступен. Выберите активное устройство из списка и повторите проверку.",
             "AUDIO_DEVICE_INACTIVE" or "AUDIO_DEVICE_LOST" => "Выбранный микрофон отключён или стал недоступен. Подключите его и выберите заново.",
+            "AUDIO_SYSTEM_AUDIO_DEVICE_LOST" => "Системное аудиоустройство отключилось во время ONLINE-записи. Запись безопасно остановлена; проверьте устройство и начните новую запись.",
             "AUDIO_INPUT_NODE_CREATE_FAILED" => "Windows не смогла открыть входной узел микрофона. Закройте приложения, использующие микрофон, и проверьте разрешения Windows.",
             "AUDIO_GRAPH_CREATE_FAILED" => "Windows не смогла создать AudioGraph для микрофона. Перезапустите Recorder Host и проверьте аудиодрайвер.",
             "AUDIO_GRAPH_UNRECOVERABLE" => "AudioGraph аварийно остановил захват микрофона. Перезапустите Recorder Host; подробности доступны в диагностике.",

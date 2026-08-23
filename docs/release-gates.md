@@ -18,7 +18,7 @@ The following evidence is deliberately outside commit CI and must be recorded as
   frame continuity);
 - microphone and system-audio device-loss recovery;
 - low-disk recording protection;
-- cold model-cache and GPU-OOM recovery;
+- cold model runtime and GPU-OOM recovery;
 - delete-locked-media recovery;
 - 30-minute, 2-hour, 4-hour and 8-hour endurance;
 - backup/restore acceptance;
@@ -33,7 +33,8 @@ Acceptance artifacts live below `artifacts/acceptance/<scenario>/` and must be
 JSON with `status` (or `result`) equal to `READY`, `PASSED` or `GREEN` (or
 `passed: true`). They must contain metrics and IDs only; do not place audio,
 transcript text, credentials or tokens in the reports. The required scenario
-names are the canonical names used by `scripts/release-gate.ps1`:
+names are maintained in `scripts/acceptance-scenarios.json` and consumed by
+both the release gate and hardware runner:
 
 Для capture-quality отчёт можно получить установленным Recorder Host так:
 
@@ -60,7 +61,7 @@ audio-quality-ab
 audio-device-loss
 system-audio-device-loss
 low-disk-during-recording
-cold-model-cache
+cold-model-runtime
 gpu-oom
 delete-locked-media
 endurance-30m

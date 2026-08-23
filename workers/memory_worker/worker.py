@@ -283,7 +283,9 @@ class MemoryProjectionRepository:
                            VALUES(%s,%s,%s,%s,%s::jsonb)
                            ON CONFLICT(owner_user_id,entity_type,normalized_name) DO UPDATE
                              SET canonical_name=EXCLUDED.canonical_name,
-                                 aliases=(COALESCE(memory_entities.aliases,'[]'::jsonb) || EXCLUDED.aliases),updated_at=now()
+                                 aliases=(SELECT COALESCE(jsonb_agg(DISTINCT value ORDER BY value),'[]'::jsonb)
+                                          FROM jsonb_array_elements_text(COALESCE(memory_entities.aliases,'[]'::jsonb) || EXCLUDED.aliases) AS alias(value)),
+                                 updated_at=now()
                            RETURNING id""",
                         (str(payload["ownerUserId"]), entity.entity_type, entity.canonical_name, entity.normalized_name, json.dumps(list(entity.aliases))),
                     ).fetchone()

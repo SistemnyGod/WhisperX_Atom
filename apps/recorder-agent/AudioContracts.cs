@@ -145,7 +145,11 @@ public sealed record AudioCaptureAbResult(
     AudioQualityAssessment? AudioGraphQuality = null,
     AudioQualityAssessment? RawQuality = null,
     string? DiagnosticDirectory = null,
-    bool AudioDeletedByDefault = true);
+    bool AudioDeletedByDefault = true,
+    double SilenceSeconds = 0,
+    double SpeechSeconds = 0,
+    bool NoiseWindowConfirmed = false,
+    string PhaseMetadata = "UNCONFIRMED");
 
 /// <summary>
 /// Persistent diagnostics for one AudioGraph attempt. This is deliberately a

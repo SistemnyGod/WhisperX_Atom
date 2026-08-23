@@ -30,6 +30,18 @@ public sealed class AudioQualityAnalyzerTests
     }
 
     [Fact]
+    public void SilenceRatioCountsSilentSamplesNotOnlyRuns()
+    {
+        var speech = new short[48000];
+        for (var i = 24000; i < speech.Length; i++) speech[i] = 9000;
+
+        var result = AudioQualityAnalyzer.AnalyzePcm16(speech, new short[4800]);
+
+        Assert.InRange(result.SilenceRatio, 49.9, 50.1);
+        Assert.Equal(1, result.ZeroRunCount);
+    }
+
+    [Fact]
     public void DiagnosticsPreserveNativeAndNormalizedClipping()
     {
         var diagnostics = new AudioGraphAttemptDiagnostics

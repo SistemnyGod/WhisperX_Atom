@@ -26,6 +26,9 @@ def test_probe_and_ab_capability_are_additive_and_ab_is_explicit():
     assert "AUDIO_CAPTURE_AB_V1" in protocol
     assert '"RUN_AUDIO_CAPTURE_AB"' in runtime
     assert "AUDIO_AB_RECORDING_ACTIVE" in runtime
+    assert "AUDIO_SYSTEM_AUDIO_DEVICE_LOST" in read("apps/recorder-host/SystemAudioCaptureEngine.cs")
+    assert "SYSTEM_AUDIO_DEVICE_LOST" in runtime
+    assert "NoiseWindowConfirmed" in contracts
     assert "LastProbePcm16" in read("apps/recorder-host/AudioGraphCaptureEngine.cs")
     assert "AudioGraphSha256 = graphHash" in runtime
 

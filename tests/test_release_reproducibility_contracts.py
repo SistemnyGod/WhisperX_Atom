@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 
 ROOT = Path(__file__).parents[1]
@@ -78,3 +79,16 @@ def test_release_gate_requires_all_live_acceptance_scenarios():
     assert "backupVerified" in gate and "cleanRestore" in gate
     assert 'summaryTerminalUsable = ($summaryStatus -in @("READY", "NEEDS_REVIEW"))' in gate
     assert "summaryQualityGreen" in gate
+
+
+def test_acceptance_registry_is_single_source_and_uses_container_gpu_release():
+    registry = json.loads(read("scripts/acceptance-scenarios.json"))
+    names = {item["name"] for item in registry}
+    assert "cold-model-runtime" in names
+    runtime_entry = next(item for item in registry if item["name"] == "cold-model-runtime")
+    assert "cold-model-cache" in runtime_entry["aliases"]
+    gate = read("scripts/release-gate.ps1")
+    bundle = read("scripts/build-server-bundle.ps1")
+    assert "acceptance-scenarios.json" in gate
+    assert "acceptance-scenarios.json" in bundle
+    assert 'gpuWorkerMode' in gate and "container" in gate

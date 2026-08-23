@@ -48,6 +48,7 @@ Copy-Item .env.example .env
 | `ASSISTANT_EMBEDDING_MODEL` | Legacy локальная sentence-transformers модель при явном opt-in | `paraphrase-multilingual-MiniLM-L12-v2` |
 | `ASSISTANT_FTS_ANCHOR_LIMIT` | Максимум FTS-якорей до semantic rerank | `64` |
 | `ASSISTANT_SEMANTIC_CANDIDATE_LIMIT` | Ограниченный semantic pool после RBAC/scope-фильтра | `512` |
+| `ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS` | Глубина transcript fallback для истории встреч | `365` |
 | `ASSISTANT_FINAL_TOP_K` | Число лучших anchors перед расширением соседями | `12` |
 | `ASSISTANT_NEIGHBOUR_LIMIT` | Максимум соседних сегментов в evidence-контексте | `36` |
 | `ASSISTANT_HYBRID_MIN_SCORE` | Минимальный итоговый score | `0.30` |

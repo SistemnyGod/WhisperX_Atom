@@ -7,11 +7,23 @@ from collections import defaultdict
 from typing import Iterable, Mapping
 
 from .models import MemoryFact, MemoryRelation
-from .entity_resolver import canonical_topic_name
+from .entity_resolver import canonical_topic_name, normalize_entity_name
 
 
 _SUPERSEDES = re.compile(r"\b(?:теперь|новый|новая|перенесли|изменили|передали|заменили)\b", re.IGNORECASE)
 _CLOSES = re.compile(r"\b(?:готово|сделано|сделана|выполнено|выполнена|завершено|завершена|закрыли|закрыта|подготовил)\b", re.IGNORECASE)
+
+
+def normalize_fact_value(fact_type: str, value: str) -> str:
+    """Return a conservative comparison key for repeated facts.
+
+    This key is only used to decide whether adjacent evidence confirms the
+    same value. It never invents missing dates or resolves ambiguous names.
+    """
+    normalized = normalize_entity_name(value)
+    if fact_type == "RESPONSIBLE":
+        return normalized
+    return " ".join(normalized.split())
 
 
 def resolve_relations(
@@ -56,7 +68,12 @@ def resolve_relations(
                 None,
             )
             if newer.fact_type in {"DEADLINE", "RESPONSIBLE"} and previous_same_type is not None:
-                relation = "SUPERSEDES" if _SUPERSEDES.search(relation_text) else "CONTRADICTS"
+                old_value = normalize_fact_value(newer.fact_type, previous_same_type.value)
+                new_value = normalize_fact_value(newer.fact_type, newer.value)
+                if old_value == new_value:
+                    relation = "CONFIRMS"
+                else:
+                    relation = "SUPERSEDES" if _SUPERSEDES.search(relation_text) else "CONTRADICTS"
                 result.append(MemoryRelation(previous_same_type.fact_id, newer.fact_id, relation, 0.70, "DERIVED"))
                 continue
 

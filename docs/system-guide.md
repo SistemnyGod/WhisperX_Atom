@@ -647,7 +647,7 @@ grounding/RBAC-контур Assistant.
 Добавленные additive-миграции:
 
 - `051_memory_entities.sql` — нормализованные сущности и связи fact/entity;
-- `052_memory_fact_relations.sql` — `SUPERSEDES`, `CONTRADICTS`, `CLOSES` и
+- `052_memory_fact_relations.sql` — `CONFIRMS`, `SUPERSEDES`, `CONTRADICTS`, `CLOSES` и
   другие derived relations;
 - `053_memory_threads.sql` — длительные owner-scoped темы и их факты;
 - `054_memory_jobs.sql` — отдельная фоновая очередь индексации;
