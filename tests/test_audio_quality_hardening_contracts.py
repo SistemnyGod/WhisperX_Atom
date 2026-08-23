@@ -59,6 +59,13 @@ def test_system_audio_monitors_selected_endpoint_during_capture_without_event_st
     assert "LastSeenAtUtc" not in source.split("private static bool SameDevice", 1)[1].split("}", 1)[0]
 
 
+def test_audio_graph_carries_zero_runs_across_silent_quanta():
+    source = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    assert "_currentZeroRunSamples" in source
+    assert "_currentZeroRunSamples + frameSamples" in source
+    assert "LongestZeroRunSamples" in source
+
+
 def test_raw_capture_handles_wasapi_silent_packets_and_extensible_float():
     source = read("apps/recorder-host/WasapiRawDiagnosticCaptureEngine.cs")
     assert "AudioClientBufferFlags.Silent" in source

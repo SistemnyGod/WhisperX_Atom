@@ -14,5 +14,5 @@ def test_ci_applies_migrations_and_requires_the_explicit_memory_database():
     assert "python scripts/apply-test-migrations.py" in workflow
     assert "tests/test_memory_postgres_integration.py" in workflow
     assert "schema_migration_checksums" in helper
-    assert "057_memory_cross_meeting_projection" in integration
+    assert "058_memory_normalizer_version" in integration
     assert "pytest.fail" in integration

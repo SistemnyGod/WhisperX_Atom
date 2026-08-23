@@ -502,17 +502,34 @@ internal static class SystemAudioSampleNormalizer
         var float32 = resolved.Kind == RawAudioSampleFormat.Float32;
         for (var target = 0; target < targetFrames; target++)
         {
-            var sourceIndex = Math.Min(sourceFrames - 1, (int)Math.Floor(target * sourceRate / (double)SampleRate));
+            // Linear interpolation avoids the aliasing/zipper noise produced
+            // by the old nearest-neighbour conversion at 44.1/96 kHz.  The
+            // converter remains allocation-free and keeps the existing
+            // 48 kHz mono contract; session-level continuity is handled by
+            // the AudioGraph frame cursor.
+            var sourcePosition = target * sourceRate / (double)SampleRate;
+            var sourceIndex = Math.Min(sourceFrames - 1, (int)Math.Floor(sourcePosition));
+            var nextIndex = Math.Min(sourceFrames - 1, sourceIndex + 1);
+            var fraction = sourcePosition - sourceIndex;
             var sum = 0d;
             for (var channel = 0; channel < channels; channel++)
             {
-                var offset = sourceIndex * (bits / 8 * channels) + channel * (bits / 8);
-                sum += float32 ? BitConverter.ToSingle(source, offset) : bits switch
+                var sourceBytes = bits / 8;
+                var leftOffset = sourceIndex * sourceBytes * channels + channel * sourceBytes;
+                var rightOffset = nextIndex * sourceBytes * channels + channel * sourceBytes;
+                var left = float32 ? BitConverter.ToSingle(source, leftOffset) : bits switch
                 {
-                    16 => BitConverter.ToInt16(source, offset) / 32768d,
-                    24 => ((source[offset + 2] << 24) | (source[offset + 1] << 16) | (source[offset] << 8)) / 2147483648d,
-                    _ => BitConverter.ToInt32(source, offset) / 2147483648d
+                    16 => BitConverter.ToInt16(source, leftOffset) / 32768d,
+                    24 => ((source[leftOffset + 2] << 24) | (source[leftOffset + 1] << 16) | (source[leftOffset] << 8)) / 2147483648d,
+                    _ => BitConverter.ToInt32(source, leftOffset) / 2147483648d
                 };
+                var right = float32 ? BitConverter.ToSingle(source, rightOffset) : bits switch
+                {
+                    16 => BitConverter.ToInt16(source, rightOffset) / 32768d,
+                    24 => ((source[rightOffset + 2] << 24) | (source[rightOffset + 1] << 16) | (source[rightOffset] << 8)) / 2147483648d,
+                    _ => BitConverter.ToInt32(source, rightOffset) / 2147483648d
+                };
+                sum += left + (right - left) * fraction;
             }
             var value = (short)Math.Clamp((int)Math.Round(sum / channels * 32767d), short.MinValue, short.MaxValue);
             BitConverter.TryWriteBytes(output.AsSpan(target * 2, 2), value);

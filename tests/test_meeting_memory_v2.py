@@ -252,6 +252,7 @@ def test_memory_migrations_are_additive_and_owner_scoped():
     invalidation = (root / "055_memory_invalidation.sql").read_text(encoding="utf-8")
     runtime = (root / "056_memory_runtime.sql").read_text(encoding="utf-8")
     projection = (root / "057_memory_cross_meeting_projection.sql").read_text(encoding="utf-8")
+    normalizer = (root / "058_memory_normalizer_version.sql").read_text(encoding="utf-8")
     assert "owner_user_id" in entities and "fact_entities" in entities
     assert "invalidated_at" in relations and "derivation_type" in relations
     assert "memory_thread_facts" in threads
@@ -259,6 +260,7 @@ def test_memory_migrations_are_additive_and_owner_scoped():
     assert "invalidated_by_version" in invalidation
     assert "lease_expires_at" in runtime and "invalidate_memory_projection_for_fact" in runtime
     assert "subject_normalized" in projection and "ix_transcript_facts_owner_active_subject" in projection
+    assert "subject_normalizer_version" in normalizer and "ix_transcript_facts_memory_normalizer" in normalizer
 
 
 def test_assistant_uses_memory_index_then_safe_transcript_fallback():

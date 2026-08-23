@@ -27,7 +27,7 @@ from .query_understanding import AssistantQueryPlan, understand_query
 from .retrieval_planner import build_retrieval_plan
 from .grounding import claims_are_semantically_grounded as _claims_are_semantically_grounded_v3
 from workers.memory_worker.memory_retrieval import MemoryQueryPlan, build_memory_query_plan
-from workers.memory_worker.entity_resolver import canonical_topic_name
+from workers.memory_worker.entity_resolver import SUBJECT_NORMALIZER_VERSION, canonical_topic_name
 
 LOGGER = logging.getLogger("whisperx.assistant-worker")
 
@@ -795,6 +795,7 @@ class AssistantRepository:
                     FROM transcript_facts f
                     JOIN meetings m ON m.id=f.meeting_id
                     WHERE f.state='ACTIVE'
+                      AND f.subject_normalizer_version=%s
                       AND f.fact_type = ANY(%s::text[])
                       AND (%s::uuid IS NULL OR f.meeting_id=%s::uuid)
                       AND (%s OR m.owner_id=%s::uuid)
@@ -827,7 +828,7 @@ class AssistantRepository:
                     LIMIT 128
                     """,
                     (
-                        list(memory_plan.fact_types), meeting_id, meeting_id,
+                        SUBJECT_NORMALIZER_VERSION, list(memory_plan.fact_types), meeting_id, meeting_id,
                         include_all, owner_user_id, topic_lookup, topic_lookup, topic_lookup, topic_lookup,
                         memory_plan.temporal_mode, memory_plan.include_superseded,
                     ),

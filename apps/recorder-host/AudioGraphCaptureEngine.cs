@@ -52,6 +52,10 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
     private double _rmsSum;
     private double _peak;
     private bool _clipping;
+    // Carries a run of completely silent quanta across AudioGraph frames so
+    // a one-second dropout is not reported as a series of unrelated 10 ms
+    // events.
+    private long _currentZeroRunSamples;
     private DateTimeOffset? _lastAudioAtUtc;
     private DateTimeOffset? _silenceStartedAtUtc;
     private long _liveSequence;
@@ -552,9 +556,17 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                     if (normalized.SilenceSampleCount > 0)
                     {
                         _attempt.ZeroRunCount++;
+                        var frameSamples = normalized.Length / sizeof(short);
+                        _currentZeroRunSamples = normalized.SilenceSampleCount >= frameSamples
+                            ? _currentZeroRunSamples + frameSamples
+                            : 0;
                         _attempt.LongestZeroRunSamples = Math.Max(
                             _attempt.LongestZeroRunSamples,
-                            normalized.SilenceSampleCount);
+                            _currentZeroRunSamples);
+                    }
+                    else
+                    {
+                        _currentZeroRunSamples = 0;
                     }
                     _lastAudioAtUtc = DateTimeOffset.UtcNow;
                     _silenceStartedAtUtc = normalized.Rms < 0.003d ? _silenceStartedAtUtc ?? DateTimeOffset.UtcNow : null;
@@ -919,6 +931,7 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
             _rmsSum = 0;
             _peak = 0;
             _clipping = false;
+            _currentZeroRunSamples = 0;
             _lastAudioAtUtc = null;
             _silenceStartedAtUtc = null;
             _telemetry = new AudioTelemetrySnapshot(0, 0, null, null, null, false, null, null);

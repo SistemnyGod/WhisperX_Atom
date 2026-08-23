@@ -189,6 +189,7 @@ function Test-WhisperXRuntime([object]$Manifest) {
         $gpuReadiness = @($readiness.workers | Where-Object { $_.name -eq "gpu-worker" }) | Select-Object -First 1
         $expectedAsrRevision = Read-EnvValue "WHISPERX_MODEL_REVISION"
         $expectedDiarRevision = Read-EnvValue "DIARIZATION_MODEL_REVISION"
+        $expectedAlignmentRevision = Read-EnvValue "ALIGNMENT_MODEL_REVISION"
         if ($null -ne $gpuReadiness -and $null -ne $gpuReadiness.capabilities) {
             if (-not [string]::IsNullOrWhiteSpace($expectedAsrRevision) -and [string]$gpuReadiness.capabilities.asrModelRevision -ne $expectedAsrRevision) {
                 Write-SupervisorLog "GPU ASR model revision attestation mismatch" "ERROR"
@@ -197,6 +198,11 @@ function Test-WhisperXRuntime([object]$Manifest) {
             }
             if (-not [string]::IsNullOrWhiteSpace($expectedDiarRevision) -and [string]$gpuReadiness.capabilities.diarizationModelRevision -ne $expectedDiarRevision) {
                 Write-SupervisorLog "GPU diarization model revision attestation mismatch" "ERROR"
+                $script:IdentityMismatch = $true
+                $unhealthy.Add("gpu-worker")
+            }
+            if (-not [string]::IsNullOrWhiteSpace($expectedAlignmentRevision) -and [string]$gpuReadiness.capabilities.alignmentModelRevision -ne $expectedAlignmentRevision) {
+                Write-SupervisorLog "GPU alignment model revision attestation mismatch" "ERROR"
                 $script:IdentityMismatch = $true
                 $unhealthy.Add("gpu-worker")
             }

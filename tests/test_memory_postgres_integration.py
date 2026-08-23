@@ -27,10 +27,10 @@ def memory_database():
             pytest.fail("WHISPERX_TEST_DATABASE is required for the Memory integration gate")
         pytest.skip("set WHISPERX_TEST_DATABASE to run PostgreSQL Memory integration tests")
     with psycopg.connect(conninfo, autocommit=True) as connection:
-        if not connection.execute("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='057_memory_cross_meeting_projection')").fetchone()[0]:
+        if not connection.execute("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='058_memory_normalizer_version')").fetchone()[0]:
             if os.getenv("WHISPERX_REQUIRE_MEMORY_INTEGRATION") == "1":
-                pytest.fail("Memory integration gate requires migration 057")
-            pytest.skip("test database has not applied migration 057")
+                pytest.fail("Memory integration gate requires migration 058")
+            pytest.skip("test database has not applied migration 058")
     yield conninfo
 
 

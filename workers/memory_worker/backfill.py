@@ -34,20 +34,20 @@ def main() -> int:
         if args.stage == "subjects":
             rows = connection.execute(
                 """SELECT id,subject
-                     FROM transcript_facts
+                    FROM transcript_facts
                     WHERE state='ACTIVE' AND subject IS NOT NULL
-                      AND subject_normalized IS NULL
+                      AND (subject_normalized IS NULL OR subject_normalizer_version IS DISTINCT FROM %s)
                     ORDER BY created_at,id
                     LIMIT %s""",
-                (limit,),
+                (SUBJECT_NORMALIZER_VERSION, limit),
             ).fetchall()
             identifiers = [{"factId": str(row[0])} for row in rows]
             if args.apply:
                 with connection.transaction():
                     for fact_id, subject in rows:
                         connection.execute(
-                            "UPDATE transcript_facts SET subject_normalized=%s WHERE id=%s AND state='ACTIVE'",
-                            (canonical_topic_name(str(subject)), fact_id),
+                            "UPDATE transcript_facts SET subject_normalized=%s,subject_normalizer_version=%s WHERE id=%s AND state='ACTIVE'",
+                            (canonical_topic_name(str(subject)), SUBJECT_NORMALIZER_VERSION, fact_id),
                         )
             print(json.dumps({
                 "mode": "apply" if args.apply else "preview",

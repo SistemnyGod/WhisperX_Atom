@@ -87,6 +87,13 @@ def test_loopback_normalizer_resolves_extensible_subformat_instead_of_assuming_f
     assert "format.Encoding == WaveFormatEncoding.Extensible && bits == 32" not in engine
 
 
+def test_loopback_normalizer_uses_interpolation_for_non_48khz_sources():
+    engine = read("apps/recorder-host/SystemAudioCaptureEngine.cs")
+    assert "Linear interpolation avoids" in engine
+    assert "var sourcePosition = target * sourceRate / (double)SampleRate" in engine
+    assert "sum += left + (right - left) * fraction" in engine
+
+
 def test_media_manifest_keeps_room_and_system_tracks_separate_until_asr_selection():
     assembly = read("workers/media_worker/recording_assembly.py")
     media = read("workers/media_worker/media_worker.py")

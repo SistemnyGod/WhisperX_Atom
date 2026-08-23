@@ -528,6 +528,10 @@ async def run() -> None:
             "diarizationModelRevision": os.getenv("DIARIZATION_MODEL_REVISION", ""),
             "diarizationModelPath": os.getenv("DIARIZATION_MODEL_PATH", ""),
             "diarizationModelSha256": os.getenv("DIARIZATION_MODEL_SHA256", ""),
+            "alignmentModel": os.getenv("ALIGNMENT_MODEL", ""),
+            "alignmentModelRevision": os.getenv("ALIGNMENT_MODEL_REVISION", ""),
+            "alignmentModelPath": os.getenv("ALIGNMENT_MODEL_PATH", ""),
+            "alignmentModelSha256": os.getenv("ALIGNMENT_MODEL_SHA256", ""),
         }
         try:
             import torch

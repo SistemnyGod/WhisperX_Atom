@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - worker image installs psycopg
 
 from .indexer import MemoryIndex, build_memory_index
 from .models import MemoryFact
-from .entity_resolver import canonical_topic_name, normalize_entity_name
+from .entity_resolver import SUBJECT_NORMALIZER_VERSION, canonical_topic_name, normalize_entity_name
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
 
@@ -378,8 +378,8 @@ class MemoryProjectionRepository:
                 for fact in result.index.facts:
                     if fact.fact_id and fact.subject:
                         connection.execute(
-                            "UPDATE transcript_facts SET subject_normalized=%s WHERE id=%s AND subject_normalized IS DISTINCT FROM %s",
-                            (self._scope_key(fact), fact.fact_id, self._scope_key(fact)),
+                            "UPDATE transcript_facts SET subject_normalized=%s,subject_normalizer_version=%s WHERE id=%s AND (subject_normalized IS DISTINCT FROM %s OR subject_normalizer_version IS DISTINCT FROM %s)",
+                            (self._scope_key(fact), SUBJECT_NORMALIZER_VERSION, fact.fact_id, self._scope_key(fact), SUBJECT_NORMALIZER_VERSION),
                         )
                 superseded = {item.source_fact_id for item in result.index.relations if item.relation_type == "SUPERSEDES"}
                 closed = {

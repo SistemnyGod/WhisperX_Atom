@@ -150,6 +150,9 @@ class PipelineConfig:
     diarization_model: str
     diarization_model_revision: str
     diarization_model_path: str
+    alignment_model: str
+    alignment_model_revision: str
+    alignment_model_path: str
     model_local_only: bool
     use_glossary: bool
     glossary_rules_raw: str
@@ -215,6 +218,9 @@ class PipelineConfig:
             diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip(),
             diarization_model_revision=(os.getenv("DIARIZATION_MODEL_REVISION") or "").strip(),
             diarization_model_path=(os.getenv("DIARIZATION_MODEL_PATH") or "").strip(),
+            alignment_model=(os.getenv("ALIGNMENT_MODEL") or "").strip(),
+            alignment_model_revision=(os.getenv("ALIGNMENT_MODEL_REVISION") or "").strip(),
+            alignment_model_path=(os.getenv("ALIGNMENT_MODEL_PATH") or "").strip(),
             model_local_only=_as_bool("WHISPERX_MODEL_LOCAL_ONLY", runtime_profile in {"production", "release"}),
             use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
@@ -328,11 +334,29 @@ class ModelCacheManager:
             model=base_model,
         )
 
-    def get_align_model(self, language_code: str, device: str):
-        key = (language_code, device)
+    def get_align_model(self, language_code: str, device: str, model_name: str = "", model_revision: str = "", model_path: str = "", model_local_only: bool = False):
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            raise FileNotFoundError(f"ALIGNMENT_MODEL_PATH_NOT_FOUND:{explicit_path}")
+        configured_model = explicit_path or (model_name or "").strip()
+        resolved_model = self._resolve_snapshot(
+            configured_model, model_revision, local_only=model_local_only, label="ALIGNMENT_MODEL"
+        ) if configured_model else ""
+        key = (language_code, device, resolved_model)
         if key not in self._align:
             started = time.perf_counter()
-            self._align[key] = whisperx.load_align_model(language_code=language_code, device=device)
+            if resolved_model:
+                # WhisperX exposes the alignment model as an optional model_name
+                # argument.  If a pinned release path is configured, do not
+                # silently fall back to the library's mutable default.
+                try:
+                    self._align[key] = whisperx.load_align_model(
+                        language_code=language_code, device=device, model_name=resolved_model
+                    )
+                except TypeError as exc:
+                    raise RuntimeError("ALIGNMENT_MODEL_PIN_UNSUPPORTED") from exc
+            else:
+                self._align[key] = whisperx.load_align_model(language_code=language_code, device=device)
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._align[key]
 
@@ -708,7 +732,14 @@ class TranscriptionPipeline:
         language = result.get("language")
         if not language:
             return result
-        align_model, metadata = self.cache.get_align_model(language, self.config.device)
+        align_model, metadata = self.cache.get_align_model(
+            language,
+            self.config.device,
+            self.config.alignment_model,
+            self.config.alignment_model_revision,
+            self.config.alignment_model_path,
+            self.config.model_local_only,
+        )
         aligned = whisperx.align(
             result.get("segments", []),
             align_model,
