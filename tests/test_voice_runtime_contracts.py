@@ -274,6 +274,12 @@ def test_assistant_result_delivery_is_observable_and_bounded():
     assert 'ASSISTANT_PLAYBACK_STATUS' in VOICE_RUNTIME
 
 
+def test_missing_accepted_query_stays_in_reconciliation_instead_of_unavailable_speech():
+    assert 'assistant_query_not_visible_yet' in BROKER
+    assert 'RecorderState: "ASSISTANT_RECONCILING"' in BROKER
+    assert 'query_not_found' not in BROKER
+
+
 def test_voice_documentation_matches_the_unrestricted_question_runtime():
     assert "separate unrestricted Vosk" in VOICE_README
     assert "unrestricted Vosk capture for arbitrary spoken\nquestions is still a release blocker" not in VOICE_README

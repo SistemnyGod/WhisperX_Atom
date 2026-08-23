@@ -239,7 +239,14 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             if (!Guid.TryParse(queryText, out var queryId)) return new(false, "VOICE_COMMAND_REJECTED", Detail: "query_id_invalid", TraceId: resultTraceId, CommandId: resultCommandId);
             if (!_backend.HasSession) return new(false, "VOICE_ASSISTANT_DESKTOP_REQUIRED", TraceId: resultTraceId, CommandId: resultCommandId);
             var query = await _backend.GetAssistantQueryAsync(queryId, cancellationToken).ConfigureAwait(false);
-            if (query is null) return new(false, "VOICE_ASSISTANT_UNAVAILABLE", Detail: "query_not_found", TraceId: resultTraceId, CommandId: resultCommandId);
+            // A durable request can be committed before the read replica or
+            // API lookup path exposes the query.  It is not an assistant
+            // outage and must not be converted into the generic
+            // "Помощник временно недоступен" speech.  Keep the command in
+            // reconciliation; the delivery loop will retry by commandId and
+            // the exactly-once playback ledger remains authoritative.
+            if (query is null)
+                return new(true, RecorderState: "ASSISTANT_RECONCILING", Detail: "assistant_query_not_visible_yet", TraceId: resultTraceId, CommandId: resultCommandId, QueryId: queryText, AssistantStatus: "QUEUED");
             var terminal = query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "NEEDS_REVIEW" or "FAILED" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE";
             var assistantSpoken = terminal && !string.IsNullOrWhiteSpace(query.VoiceAnswer ?? query.Answer) ? query.VoiceAnswer ?? query.Answer : null;
             return new(terminal && assistantSpoken is not null, terminal && assistantSpoken is not null ? null : query.ErrorCode ?? (terminal ? "ASSISTANT_NO_GROUNDED_ANSWER" : null), query.Status, SpokenText: assistantSpoken, Detail: query.Status, TraceId: resultTraceId, CommandId: resultCommandId, QueryId: queryText, AssistantStatus: query.Status, ResolvedMode: query.AssistantMode);
