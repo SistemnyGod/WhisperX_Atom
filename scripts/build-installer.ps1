@@ -2,7 +2,9 @@
     [switch]$SkipPublish,
     [switch]$NoRestore,
     [string]$ServerOrigin = "http://192.168.2.194:8080",
-    [string]$TtsWheelhouse = ''
+    [string]$TtsWheelhouse = '',
+    [string]$ServerBundleRoot = 'artifacts/server-bundle',
+    [string]$ServerArchive = 'artifacts/WhisperXAtom-Server.zip'
 )
 $ErrorActionPreference = "Stop"
 $originUri = $null
@@ -72,8 +74,10 @@ $signatureStatus = [string]$signature.Status
 $releaseStatus = if ($signatureStatus -eq "Valid") { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_PILOT_BUILD" }
 $releaseDir = Join-Path $repoRoot "artifacts\\release"
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-$serverArchive = Join-Path $repoRoot "artifacts\\WhisperXAtom-Server.zip"
-$serverBundleManifestPath = Join-Path $repoRoot "artifacts\\server-bundle\\release-manifest.json"
+$serverArchivePath = if ([IO.Path]::IsPathRooted($ServerArchive)) { [IO.Path]::GetFullPath($ServerArchive) } else { [IO.Path]::GetFullPath((Join-Path $repoRoot $ServerArchive)) }
+$serverBundlePath = if ([IO.Path]::IsPathRooted($ServerBundleRoot)) { [IO.Path]::GetFullPath($ServerBundleRoot) } else { [IO.Path]::GetFullPath((Join-Path $repoRoot $ServerBundleRoot)) }
+$serverArchive = $serverArchivePath
+$serverBundleManifestPath = Join-Path $serverBundlePath 'release-manifest.json'
 $serverBundle = if (Test-Path -LiteralPath $serverBundleManifestPath -PathType Leaf) {
     $serverManifest = Get-Content -LiteralPath $serverBundleManifestPath -Raw | ConvertFrom-Json
     $serverIdentity = [string]$serverManifest.buildIdentity
@@ -81,8 +85,8 @@ $serverBundle = if (Test-Path -LiteralPath $serverBundleManifestPath -PathType L
         throw "INSTALLER_RUNTIME_IDENTITY_MISMATCH: desktop=$buildIdentity server=$serverIdentity"
     }
     [ordered]@{
-        directory = "artifacts/server-bundle"
-        archive = if (Test-Path -LiteralPath $serverArchive -PathType Leaf) { [ordered]@{ path = "artifacts/WhisperXAtom-Server.zip"; sha256 = (Get-FileHash -LiteralPath $serverArchive -Algorithm SHA256).Hash.ToLowerInvariant() } } else { $null }
+        directory = $ServerBundleRoot
+        archive = if (Test-Path -LiteralPath $serverArchive -PathType Leaf) { [ordered]@{ path = $ServerArchive; sha256 = (Get-FileHash -LiteralPath $serverArchive -Algorithm SHA256).Hash.ToLowerInvariant() } } else { $null }
         buildIdentity = [string]$serverManifest.buildIdentity
         dockerImages = $serverManifest.dockerImages
     }
