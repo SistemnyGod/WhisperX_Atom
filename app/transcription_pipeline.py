@@ -16,7 +16,7 @@ import torch
 import whisperx
 from whisperx.diarize import DiarizationPipeline as WhisperXDiarizationPipeline
 
-from app.storage import read_job_json, write_job_json
+from whisperx_atom.runtime_state import read_job_json, write_job_json
 from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
 from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import VIDEO_EXTENSIONS
