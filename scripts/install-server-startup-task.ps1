@@ -76,7 +76,12 @@ catch {
 }
 $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $registered) { throw "SERVER_STARTUP_TASK_NOT_REGISTERED" }
-if ($registered.Principal.UserId -ne $principal.UserId -or $registered.Settings.MultipleInstances -ne "IgnoreNew") { throw "SERVER_STARTUP_TASK_CONFIGURATION_INVALID" }
+# ScheduledTasks returns MultipleInstances as a generated enum rather than a
+# string.  Comparing that enum directly to "IgnoreNew" falsely rejects a
+# correctly registered task on Windows PowerShell 5.1.
+$registeredUserId = ([string]$registered.Principal.UserId).Trim()
+$registeredMultipleInstances = ([string]$registered.Settings.MultipleInstances).Trim()
+if ($registeredUserId -ne ([string]$principal.UserId).Trim() -or $registeredMultipleInstances -ne "IgnoreNew") { throw "SERVER_STARTUP_TASK_CONFIGURATION_INVALID" }
 Start-ScheduledTask -TaskName $TaskName
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
 do {
