@@ -11,6 +11,12 @@ if TYPE_CHECKING:
     from fastapi import UploadFile
 
 from whisperx_atom.media_policy import ALLOWED_AUDIO_EXTENSIONS, CHUNK_SIZE, MAX_UPLOAD_BYTES, VIDEO_EXTENSIONS
+from whisperx_atom.runtime_state import (
+    JOBS_DIR,
+    job_path,
+    read_job_json,
+    write_job_json,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -21,20 +27,6 @@ JOBS_DIR = DATA_DIR / "jobs"
 def ensure_dirs():
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def job_path(job_id: str) -> Path:
-    return JOBS_DIR / f"{job_id}.json"
-
-
-def read_job_json(job_id: str) -> dict:
-    with job_path(job_id).open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def write_job_json(job_id: str, data: dict) -> None:
-    with job_path(job_id).open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _probe_audio(path: Path) -> dict:
