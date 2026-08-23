@@ -299,6 +299,45 @@ class AssistantRepository:
         self._last_query_plan: dict[str, Any] = {}
         self._last_answer_plan: dict[str, Any] = {}
 
+    @staticmethod
+    def _merge_memory_and_transcript_context(
+        memory_result: tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None],
+        transcript_result: tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None],
+    ) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+        """Fuse Memory locators with hybrid transcript evidence.
+
+        Memory remains only a canonical locator.  Hybrid results are added as
+        independent evidence so an extractor miss (for example CAUSE) cannot
+        hide a strong transcript match.  Segment blocks are deduplicated and
+        bounded before they reach Qwen.
+        """
+        memory_context, memory_valid, memory_kind, memory_error = memory_result
+        transcript_context, transcript_valid, transcript_kind, transcript_error = transcript_result
+        merged_valid = dict(memory_valid)
+        merged_valid.update(transcript_valid)
+        blocks: list[str] = []
+        seen: set[str] = set()
+        for source in (memory_context, transcript_context):
+            for block in re.split(r"(?=\[MEETING )", source or ""):
+                match = re.search(r"\[SEG-([^\s\]]+)", block)
+                if not match or match.group(1) in seen:
+                    continue
+                segment_id = match.group(1)
+                if segment_id not in merged_valid:
+                    continue
+                seen.add(segment_id)
+                blocks.append(block.strip())
+                if len(blocks) >= 64:
+                    break
+            if len(blocks) >= 64:
+                break
+        return (
+            "\n".join(blocks),
+            {segment_id: merged_valid[segment_id] for segment_id in seen},
+            "ENRICHED" if "ENRICHED" in {memory_kind, transcript_kind} else transcript_kind or memory_kind,
+            memory_error or transcript_error,
+        )
+
     def close(self) -> None:
         self._db.close()
 
@@ -1428,7 +1467,13 @@ class AssistantWorker:
                         retrieval_plan.neighbour_window,
                     )
                 if memory_result is not None:
-                    context, valid, transcript_kind, context_error = memory_result
+                    # Memory is a locator, not a substitute for transcript
+                    # retrieval.  Always add the hybrid result so an omitted
+                    # fact type cannot suppress a relevant canonical segment.
+                    context_loader = self.repository.context_for_plan if comparison_queries else self.repository.context
+                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window)
+                    transcript_result = await asyncio.to_thread(context_loader, *context_args)
+                    context, valid, transcript_kind, context_error = self.repository._merge_memory_and_transcript_context(memory_result, transcript_result)
                 else:
                     context_loader = self.repository.context_for_plan if comparison_queries else self.repository.context
                     context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window)

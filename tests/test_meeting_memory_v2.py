@@ -272,6 +272,7 @@ def test_assistant_uses_memory_index_then_safe_transcript_fallback():
     assert "m.owner_id=%s::uuid" in memory_sql
     assert "f.state='ACTIVE'" in memory_sql
     assert "f.subject_normalized=%s" in memory_sql
+    assert "_merge_memory_and_transcript_context" in source
 
 
 def test_memory_runtime_is_wired_without_gpu_dependency():
