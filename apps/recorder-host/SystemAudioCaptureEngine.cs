@@ -40,6 +40,8 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
     private DateTimeOffset? _lastAudioAtUtc;
     private DateTimeOffset? _silenceStartedAtUtc;
     private int _failureRaised;
+    private CancellationTokenSource? _deviceMonitorCts;
+    private Task? _deviceMonitorTask;
     private long _framesProduced;
     private long _framesConsumed;
     private int _queueDepth;
@@ -203,6 +205,7 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
                 throw new TimeoutException("AUDIO_SYSTEM_AUDIO_START_TIMEOUT");
             }
             SetState(AudioCaptureState.Recording);
+            StartSelectedDeviceMonitor(selected.Id);
         }
         catch
         {
@@ -229,9 +232,22 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken = default)
+    public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var monitorCts = Interlocked.Exchange(ref _deviceMonitorCts, null);
+        var monitorTask = Interlocked.Exchange(ref _deviceMonitorTask, null);
+        if (monitorCts is not null)
+        {
+            monitorCts.Cancel();
+            if (monitorTask is not null)
+            {
+                try { await monitorTask.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (monitorCts.IsCancellationRequested) { }
+                catch (ObjectDisposedException) when (monitorCts.IsCancellationRequested) { }
+            }
+            monitorCts.Dispose();
+        }
         var capture = Interlocked.Exchange(ref _capture, null);
         if (capture is not null)
         {
@@ -244,7 +260,6 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
         _clock.Stop();
         if (State is not AudioCaptureState.DeviceLost and not AudioCaptureState.Failed)
             SetState(AudioCaptureState.Stopped);
-        return Task.CompletedTask;
     }
 
     public async Task<AudioDeviceProbeResult> ProbeAsync(AudioSelectionMode selectionMode, string? deviceId, TimeSpan duration, CancellationToken cancellationToken = default)
@@ -287,6 +302,45 @@ public sealed class SystemAudioCaptureEngine : IAudioCaptureEngine, IHostCapture
             RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST", "The selected system-audio endpoint was removed.", true);
         }
         DeviceStateChanged?.Invoke(this, args);
+    }
+
+    private void StartSelectedDeviceMonitor(string selectedId)
+    {
+        var previousCts = Interlocked.Exchange(ref _deviceMonitorCts, new CancellationTokenSource());
+        previousCts?.Cancel();
+        previousCts?.Dispose();
+        var cts = _deviceMonitorCts!;
+        _deviceMonitorTask = MonitorSelectedDeviceAsync(selectedId, cts.Token);
+    }
+
+    private async Task MonitorSelectedDeviceAsync(string selectedId, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                await _catalog.ReconcileAsync(cancellationToken).ConfigureAwait(false);
+                if (!_catalog.Devices.Any(device => string.Equals(device.Id, selectedId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    // ReconcileAsync normally raises DEVICE_REMOVED and owns
+                    // the exactly-once failure path. Keep this defensive
+                    // fallback for drivers that change the endpoint state
+                    // without emitting a catalog delta.
+                    SetState(AudioCaptureState.DeviceLost);
+                    try { _capture?.StopRecording(); } catch { }
+                    RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST", "The selected system-audio endpoint is no longer available.", true);
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (Exception ex)
+            {
+                // A transient enumeration error must not stop a recording;
+                // the next bounded poll can still detect endpoint removal.
+                Debug.WriteLine($"System-audio endpoint monitor failed: {ex.Message}");
+            }
+        }
     }
 
     private void OnDataAvailable(object? _, WaveInEventArgs args)
@@ -390,13 +444,29 @@ public sealed class SystemAudioDeviceCatalog : IAudioDeviceCatalog
         List<AudioDeviceChangedEventArgs> changes = [];
         lock (_gate)
         {
-            foreach (var item in next) if (!_devices.TryGetValue(item.Key, out var old) || old != item.Value) changes.Add(new AudioDeviceChangedEventArgs(old is null ? "DEVICE_ADDED" : "DEVICE_STATE_CHANGED", item.Value, DateTimeOffset.UtcNow));
+            foreach (var item in next)
+            {
+                if (!_devices.TryGetValue(item.Key, out var old))
+                    changes.Add(new AudioDeviceChangedEventArgs("DEVICE_ADDED", item.Value, DateTimeOffset.UtcNow));
+                else if (!SameDevice(old, item.Value))
+                    changes.Add(new AudioDeviceChangedEventArgs("DEVICE_STATE_CHANGED", item.Value, DateTimeOffset.UtcNow));
+            }
             foreach (var removed in _devices.Keys.Except(next.Keys, StringComparer.OrdinalIgnoreCase).ToArray()) changes.Add(new AudioDeviceChangedEventArgs("DEVICE_REMOVED", _devices[removed] with { RuntimeStatus = "DEVICE_LOST" }, DateTimeOffset.UtcNow));
             _devices = next; IsReady = true;
         }
         foreach (var change in changes) DeviceChanged?.Invoke(this, change);
         return Task.CompletedTask;
     }
+
+    private static bool SameDevice(AudioDeviceDescriptor left, AudioDeviceDescriptor right)
+        => string.Equals(left.Id, right.Id, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+            && left.DataFlow == right.DataFlow
+            && string.Equals(left.State, right.State, StringComparison.OrdinalIgnoreCase)
+            && left.IsDefault == right.IsDefault
+            && left.SelectionMode == right.SelectionMode
+            && left.IsSelected == right.IsSelected
+            && string.Equals(left.RuntimeStatus, right.RuntimeStatus, StringComparison.OrdinalIgnoreCase);
     public AudioDeviceDescriptor? Resolve(AudioSelectionMode mode, string? deviceId)
     {
         lock (_gate)

@@ -51,6 +51,14 @@ def test_system_audio_stopped_callback_maps_invalidated_endpoint_to_device_loss(
     assert 'RaiseFailure("AUDIO_SYSTEM_AUDIO_DEVICE_LOST"' in source
 
 
+def test_system_audio_monitors_selected_endpoint_during_capture_without_event_storm():
+    source = read("apps/recorder-host/SystemAudioCaptureEngine.cs")
+    assert "StartSelectedDeviceMonitor" in source
+    assert "MonitorSelectedDeviceAsync" in source
+    assert "SameDevice" in source
+    assert "LastSeenAtUtc" not in source.split("private static bool SameDevice", 1)[1].split("}", 1)[0]
+
+
 def test_storage_watchdog_has_emergency_exactly_once_boundary():
     storage = read("apps/recorder-agent/StorageWatermark.cs")
     watchdog = read("apps/recorder-host/StorageCaptureWatchdog.cs")
