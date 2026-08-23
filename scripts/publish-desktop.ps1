@@ -92,10 +92,15 @@ Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Dest
 # Silero is a build-time dependency. It is staged outside Git and frozen into
 # an onedir host; a release must fail closed when the model/runtime is absent.
 $ttsPublisher = Join-Path $repoRoot "scripts\publish-tts-host.ps1"
-$ttsArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ttsPublisher,'-OutputRoot',(Join-Path $output 'TtsHost'),'-AllowGeneratedStagingDirty')
-if ($TtsWheelhouse) { $ttsArgs += @('-WheelhouseRoot', $TtsWheelhouse) }
-& powershell.exe @ttsArgs
-if ($LASTEXITCODE -ne 0) { throw "TtsHost publish failed with exit code $LASTEXITCODE" }
+# Run in the current PowerShell host.  Spawning a nested Windows PowerShell
+# loses the caller's module/session environment on some Server Nodes, which
+# can make built-in hash verification unavailable halfway through packaging.
+# Named parameters also keep the wheelhouse from being mistaken for OutputRoot.
+if ($TtsWheelhouse) {
+    & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty -WheelhouseRoot $TtsWheelhouse
+} else {
+    & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty
+}
 
 # The supported Windows runtime is .NET Desktop + AudioGraph Host + Voice
 # Host.  The legacy Python app.py is kept in the repository for compatibility,
