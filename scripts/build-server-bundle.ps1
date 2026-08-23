@@ -217,6 +217,14 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding utf8
 ([ordered]@{ algorithm = 'SHA256'; path = 'docker-images.tar'; hash = $dockerTarHash } | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $stage 'docker-images.sha256.json') -Encoding utf8
+# Bundle staging is an explicit allowlist of compose files, scripts,
+# migrations and image/model manifests. Reject human documents defensively so
+# local secret containers (for example "Токен.docx") can never enter a release.
+$forbiddenReleaseFiles = @(Get-ChildItem -LiteralPath $stage -File -Recurse -Force |
+    Where-Object { $_.Extension -in @('.doc','.docx','.xls','.xlsx','.ppt','.pptx') -or $_.Name -ieq 'Токен.docx' })
+if ($forbiddenReleaseFiles.Count -gt 0) {
+    throw ('RELEASE_FORBIDDEN_DOCUMENT: ' + (($forbiddenReleaseFiles | ForEach-Object FullName) -join ';'))
+}
 if (Test-Path -LiteralPath $finalRoot) { Remove-Item -LiteralPath $finalRoot -Recurse -Force }
 Move-Item -LiteralPath $stage -Destination $finalRoot
 $archive = [IO.Path]::GetFullPath((Join-Path $repo $ArchivePath))

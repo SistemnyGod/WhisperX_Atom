@@ -3,6 +3,7 @@ param(
     [string]$RepoRoot = (Join-Path $PSScriptRoot '..'),
     [string]$KeepIdentity,
     [switch]$IncludeArchives,
+    [switch]$IncludeNodeModules,
     [switch]$Apply
 )
 
@@ -40,6 +41,28 @@ $protectedNames = @(
 )
 $candidates = [System.Collections.Generic.List[object]]::new()
 
+function Add-CleanupCandidate([string]$Path, [string]$Reason) {
+    Assert-Under $Path $repo
+    # The root release directory contains backups, inventory and the offline
+    # package cache. It is never a generic build-output candidate.
+    if ([string]::Equals([IO.Path]::GetFullPath($Path), $artifactRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "CLEANUP_ROOT_ARTIFACTS_FORBIDDEN: $Path"
+    }
+    $candidates.Add([pscustomobject]@{ Path=$Path; Reason=$Reason })
+}
+
+function Get-TopLevelCandidates {
+    $unique = @($candidates | Sort-Object Path -Unique)
+    return @($unique | Where-Object {
+        $candidatePath = [IO.Path]::GetFullPath($_.Path).TrimEnd('\\') + '\\'
+        -not @($unique | Where-Object {
+            $parentPath = [IO.Path]::GetFullPath($_.Path).TrimEnd('\\') + '\\'
+            $parentPath.Length -lt $candidatePath.Length -and
+                $candidatePath.StartsWith($parentPath, [StringComparison]::OrdinalIgnoreCase)
+        }).Count
+    })
+}
+
 # Build/test outputs are ignored and scoped to known source roots only.
 foreach ($root in @('apps','tests')) {
     $rootPath = Join-Path $repo $root
@@ -47,9 +70,31 @@ foreach ($root in @('apps','tests')) {
     Get-ChildItem -LiteralPath $rootPath -Directory -Recurse -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -in @('bin','obj') } |
         ForEach-Object {
-            Assert-Under $_.FullName $repo
-            $candidates.Add([pscustomobject]@{ Path=$_.FullName; Reason='local build output' })
+            Add-CleanupCandidate $_.FullName 'local build output'
         }
+}
+
+# Only nested staging artifacts are disposable. The repository-level
+# artifacts directory is intentionally excluded above.
+foreach ($root in @('apps','scripts','tests')) {
+    $rootPath = Join-Path $repo $root
+    if (-not (Test-Path -LiteralPath $rootPath -PathType Container)) { continue }
+    Get-ChildItem -LiteralPath $rootPath -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @('artifacts','TestResults','__pycache__') } |
+        ForEach-Object { Add-CleanupCandidate $_.FullName 'nested build or test output' }
+}
+
+if ($IncludeNodeModules) {
+    $webRoot = Join-Path $repo 'apps\web'
+    $webLock = @('package-lock.json','npm-shrinkwrap.json','pnpm-lock.yaml','yarn.lock') |
+        ForEach-Object { Join-Path $webRoot $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    $webModules = Join-Path $webRoot 'node_modules'
+    if ($null -eq $webLock) { throw 'CLEANUP_WEB_LOCKFILE_REQUIRED' }
+    if (Test-Path -LiteralPath $webModules -PathType Container) {
+        Add-CleanupCandidate $webModules 'web dependencies rebuildable from lockfile'
+    }
 }
 
 # Test scratch directories are explicitly named and never selected from a
@@ -57,8 +102,7 @@ foreach ($root in @('apps','tests')) {
 Get-ChildItem -LiteralPath $repo -Directory -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^(\.pytest|\.media-test|\.codex-test|\.review-test|\.technical-test|tmp)' } |
     ForEach-Object {
-        Assert-Under $_.FullName $repo
-        $candidates.Add([pscustomobject]@{ Path=$_.FullName; Reason='test scratch directory' })
+        Add-CleanupCandidate $_.FullName 'test scratch directory'
     }
 
 # Old server archives are removable only when the caller explicitly opts in
@@ -69,28 +113,36 @@ if ($IncludeArchives -and -not [string]::IsNullOrWhiteSpace($KeepIdentity) -and 
     Get-ChildItem -LiteralPath $archiveRoot -File -Filter 'WhisperXAtom-Server-*.zip' -Force -ErrorAction SilentlyContinue |
         ForEach-Object {
             if ([string]::IsNullOrWhiteSpace($KeepIdentity) -or $_.Name -notmatch [regex]::Escape($KeepIdentity)) {
-                Assert-Under $_.FullName $artifactRoot
-                $candidates.Add([pscustomobject]@{ Path=$_.FullName; Reason='superseded server archive' })
+                Add-CleanupCandidate $_.FullName 'superseded server archive'
+            }
+        }
+    Get-ChildItem -LiteralPath $archiveRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^server-bundle-[0-9a-fA-F]+$' } |
+        ForEach-Object {
+            if ($_.Name -notmatch [regex]::Escape($KeepIdentity)) {
+                Add-CleanupCandidate $_.FullName 'superseded extracted server bundle'
             }
         }
 }
 $archivesSkipped = -not $IncludeArchives -or [string]::IsNullOrWhiteSpace($KeepIdentity)
+$topLevelCandidates = Get-TopLevelCandidates
 
 $report = [ordered]@{
     mode = if ($Apply) { 'apply' } else { 'preview' }
     repoRoot = $repo
     keepIdentity = $KeepIdentity
     includeArchives = [bool]$IncludeArchives
+    includeNodeModules = [bool]$IncludeNodeModules
     archivesSkipped = $archivesSkipped
-    protectedRoots = @('C:\WhisperXAtom','Docker volumes','Patrol360')
-    candidates = @($candidates | Sort-Object Path -Unique | ForEach-Object {
+    protectedRoots = @('C:\WhisperXAtom','Docker volumes','Patrol360',$artifactRoot,'.env','.env.lan','vendor','user recordings')
+    candidates = @($topLevelCandidates | ForEach-Object {
         [ordered]@{ path=$_.Path; reason=$_.Reason; sizeBytes=(Get-SafeSizeBytes $_.Path) }
     })
 }
 $report | ConvertTo-Json -Depth 8
 
 if (-not $Apply) { exit 0 }
-foreach ($item in @($candidates | Sort-Object Path -Unique)) {
+foreach ($item in @($topLevelCandidates)) {
     Assert-Under $item.Path $repo
     if ($protectedNames -contains ([IO.Path]::GetFileName($item.Path))) { throw "CLEANUP_PROTECTED_ARTIFACT: $($item.Path)" }
     if ($PSCmdlet.ShouldProcess($item.Path, "Remove $($item.Reason)")) {

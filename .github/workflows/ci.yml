@@ -92,6 +92,11 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgresql://whisperx:ci-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/whisperx_ci
+      # Memory projection tests intentionally refuse DATABASE_URL so they can
+      # never accidentally use a developer/LAN database.  CI supplies their
+      # explicitly isolated connection string as well.
+      WHISPERX_TEST_DATABASE: postgresql://whisperx:ci-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/whisperx_ci
+      WHISPERX_REQUIRE_MEMORY_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -99,8 +104,12 @@ jobs:
           python-version-file: .python-version
           cache: pip
       - run: python -m pip install --require-hashes -r requirements.test.lock.txt
+      - name: Apply production migrations to the isolated integration database
+        run: python scripts/apply-test-migrations.py
       - name: Run PostgreSQL integration tests
-        run: python -m pytest -q -m integration tests
+        run: |
+          python -m pytest -q tests/test_gpu_runtime_integration.py
+          python -m pytest -q tests/test_memory_postgres_integration.py
 
   migration-validation:
     runs-on: ubuntu-latest
