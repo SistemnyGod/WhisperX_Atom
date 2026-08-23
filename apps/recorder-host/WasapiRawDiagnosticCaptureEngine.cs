@@ -71,7 +71,15 @@ public sealed class WasapiRawDiagnosticCaptureEngine
                     try
                     {
                         var byteCount = checked(frames * native.BlockAlign);
-                        if (pointer != IntPtr.Zero && byteCount > 0)
+                        if (byteCount > 0 && flags.HasFlag(AudioClientBufferFlags.Silent))
+                        {
+                            // WASAPI explicitly says the packet contents are
+                            // undefined when Silent is set. Materialize the
+                            // silence instead of copying arbitrary memory into
+                            // the diagnostic stream.
+                            nativeBytes.AddRange(new byte[byteCount]);
+                        }
+                        else if (pointer != IntPtr.Zero && byteCount > 0)
                         {
                             var buffer = new byte[byteCount];
                             Marshal.Copy(pointer, buffer, 0, byteCount);
@@ -142,7 +150,14 @@ public sealed class WasapiRawDiagnosticCaptureEngine
     private static byte[] ConvertToCanonical(byte[] bytes, WaveFormat format)
     {
         if (bytes.Length == 0) return Array.Empty<byte>();
+        var resolved = AudioSampleFormatResolver.Resolve(format);
         var sourceFrames = bytes.Length / Math.Max(1, format.BlockAlign);
+        // A capture boundary must be frame-aligned.  If a driver returns a
+        // truncated packet, keep the diagnostic path fail-safe instead of
+        // indexing an empty source below; the result will be reported as a
+        // weak/empty capture by the existing quality gate.
+        if (sourceFrames <= 0 || format.Channels <= 0)
+            return Array.Empty<byte>();
         var source = new float[sourceFrames];
         for (var frame = 0; frame < sourceFrames; frame++)
         {
@@ -150,7 +165,7 @@ public sealed class WasapiRawDiagnosticCaptureEngine
             for (var channel = 0; channel < format.Channels; channel++)
             {
                 var offset = frame * format.BlockAlign + channel * format.BitsPerSample / 8;
-                sum += ReadSample(bytes, offset, format);
+                sum += ReadSample(bytes, offset, resolved);
             }
             source[frame] = (float)Math.Clamp(sum / Math.Max(1, format.Channels), -1d, 1d);
         }
@@ -170,19 +185,22 @@ public sealed class WasapiRawDiagnosticCaptureEngine
         return result;
     }
 
-    private static float ReadSample(byte[] data, int offset, WaveFormat format)
+    private static float ReadSample(byte[] data, int offset, AudioSampleFormatDescriptor resolved)
     {
-        if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+        // Resolve WAVE_FORMAT_EXTENSIBLE through its subtype once per capture.
+        // A 32-bit extensible float is not PCM32 even though the container
+        // width is identical.
+        if (resolved.Kind == RawAudioSampleFormat.Float32)
             return BitConverter.ToSingle(data, offset);
-        if (format.BitsPerSample == 16)
+        if (resolved.Kind == RawAudioSampleFormat.Pcm16)
             return BitConverter.ToInt16(data, offset) / 32768f;
-        if (format.BitsPerSample == 24)
+        if (resolved.Kind == RawAudioSampleFormat.Pcm24)
         {
             var value = data[offset] | data[offset + 1] << 8 | data[offset + 2] << 16;
             if ((value & 0x800000) != 0) value |= unchecked((int)0xff000000);
             return value / 8388608f;
         }
-        if (format.BitsPerSample == 32)
+        if (resolved.Kind == RawAudioSampleFormat.Pcm32)
             return BitConverter.ToInt32(data, offset) / 2147483648f;
         return 0;
     }

@@ -59,6 +59,14 @@ def test_system_audio_monitors_selected_endpoint_during_capture_without_event_st
     assert "LastSeenAtUtc" not in source.split("private static bool SameDevice", 1)[1].split("}", 1)[0]
 
 
+def test_raw_capture_handles_wasapi_silent_packets_and_extensible_float():
+    source = read("apps/recorder-host/WasapiRawDiagnosticCaptureEngine.cs")
+    assert "AudioClientBufferFlags.Silent" in source
+    assert "AudioSampleFormatResolver.Resolve(format)" in source
+    assert "RawAudioSampleFormat.Float32" in source
+    assert "sourceFrames <= 0" in source
+
+
 def test_storage_watchdog_has_emergency_exactly_once_boundary():
     storage = read("apps/recorder-agent/StorageWatermark.cs")
     watchdog = read("apps/recorder-host/StorageCaptureWatchdog.cs")
