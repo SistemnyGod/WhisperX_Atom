@@ -20,7 +20,13 @@ function Invoke-Check([string]$Name, [scriptblock]$Action) {
 Set-Location $repo
 Invoke-Check "API build" { dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --nologo }
 Invoke-Check "Python compile" { py -3.12 -m compileall -q whisperx_atom workers }
-Invoke-Check "Python tests" { py -3.12 -m unittest discover -s tests -v 2>&1 }
+Invoke-Check "Python test runtime" {
+  & py -3.12 -c "import pytest" 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "PYTHON_TEST_RUNTIME_MISSING: install requirements.test.lock.txt for Python 3.12"
+  }
+}
+Invoke-Check "Python tests" { py -3.12 -m pytest -q }
 Invoke-Check "PowerShell E2E syntax" { [scriptblock]::Create((Get-Content scripts/e2e-core.ps1 -Raw)) | Out-Null }
 if (-not $SkipWeb) {
   Push-Location apps/web
