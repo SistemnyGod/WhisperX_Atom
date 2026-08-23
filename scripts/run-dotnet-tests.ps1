@@ -2,7 +2,7 @@
 param(
     [string[]]$Project,
     [ValidateRange(30, 3600)]
-    [int]$TimeoutSeconds = 180,
+    [int]$TimeoutSeconds = 60,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [switch]$NoRestore
@@ -14,6 +14,11 @@ $logRoot = Join-Path $repo "artifacts\test-logs"
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 $tempRoot = Join-Path $repo "artifacts\test-temp\dotnet"
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+$nugetCache = Join-Path $repo "artifacts\nuget-packages"
+New-Item -ItemType Directory -Force -Path $nugetCache | Out-Null
+if (@(Get-ChildItem -LiteralPath $nugetCache -Directory -ErrorAction SilentlyContinue).Count -eq 0) {
+    & (Join-Path $PSScriptRoot 'prepare-nuget-cache.ps1') -Destination $nugetCache
+}
 
 if ($Project.Count -eq 0) {
     $Project = @(Get-ChildItem -Path $repo -Recurse -Filter "*Tests.csproj" -File -ErrorAction SilentlyContinue |
@@ -35,9 +40,30 @@ foreach ($projectPath in $Project) {
     New-Item -ItemType Directory -Force -Path $runTemp | Out-Null
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
+    $childEnvironment = @{ TEMP = $runTemp; TMP = $runTemp; NUGET_PACKAGES = $nugetCache; HTTP_PROXY = ''; HTTPS_PROXY = ''; ALL_PROXY = ''; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBuildEnableWorkloadResolver = 'false' }
+    if (-not $NoRestore) {
+        # Restore has its own network/cache behavior and must not consume the
+        # testhost hang budget.  All variables are process-scoped and restored
+        # immediately, which also works on Windows PowerShell 5.1.
+        $restoreEnvironment = @{}
+        foreach ($entry in $childEnvironment.GetEnumerator()) {
+            $restoreEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
+            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+        }
+        try {
+            # Treat the repository cache as a hierarchical offline feed as
+            # well as the global package folder.  This avoids even probing
+            # nuget.org during a local release test run.
+            & dotnet restore $resolved --source $nugetCache --packages $nugetCache --verbosity minimal -p:NuGetAudit=false
+            if ($LASTEXITCODE -ne 0) { throw "DOTNET_RESTORE_FAILED: $name exit=$LASTEXITCODE" }
+        } finally {
+            foreach ($entry in $restoreEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+        }
+    }
+
     # Start-Process joins ArgumentList into a command line; quote the project
     # path explicitly because the workspace path contains spaces.
-    $arguments = @("test", ('"' + $resolved + '"'), "-c", $Configuration, "--verbosity", "minimal", "-p:NuGetAudit=false", "-p:RestoreIgnoreFailedSources=true")
+    $arguments = @("test", ('"' + $resolved + '"'), "-c", $Configuration, "--no-restore", "--verbosity", "minimal", "-p:NuGetAudit=false", "-p:RestoreIgnoreFailedSources=true")
     $effectiveTimeout = $TimeoutSeconds
     if ($name -match 'Desktop') {
         # WinUI/pipe tests can otherwise leave a testhost alive while MSBuild
@@ -58,9 +84,7 @@ foreach ($projectPath in $Project) {
             "-nodeReuse:false"
         )
     }
-    if ($NoRestore) { $arguments += "--no-restore" }
     Write-Host "Running $name (timeout ${effectiveTimeout}s)"
-    $childEnvironment = @{ TEMP = $runTemp; TMP = $runTemp; HTTP_PROXY = ''; HTTPS_PROXY = ''; ALL_PROXY = ''; DOTNET_CLI_TELEMETRY_OPTOUT = '1'; MSBuildEnableWorkloadResolver = 'false' }
     try {
         if ($PSVersionTable.PSVersion.Major -ge 7) {
             $process = Start-Process -FilePath "dotnet" -ArgumentList $arguments -WorkingDirectory $repo `

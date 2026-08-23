@@ -29,11 +29,16 @@ def test_signal_metrics_distinguish_silence_and_far_field(tmp_path):
     # Noise floor followed by a deliberately quiet but measurable voice-like
     # tone.  The analyzer must remain bounded and recommend enhancement.
     samples = [int(80 * math.sin(index / 3)) for index in range(8_000)]
-    samples += [int(700 * math.sin(index / 5)) for index in range(8_000)]
+    # Keep the speech-like half below the production weak-signal threshold
+    # (roughly -38 dBFS RMS) while still clearly above the synthetic floor.
+    samples += [int(400 * math.sin(index / 5)) for index in range(8_000)]
     distant = tmp_path / "distant.wav"
     _wav(distant, samples)
     metrics = analyze_wav(distant)
-    assert metrics.window_count == 100
+    # The production analyzer defaults to 100 ms windows, therefore a
+    # one-second sample must yield ten windows.  The old assertion expected
+    # 10 ms windows and stayed hidden while NumPy was absent from local tests.
+    assert metrics.window_count == 10
     assert metrics.duration_seconds == 1.0
     assert metrics.active_speech_rms_p90 > metrics.noise_floor_rms_p20
     assert metrics.recommended_profile == "LARGE_ROOM"

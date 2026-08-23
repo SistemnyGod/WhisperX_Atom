@@ -19,6 +19,8 @@ permissions:
 jobs:
   dotnet-build:
     runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/artifacts/nuget-packages
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -26,8 +28,8 @@ jobs:
           global-json-file: global.json
       - uses: actions/cache@v4
         with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json') }}
+          path: artifacts/nuget-packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json', 'NuGet.Config') }}
           restore-keys: nuget-${{ runner.os }}-
       - run: dotnet restore apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj
       - run: dotnet restore apps/recorder-agent/WhisperX.Atom.Recorder.Core.csproj
@@ -53,7 +55,7 @@ jobs:
       - name: Run .NET tests when test projects are present
         shell: pwsh
         run: |
-          ./scripts/run-dotnet-tests.ps1 -Configuration Release -NoRestore -TimeoutSeconds 180
+          ./scripts/run-dotnet-tests.ps1 -Configuration Release -NoRestore -TimeoutSeconds 60
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-validation
@@ -70,7 +72,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: pip
-      - run: python -m pip install --upgrade pip pytest numpy
+      - run: python -m pip install --require-hashes -r requirements.test.lock.txt
       - name: Run unit and contract tests
         run: python -m pytest -q -m "unit or contract" tests
 
@@ -96,7 +98,7 @@ jobs:
         with:
           python-version-file: .python-version
           cache: pip
-      - run: python -m pip install --upgrade pip pytest 'psycopg[binary]'
+      - run: python -m pip install --require-hashes -r requirements.test.lock.txt
       - name: Run PostgreSQL integration tests
         run: python -m pytest -q -m integration tests
 

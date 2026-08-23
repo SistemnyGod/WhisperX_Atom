@@ -3,7 +3,20 @@
 ## Быстрые проверки
 
 ```powershell
-py -m pytest -p no:cacheprovider tests/test_transcript_runtime_contracts.py tests/test_transcript_mvp_contracts.py tests/test_nonweb_risks.py -q
+.\scripts\prepare-python-test-environment.ps1
+.\scripts\run-python-tests.ps1 -PytestArguments @('-q','tests/test_transcript_runtime_contracts.py','tests/test_transcript_mvp_contracts.py','tests/test_nonweb_risks.py')
+```
+
+Для полностью автономного .NET restore на уже подготовленной Windows-машине
+однократно скопируйте проверенный пользовательский cache в изолированный cache
+репозитория:
+
+```powershell
+.\scripts\prepare-nuget-cache.ps1 -AllCached
+.\scripts\run-dotnet-tests.ps1 -TimeoutSeconds 60
+```
+
+```powershell
 dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --no-restore
 dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj --no-restore
 .\scripts\check-desktop-ui-encoding.ps1
