@@ -135,6 +135,13 @@ def test_vertical_gate_restarts_only_selected_gpu_mode_services():
     assert "down -v" not in script
 
 
+def test_duplicate_track_recovery_types_json_text_parameters():
+    recovery = read("workers/ml_worker/recording_recovery.py")
+    outbox = recovery.split("INSERT INTO outbox_messages", 1)[1].split("result[\"applied\"]", 1)[0]
+    assert "'message_id',%s::text" in outbox
+    assert "'session_id',%s::text" in outbox
+
+
 def test_media_to_asr_transition_starts_with_fresh_watchdog_backoff():
     persistence = read("workers/media_worker/persistence.py")
     transition = persistence.split("def mark_ready_for_asr_and_enqueue", 1)[1]

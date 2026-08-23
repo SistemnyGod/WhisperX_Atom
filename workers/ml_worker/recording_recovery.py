@@ -162,10 +162,10 @@ def recover(session_ids: list[str], apply: bool) -> dict[str, Any]:
                     """
                     INSERT INTO outbox_messages(id,topic,payload)
                     SELECT %s,'media.ingest',jsonb_build_object(
-                        'message_id',%s,'job_id',j.id,'meeting_id',j.meeting_id,
+                        'message_id',%s::text,'job_id',j.id,'meeting_id',j.meeting_id,
                         'media_asset_id',j.media_asset_id,'stage','INGEST','attempt',j.attempt,
                         'storage_key',a.storage_key,'source_type',a.source_type,
-                        'session_id',%s,'language','ru','correlation_id',rs.pipeline_correlation_id)
+                        'session_id',%s::text,'language','ru','correlation_id',rs.pipeline_correlation_id)
                     FROM jobs j
                     JOIN media_assets a ON a.id=j.media_asset_id
                     JOIN recording_sessions rs ON rs.id=%s
