@@ -19,13 +19,21 @@ $publish = Join-Path $repoRoot "scripts\publish-desktop.ps1"
 $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
 $artifact = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
 if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
-    if ($NoRestore) {
-        $publishArgs = @('-NoRestore')
+    # Invoke named parameters explicitly.  Passing an argument array through
+    # the call operator is not reliable across Windows PowerShell versions:
+    # it may bind "-TtsWheelhouse" as OutputRoot, leaving the real desktop
+    # payload stale while the installer is being created.
+    if ($TtsWheelhouse) {
+        if ($NoRestore) {
+            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse
+        } else {
+            & $publish -TtsWheelhouse $TtsWheelhouse
+        }
+    } elseif ($NoRestore) {
+        & $publish -NoRestore
     } else {
-        $publishArgs = @()
+        & $publish
     }
-    if ($TtsWheelhouse) { $publishArgs += @('-TtsWheelhouse', $TtsWheelhouse) }
-    & $publish @publishArgs
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($null -eq $iscc) {

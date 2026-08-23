@@ -101,6 +101,15 @@ def test_installer_release_manifest_rejects_dirty_or_mixed_runtime():
     assert "identity.dirty" in script
 
 
+def test_installer_forwards_tts_wheelhouse_by_named_parameter():
+    script = read("scripts/build-installer.ps1")
+    # Positional splatting can bind the switch as publish-desktop.ps1's
+    # OutputRoot on Windows PowerShell, silently preserving a stale Desktop.
+    assert "& $publish -NoRestore -TtsWheelhouse $TtsWheelhouse" in script
+    assert "& $publish -TtsWheelhouse $TtsWheelhouse" in script
+    assert "& $publish @publishArgs" not in script
+
+
 def test_clean_runtime_gate_requires_one_identity_and_excludes_legacy_python_payload():
     script = read("scripts/verify-clean-runtime.ps1")
     publish = read("scripts/publish-desktop.ps1")
