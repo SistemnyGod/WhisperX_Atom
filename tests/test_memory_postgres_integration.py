@@ -46,9 +46,19 @@ def _setup_chain(connection):
         (owner, user_name),
     )
     connection.execute(
-        """INSERT INTO meetings(id,title,description,status,owner_id,started_at)
-           VALUES(%s,'Memory A','', 'READY',%s,%s),(%s,'Memory B','', 'READY',%s,%s)""",
-        (meeting_a, owner, "2026-08-01T10:00:00Z", meeting_b, owner, "2026-08-02T10:00:00Z"),
+        """INSERT INTO meetings(id,title,description,status,owner_id)
+           VALUES(%s,'Memory A','', 'READY',%s),(%s,'Memory B','', 'READY',%s)""",
+        (meeting_a, owner, meeting_b, owner),
+    )
+    # Production meetings derive their effective start from the first
+    # recording session (the meetings table intentionally has no started_at
+    # column).  Keep the fixture on that canonical contract so chronology is
+    # tested exactly as the worker queries it.
+    connection.execute(
+        """INSERT INTO recording_sessions(id,meeting_id,state,started_at,finished_at)
+           VALUES(%s,%s,'FINISHED',%s,%s),(%s,%s,'FINISHED',%s,%s)""",
+        (uuid.uuid4(), meeting_a, "2026-08-01T10:00:00Z", "2026-08-01T10:10:00Z",
+         uuid.uuid4(), meeting_b, "2026-08-02T10:00:00Z", "2026-08-02T10:10:00Z"),
     )
     connection.execute(
         "INSERT INTO transcripts(id,meeting_id,version,status) VALUES(%s,%s,2,'READY'),(%s,%s,2,'READY')",
@@ -98,6 +108,7 @@ def _cleanup_chain(connection, values):
     owner, _user_name, meeting_a, meeting_b, _transcript_a, _transcript_b, _fact_a, _fact_b, _job_a, _job_b = values
     connection.execute("DELETE FROM memory_jobs WHERE owner_user_id=%s", (owner,))
     connection.execute("DELETE FROM transcript_facts WHERE owner_user_id=%s", (owner,))
+    connection.execute("DELETE FROM recording_sessions WHERE meeting_id IN (%s,%s)", (meeting_a, meeting_b))
     connection.execute("DELETE FROM transcripts WHERE meeting_id IN (%s,%s)", (meeting_a, meeting_b))
     connection.execute("DELETE FROM meetings WHERE owner_id=%s", (owner,))
     connection.execute("DELETE FROM users WHERE id=%s", (owner,))

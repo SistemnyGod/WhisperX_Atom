@@ -57,7 +57,12 @@ def main() -> None:
                                 (version, checksum),
                             )
                         continue
-                    cursor.execute(payload.decode("utf-8"))
+                    # A few checked-in migrations are emitted by Windows
+                    # tooling with an UTF-8 BOM.  PostgreSQL treats that BOM
+                    # as SQL text when the whole migration is sent at once,
+                    # so strip it at the boundary while keeping the bytes
+                    # unchanged for checksum attestation.
+                    cursor.execute(payload.decode("utf-8-sig"))
                     cursor.execute("INSERT INTO schema_migrations(version) VALUES(%s)", (version,))
                     cursor.execute(
                         "INSERT INTO schema_migration_checksums(version,sha256) VALUES(%s,%s)",
