@@ -18,7 +18,11 @@ public sealed record VoiceUtteranceEnvelope(
     string Route,
     long Sequence = 0,
     double DurationMs = 0,
-    double? QueueWaitMs = null);
+    double? QueueWaitMs = null,
+    double? PreRollMs = null,
+    double? SpeechMs = null,
+    double? PostRollMs = null,
+    bool Truncated = false);
 
 public enum VoiceRefinementState
 {

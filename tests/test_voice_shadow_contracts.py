@@ -62,3 +62,39 @@ def test_release_packaging_cannot_skip_asset_gate():
     assert 'RequireVoiceRefinerAssets' in installer
     assert 'verify-voice-refiner-assets.ps1' in installer
     assert 'VoiceRefinerHost' in publish
+
+
+def test_shadow_rc_uses_resident_attestation_and_host_watchdog():
+    client = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/ResidentVoiceRefinerClient.cs").read_text(encoding="utf-8")
+    host = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Refiner.Host/Program.cs").read_text(encoding="utf-8")
+    protocol = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceRefinerProtocol.cs").read_text(encoding="utf-8")
+    assert "FileAttestationCache" in client
+    assert "LastWriteTimeUtc" in client
+    assert "VOICE_REFINER_NATIVE_ABI_MISMATCH" in host
+    assert "InferenceTimeoutExitCode = 73" in protocol
+    assert "Environment.Exit(VoiceRefinerProtocol.InferenceTimeoutExitCode)" in host
+    assert "Task.Run" in host
+    assert "VerifyManifest" in host
+    assert "VOICE_REFINER_ASSET_CHANGED" in client
+    assert "CancelAfter(_timeout)" in client
+
+
+def test_shadow_rc_manifest_v2_and_real_capture_windows():
+    stage = (ROOT / "scripts/stage-voice-refiner-assets.ps1").read_text(encoding="utf-8-sig")
+    verify = (ROOT / "scripts/verify-voice-refiner-assets.ps1").read_text(encoding="utf-8-sig")
+    buffer = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/UtteranceCaptureBuffer.cs").read_text(encoding="utf-8")
+    bridge = (ROOT / "apps/voice-host/native/whisper-refiner/whisperx_refiner_bridge.cpp").read_text(encoding="utf-8")
+    assert "schemaVersion = 2" in stage
+    assert "whisperCppRevision" in stage and "bridgeRevision" in stage
+    assert "schemaVersion -ne 2" in verify
+    assert "VOICE_REFINER_MANIFEST_UPGRADE_REQUIRED" in verify
+    assert "preRollSeconds = 2" in buffer
+    assert "maxSeconds = 20" in buffer
+    assert "postRollSeconds = 0.4" in buffer
+    assert "CompleteForShadow" in buffer
+    assert "whisperx_refiner_abi_version" in bridge
+    assert "params.use_gpu = false" in bridge
+    assert "f049fff95a089aa9969deb009cdd4892b3e74916" in stage
+    assert "c521a4b02f422512d734391fdf08bb08c0862f68" in stage
+    assert "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" in verify
+    assert "WHISPER_CPP_SOURCE_DIR" in (ROOT / "apps/voice-host/native/whisper-refiner/CMakeLists.txt").read_text(encoding="utf-8")

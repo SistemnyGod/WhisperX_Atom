@@ -272,6 +272,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private double? _voiceRefinerProcessingMs;
     private string? _voiceRefinerAgreement;
     private string? _voiceRefinerError;
+    private int _voiceRefinerTimeoutCount;
     private int _audioQueueOverflow;
     private VoiceCalibrationAccumulator? _calibration;
     private VoiceCommand? _pendingStop;
@@ -343,13 +344,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 ?? Path.Combine(refinerRoot, OperatingSystem.IsWindows() ? "whisperx-refiner.dll" : "libwhisperx-refiner.so");
             var refinerHost = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_HOST_EXECUTABLE")
                 ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "VoiceRefinerHost", OperatingSystem.IsWindows() ? "WhisperX.Atom.Voice.Refiner.Host.exe" : "WhisperX.Atom.Voice.Refiner.Host"));
-            var timeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_TIMEOUT_MS"), out var configuredTimeout)
-                ? Math.Clamp(configuredTimeout, 500, 30_000) : 8_000;
+            var legacyTimeout = int.TryParse(Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_TIMEOUT_MS"), out var legacyConfigured)
+                ? Math.Clamp(legacyConfigured, 500, 60_000) : 0;
+            var timeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_CLIENT_TIMEOUT_MS"), out var clientConfigured)
+                ? Math.Clamp(clientConfigured, 3_000, 60_000)
+                : legacyTimeout > 0 ? Math.Max(legacyTimeout + 3_000, 3_000) : VoiceRefinerProtocol.ClientTimeoutMs;
             _voiceRefiner = new ResidentVoiceRefinerClient(refinerHost, refinerModel, refinerNative, TimeSpan.FromMilliseconds(timeoutMs), BuildIdentity);
             _voiceRefinerProvider = _voiceRefiner.Provider;
             _voiceRefinerModel = _voiceRefiner.Model;
             _voiceRefinerState = _voiceRefiner.IsAvailable ? VoiceRefinementState.Ready.ToString().ToUpperInvariant() : VoiceRefinementState.Unavailable.ToString().ToUpperInvariant();
-            _voiceRefinerError = _voiceRefiner.IsAvailable ? null : "VOICE_REFINER_ASSETS_UNAVAILABLE";
+            _voiceRefinerError = _voiceRefiner.IsAvailable ? null : (_voiceRefiner as ResidentVoiceRefinerClient)?.AvailabilityError ?? "VOICE_REFINER_ASSETS_UNAVAILABLE";
         }
         else
         {
@@ -454,6 +458,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceRefinerQueueWaitMs = _voiceRefinerQueueWaitMs,
                 VoiceRefinerAgreement = _voiceRefinerAgreement,
                 VoiceRefinerError = _voiceRefinerError,
+                VoiceRefinerNativeAbiVersion = _voiceRefiner is null ? null : VoiceRefinerProtocol.NativeAbiVersion,
+                VoiceRefinerAssetsAttested = _voiceRefiner?.IsAvailable,
+                VoiceRefinerHostRestartCount = (_voiceRefiner as ResidentVoiceRefinerClient)?.RestartCount ?? 0,
+                VoiceRefinerTimeoutCount = _voiceRefinerTimeoutCount,
+                VoiceRefinerLastAppliedSequence = Volatile.Read(ref _voiceRefinerLastAppliedSequence),
                 Capabilities = new[] { VoiceIpcCapabilities.VoiceGainControl },
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
@@ -1205,7 +1214,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             {
                 EnsureRecognitionState(text);
                 _intentLatencyMs = Math.Max(0, (DateTimeOffset.UtcNow - now).TotalMilliseconds);
-                QueueShadowRefinement(text, command, confidence, _utteranceBuffer.Complete());
+                QueueShadowRefinement(text, command, confidence, _utteranceBuffer.CompleteForShadow());
                 await ExecuteAsync(command, cancellationToken);
             }
             else
@@ -1577,7 +1586,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
         EnsureRecognitionState(normalized);
         _lastCommandLatencyMs = (DateTimeOffset.UtcNow - _commandStartedAt).TotalMilliseconds;
-        QueueShadowRefinement(normalized, command, confidence, _utteranceBuffer.Complete());
+        QueueShadowRefinement(normalized, command, confidence, _utteranceBuffer.CompleteForShadow());
         await ExecuteAsync(command, cancellationToken);
     }
 
@@ -2329,24 +2338,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static string NormalizeCommandText(string? text) =>
         string.Join(' ', (text ?? string.Empty).Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-    private void QueueShadowRefinement(string text, VoiceCommand command, double confidence, byte[] pcm)
+    private void QueueShadowRefinement(string text, VoiceCommand command, double confidence, UtteranceCaptureBuffer.PendingCapture capture)
     {
         var refiner = _voiceRefiner;
-        if (refiner is null || !VoiceRefinerEnabled || pcm.Length < 1600) return;
+        if (refiner is null || !VoiceRefinerEnabled || capture.InitialPcm16kMono.Length < 1600) return;
         var sequence = Interlocked.Increment(ref _voiceRefinerSequence);
-        var envelope = new VoiceUtteranceEnvelope(
-            Guid.NewGuid().ToString("N"),
-            DateTimeOffset.UtcNow,
-            _lastWakeAtUtc,
-            _wakeSpeechStartedAt == default ? null : _wakeSpeechStartedAt,
-            DateTimeOffset.UtcNow,
-            pcm,
-            text,
-            command.Intent,
-            confidence,
-            _lastRecognitionRoute ?? "UNKNOWN",
-            sequence,
-            pcm.Length / 32.0);
+        // Snapshot utterance metadata before awaiting post-roll; a new wake
+        // candidate may start while the previous capture is finishing.
+        var wakeAtUtc = _lastWakeAtUtc;
+        DateTimeOffset? speechStartedAtUtc = _wakeSpeechStartedAt == default ? null : _wakeSpeechStartedAt;
+        var recognitionRoute = _lastRecognitionRoute ?? "UNKNOWN";
         if (!_shadowQueueSlots.Wait(0))
         {
             _voiceRefinerState = "DROPPED";
@@ -2359,6 +2360,31 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         {
             try
             {
+                var completed = await capture.Completion.ConfigureAwait(false);
+                if (completed.Pcm16kMono.Length < 1600)
+                {
+                    _voiceRefinerState = VoiceRefinementState.NoSpeech.ToString().ToUpperInvariant();
+                    _voiceRefinerError = "VOICE_REFINER_NO_SPEECH";
+                    return;
+                }
+                var envelope = new VoiceUtteranceEnvelope(
+                    Guid.NewGuid().ToString("N"),
+                    capture.CapturedAtUtc,
+                    wakeAtUtc,
+                    speechStartedAtUtc,
+                    DateTimeOffset.UtcNow,
+                    completed.Pcm16kMono,
+                    text,
+                    command.Intent,
+                    confidence,
+                    recognitionRoute,
+                    sequence,
+                    completed.Pcm16kMono.Length / 32.0,
+                    null,
+                    completed.PreRollMs,
+                    completed.SpeechMs,
+                    completed.PostRollMs,
+                    completed.Truncated);
                 VoiceRefinementResult result;
                 try { result = await refiner.RefineAsync(envelope, _shutdown.Token).ConfigureAwait(false); }
                 catch { result = new(VoiceRefinementState.Failed, Provider: refiner.Provider, Model: refiner.Model, ErrorCode: "VOICE_REFINER_FAILED", UtteranceId: envelope.UtteranceId, Sequence: sequence); }
@@ -2370,6 +2396,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                     _voiceRefinerProcessingMs = result.ProcessingMs;
                     _voiceRefinerQueueWaitMs = result.QueueWaitMs;
                     _voiceRefinerError = result.ErrorCode;
+                    if (result.State == VoiceRefinementState.Timeout) Interlocked.Increment(ref _voiceRefinerTimeoutCount);
                     _voiceRefinerProvider = result.Provider;
                     _voiceRefinerModel = result.Model ?? refiner.Model;
                     if (result.State == VoiceRefinementState.Ready && !string.IsNullOrWhiteSpace(result.Text))

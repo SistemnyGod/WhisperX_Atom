@@ -14,7 +14,13 @@ var modelPath = Environment.GetEnvironmentVariable("VOICE_REFINER_MODEL") ?? str
 var nativePath = Environment.GetEnvironmentVariable("VOICE_REFINER_NATIVE_LIBRARY") ?? string.Empty;
 var modelHash = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_SHA256") ?? string.Empty;
 var nativeHash = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_NATIVE_SHA256") ?? string.Empty;
-using var backend = NativeWhisperBackend.TryCreate(modelPath, nativePath, modelHash, nativeHash, expectedIdentity, out var backendError);
+var manifestPath = Environment.GetEnvironmentVariable("VOICE_REFINER_MANIFEST")
+    ?? Path.Combine(Path.GetDirectoryName(modelPath) ?? AppContext.BaseDirectory, "voice-refiner.manifest.json");
+var expectedAbi = int.TryParse(Environment.GetEnvironmentVariable("VOICE_REFINER_NATIVE_ABI_VERSION"), out var configuredAbi)
+    ? configuredAbi : VoiceRefinerProtocol.NativeAbiVersion;
+var inferenceTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_REFINER_HOST_TIMEOUT_MS"), out var configuredTimeout)
+    ? Math.Clamp(configuredTimeout, 1_000, 60_000) : VoiceRefinerProtocol.HostInferenceTimeoutMs;
+using var backend = NativeWhisperBackend.TryCreate(modelPath, nativePath, modelHash, nativeHash, manifestPath, expectedIdentity, expectedAbi, out var backendError);
 if (backend is null)
 {
     await RunUnavailableAsync(backendError ?? "VOICE_REFINER_NATIVE_UNAVAILABLE", expectedIdentity, options, ReadParentPid(args));
@@ -29,7 +35,7 @@ var queue = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(VoiceRefin
     AllowSynchronousContinuations = false
 });
 using var shutdown = new CancellationTokenSource();
-var worker = ProcessQueueAsync(queue.Reader, backend, expectedIdentity, options, shutdown.Token);
+var worker = ProcessQueueAsync(queue.Reader, backend, expectedIdentity, options, inferenceTimeoutMs, shutdown.Token);
 var accept = AcceptConnectionsAsync(queue.Writer, expectedIdentity, options, shutdown.Token);
 var parentMonitor = ParentMonitorAsync(ReadParentPid(args), shutdown.Token);
 try { await Task.WhenAny(accept, parentMonitor); }
@@ -60,6 +66,11 @@ static async Task HandleConnectionAsync(NamedPipeServerStream pipe, ChannelWrite
         if (request is null || request.SchemaVersion != VoiceRefinerProtocol.SchemaVersion || !string.Equals(request.Op, "refine", StringComparison.OrdinalIgnoreCase))
         {
             await WriteResponseAsync(pipe, new(false, RequestId: request?.RequestId, ErrorCode: "VOICE_REFINER_INVALID_REQUEST"), options, cancellationToken);
+            return;
+        }
+        if (request.NativeAbiVersion != VoiceRefinerProtocol.NativeAbiVersion)
+        {
+            await WriteResponseAsync(pipe, new(false, request.RequestId, ErrorCode: "VOICE_REFINER_NATIVE_ABI_MISMATCH"), options, cancellationToken);
             return;
         }
         if (!string.IsNullOrWhiteSpace(identity) && !string.Equals(identity, request.BuildIdentity, StringComparison.Ordinal))
@@ -94,15 +105,29 @@ static async Task HandleConnectionAsync(NamedPipeServerStream pipe, ChannelWrite
     }
 }
 
-static async Task ProcessQueueAsync(ChannelReader<WorkItem> reader, NativeWhisperBackend backend, string identity, JsonSerializerOptions options, CancellationToken cancellationToken)
+static async Task ProcessQueueAsync(ChannelReader<WorkItem> reader, NativeWhisperBackend backend, string identity, JsonSerializerOptions options, int inferenceTimeoutMs, CancellationToken cancellationToken)
 {
     await foreach (var work in reader.ReadAllAsync(cancellationToken))
     {
         try
         {
             var queueWait = (DateTimeOffset.UtcNow - work.AcceptedAtUtc).TotalMilliseconds;
-            var result = await backend.TranscribeAsync(work.Pcm, cancellationToken);
-            var response = new VoiceRefinerResponse(result.Ok, work.Request.RequestId, result.Ok ? "READY" : "FAILED", VoiceRefinerHostState.Ready.ToString().ToUpperInvariant(), result.Text, null, result.ProcessingMs, queueWait, result.ErrorCode, identity, backend.ModelName, "whisper.cpp-native", result.Ok, VoiceRefinerProtocol.QueueCapacity);
+            using var inferenceTimeout = new CancellationTokenSource(inferenceTimeoutMs);
+            var resultTask = backend.TranscribeAsync(work.Pcm, inferenceTimeout.Token);
+            NativeResult result;
+            try
+            {
+                result = await resultTask.WaitAsync(inferenceTimeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Native whisper.cpp does not expose a safe cancellation
+                // boundary. The isolated host must exit so the client can
+                // recreate it for the next Shadow utterance.
+                Environment.Exit(VoiceRefinerProtocol.InferenceTimeoutExitCode);
+                return;
+            }
+            var response = new VoiceRefinerResponse(result.Ok, work.Request.RequestId, result.Ok ? "READY" : "FAILED", VoiceRefinerHostState.Ready.ToString().ToUpperInvariant(), result.Text, null, result.ProcessingMs, queueWait, result.ErrorCode, identity, backend.ModelName, "whisper.cpp-native", result.Ok, VoiceRefinerProtocol.QueueCapacity, VoiceRefinerProtocol.NativeAbiVersion);
             await WriteResponseAsync(work.Pipe, response, options, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -226,21 +251,28 @@ sealed class NativeWhisperBackend : IDisposable
         ModelName = modelName;
     }
 
-    public static NativeWhisperBackend? TryCreate(string modelPath, string nativePath, string modelHash, string nativeHash, string identity, out string? error)
+    public static NativeWhisperBackend? TryCreate(string modelPath, string nativePath, string modelHash, string nativeHash, string manifestPath, string identity, int expectedAbi, out string? error)
     {
         error = null;
         if (!File.Exists(modelPath)) { error = "VOICE_REFINER_MODEL_MISSING"; return null; }
         if (!File.Exists(nativePath)) { error = "VOICE_REFINER_NATIVE_LIBRARY_MISSING"; return null; }
+        if (!VerifyManifest(manifestPath, modelPath, nativePath, modelHash, nativeHash, identity, expectedAbi, out error)) return null;
         if (!VerifyHash(modelPath, modelHash) || !VerifyHash(nativePath, nativeHash)) { error = "VOICE_REFINER_ASSET_INTEGRITY_FAILED"; return null; }
         IntPtr library = IntPtr.Zero;
         try
         {
             library = NativeLibrary.Load(nativePath);
-            if (!NativeLibrary.TryGetExport(library, "whisperx_refiner_init", out var initSymbol)
+            if (!NativeLibrary.TryGetExport(library, "whisperx_refiner_abi_version", out var abiSymbol)
+                || !NativeLibrary.TryGetExport(library, "whisperx_refiner_init", out var initSymbol)
                 || !NativeLibrary.TryGetExport(library, "whisperx_refiner_transcribe", out var transcribeSymbol)
                 || !NativeLibrary.TryGetExport(library, "whisperx_refiner_free", out var freeSymbol))
             {
                 NativeLibrary.Free(library); error = "VOICE_REFINER_NATIVE_ABI_MISSING"; return null;
+            }
+            var abi = Marshal.GetDelegateForFunctionPointer<AbiDelegate>(abiSymbol);
+            if (abi() != expectedAbi)
+            {
+                NativeLibrary.Free(library); error = "VOICE_REFINER_NATIVE_ABI_MISMATCH"; return null;
             }
             var init = Marshal.GetDelegateForFunctionPointer<InitDelegate>(initSymbol);
             var transcribe = Marshal.GetDelegateForFunctionPointer<TranscribeDelegate>(transcribeSymbol);
@@ -269,19 +301,22 @@ sealed class NativeWhisperBackend : IDisposable
     public Task<NativeResult> TranscribeAsync(byte[] pcm, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        // The pinned native bridge owns model lifetime and returns UTF-8 text
-        // into a caller-provided buffer. No text is logged or persisted.
-        var output = new byte[16 * 1024];
-        var handle = GCHandle.Alloc(output, GCHandleType.Pinned);
-        var input = GCHandle.Alloc(pcm, GCHandleType.Pinned);
-        try
+        return Task.Run(() =>
         {
-            var started = Stopwatch.GetTimestamp();
-            var length = _transcribe!(_context, input.AddrOfPinnedObject(), pcm.Length, handle.AddrOfPinnedObject(), output.Length);
-            var text = length > 0 ? Encoding.UTF8.GetString(output, 0, Math.Min(length, output.Length)).Trim() : null;
-            return Task.FromResult(new NativeResult(length > 0, text, Stopwatch.GetElapsedTime(started).TotalMilliseconds, length > 0 ? null : "VOICE_REFINER_NO_SPEECH"));
-        }
-        finally { input.Free(); handle.Free(); }
+            // The pinned native bridge owns model lifetime and returns UTF-8
+            // text into a caller-provided buffer. No text is logged/persisted.
+            var output = new byte[16 * 1024];
+            var handle = GCHandle.Alloc(output, GCHandleType.Pinned);
+            var input = GCHandle.Alloc(pcm, GCHandleType.Pinned);
+            try
+            {
+                var started = Stopwatch.GetTimestamp();
+                var length = _transcribe!(_context, input.AddrOfPinnedObject(), pcm.Length, handle.AddrOfPinnedObject(), output.Length);
+                var text = length > 0 ? Encoding.UTF8.GetString(output, 0, Math.Min(length, output.Length)).Trim() : null;
+                return new NativeResult(length > 0, text, Stopwatch.GetElapsedTime(started).TotalMilliseconds, length > 0 ? null : "VOICE_REFINER_NO_SPEECH");
+            }
+            finally { input.Free(); handle.Free(); }
+        }, CancellationToken.None);
     }
 
     public void Dispose()
@@ -295,6 +330,90 @@ sealed class NativeWhisperBackend : IDisposable
         using var stream = File.OpenRead(path);
         return string.Equals(Convert.ToHexString(SHA256.HashData(stream)), expected, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool VerifyManifest(string path, string modelPath, string nativePath, string modelHash, string nativeHash, string identity, int expectedAbi, out string? error)
+    {
+        error = null;
+        try
+        {
+            if (!File.Exists(path)) { error = "VOICE_REFINER_MANIFEST_MISSING"; return false; }
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("schemaVersion", out var schema) || schema.GetInt32() != 2)
+            {
+                error = "VOICE_REFINER_MANIFEST_UPGRADE_REQUIRED";
+                return false;
+            }
+            if (!root.TryGetProperty("provider", out var provider) || !string.Equals(provider.GetString(), "whisper.cpp-native", StringComparison.Ordinal))
+            {
+                error = "VOICE_REFINER_MANIFEST_INVALID";
+                return false;
+            }
+            var model = root.GetProperty("model");
+            var native = root.GetProperty("native");
+            var modelFile = model.GetProperty("file").GetString();
+            var nativeFile = native.GetProperty("file").GetString();
+            if (!string.Equals(Path.GetFileName(modelFile), Path.GetFileName(modelPath), StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(Path.GetFileName(nativeFile), Path.GetFileName(nativePath), StringComparison.OrdinalIgnoreCase))
+            {
+                error = "VOICE_REFINER_MANIFEST_INVALID";
+                return false;
+            }
+            if (native.GetProperty("abiVersion").GetInt32() != expectedAbi)
+            {
+                error = "VOICE_REFINER_NATIVE_ABI_MISMATCH";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(model.GetProperty("source").GetString())
+                || !IsRevision(model.GetProperty("revision").GetString())
+                || !IsRevision(native.GetProperty("whisperCppRevision").GetString())
+                || !IsRevision(native.GetProperty("bridgeRevision").GetString()))
+            {
+                error = "VOICE_REFINER_MANIFEST_INVALID";
+                return false;
+            }
+            var bridgeRevision = native.GetProperty("bridgeRevision").GetString();
+            var identityMarker = identity is null ? null : System.Text.RegularExpressions.Regex.Match(identity, "\\+([0-9a-fA-F]{40})(?:$|-)");
+            if (identityMarker is { Success: true } && !string.Equals(bridgeRevision, identityMarker.Groups[1].Value, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "VOICE_REFINER_BRIDGE_IDENTITY_MISMATCH";
+                return false;
+            }
+            if (root.TryGetProperty("buildIdentity", out var build) && !string.IsNullOrWhiteSpace(identity)
+                && !string.Equals(build.GetString(), identity, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "VOICE_REFINER_BUILD_IDENTITY_MISMATCH";
+                return false;
+            }
+            var declaredModelHash = model.GetProperty("sha256").GetString();
+            var declaredNativeHash = native.GetProperty("sha256").GetString();
+            if (!IsSha256(declaredModelHash) || !IsSha256(declaredNativeHash)
+                || !string.Equals(declaredModelHash, modelHash, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(declaredNativeHash, nativeHash, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "VOICE_REFINER_ASSET_CHANGED";
+                return false;
+            }
+            var modelInfo = new FileInfo(modelPath);
+            var nativeInfo = new FileInfo(nativePath);
+            if (model.GetProperty("sizeBytes").GetInt64() != modelInfo.Length
+                || native.GetProperty("sizeBytes").GetInt64() != nativeInfo.Length)
+            {
+                error = "VOICE_REFINER_ASSET_CHANGED";
+                return false;
+            }
+            return true;
+        }
+        catch
+        {
+            error = "VOICE_REFINER_MANIFEST_INVALID";
+            return false;
+        }
+    }
+
+    private static bool IsRevision(string? value) => value is not null && value.Length == 40 && value.All(Uri.IsHexDigit);
+    private static bool IsSha256(string? value) => value is not null && value.Length == 64 && value.All(Uri.IsHexDigit);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int AbiDelegate();
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr InitDelegate(IntPtr modelPathUtf8);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int TranscribeDelegate(IntPtr context, IntPtr pcm16kMono, int pcmBytes, IntPtr utf8Output, int outputCapacity);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void FreeDelegate(IntPtr context);

@@ -159,7 +159,12 @@ public sealed record VoiceHostSnapshot(
     double? VoiceRefinerQueueWaitMs = null,
     string? VoiceRefinerAgreement = null,
     string? VoiceRefinerError = null,
-    IReadOnlyList<string>? Capabilities = null);
+    IReadOnlyList<string>? Capabilities = null,
+    int? VoiceRefinerNativeAbiVersion = null,
+    bool? VoiceRefinerAssetsAttested = null,
+    int VoiceRefinerHostRestartCount = 0,
+    int VoiceRefinerTimeoutCount = 0,
+    long VoiceRefinerLastAppliedSequence = 0);
 
 public sealed record VoiceResponse(
     string Text,

@@ -6,9 +6,13 @@ namespace WhisperX.Atom.Voice;
 public static class VoiceRefinerProtocol
 {
     public const int SchemaVersion = 1;
+    public const int NativeAbiVersion = 1;
     public const string PipePrefix = "WhisperXAtomVoiceRefiner-";
     public const int MaxPcmBytes = 960_000; // 30 seconds, 16 kHz mono PCM16
     public const int QueueCapacity = 2;
+    public const int HostInferenceTimeoutMs = 15_000;
+    public const int ClientTimeoutMs = 18_000;
+    public const int InferenceTimeoutExitCode = 73;
 
     public static string PipeName => PipePrefix + SanitizeUser(Environment.UserName);
 
@@ -42,7 +46,8 @@ public sealed record VoiceRefinerRequest(
     [property: JsonPropertyName("utteranceId")] string? UtteranceId = null,
     [property: JsonPropertyName("sequence")] long Sequence = 0,
     [property: JsonPropertyName("sampleRate")] int SampleRate = 16000,
-    [property: JsonPropertyName("pcmBytes")] int PcmBytes = 0);
+    [property: JsonPropertyName("pcmBytes")] int PcmBytes = 0,
+    [property: JsonPropertyName("nativeAbiVersion")] int NativeAbiVersion = VoiceRefinerProtocol.NativeAbiVersion);
 
 public sealed record VoiceRefinerResponse(
     [property: JsonPropertyName("ok")] bool Ok,
@@ -58,4 +63,5 @@ public sealed record VoiceRefinerResponse(
     [property: JsonPropertyName("model")] string? Model = null,
     [property: JsonPropertyName("provider")] string? Provider = null,
     [property: JsonPropertyName("modelReady")] bool ModelReady = false,
-    [property: JsonPropertyName("queueDepth")] int QueueDepth = 0);
+    [property: JsonPropertyName("queueDepth")] int QueueDepth = 0,
+    [property: JsonPropertyName("nativeAbiVersion")] int? NativeAbiVersion = null);
