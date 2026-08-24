@@ -110,8 +110,12 @@ ASSISTANT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["answer", "voice_answer", "evidence_segment_ids", "claims"],
     "properties": {
-        "answer": {"type": "string", "maxLength": 4000},
-        "voice_answer": {"type": "string", "maxLength": 500},
+        # Keep the production schema within llama.cpp's grammar limits. The
+        # response is bounded by the worker/runtime, while JSON-schema
+        # maxLength expands into a large `{0,N}` grammar repetition that
+        # llama.cpp rejects before inference starts.
+        "answer": {"type": "string"},
+        "voice_answer": {"type": "string"},
         "evidence_segment_ids": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
         "claims": {
             "type": "array",
@@ -120,11 +124,11 @@ ASSISTANT_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "required": ["text", "evidenceIds"],
                 "properties": {
-                    "text": {"type": "string", "maxLength": 1000},
+                    "text": {"type": "string"},
                     "evidenceIds": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                    "subject": {"type": "string", "maxLength": 300},
-                    "predicate": {"type": "string", "maxLength": 80},
-                    "value": {"type": "string", "maxLength": 500},
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "value": {"type": "string"},
                     "polarity": {"type": "string", "enum": ["POSITIVE", "NEGATIVE", "UNKNOWN"]},
                 },
             },
