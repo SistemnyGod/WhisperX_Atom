@@ -41,8 +41,12 @@ public sealed class ProcessingJobTrackerSemanticsTests
         var proxy = BackendProxy.Create(job, new[] { run });
         var tracker = new ProcessingJobTracker(proxy);
         var observations = new List<ProcessingJobObservation>();
+        // The proxy deliberately keeps returning RUNNING. Bound the test so
+        // a regression in the polling loop cannot occupy a testhost for the
+        // production 30-minute background observation window.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        var result = await tracker.WaitForTerminalAsync(job, observation: observations.Add);
+        var result = await tracker.WaitForTerminalAsync(job, observation: observations.Add, cancellationToken: cancellation.Token);
 
         Assert.NotNull(result);
         Assert.Contains(observations, item => item.State == ProcessingJobState.Blocked);

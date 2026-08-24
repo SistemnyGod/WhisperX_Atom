@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace WhisperX.Atom.Voice;
 
 /// <summary>
@@ -30,6 +28,14 @@ public sealed class VoiceIntentParser
     private static readonly string[] LegacyWakeWords = ["атом", "atom"];
     private readonly bool _allowLegacyAtom;
 
+    private static readonly string[] RecorderCommandCandidates =
+    [
+        "начни запись", "запусти запись", "заверши запись", "останови запись",
+        "поставь на паузу", "приостанови запись", "продолжи запись", "возобнови запись",
+        "поставь метку", "добавь метку", "отметь решение", "зафиксируй решение",
+        "отметь поручение", "зафиксируй поручение"
+    ];
+
     public VoiceIntentParser(bool allowLegacyAtom = true)
     {
         _allowLegacyAtom = allowLegacyAtom;
@@ -43,7 +49,7 @@ public sealed class VoiceIntentParser
 
     public bool HasWakeWord(string text)
     {
-        var normalized = Normalize(text);
+        var normalized = VoiceCommandText.Normalize(text);
         return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Any(word => WakeWords.Contains(word, StringComparer.OrdinalIgnoreCase));
     }
@@ -53,8 +59,15 @@ public sealed class VoiceIntentParser
         double confidence = 1.0,
         double minimumConfidence = DefaultMinimumConfidence)
     {
-        var normalized = Normalize(text);
+        var normalized = VoiceCommandText.Normalize(text);
         var withoutWake = RemoveWakeWord(normalized);
+        var commandCandidate = VoiceCommandText.NormalizeCommandCandidate(withoutWake, WakeWords, RecorderCommandCandidates);
+        // Punctuation is intentionally removed for matching, but a question
+        // marker remains a semantic guard.  «Останови запись?» is a question,
+        // not permission to mutate Recorder.  This check happens before the
+        // exact-command switch so punctuation cannot bypass the fail-closed
+        // conversational boundary.
+        var questionLike = ContainsQuestionMarker(text) || IsQuestion(withoutWake);
         var threshold = double.IsFinite(minimumConfidence)
             ? Math.Clamp(minimumConfidence, 0d, 1d)
             : DefaultMinimumConfidence;
@@ -63,7 +76,7 @@ public sealed class VoiceIntentParser
         // strict command matching. Only a confidently recognized command can
         // mutate Recorder, while a confidently recognized non-command becomes
         // AssistantQuery below.
-        if (string.IsNullOrWhiteSpace(withoutWake)
+        if (string.IsNullOrWhiteSpace(commandCandidate)
             || !double.IsFinite(confidence)
             || confidence < threshold)
             return new VoiceCommand(VoiceIntent.Unknown, text, confidence, CreatedAt: DateTimeOffset.UtcNow);
@@ -73,7 +86,7 @@ public sealed class VoiceIntentParser
         // запись» and «начать запись» must reach the Assistant rather than
         // mutate the Recorder. A command starts with an explicit imperative
         // pattern (or one of the exact status/confirmation tokens).
-        var intent = withoutWake switch
+        var intent = commandCandidate switch
         {
             var value when (Matches(value, "начни запись") || Matches(value, "запусти запись")) && IsExact(value, "начни запись", "запусти запись") => VoiceIntent.StartRecording,
             var value when Matches(value, "поставь на паузу", "приостанови запись") && IsExact(value, "поставь на паузу", "приостанови запись") => VoiceIntent.PauseRecording,
@@ -117,12 +130,47 @@ public sealed class VoiceIntentParser
             // centrally by the API, not in Voice Host.
             _ => IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery : VoiceIntent.Unknown
         };
+        // A question marker must never turn a Recorder mutation into an
+        // action. Non-mutating local lookups (for example «запись идёт?» or
+        // «состояние сервера?») remain valid fast paths.
+        if (questionLike && IsRecorderMutation(intent))
+            intent = IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery : VoiceIntent.Unknown;
 
-        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.AssistantQuery or VoiceIntent.Farewell
-            ? ExtractParameter(withoutWake, intent)
-            : null;
+        var parameter = intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem
+            ? ExtractParameter(commandCandidate, intent)
+            : intent is VoiceIntent.AssistantQuery or VoiceIntent.Farewell
+                ? ExtractParameter(withoutWake, intent)
+                : null;
         return new VoiceCommand(intent, text, confidence, parameter, DateTimeOffset.UtcNow);
     }
+
+    /// <summary>
+    /// Returns true only when the utterance starts with an approved
+    /// imperative. Questions and infinitives remain conversational text.
+    /// A true result is a local repeat/recovery path, never an Assistant query.
+    /// </summary>
+    public bool IsRecorderImperative(string text)
+    {
+        var normalized = VoiceCommandText.NormalizeCommandCandidate(RemoveWakeWord(VoiceCommandText.Normalize(text)), WakeWords, Array.Empty<string>());
+        return RecorderCommandCandidates.Any(command =>
+            normalized == command || normalized.StartsWith(command + " ", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Returns true only when bounded normalization produced one complete
+    /// approved command. Unknown trailing words therefore cannot be promoted
+    /// by the constrained grammar recognizer.
+    /// </summary>
+    public bool IsSafeRecorderCommand(string text)
+    {
+        var normalized = VoiceCommandText.NormalizeCommandCandidate(
+            RemoveWakeWord(VoiceCommandText.Normalize(text)),
+            WakeWords,
+            RecorderCommandCandidates);
+        return RecorderCommandCandidates.Contains(normalized, StringComparer.Ordinal);
+    }
+
+    public IReadOnlyList<string> RecorderCommands => RecorderCommandCandidates;
 
     private static bool IsQuestion(string value) => value.Contains('?', StringComparison.Ordinal)
         || value.StartsWith("что ", StringComparison.Ordinal)
@@ -156,6 +204,15 @@ public sealed class VoiceIntentParser
         || value.StartsWith("поговори ", StringComparison.Ordinal)
         || value.StartsWith("переведи ", StringComparison.Ordinal)
         || value.StartsWith("напиши ", StringComparison.Ordinal);
+
+    private static bool ContainsQuestionMarker(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && (value.Contains('?', StringComparison.Ordinal) || value.Contains('\uFF1F', StringComparison.Ordinal));
+
+    private static bool IsRecorderMutation(VoiceIntent intent) => intent is
+        VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording
+        or VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem
+        or VoiceIntent.StopRecording;
 
     private static bool IsAssistantUtterance(string value)
     {
@@ -195,13 +252,4 @@ public sealed class VoiceIntentParser
         return value;
     }
 
-    private static string Normalize(string text)
-    {
-        var cleaned = new string((text ?? string.Empty).Select(character => char.IsPunctuation(character) ? ' ' : character).ToArray());
-        return string.Join(' ', cleaned
-            .Trim()
-            .ToLower(CultureInfo.GetCultureInfo("ru-RU"))
-            .Replace('\u0451', '\u0435')
-            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-    }
 }

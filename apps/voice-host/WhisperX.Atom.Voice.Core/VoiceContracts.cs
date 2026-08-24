@@ -137,7 +137,11 @@ public sealed record VoiceHostSnapshot(
     double? LastTtsQueueWaitMs = null,
     double? LastTtsSynthesisMs = null,
     double? LastTtsPlaybackMs = null,
-    string? LastAssistantQueryId = null);
+    string? LastAssistantQueryId = null,
+    string? LastRecognizer = null,
+    string? LastRecognitionRoute = null,
+    double? LastRecognitionConfidence = null,
+    string? LastNormalizationReason = null);
 
 public sealed record VoiceResponse(
     string Text,

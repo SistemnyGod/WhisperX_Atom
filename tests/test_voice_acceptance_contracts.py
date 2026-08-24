@@ -19,7 +19,10 @@ def test_microphone_acceptance_reports_aliases_and_safety_metrics():
 def test_microphone_acceptance_uses_intent_specific_confidence_policy():
     assert "requiredConfidence = command.Intent switch" in RUNNER
     assert "VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence" in RUNNER
-    assert "VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70" in RUNNER
+    assert "VoiceIntent.StopRecording => 0.75" in RUNNER
+    assert "VoiceIntent.StopSpeaking => 0.70" in RUNNER
+    assert "VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording" in RUNNER
+    assert "VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.70" in RUNNER
     assert "result.Confidence >= 0.65" not in RUNNER
 
 

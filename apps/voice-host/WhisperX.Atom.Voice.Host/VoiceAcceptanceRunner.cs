@@ -65,8 +65,22 @@ internal static class VoiceAcceptanceRunner
             var command = parser.Parse(text, 0.95);
             return new { text, intent = command.Intent.ToString(), accepted = parser.HasWakeWord(text) && command.Intent == VoiceIntent.StartRecording };
         }).ToArray();
+        var recoveryCases = new[]
+        {
+            "Мифодий, останови запись останови запись",
+            "Мифодий, останови запись мефодий",
+            "Мифодий, останови запись входе остановит запись",
+            "Мифодий, останови запись единственными запись"
+        }.Select(text =>
+        {
+            var command = parser.Parse(text, 0.95);
+            var safe = parser.IsSafeRecorderCommand(text);
+            var imperative = parser.IsRecorderImperative(text);
+            return new { text, intent = command.Intent.ToString(), safe, imperative, accepted = imperative && (safe ? command.Intent == VoiceIntent.StopRecording : command.Intent == VoiceIntent.AssistantQuery) };
+        }).ToArray();
         var passed = results.All(item => item.accepted && (item.expectedIntent != VoiceIntent.AssistantQuery.ToString() || item.parameterPresent))
             && aliasResults.All(item => item.accepted);
+        passed = passed && recoveryCases.All(item => item.accepted);
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             mode = "command-acceptance",
@@ -75,6 +89,7 @@ internal static class VoiceAcceptanceRunner
             brokerInvocations = 0,
             cases = results,
             aliases = aliasResults,
+            recoveryCases,
         }));
         return Task.FromResult(passed ? 0 : 4);
     }
@@ -278,9 +293,10 @@ internal static class VoiceAcceptanceRunner
             // model the stricter STOP confirmation boundary.
             var requiredConfidence = command.Intent switch
             {
-                VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70,
-                VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => 0.60,
-                VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.55,
+                VoiceIntent.StopRecording => 0.75,
+                VoiceIntent.StopSpeaking => 0.70,
+                VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording
+                    or VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.70,
                 VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence,
                 VoiceIntent.RepeatAnswer or VoiceIntent.ShortenAnswer or VoiceIntent.ElaborateAnswer or VoiceIntent.PreviousQuestion => VoiceIntentParser.DefaultMinimumConfidence,
                 _ => VoiceIntentParser.DefaultMinimumConfidence

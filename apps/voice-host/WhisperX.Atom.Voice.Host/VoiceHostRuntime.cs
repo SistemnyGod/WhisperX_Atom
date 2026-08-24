@@ -35,12 +35,26 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         Environment.GetEnvironmentVariable("VOICE_BARGE_IN_MODE"), "OFF", StringComparison.OrdinalIgnoreCase);
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
+    private static readonly string[] CommandGrammar = CreateCommandGrammar();
     private static readonly string[] CancelGrammar = CreateCancelGrammar();
     private static readonly string[] BargeGrammar = CreateBargeGrammar();
 
     private static string[] CreateBargeGrammar() => LegacyAtomWakeEnabled
         ? ["мефодий", "мифодий", "атом", "atom", "[unk]"]
         : ["мефодий", "мифодий", "[unk]"];
+
+    private static string[] CreateCommandGrammar() =>
+    [
+        "начни запись", "запусти запись", "заверши запись", "останови запись",
+        "поставь на паузу", "приостанови запись", "продолжи запись", "возобнови запись",
+        "поставь метку", "добавь метку", "отметь решение", "зафиксируй решение",
+        "отметь поручение", "зафиксируй поручение", "статус", "состояние",
+        "пока", "до свидания", "до встречи", "всего доброго", "хорошего дня",
+        "спокойной ночи", "увидимся", "спасибо пока", "спасибо до свидания",
+        "остановись", "замолчи", "прекрати говорить", "останови ответ",
+        "подтверждаю", "подтвердить", "подтверждение", "отмена", "отмени", "нет", "не надо",
+        "[unk]"
+    ];
 
     private static bool IsTruthy(string? value) =>
         string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
@@ -103,9 +117,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         return phrases.Distinct(StringComparer.Ordinal).ToArray();
     }
 
-    // Recorder actions stay deterministic in VoiceIntentParser.  The audio
-    // recognizer used after a wake word intentionally has no grammar: a
-    // meeting question cannot be represented by the short command grammar.
+    // Recorder actions stay deterministic in VoiceIntentParser. After a
+    // confirmed wake word, the short command grammar and unrestricted
+    // question recognizer receive the same PCM in parallel; the arbiter only
+    // promotes a grammar result when the unrestricted text is command-shaped.
     internal static IReadOnlyList<string> WakePhrases => WakeGrammar;
     private readonly VoiceStateMachine _state = new();
     private readonly VoiceIntentParser _parser = new(LegacyAtomWakeEnabled);
@@ -115,6 +130,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly VoiceLedgerStore _voiceLedger = new();
     private readonly VoskRecognizer? _wakeRecognizer;
     private readonly VoskRecognizer? _utteranceRecognizer;
+    private readonly VoskRecognizer? _commandRecognizer;
     private readonly VoskRecognizer? _cancelRecognizer;
     private readonly VoskRecognizer? _bargeRecognizer;
     private readonly VoskRecognizer? _liveRecognizer;
@@ -158,6 +174,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private DateTimeOffset _lastSpeechAt;
     private DateTimeOffset _liveRecordingStartedAt;
     private string? _pendingRecognizedText;
+    private string? _pendingCommandText;
+    private double _pendingCommandConfidence;
     private Guid? _liveRecordingSessionId;
     private int _liveAudioConnected;
     private int _liveSystemAudioEnabled;
@@ -215,6 +233,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private double? _lastTtsSynthesisMs;
     private double? _lastTtsPlaybackMs;
     private string? _lastAssistantQueryId;
+    private string? _lastRecognizer;
+    private string? _lastRecognitionRoute;
+    private double? _lastRecognitionConfidence;
+    private string? _lastNormalizationReason;
     private DateTimeOffset _wakeSpeechStartedAt;
     private long _audioQueueDrops;
     private int _audioQueueDepth;
@@ -261,6 +283,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             {
                 _wakeRecognizer = new VoskRecognizer(modelPath, grammar: WakeGrammar);
                 _utteranceRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
+                _commandRecognizer = _wakeRecognizer.CreateSession(CommandGrammar);
                 _cancelRecognizer = new VoskRecognizer(modelPath, grammar: CancelGrammar);
                 _bargeRecognizer = new VoskRecognizer(modelPath, grammar: BargeGrammar);
                 _liveRecognizer = _wakeRecognizer.CreateUnrestrictedSession();
@@ -367,6 +390,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 LastTtsSynthesisMs = _lastTtsSynthesisMs,
                 LastTtsPlaybackMs = _lastTtsPlaybackMs,
                 LastAssistantQueryId = _lastAssistantQueryId,
+                LastRecognizer = _lastRecognizer,
+                LastRecognitionRoute = _lastRecognitionRoute,
+                LastRecognitionConfidence = _lastRecognitionConfidence,
+                LastNormalizationReason = _lastNormalizationReason,
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
         }
@@ -580,6 +607,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         var normalized = pushToTalk && !_parser.HasWakeWord(text) ? "Мифодий " + text : text;
         if (!_parser.HasWakeWord(normalized)) return new VoiceResponse("Нужна кодовая фраза «Мифодий»", true, false);
         var command = _parser.Parse(normalized, confidence, MinimumConfidence());
+        _lastRecognizer = pushToTalk ? "VOSK_PUSH_TO_TALK" : "IPC_TEXT";
+        _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
+        _lastRecognitionConfidence = confidence;
+        _lastNormalizationReason = null;
         if (confidence < MinimumConfidence())
         {
             _lastErrorCode = "VOICE_CONFIDENCE_TOO_LOW";
@@ -959,7 +990,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         if (_commandSession)
         {
             VoiceRecognitionResult result;
-            lock (_recognitionGate) result = _utteranceRecognizer!.Accept(pcm);
+            VoiceRecognitionResult commandResult;
+            lock (_recognitionGate)
+            {
+                result = _utteranceRecognizer!.Accept(pcm);
+                commandResult = _commandRecognizer?.Accept(pcm) ?? new VoiceRecognitionResult(null, null, false, 0);
+            }
             if (speech)
             {
                 _speechSeen = true;
@@ -970,6 +1006,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 _pendingRecognizedText = AppendText(_pendingRecognizedText, result.Text);
                 if (result.Confidence > 0) { _pendingConfidenceSum += result.Confidence; _pendingConfidenceSegments++; }
             }
+            if (commandResult.IsEndpoint && !string.IsNullOrWhiteSpace(commandResult.Text)
+                && commandResult.Confidence >= _pendingCommandConfidence)
+            {
+                _pendingCommandText = commandResult.Text;
+                _pendingCommandConfidence = commandResult.Confidence;
+            }
 
             var silence = _speechSeen && now - _lastSpeechAt >= TimeSpan.FromMilliseconds(700);
             var timeout = now - _commandStartedAt >= TimeSpan.FromSeconds(20);
@@ -979,6 +1021,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
 
         VoiceRecognitionResult wakeResult;
+        VoiceRecognitionResult oneShotCommandResult;
         lock (_recognitionGate)
         {
             // This recognizer never leaves the process and is reset at each
@@ -986,7 +1029,16 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             // while the constrained recognizer decides whether a wake word
             // was actually present.
             _utteranceRecognizer!.Accept(pcm);
+            oneShotCommandResult = _commandRecognizer?.Accept(pcm)
+                ?? new VoiceRecognitionResult(null, null, false, 0);
             wakeResult = _wakeRecognizer!.Accept(pcm);
+        }
+        if (!_commandSession && oneShotCommandResult.IsEndpoint
+            && !string.IsNullOrWhiteSpace(oneShotCommandResult.Text)
+            && oneShotCommandResult.Confidence >= _pendingCommandConfidence)
+        {
+            _pendingCommandText = oneShotCommandResult.Text;
+            _pendingCommandConfidence = oneShotCommandResult.Confidence;
         }
         var partial = wakeResult.Partial;
         if (!string.IsNullOrWhiteSpace(partial) && _parser.HasWakeWord(partial) && _state.Snapshot.State == VoiceHostState.Listening)
@@ -1012,9 +1064,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         {
             var wakeText = wakeResult.Text!;
             VoiceRecognitionResult utterance;
+            VoiceRecognitionResult commandUtterance;
             lock (_recognitionGate)
             {
                 utterance = _utteranceRecognizer!.FinalizeSessionResult();
+                commandUtterance = _commandRecognizer?.FinalizeSessionResult()
+                    ?? new VoiceRecognitionResult(null, null, true, 0);
                 // The unrestricted recognizer already saw the complete audio
                 // stream. Replay the in-memory pre-roll only when it failed to
                 // retain a wake word or returned no usable text; otherwise a
@@ -1039,6 +1094,41 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             }
             var confidence = utterance.Confidence > 0 ? utterance.Confidence : wakeResult.Confidence;
             var command = _parser.Parse(text, confidence, MinimumConfidence());
+            // Prefer the dedicated command grammar result. The wake grammar
+            // remains a compatibility fallback because older bundled Vosk
+            // models include wake+command phrases but not command-only items.
+            var grammarText = !string.IsNullOrWhiteSpace(_pendingCommandText)
+                && !_pendingCommandText.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
+                ? _pendingCommandText
+                : !string.IsNullOrWhiteSpace(commandUtterance.Text)
+                    && !commandUtterance.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
+                    ? commandUtterance.Text
+                : wakeText;
+            var grammarConfidence = _pendingCommandConfidence > 0
+                ? _pendingCommandConfidence
+                : commandUtterance.Confidence > 0 ? commandUtterance.Confidence : wakeResult.Confidence;
+            var grammarInput = _parser.HasWakeWord(grammarText)
+                ? grammarText
+                : $"Мифодий {grammarText}";
+            var grammarCommand = _parser.Parse(grammarInput, grammarConfidence, MinimumConfidence());
+            if (grammarCommand.Intent is not VoiceIntent.Unknown
+                && grammarCommand.Intent is not VoiceIntent.AssistantQuery
+                && _parser.IsSafeRecorderCommand(text)
+                && grammarCommand.Confidence >= MinimumConfidence())
+            {
+                command = grammarCommand;
+                confidence = grammarCommand.Confidence;
+                _lastRecognizer = "VOSK_COMMAND_GRAMMAR";
+                _lastRecognitionRoute = "LOCAL_COMMAND";
+                _lastNormalizationReason = "GRAMMAR_CANONICALIZED_ASR";
+            }
+            else
+            {
+                _lastRecognizer = "VOSK_UNRESTRICTED";
+                _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
+                _lastNormalizationReason = null;
+            }
+            _lastRecognitionConfidence = confidence;
             _lastUtteranceAtUtc = DateTimeOffset.UtcNow;
             if (confidence < MinimumConfidence())
             {
@@ -1350,13 +1440,19 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private void BeginCommandSession()
     {
-        lock (_recognitionGate) _utteranceRecognizer!.ResetSession();
+        lock (_recognitionGate)
+        {
+            _utteranceRecognizer!.ResetSession();
+            _commandRecognizer?.ResetSession();
+        }
         // A wake-only command starts a new clean recognition session. The
         // pre-roll is only a fallback for the current wake utterance and must
         // not leak into the follow-up command.
         _preRoll.Clear();
         _commandSession = true;
         _pendingRecognizedText = null;
+        _pendingCommandText = null;
+        _pendingCommandConfidence = 0;
         _pendingConfidenceSum = 0;
         _pendingConfidenceSegments = 0;
         _speechSeen = false;
@@ -1368,12 +1464,26 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private async Task FinishCommandSessionAsync(CancellationToken cancellationToken)
     {
         VoiceRecognitionResult tail;
-        lock (_recognitionGate) tail = _utteranceRecognizer!.FinalizeSessionResult();
+        VoiceRecognitionResult commandTail;
+        lock (_recognitionGate)
+        {
+            tail = _utteranceRecognizer!.FinalizeSessionResult();
+            commandTail = _commandRecognizer?.FinalizeSessionResult() ?? new VoiceRecognitionResult(null, null, true, 0);
+        }
         var text = AppendText(_pendingRecognizedText, tail.Text);
         if (!string.IsNullOrWhiteSpace(tail.Text) && tail.Confidence > 0) { _pendingConfidenceSum += tail.Confidence; _pendingConfidenceSegments++; }
         var confidence = _pendingConfidenceSegments == 0 ? 0 : _pendingConfidenceSum / _pendingConfidenceSegments;
+        var commandText = _pendingCommandText;
+        var commandConfidence = _pendingCommandConfidence;
+        if (!string.IsNullOrWhiteSpace(commandTail.Text) && commandTail.Confidence >= commandConfidence)
+        {
+            commandText = commandTail.Text;
+            commandConfidence = commandTail.Confidence;
+        }
         _commandSession = false;
         _pendingRecognizedText = null;
+        _pendingCommandText = null;
+        _pendingCommandConfidence = 0;
         _intentLatencyMs = _speechSeen ? Math.Max(0, (DateTimeOffset.UtcNow - _lastSpeechAt).TotalMilliseconds) : null;
         if (string.IsNullOrWhiteSpace(text) || text.Length > 2000)
         {
@@ -1385,6 +1495,27 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
         var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
         var command = _parser.Parse(normalized, confidence, MinimumConfidence());
+        var grammarCommand = string.IsNullOrWhiteSpace(commandText)
+            ? new VoiceCommand(VoiceIntent.Unknown, normalized, 0)
+            : _parser.Parse($"Мифодий {commandText}", commandConfidence, MinimumConfidence());
+        if (grammarCommand.Intent is not VoiceIntent.Unknown
+            && grammarCommand.Intent is not VoiceIntent.AssistantQuery
+            && _parser.IsSafeRecorderCommand(normalized)
+            && grammarCommand.Confidence >= MinimumConfidence())
+        {
+            command = grammarCommand;
+            confidence = grammarCommand.Confidence;
+            _lastRecognizer = "VOSK_COMMAND_GRAMMAR";
+            _lastRecognitionRoute = "LOCAL_COMMAND";
+            _lastNormalizationReason = "GRAMMAR_CANONICALIZED_ASR";
+        }
+        else
+        {
+            _lastRecognizer = "VOSK_UNRESTRICTED";
+            _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
+            _lastNormalizationReason = null;
+        }
+        _lastRecognitionConfidence = confidence;
         if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown || !IsConfidenceSufficient(command))
         {
             ResetRecognitionSessions();
@@ -1454,9 +1585,30 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _lastTraceId = traceId;
             _lastCommandId = commandId;
             _lastIntent = command.Intent.ToString();
+            _lastRecognitionConfidence = command.Confidence;
+            if (command.Intent == VoiceIntent.AssistantQuery && _parser.IsRecorderImperative(command.Text))
+            {
+                _lastErrorCode = "VOICE_COMMAND_REPEAT_REQUIRED";
+                _lastRecognitionRoute = "LOCAL_COMMAND_RECOVERY";
+                _lastNormalizationReason = "COMMAND_SHAPED_ASR_REJECTED";
+                await TryRecordVoiceEventAsync(
+                    "VOICE_COMMAND_REJECTED",
+                    new
+                    {
+                        eventId = Guid.NewGuid().ToString("N"),
+                        intent = "Unknown",
+                        reason = "COMMAND_SHAPED_ASR_REJECTED",
+                        confidence = command.Confidence,
+                        traceId,
+                        commandId,
+                        capturedAtUtc = DateTimeOffset.UtcNow
+                    },
+                    CancellationToken.None);
+                return await RespondAsync(VoiceErrorText(_lastErrorCode), cancellationToken, false, commandId: commandId, traceId: traceId);
+            }
             // A complete, high-confidence stop phrase is safe to execute
             // immediately. Short/uncertain phrases still require confirmation.
-            if (command.Intent == VoiceIntent.StopRecording && _pendingStop is null && command.Confidence < 0.70)
+            if (command.Intent == VoiceIntent.StopRecording && _pendingStop is null && command.Confidence < 0.75)
             {
                 _pendingStop = command;
                 _state.RequestConfirmation(command);
@@ -1525,7 +1677,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             {
                 eventId = Guid.NewGuid().ToString("N"),
                 intent = command.Intent.ToString(),
-                parameter = command.Parameter,
+                // Assistant questions are deliberately excluded from the
+                // voice ledger. Product annotations may retain their label,
+                // but telemetry must not become a question transcript.
+                parameter = command.Intent is VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem or VoiceIntent.AddMarker
+                    ? command.Parameter
+                    : null,
                 traceId,
                 commandId,
                 capturedAtUtc = DateTimeOffset.UtcNow
@@ -1770,6 +1927,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_HOST_RESTART_LIMIT" => "Voice Host часто завершается; автоматические перезапуски временно остановлены.",
         "VOICE_HOST_SHUTDOWN_TIMEOUT" => "Voice Host не завершился штатно.",
         "VOICE_COMMAND_REJECTED" => "Команда отклонена текущим состоянием записи.",
+        "VOICE_COMMAND_REPEAT_REQUIRED" => "Не уверен, что расслышал команду. Повторите: «Мифодий, останови запись». Вашу запись я не изменил.",
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
         "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",
@@ -1996,11 +2154,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         {
             _wakeRecognizer?.ResetSession();
             _utteranceRecognizer?.ResetSession();
+            _commandRecognizer?.ResetSession();
             _cancelRecognizer?.ResetSession();
             _bargeRecognizer?.ResetSession();
         }
         _commandSession = false;
         _pendingRecognizedText = null;
+        _pendingCommandText = null;
+        _pendingCommandConfidence = 0;
         _pendingConfidenceSum = 0;
         _pendingConfidenceSegments = 0;
         _speechSeen = false;
@@ -2052,7 +2213,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private double RequiredConfidence(VoiceIntent intent) => intent switch
     {
-        VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70,
+        VoiceIntent.StopRecording => 0.75,
+        VoiceIntent.StopSpeaking => 0.70,
         VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => _sensitivity switch
         {
             "high" => 0.65,
@@ -2074,9 +2236,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         VoiceIntent.PreviousQuestion;
 
     private bool IsConfidenceSufficient(VoiceCommand command) =>
-        // STOP is deliberately allowed through to ExecuteAsync, where a
-        // sub-0.70 result becomes an explicit confirmation request.
-        command.Intent == VoiceIntent.StopRecording || command.Confidence >= RequiredConfidence(command.Intent);
+        // A borderline STOP is handled by the explicit confirmation path in
+        // ExecuteAsync, but a very weak result must be repeated locally.
+        command.Intent == VoiceIntent.StopRecording
+            ? command.Confidence >= 0.55
+            : command.Confidence >= RequiredConfidence(command.Intent);
 
     private static bool ContainsWakeWord(string normalized)
         => normalized.Contains("мифодий", StringComparison.Ordinal)
@@ -2092,11 +2256,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     }
 
     private static string? AppendText(string? first, string? second)
-    {
-        if (string.IsNullOrWhiteSpace(first)) return string.IsNullOrWhiteSpace(second) ? null : second.Trim();
-        if (string.IsNullOrWhiteSpace(second)) return first.Trim();
-        return $"{first.Trim()} {second.Trim()}";
-    }
+        => VoiceCommandText.MergeFinalSegments(first, second);
 
     private static string NormalizeCommandText(string? text) =>
         string.Join(' ', (text ?? string.Empty).Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
@@ -2273,6 +2433,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         try { if (_liveStatusPollTask is not null) await _liveStatusPollTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         await _liveAudio.DisposeAsync().ConfigureAwait(false);
         _utteranceRecognizer?.Dispose();
+        _commandRecognizer?.Dispose();
         _wakeRecognizer?.Dispose();
         _cancelRecognizer?.Dispose();
         _bargeRecognizer?.Dispose();

@@ -75,7 +75,8 @@ public sealed partial class AssistantMessageBubble : UserControl
     {
         if (string.Equals(errorCode, "ASSISTANT_WAITING_FOR_GPU", StringComparison.OrdinalIgnoreCase)) return "Ждёт освобождения GPU";
         if (string.Equals(errorCode, "ASSISTANT_GPU_BUSY_TIMEOUT", StringComparison.OrdinalIgnoreCase)) return "GPU занят слишком долго";
-        if (string.Equals(errorCode, "LOCAL_COMMAND_REQUIRED", StringComparison.OrdinalIgnoreCase)) return "Нужна явная команда";
+        if (string.Equals(errorCode, "LOCAL_COMMAND_REQUIRED", StringComparison.OrdinalIgnoreCase)) return "Нужна явная команда записи";
+        if (string.Equals(errorCode, "VOICE_COMMAND_REPEAT_REQUIRED", StringComparison.OrdinalIgnoreCase)) return "Повторите голосовую команду";
         if (!string.IsNullOrWhiteSpace(processingStage))
         {
             var stage = processingStage.Trim().ToUpperInvariant() switch

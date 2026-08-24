@@ -439,7 +439,9 @@ public sealed class AssistantViewModel : ObservableObject
         if (string.Equals(errorCode, "ASSISTANT_GPU_BUSY_TIMEOUT", StringComparison.OrdinalIgnoreCase))
             return "GPU занят слишком долго — повторите вопрос позже";
         if (string.Equals(errorCode, "LOCAL_COMMAND_REQUIRED", StringComparison.OrdinalIgnoreCase))
-            return "Нужна явная команда записи";
+            return "Нужна явная команда записи: начните или остановите запись голосом";
+        if (string.Equals(errorCode, "VOICE_COMMAND_REPEAT_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            return "Повторите голосовую команду — состояние записи не изменено";
         if (string.Equals(errorCode, "VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT", StringComparison.OrdinalIgnoreCase))
             return "Сервер принимает запрос дольше обычного";
         if (!string.IsNullOrWhiteSpace(processingStage))

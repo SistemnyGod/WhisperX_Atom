@@ -98,7 +98,7 @@ def test_voice_host_lease_and_command_safety_are_explicit():
     assert "Global\\WhisperXAtomVoiceHost" in VOICE_LEASE
     assert "TryAcquire" in VOICE_LEASE
     assert 'normalizedCommand is not ("STATUS" or "DOCTOR" or "SHUTDOWN")' in VOICE_RUNTIME
-    assert "command.Confidence < 0.70" in VOICE_RUNTIME
+    assert "command.Confidence < 0.75" in VOICE_RUNTIME
     assert "TimeSpan.FromSeconds(10)" in VOICE_RUNTIME
     assert "_speech.IsBusy" in VOICE_RUNTIME
     assert "TouchHeartbeat" in STATE_MACHINE
@@ -113,6 +113,12 @@ def test_broker_test_mode_does_not_call_recorder_and_returns_trace():
     assert "TraceId" in BROKER
     assert "ConnectWithRetryAsync" in BROKER_CLIENT
     assert "commandId" in BROKER and "CacheCommand" in BROKER
+
+
+def test_voice_ledger_does_not_persist_assistant_question_text():
+    assert "VOICE_COMMAND_REJECTED" in VOICE_RUNTIME
+    assert "parameter = command.Intent is VoiceIntent.MarkDecision" in VOICE_RUNTIME
+    assert "parameter = command.Parameter," not in VOICE_RUNTIME
 
 
 def test_command_and_conversation_paths_are_disjoint():
@@ -169,19 +175,24 @@ def test_voice_questions_use_the_user_scoped_assistant_and_speak_safe_terminal_r
 def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
     assert "CreateUnrestrictedSession" in VOICE_RECOGNIZERS
     assert "_utteranceRecognizer" in VOICE_RUNTIME
+    assert "_commandRecognizer" in VOICE_RUNTIME
+    assert "CreateCommandGrammar" in VOICE_RUNTIME
+    assert "_commandRecognizer?.Accept(pcm)" in VOICE_RUNTIME
     assert "_wakeRecognizer!.Accept(pcm)" in VOICE_RUNTIME
     assert "_utteranceRecognizer!.Accept(pcm)" in VOICE_RUNTIME
     # Actions remain parser-controlled, therefore arbitrary text cannot call
     # Recorder before it is classified as an explicit intent.
     assert "var command = _parser.Parse(text, confidence, MinimumConfidence());" in VOICE_RUNTIME
     assert "IsAssistantUtterance" in VOICE_PARSER
+    assert "IsSafeRecorderCommand" in VOICE_PARSER
+    assert "MergeFinalSegments" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceCommandText.cs").read_text(encoding="utf-8")
     assert "_ => IsAssistantUtterance(withoutWake) ? VoiceIntent.AssistantQuery" in VOICE_PARSER
     assert "DefaultMinimumConfidence = 0.55" in VOICE_PARSER
     assert "double.IsFinite(confidence)" in VOICE_PARSER
     assert "minimumConfidence" in VOICE_PARSER
     assert 'Matches(value, "начни запись")' in VOICE_PARSER
     assert 'Matches(value, "заверши запись", "останови запись")' in VOICE_PARSER
-    command_table = VOICE_PARSER.split('var intent = withoutWake switch', 1)[1].split('// AssistantQuery', 1)[0]
+    command_table = VOICE_PARSER.split('var intent = commandCandidate switch', 1)[1].split('// AssistantQuery', 1)[0]
     assert '"начать запись"' not in command_table
     assert '"остановить запись"' not in command_table
     assert '"запись", "старт"' not in command_table
@@ -215,7 +226,8 @@ def test_far_field_front_end_never_mutates_recorder_audio_and_commands_have_sepa
     assert "MaxGain = 4.0d" in front_end
     assert "Math.Clamp(filtered * _gain, -0.92d, 0.92d)" in front_end
     assert '"high" => 0.45' in runtime
-    assert 'VoiceIntent.StopRecording or VoiceIntent.StopSpeaking => 0.70' in runtime
+    assert 'VoiceIntent.StopRecording => 0.75' in runtime
+    assert 'VoiceIntent.StopSpeaking => 0.70' in runtime
     assert 'VoiceIntent.AssistantQuery => MinimumConfidence()' in runtime
     assert "IsConfidenceSufficient(command)" in runtime
 
