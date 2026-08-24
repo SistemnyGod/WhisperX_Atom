@@ -13,6 +13,41 @@ from typing import Any
 from .llama_subprocess import LocalLlamaRuntime, attest_llm_model
 
 
+def _decode_json_document(value: str) -> Any:
+    """Decode a model JSON response without accepting arbitrary prose.
+
+    llama.cpp may return a fenced JSON document or a short preamble even when
+    ``response_format`` is requested.  The production clients already apply
+    the same bounded extraction before schema validation; the doctor must
+    measure that path rather than fail on harmless transport decoration.
+    """
+
+    text = value.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+
+
+def _canonical_segment_id(value: object) -> str:
+    text = str(value).strip()
+    return text if text.upper().startswith("SEG-") else f"SEG-{text}"
+
+
 def _binary_version() -> str | None:
     binary = os.getenv("LLM_SERVER_BINARY", os.getenv("LLAMA_RUNTIME_BINARY", "/opt/llama/llama-server"))
     try:
@@ -73,12 +108,7 @@ def _probe(base_url: str, model: str) -> dict[str, Any]:
                         content.append(token)
                     if first_token_ms is None:
                         first_token_ms = (time.perf_counter() - started) * 1000
-    decoded = None
-    if content:
-        try:
-            decoded = json.loads("".join(content))
-        except json.JSONDecodeError:
-            decoded = None
+    decoded = _decode_json_document("".join(content)) if content else None
     json_valid = isinstance(decoded, dict) and isinstance(decoded.get("answer"), str) and bool(decoded["answer"].strip())
     return {
         "status": "READY" if chunks > 0 and json_valid else "FAILED",
@@ -113,11 +143,17 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
         )
         required = {"questions_and_decisions", "tasks"}
         expected_ids = {"SEG-1", "SEG-2", "SEG-3", "SEG-4"}
-    schema = {
-        "type": "object",
-        "required": sorted(required),
-        "additionalProperties": True,
-    }
+    # Use the exact additive schemas consumed by the production Assistant and
+    # MEETING_PROTOCOL_RU paths.  A shallow ``required`` list made the probe
+    # green for malformed protocol rows that could never pass content gates.
+    if kind == "ASSISTANT_GROUNDING":
+        from .assistant import ASSISTANT_SCHEMA
+
+        schema = ASSISTANT_SCHEMA
+    else:
+        from .contracts import MEETING_PROTOCOL_RU_SCHEMA
+
+        schema = MEETING_PROTOCOL_RU_SCHEMA
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -153,20 +189,24 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
                         content.append(str(token))
                         if first_token_ms is None:
                             first_token_ms = (time.perf_counter() - started) * 1000
-        decoded = json.loads("".join(content)) if content else None
+        decoded = _decode_json_document("".join(content)) if content else None
         valid = isinstance(decoded, dict) and required.issubset(decoded)
         ids: set[str] = set()
         if isinstance(decoded, dict):
             for key in ("evidence_segment_ids", "evidenceIds"):
-                ids.update(str(item) for item in decoded.get(key, []) if item)
+                ids.update(_canonical_segment_id(item) for item in decoded.get(key, []) if item)
             for collection in ("claims", "tasks", "questions_and_decisions"):
                 for item in decoded.get(collection, []) if isinstance(decoded.get(collection), list) else []:
                     if isinstance(item, dict):
-                        ids.update(str(value) for value in item.get("evidence_segment_ids", item.get("evidenceIds", [])) if value)
+                        ids.update(
+                            _canonical_segment_id(value)
+                            for value in item.get("evidence_segment_ids", item.get("evidenceIds", []))
+                            if value
+                        )
         if kind == "ASSISTANT_GROUNDING":
-            valid = valid and ids and ids.issubset(expected_ids) and ids == expected_ids
+            valid = valid and ids and ids == {_canonical_segment_id(item) for item in expected_ids}
         else:
-            valid = valid and ids and ids.issubset(expected_ids)
+            valid = valid and ids and ids == {_canonical_segment_id(item) for item in expected_ids}
         return {"status": "READY" if valid and chunks else "FAILED", "firstTokenMs": round(first_token_ms, 3) if first_token_ms is not None else None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks}
     except Exception as exc:
         return {"status": "FAILED", "firstTokenMs": None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks, "error": type(exc).__name__}
