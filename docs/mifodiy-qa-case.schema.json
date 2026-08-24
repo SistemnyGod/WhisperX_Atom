@@ -18,6 +18,21 @@
     "activeMeetingId": { "type": ["string", "null"], "format": "uuid" },
     "evidenceSegmentIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "maxItems": 64 },
     "expectedClaims": { "type": "array", "items": { "type": "string", "maxLength": 500 }, "maxItems": 32 },
+    "expectedFacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["predicate", "value"],
+        "properties": {
+          "subject": { "type": ["string", "null"], "maxLength": 300 },
+          "predicate": { "type": "string", "maxLength": 80 },
+          "value": { "type": "string", "maxLength": 500 },
+          "polarity": { "type": ["string", "null"], "enum": ["POSITIVE", "NEGATIVE", "UNKNOWN", null] }
+        }
+      },
+      "maxItems": 16
+    },
     "category": { "type": "string", "maxLength": 80 }
   }
 }

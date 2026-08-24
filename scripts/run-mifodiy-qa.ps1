@@ -34,6 +34,9 @@ foreach ($case in $cases) {
     if ([string]$case.expectedMode -notin @("AUTO","GENERAL_CHAT","CURRENT_MEETING","LIVE_MEETING","MEETING_MEMORY")) { $invalid.Add("${id}:mode") }
     if ($case.expectedIntent -and [string]$case.expectedIntent -notin $allowedIntents) { $invalid.Add("${id}:intent") }
     if ($case.answerType -and [string]$case.answerType -notin $allowedAnswerTypes) { $invalid.Add("${id}:answerType") }
+    foreach ($fact in @($case.expectedFacts)) {
+        if ([string]::IsNullOrWhiteSpace([string]$fact.predicate) -or [string]::IsNullOrWhiteSpace([string]$fact.value)) { $invalid.Add("${id}:expectedFact") }
+    }
     $target = if ($case.executionTarget) { [string]$case.executionTarget } else { "ASSISTANT_API" }
     if ($target -notin @("ASSISTANT_API", "VOICE_LOCAL")) { $invalid.Add("${id}:executionTarget") }
     if ([string]$case.expectedOutcome -eq "LOCAL_STATUS" -and $target -ne "VOICE_LOCAL") { $invalid.Add("${id}:localStatusTarget") }
@@ -120,6 +123,25 @@ foreach ($case in $cases) {
         $answerText = [string]$query.answer
         if ([string]::IsNullOrWhiteSpace($answerText)) { $answerText = [string]$query.voiceAnswer }
         foreach ($forbiddenClaim in @($case.mustNotInfer)) { if ($forbiddenClaim -and $answerText.IndexOf([string]$forbiddenClaim, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $item.groundingPassed = $false } }
+        foreach ($expectedClaim in @($case.expectedClaims)) {
+            if ($expectedClaim -and $answerText.IndexOf([string]$expectedClaim, [StringComparison]::OrdinalIgnoreCase) -lt 0) { $item.groundingPassed = $false }
+        }
+        foreach ($expectedFact in @($case.expectedFacts)) {
+            $predicate = [string]$expectedFact.predicate
+            $value = [string]$expectedFact.value
+            if ($value -and $answerText.IndexOf($value, [StringComparison]::OrdinalIgnoreCase) -lt 0) { $item.groundingPassed = $false }
+            $predicateIntentMap = @{
+                RESPONSIBLE = @("RESPONSIBLE", "FACT_LOOKUP")
+                DEADLINE = @("DEADLINE", "FACT_LOOKUP")
+                DECISION = @("DECISION", "FACT_LOOKUP")
+                TASK = @("TASK", "FACT_LOOKUP")
+                CAUSE = @("CAUSE", "FACT_LOOKUP")
+                STATUS = @("STATUS", "FACT_LOOKUP")
+                PERSON = @("RESPONSIBLE", "FACT_LOOKUP")
+            }
+            $predicateKey = $predicate.Trim().ToUpperInvariant()
+            if ($predicateKey -and $item.actualIntent -and $predicateIntentMap.ContainsKey($predicateKey) -and $item.actualIntent -notin $predicateIntentMap[$predicateKey]) { $item.groundingPassed = $false }
+        }
         $item.casePassed = [bool]($item.modePassed -and $item.intentPassed -and $item.outcomePassed -and $item.answerTypePassed -and $item.evidencePassed -and $item.groundingPassed)
         $item.status = if ($item.casePassed) { "PASSED" } else { "FAILED" }
     } catch { $item.status = "FAILED"; $item.finalStatus = $_.Exception.GetType().Name; $item.totalMs = [math]::Round($started.Elapsed.TotalMilliseconds, 1) }
@@ -128,7 +150,20 @@ foreach ($case in $cases) {
 
 $executed = @($results | Where-Object { $_.status -notin @("VALIDATED","NOT_RUN") })
 $failed = @($results | Where-Object { $_.status -eq "FAILED" }).Count
-$report = [ordered]@{ schema = "mifodiy-qa-v2"; generatedAtUtc = [DateTimeOffset]::UtcNow; caseCount = $cases.Count; executedCaseCount = $executed.Count; passedCaseCount = @($results | Where-Object { $_.casePassed -eq $true }).Count; failedCaseCount = $failed; status = if ($ValidateOnly) { "VALIDATED" } elseif ($executed.Count -gt 0 -and $failed -eq 0) { "PASSED" } else { "FAILED" }; results = $results }
+$targetValues = @($cases | ForEach-Object { if ($_.executionTarget) { [string]$_.executionTarget } else { "ASSISTANT_API" } } | Select-Object -Unique)
+$report = [ordered]@{
+    schema = "mifodiy-qa-v2"
+    generatedAtUtc = [DateTimeOffset]::UtcNow
+    executionTarget = if ($targetValues.Count -eq 1) { $targetValues[0] } else { "MIXED" }
+    mode = if ($ValidateOnly) { "VALIDATION_ONLY" } elseif ($targetValues.Count -eq 1 -and $targetValues[0] -eq "ASSISTANT_API") { "ASSISTANT_API" } else { "MIXED" }
+    caseCount = $cases.Count
+    executedCaseCount = $executed.Count
+    passedCaseCount = @($results | Where-Object { $_.casePassed -eq $true }).Count
+    failedCaseCount = $failed
+    caseResultsComplete = (-not $ValidateOnly) -and $executed.Count -eq $cases.Count -and @($results | Where-Object { -not $_.modePassed -or -not $_.intentPassed -or -not $_.outcomePassed -or -not $_.answerTypePassed -or -not $_.evidencePassed -or -not $_.groundingPassed -or -not $_.casePassed }).Count -eq 0
+    status = if ($ValidateOnly) { "VALIDATED" } elseif ($executed.Count -gt 0 -and $executed.Count -eq $cases.Count -and $failed -eq 0) { "PASSED" } else { "FAILED" }
+    results = $results
+}
 $parent = Split-Path -Parent $OutputPath
 if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
 $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputPath -Encoding UTF8

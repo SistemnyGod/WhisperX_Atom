@@ -116,7 +116,8 @@ $acceptanceBlockers = [System.Collections.Generic.List[string]]::new()
 $releaseIdentityPath = Join-Path $repo "artifacts\desktop\build-identity.json"
 $releaseManifest = if (Test-Path -LiteralPath $releaseIdentityPath -PathType Leaf) { Get-Content -LiteralPath $releaseIdentityPath -Raw | ConvertFrom-Json } else { $null }
 $releaseIdentity = if ($releaseManifest) { [string]$releaseManifest.buildIdentity } else { $null }
-$releaseThreadCount = if ($releaseManifest -and $releaseManifest.voiceRefinerThreads) { [int]$releaseManifest.voiceRefinerThreads } else { 1 }
+$releaseThreadValue = if ($releaseManifest) { Get-JsonProperty $releaseManifest 'voiceRefinerThreads' } else { $null }
+$releaseThreadCount = if ($null -ne $releaseThreadValue) { [int]$releaseThreadValue } else { 1 }
 $voiceManifestPath = Join-Path $repo "apps\voice-host\Models\Voice\whisper-shadow\voice-refiner.manifest.json"
 $voiceManifest = if (Test-Path -LiteralPath $voiceManifestPath -PathType Leaf) { Get-Content -LiteralPath $voiceManifestPath -Raw | ConvertFrom-Json } else { $null }
 if ($requiredAcceptanceScenarios.Count -eq 0) { $acceptanceBlockers.Add('ACCEPTANCE_SCENARIO_REGISTRY_MISSING') }
@@ -142,6 +143,8 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
             } elseif ($scenario -in @("voice-shadow-corpus", "far-field-voice")) {
                 $scenarioReady = ($json.schema -in @("voice-shadow-corpus-v2", "far-field-voice-acceptance-v2")) -and
                     $json.status -eq "PASSED" -and
+                    ($scenario -ne "far-field-voice" -or [string]$json.mode -eq "LIVE") -and
+                    ($scenario -ne "voice-shadow-corpus" -or [string]$json.captureMode -eq "LIVE") -and
                     ($scenario -ne "voice-shadow-corpus" -or $json.assetAttestationValid -eq $true) -and
                     -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
                     -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
@@ -161,6 +164,19 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                             [int]$json.threadCount -eq $releaseThreadCount
                     } else { $scenarioReady = $false }
                 }
+            } elseif ($scenario -eq "mifodiy-intelligence-acceptance") {
+                # The offline 700-case intent preflight is useful evidence but
+                # cannot stand in for authenticated Assistant API execution.
+                # Require a production-mode report with real executions and
+                # the fail-closed QA fields, so a generated fixture can never
+                # make the release gate green.
+                $scenarioReady = $json.schema -eq "mifodiy-qa-v2" -and
+                    $json.status -eq "PASSED" -and
+                    [string]$json.executionTarget -eq "ASSISTANT_API" -and
+                    [string]$json.mode -in @("ASSISTANT_API", "PRODUCTION_E2E") -and
+                    [int]$json.executedCaseCount -ge 700 -and
+                    [int]$json.failedCaseCount -eq 0 -and
+                    $json.caseResultsComplete -eq $true
             } else {
                 $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
             }

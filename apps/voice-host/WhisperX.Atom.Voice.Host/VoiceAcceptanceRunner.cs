@@ -137,7 +137,6 @@ internal static class VoiceAcceptanceRunner
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             mode = "replay-dry-run",
-            audioPath,
             detections,
             recognizedEndpoints = analyzer.RecognizedEndpoints,
             falseActivations = analyzer.FalseActivations,
@@ -318,14 +317,9 @@ internal static class VoiceAcceptanceRunner
                 if (alias is "myfodiy" or "mefodiy" or "atom")
                     AcceptedByAlias[alias] = AcceptedByAlias.TryGetValue(alias, out var count) ? count + 1 : 1;
             }
-            Console.WriteLine(JsonSerializer.Serialize(new
-            {
-                text = result.Text,
-                confidence = result.Confidence,
-                intent = command.Intent.ToString(),
-                accepted,
-                dryRun = true
-            }));
+            // Keep microphone/replay acceptance privacy-safe: only aggregate
+            // categories and counters leave the process.  Raw recognition
+            // text, confidence and PCM never enter logs or evidence.
             return accepted ? 1 : 0;
         }
 
