@@ -145,3 +145,15 @@ def test_voice_refiner_threads_use_safe_default_and_are_forwarded_to_host():
     assert "VOICE_REFINER_THREADS_INVALID" in runtime
     assert '"VOICE_REFINER_THREADS"' in client
     assert "configured_threads" in bridge and "params.n_threads = context->threads" in bridge
+
+
+def test_thread_benchmark_is_bounded_and_fail_closed():
+    benchmark = (ROOT / "scripts/voice-refiner-thread-benchmark.ps1").read_text(encoding="utf-8-sig")
+    registry = (ROOT / "scripts/acceptance-scenarios.json").read_text(encoding="utf-8-sig")
+    gate = (ROOT / "scripts/release-gate.ps1").read_text(encoding="utf-8-sig")
+    assert "@(1, 2, 4)" in benchmark
+    assert "maxRefinementP95Ms = 4500" in benchmark
+    assert "maxLocalCommandP95Ms = 2000" in benchmark
+    assert "chooseMinimumPassingThreadCount" in benchmark
+    assert "fallbackMode = 'SHADOW'" in benchmark
+    assert "voice-refiner-thread-benchmark" in registry and "voice-refiner-thread-benchmark-v1" in gate

@@ -9,6 +9,7 @@
   {"name":"audio-quality","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"audio-quality-ab","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"voice-shadow-corpus","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"voice-refiner-thread-benchmark","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"far-field-voice","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"audio-device-loss","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"system-audio-device-loss","aliases":[],"nodeRole":"Client","requiredFor":["full"]},

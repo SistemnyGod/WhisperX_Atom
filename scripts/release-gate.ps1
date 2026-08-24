@@ -133,6 +133,12 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                 # summaries and playable audio.  Keep the gate fail-closed
                 # until the operator records those content checks.
                 $scenarioReady = ($json.backupVerified -eq $true -and $json.cleanRestore -eq $true -and $json.contentChecksPassed -eq $true)
+            } elseif ($scenario -eq "voice-refiner-thread-benchmark") {
+                $scenarioReady = $json.schema -eq "voice-refiner-thread-benchmark-v1" -and
+                    $json.status -eq "PASSED" -and
+                    [string]$json.buildIdentity -eq $releaseIdentity -and
+                    $null -ne $json.selectedThreadCount -and
+                    $json.promotionAllowed -eq $false
             } elseif ($scenario -in @("voice-shadow-corpus", "far-field-voice")) {
                 $scenarioReady = ($json.schema -in @("voice-shadow-corpus-v2", "far-field-voice-acceptance-v2")) -and
                     $json.status -eq "PASSED" -and
