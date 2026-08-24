@@ -5,7 +5,8 @@ param(
     [string]$BuildIdentity,
     [string]$ManifestPath,
     [string]$VoiceHostPath,
-    [int]$ThreadCount = 1
+    [int]$ThreadCount = 1,
+    [ValidateSet('LIVE','DIAGNOSTIC')][string]$CaptureMode = 'DIAGNOSTIC'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,12 +114,13 @@ $refinedAccuracy = if ($assistantCases.Count) { [double](@($assistantCases | Whe
 $accuracyGain = if ($null -ne $voskAccuracy -and $null -ne $refinedAccuracy) { [math]::Round($refinedAccuracy - $voskAccuracy, 4) } else { $null }
 $regressionCases = @($cases | Where-Object { [bool]$_.numberRegression -or [bool]$_.dateRegression -or [bool]$_.negationRegression -or [bool]$_.intentRegression }).Count
 
-$blocked = -not $assetAttestationValid -or $cases.Count -lt $minimumCases -or $commandCases.Count -eq 0 -or $distanceFailures.Count -gt 0 -or $wakeCases.Count -eq 0 -or $wakeFailures.Count -gt 0 -or $assistantCases.Count -eq 0 -or $null -eq $accuracyGain -or $manualUnconfirmed -gt 0
+$blocked = $CaptureMode -ne 'LIVE' -or -not $assetAttestationValid -or $cases.Count -lt $minimumCases -or $commandCases.Count -eq 0 -or $distanceFailures.Count -gt 0 -or $wakeCases.Count -eq 0 -or $wakeFailures.Count -gt 0 -or $assistantCases.Count -eq 0 -or $null -eq $accuracyGain -or $manualUnconfirmed -gt 0
 $failed = $falseMutations -ne 0 -or $falseStops -ne 0 -or $queueDrops -ne 0 -or ($null -ne $p95 -and $p95 -gt 2000) -or $regressionCases -ne 0 -or ($null -ne $accuracyGain -and $accuracyGain -lt 0.05) -or ($cases.Count -gt 0 -and ($refinerTimeouts / $cases.Count) -ge 0.01)
 $status = if ($failed) { 'FAILED' } elseif ($blocked) { 'BLOCKED' } else { 'PASSED' }
 
 $evidence = [ordered]@{
     schema = $schema
+    captureMode = $CaptureMode
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
     buildIdentity = $BuildIdentity
     voiceHostSha256 = $voiceHostSha256
@@ -142,6 +144,7 @@ $evidence = [ordered]@{
     refinedAssistantAccuracy = $refinedAccuracy
     refinedAccuracyGain = $accuracyGain
     criticalRegressionCases = $regressionCases
+    safety = [ordered]@{ audioIncluded = $false; transcriptIncluded = $false; textIncluded = $false; questionTextIncluded = $false; shadowTextIncluded = $false }
     status = $status
 }
 $parent = Split-Path -Parent $OutputPath

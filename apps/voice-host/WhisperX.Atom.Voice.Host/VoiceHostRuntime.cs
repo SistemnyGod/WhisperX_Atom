@@ -1680,7 +1680,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _lastRecognitionConfidence = command.Confidence;
             if (command.Intent == VoiceIntent.AssistantQuery && _parser.IsRecorderImperative(command.Text))
             {
-                _lastErrorCode = "VOICE_COMMAND_REPEAT_REQUIRED";
+                _lastErrorCode = "AMBIGUOUS_LOCAL_COMMAND";
                 _lastRecognitionRoute = "LOCAL_COMMAND_RECOVERY";
                 _lastNormalizationReason = "COMMAND_SHAPED_ASR_REJECTED";
                 await TryRecordVoiceEventAsync(
@@ -2038,7 +2038,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_HOST_RESTART_LIMIT" => "Voice Host часто завершается; автоматические перезапуски временно остановлены.",
         "VOICE_HOST_SHUTDOWN_TIMEOUT" => "Voice Host не завершился штатно.",
         "VOICE_COMMAND_REJECTED" => "Команда отклонена текущим состоянием записи.",
-        "VOICE_COMMAND_REPEAT_REQUIRED" => "Не уверен, что расслышал команду. Повторите: «Мифодий, останови запись». Вашу запись я не изменил.",
+        "AMBIGUOUS_LOCAL_COMMAND" or "VOICE_COMMAND_REPEAT_REQUIRED" => "Не удалось точно распознать команду записи. Повторите команду. Запись не изменена.",
         "RECORDER_HOST_NOT_INITIALIZED" => "Recorder ещё запускается, повторите команду через несколько секунд.",
         "VOICE_HOST_NOT_INITIALIZED" => "Мифодий ещё запускается, повторите команду через несколько секунд.",
         "VOICE_ASSISTANT_DESKTOP_REQUIRED" => "Откройте Desktop, чтобы задавать вопросы по совещаниям.",

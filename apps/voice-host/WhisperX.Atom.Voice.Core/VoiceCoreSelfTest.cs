@@ -63,6 +63,19 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, сделай саммари").Intent == VoiceIntent.GenerateSummary, "summary command");
         Assert(parser.Parse("Мифодий, статус саммари").Intent == VoiceIntent.GetSummaryStatus, "summary status command");
         Assert(parser.Parse("Мифодий, как сделать хорошее саммари?").Intent == VoiceIntent.AssistantQuery, "summary question remains conversational");
+        Assert(parser.Parse("Мифодий, пожалуйста, начни запись").Intent == VoiceIntent.StartRecording, "natural start with filler");
+        Assert(parser.Parse("Мифодий, начинай запись").Intent == VoiceIntent.StartRecording, "natural start variant");
+        Assert(parser.Parse("Мифодий, давай начнём запись").Intent == VoiceIntent.StartRecording, "natural start with proposal");
+        Assert(parser.Parse("Мифодий, поставь запись на паузу").Intent == VoiceIntent.PauseRecording, "natural pause variant");
+        Assert(parser.Parse("Мифодий, давай паузу").Intent == VoiceIntent.PauseRecording, "natural pause short variant");
+        Assert(parser.Parse("Мифодий, продолжай запись").Intent == VoiceIntent.ResumeRecording, "natural resume variant");
+        Assert(parser.Parse("Мифодий, заканчивай запись").Intent == VoiceIntent.StopRecording, "natural stop variant");
+        Assert(parser.Parse("Мифодий, не начинай запись").Intent == VoiceIntent.AssistantQuery, "negated start remains conversational");
+        Assert(parser.Parse("Мифодий, не останавливай запись").Intent == VoiceIntent.AssistantQuery, "negated stop remains conversational");
+        Assert(parser.Parse("Мифодий, останови запись?").Intent == VoiceIntent.AssistantQuery, "question stop remains conversational");
+        Assert(parser.Parse("Мифодий, остановить запись надо позже").Intent == VoiceIntent.AssistantQuery, "future stop remains conversational");
+        Assert(parser.IsRecorderImperative("Мифодий, не останавливай запись"), "negated command-shaped recovery");
+        Assert(parser.IsRecorderImperative("Мифодий, остановить запись надо позже"), "future command-shaped recovery");
 
         var commands = new (string Text, VoiceIntent Intent)[]
         {

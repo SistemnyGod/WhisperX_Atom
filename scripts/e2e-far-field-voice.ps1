@@ -8,7 +8,8 @@ param(
     [string]$RefinerManifestPath,
     [ValidateRange(1,4)][int]$ThreadCount = 1,
     [ValidateRange(1, 200)][int]$TargetPerCase = 20,
-    [ValidateRange(15, 900)][int]$TimeoutSeconds = 180
+    [ValidateRange(15, 900)][int]$TimeoutSeconds = 180,
+    [switch]$AllowDiagnosticFixtures
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +86,20 @@ if ($Mode -eq "Contract") {
     exit 0
 }
 
+if (-not $AllowDiagnosticFixtures) {
+    Write-Artifact ([ordered]@{
+        schema = "far-field-voice-acceptance-v2"
+        status = "BLOCKED_BY_HARDWARE"
+        mode = "LIVE_REQUIRED"
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+        targetPerCase = $TargetPerCase
+        matrix = @($cases | ForEach-Object { [ordered]@{ distance = $_.distance; condition = $_.condition; minimumRecall = $_.minimumRecall } })
+        safety = [ordered]@{ recorderInvocations = 0; brokerInvocations = 0; audioIncluded = $false; transcriptIncluded = $false; fixturePathsIncluded = $false }
+        reason = "REAL_MICROPHONE_MATRIX_REQUIRED"
+    })
+    exit 4
+}
+
 $identity = Get-InstalledIdentity $VoiceHostPath (Join-Path ${env:ProgramFiles} "WhisperX Atom\VoiceHost")
 $installRoot = Split-Path (Split-Path $VoiceHostPath -Parent) -Parent
 if ([string]::IsNullOrWhiteSpace($ExpectedBuildIdentity)) {
@@ -154,8 +169,8 @@ foreach ($case in $cases) {
 $passed = $errors.Count -eq 0 -and $results.Count -eq $cases.Count -and (@($results | Where-Object { -not $_.passed }).Count -eq 0)
 Write-Artifact ([ordered]@{
     schema = "far-field-voice-acceptance-v2"
-    status = if ($passed) { "PASSED" } else { "BLOCKED" }
-    mode = "INSTALLED"
+    status = "DIAGNOSTIC_ONLY"
+    mode = "FIXTURE_DIAGNOSTIC"
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
     build = $identity
     buildIdentity = $ExpectedBuildIdentity
@@ -167,5 +182,4 @@ Write-Artifact ([ordered]@{
     errors = @($errors)
     safety = [ordered]@{ recorderInvocations = 0; brokerInvocations = 0; audioIncluded = $false; transcriptIncluded = $false; fixturePathsIncluded = $false }
 })
-if ($passed) { exit 0 }
 exit 4

@@ -83,6 +83,8 @@ if ($DevelopmentNoVoiceRefinerAssets) {
 } else {
     & $assetVerifier -ExpectedBuildIdentity $buildIdentity
     if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+    & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_RELEASE_EVIDENCE_GATE_FAILED" }
 }
 $runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
 if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }

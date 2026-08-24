@@ -67,10 +67,10 @@ public sealed class VoiceIntentParser
     {
         var normalized = VoiceCommandText.Normalize(text);
         var withoutWake = RemoveWakeWord(normalized);
-        var commandCandidate = VoiceCommandText.NormalizeCommandCandidate(
+        var commandCandidate = VoiceCommandNormalizer.NormalizeCandidate(VoiceCommandText.NormalizeCommandCandidate(
             withoutWake,
             WakeWords,
-            RecorderCommandCandidates.Concat(SummaryCommandCandidates));
+            RecorderCommandCandidates.Concat(SummaryCommandCandidates)));
         // Punctuation is intentionally removed for matching, but a question
         // marker remains a semantic guard.  «Останови запись?» is a question,
         // not permission to mutate Recorder.  This check happens before the
@@ -170,9 +170,11 @@ public sealed class VoiceIntentParser
     /// </summary>
     public bool IsRecorderImperative(string text)
     {
-        var normalized = VoiceCommandText.NormalizeCommandCandidate(RemoveWakeWord(VoiceCommandText.Normalize(text)), WakeWords, Array.Empty<string>());
+        var withoutWake = RemoveWakeWord(VoiceCommandText.Normalize(text));
+        var normalized = VoiceCommandNormalizer.NormalizeCandidate(VoiceCommandText.NormalizeCommandCandidate(withoutWake, WakeWords, Array.Empty<string>()));
         return RecorderCommandCandidates.Any(command =>
-            normalized == command || normalized.StartsWith(command + " ", StringComparison.Ordinal));
+            normalized == command || normalized.StartsWith(command + " ", StringComparison.Ordinal))
+            || VoiceCommandNormalizer.LooksCommandShaped(withoutWake);
     }
 
     /// <summary>
@@ -189,10 +191,10 @@ public sealed class VoiceIntentParser
         // semantic question guard here to prevent «останови запись?» from
         // being promoted back into STOP by the constrained recognizer.
         if (ContainsQuestionMarker(text) || IsQuestion(withoutWake)) return false;
-        var normalized = VoiceCommandText.NormalizeCommandCandidate(
+        var normalized = VoiceCommandNormalizer.NormalizeCandidate(VoiceCommandText.NormalizeCommandCandidate(
             withoutWake,
             WakeWords,
-            RecorderCommandCandidates);
+            RecorderCommandCandidates));
         return RecorderCommandCandidates.Contains(normalized, StringComparer.Ordinal);
     }
 

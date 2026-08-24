@@ -44,6 +44,7 @@ public static class UiStatusMapper
             ["ASSISTANT_RETRY_EXHAUSTED"] = new("ASSISTANT_RETRY_EXHAUSTED", "Сервер исчерпал попытки обработки", UiStatusKind.Error),
             ["LOCAL_COMMAND_REQUIRED"] = new("LOCAL_COMMAND_REQUIRED", "Нужна явная команда записи", UiStatusKind.Warning),
             ["VOICE_COMMAND_REPEAT_REQUIRED"] = new("VOICE_COMMAND_REPEAT_REQUIRED", "Повторите голосовую команду", UiStatusKind.Warning),
+            ["AMBIGUOUS_LOCAL_COMMAND"] = new("AMBIGUOUS_LOCAL_COMMAND", "Повторите голосовую команду", UiStatusKind.Warning),
             ["VOICE_ASSISTANT_SERVER_UNREACHABLE"] = new("VOICE_ASSISTANT_SERVER_UNREACHABLE", "Сервер недоступен по сети", UiStatusKind.Warning),
             ["VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT"] = new("VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT", "Сервер принимает запрос дольше обычного", UiStatusKind.Warning),
             ["VOICE_ASSISTANT_SERVER_ERROR"] = new("VOICE_ASSISTANT_SERVER_ERROR", "Сервер не смог обработать вопрос", UiStatusKind.Error),

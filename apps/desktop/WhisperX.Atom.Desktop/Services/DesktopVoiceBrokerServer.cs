@@ -722,7 +722,7 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         "ASSISTANT_GPU_BUSY_TIMEOUT" or "ASSISTANT_QUEUE_TIMEOUT" => "Мифодий не дождался освобождения GPU. Повторите вопрос позже.",
         "ASSISTANT_LLM_UNAVAILABLE" => "Локальная модель Мифодия сейчас недоступна.",
         "LOCAL_COMMAND_REQUIRED" => "Это команда записи. Скажите «Мифодий, начни запись» или «Мифодий, останови запись».",
-        "VOICE_COMMAND_REPEAT_REQUIRED" => "Не уверен, что команда распознана. Повторите её. Запись не изменена.",
+        "AMBIGUOUS_LOCAL_COMMAND" or "VOICE_COMMAND_REPEAT_REQUIRED" => "Не удалось точно распознать команду записи. Повторите её. Запись не изменена.",
         "ASSISTANT_NO_GROUNDED_ANSWER" => "Не удалось получить подтверждённый ответ.",
         "LLM_UNAVAILABLE" => "Помощник временно недоступен.",
         "FAILED" => "Не удалось получить подтверждённый ответ.",
