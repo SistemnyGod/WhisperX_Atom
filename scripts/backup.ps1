@@ -40,6 +40,23 @@ function Get-SchemaVersion {
     return [IO.Path]::GetFileNameWithoutExtension($migration.Name)
 }
 function Invoke-PgDump([string]$Destination, [string]$DbUser, [string]$DbName) {
+    if ($PostgresContainer) {
+        # Stage the custom-format dump inside the container and copy it out.
+        # Streaming docker exec through a child ProcessStartInfo is fragile on
+        # Windows (the child can lose access to the Docker named pipe), while
+        # the explicit cp/exec path is also the one used by restore.ps1.
+        $inside = "/tmp/whisperx-backup-" + [Guid]::NewGuid().ToString("N") + ".dump"
+        try {
+            & docker exec $PostgresContainer pg_dump -Fc -U $DbUser -d $DbName -f $inside
+            if ($LASTEXITCODE -ne 0) { throw "PG_DUMP_FAILED" }
+            & docker cp "${PostgresContainer}:$inside" $Destination
+            if ($LASTEXITCODE -ne 0) { throw "PG_DUMP_COPY_FAILED" }
+            return
+        }
+        finally {
+            & docker exec $PostgresContainer rm -f $inside 2>$null | Out-Null
+        }
+    }
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = "docker.exe"
     $arguments = if ($PostgresContainer) { @("exec", "-i", $PostgresContainer, "pg_dump", "-Fc", "-U", $DbUser, "-d", $DbName) } else { @("compose", "-f", $ComposeFile, "exec", "-T", $PostgresService, "pg_dump", "-Fc", "-U", $DbUser, "-d", $DbName) }

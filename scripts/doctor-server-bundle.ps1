@@ -98,12 +98,28 @@ if ($Mode -eq 'Release') {
                 $modelChecks.Add([ordered]@{ name = $name; status = 'FAILED'; detail = 'MODEL_PATH_OR_SHA256_MISSING' }); return
             }
             $path = Resolve-ModelPath $configured $defaultRelative
-            if ($null -eq $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            if ($null -eq $path -or -not (Test-Path -LiteralPath $path)) {
                 $modelChecks.Add([ordered]@{ name = $name; status = 'FAILED'; detail = 'MODEL_FILE_MISSING' }); return
             }
-            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            # WhisperX/faster-whisper and pyannote consume a snapshot
+            # directory, not a single weight file.  Keep the existing SHA
+            # contract but attest the canonical immutable file inside that
+            # directory (model.bin for ASR, config.yaml for pyannote).  A
+            # direct file path remains supported for legacy installations.
+            $hashPath = $path
+            if ((Get-Item -LiteralPath $path).PSIsContainer) {
+                $attestationFile = if ($name -eq 'whisperx') { 'model.bin' } elseif ($name -eq 'diarization') { 'config.yaml' } else { $null }
+                if ([string]::IsNullOrWhiteSpace($attestationFile)) {
+                    $modelChecks.Add([ordered]@{ name = $name; status = 'FAILED'; detail = 'MODEL_ATTESTATION_FILE_UNDEFINED' }); return
+                }
+                $hashPath = Join-Path $path $attestationFile
+                if (-not (Test-Path -LiteralPath $hashPath -PathType Leaf)) {
+                    $modelChecks.Add([ordered]@{ name = $name; status = 'FAILED'; detail = 'MODEL_ATTESTATION_FILE_MISSING' }); return
+                }
+            }
+            $actual = (Get-FileHash -LiteralPath $hashPath -Algorithm SHA256).Hash.ToLowerInvariant()
             $match = $actual -eq $expected.Trim().ToLowerInvariant()
-            $modelChecks.Add([ordered]@{ name = $name; status = $(if ($match) { 'READY' } else { 'FAILED' }); detail = $(if ($match) { 'SHA256_MATCH' } else { 'SHA256_MISMATCH' }) })
+            $modelChecks.Add([ordered]@{ name = $name; status = $(if ($match) { 'READY' } else { 'FAILED' }); detail = $(if ($match) { 'SHA256_MATCH' } else { 'SHA256_MISMATCH' }); attestationFile = [IO.Path]::GetFileName($hashPath) })
         }
         Add-VerifiedModelCheck 'whisperx' 'WHISPERX_MODEL_PATH' 'WHISPERX_MODEL_SHA256' 'whisperx'
         Add-VerifiedModelCheck 'diarization' 'DIARIZATION_MODEL_PATH' 'DIARIZATION_MODEL_SHA256' 'diarization'

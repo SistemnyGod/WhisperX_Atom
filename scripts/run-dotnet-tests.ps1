@@ -22,7 +22,13 @@ if (@(Get-ChildItem -LiteralPath $nugetCache -Directory -ErrorAction SilentlyCon
 
 if ($Project.Count -eq 0) {
     $Project = @(Get-ChildItem -Path $repo -Recurse -Filter "*Tests.csproj" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch "[\\/]obj[\\/]|[\\/]bin[\\/]" } |
+        Where-Object {
+            # Release worktrees are detached snapshots used for maintenance
+            # and must never be included in the active checkout's test gate.
+            # Otherwise the runner silently executes an older tree as well and
+            # reports duplicate suites as if they were independent coverage.
+            $_.FullName -notmatch "[\\/]obj[\\/]|[\\/]bin[\\/]|[\\/]\.release-worktrees[\\/]"
+        } |
         Sort-Object FullName |
         ForEach-Object { $_.FullName })
 }
