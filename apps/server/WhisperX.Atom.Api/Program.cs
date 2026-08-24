@@ -2733,6 +2733,7 @@ public sealed class Database(IConfiguration configuration)
                 if (stored is string knownChecksum &&
                     !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase) &&
                     !IsLineEndingCompatibleChecksum(sql, knownChecksum) &&
+                    !IsKnownMixedLineEndingCompatibleChecksum(version, knownChecksum, checksum) &&
                     !IsKnownRollingCompatibleChecksum(version, knownChecksum, checksum))
                     throw new InvalidOperationException($"MIGRATION_CHECKSUM_MISMATCH:{version}");
                 if (stored is null or DBNull)
@@ -2777,6 +2778,22 @@ public sealed class Database(IConfiguration configuration)
 
     private static string MigrationChecksum(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
+
+    private static bool IsKnownMixedLineEndingCompatibleChecksum(string version, string stored, string current)
+    {
+        // Three early migrations were first applied from Windows working-tree
+        // files containing a mixture of CRLF and LF. A clean Git checkout uses
+        // LF throughout, so neither the all-LF nor all-CRLF checksum matches the
+        // recorded value. Keep the compatibility list limited to the verified
+        // old/new checksum pairs; arbitrary SQL drift must remain fail-closed.
+        return (version, stored.ToLowerInvariant(), current.ToLowerInvariant()) switch
+        {
+            ("001_initial", "d7378343a84da3e32c1abeb4cb38da5973afae32476832b11465067b6a70313d", "5191cf5807112d00e703590d6a986d603c25bc8e3b539136afc444940b22a603") => true,
+            ("006_recording_ownership", "16829310a21f7ecadfee1ec5c5548bc11f4102ef4a6d8090f8eb3748725c64d7", "ec0aefa00f10dab961ef246c14861668121c1f68c6efeeb22e1ad3685b43db77") => true,
+            ("008_backend_hardening", "bfe7b3079f4948010fdd6b9690feb27cf785efbccc5f4ff508a2f9d43d4b503d", "ba1a9f95e70bf746c9521a2420adba242aa66dfc6754c579d8561638809ba52c") => true,
+            _ => false
+        };
+    }
 
     private static bool IsKnownRollingCompatibleChecksum(string version, string stored, string current)
     {
