@@ -65,7 +65,8 @@ def build_deterministic_summary(
         transcript_version=0,
         minimum_confidence=0.70,
     )
-    derived_facts = list(canonical_facts) if facts is None else list(facts)
+    provided_facts = list(facts or ())
+    derived_facts = canonical_facts if not provided_facts else provided_facts
     valid_facts: list[DerivedFact] = []
     for fact in derived_facts:
         evidence = tuple(str(item) for item in fact.evidence_segment_ids if str(item) in segment_by_id)
