@@ -11,6 +11,9 @@
     <AssemblyVersion>1.0.1.0</AssemblyVersion>
     <FileVersion>1.0.1.0</FileVersion>
     <WhisperXBuildIdentity Condition="'$(WhisperXBuildIdentity)' == ''">1.0.1+voice-refiner</WhisperXBuildIdentity>
+    <!-- The release identity is supplied explicitly by publish-desktop.ps1.
+         Do not append SourceRevisionId a second time to ProductVersion. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <InformationalVersion>$(WhisperXBuildIdentity)</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
