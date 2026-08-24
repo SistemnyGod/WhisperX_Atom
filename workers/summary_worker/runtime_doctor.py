@@ -89,6 +89,89 @@ def _probe(base_url: str, model: str) -> dict[str, Any]:
     }
 
 
+def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
+    """Run a secret-free production-shaped Assistant/Summary contract probe.
+
+    Response text is consumed only in memory and is intentionally omitted from
+    the returned doctor artifact.
+    """
+    if kind == "ASSISTANT_GROUNDING":
+        prompt = (
+            "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. "
+            "Ответь кто отвечает за ремонт. Единственный evidence: SEG-1: "
+            "Ответственным за ремонт назначен Иванов. Нельзя добавлять другие имена, даты или числа."
+        )
+        required = {"answer", "voice_answer", "evidence_segment_ids", "claims"}
+        expected_ids = {"SEG-1"}
+    else:
+        prompt = (
+            "Верни только JSON профиля MEETING_PROTOCOL_RU с questions_and_decisions и tasks. "
+            "Используй только SEG-1..SEG-4. SEG-1: Обсудили ремонт второй печи. "
+            "SEG-2: Решили перенести ремонт на 30 августа. "
+            "SEG-3: Ответственным назначили Иванова. "
+            "SEG-4: Иванову поручили подготовить ведомость до 28 августа."
+        )
+        required = {"questions_and_decisions", "tasks"}
+        expected_ids = {"SEG-1", "SEG-2", "SEG-3", "SEG-4"}
+    schema = {
+        "type": "object",
+        "required": sorted(required),
+        "additionalProperties": True,
+    }
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 400,
+        "temperature": 0,
+        "response_format": {"type": "json_object", "schema": schema},
+        "stream": True,
+    }).encode("utf-8")
+    request = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    started = time.perf_counter()
+    first_token_ms: float | None = None
+    chunks = 0
+    content: list[str] = []
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            for raw in response:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    continue
+                try:
+                    value = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = value.get("choices") if isinstance(value, dict) else None
+                if isinstance(choices, list) and choices:
+                    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                    token = delta.get("content") if isinstance(delta, dict) else None
+                    if token:
+                        chunks += 1
+                        content.append(str(token))
+                        if first_token_ms is None:
+                            first_token_ms = (time.perf_counter() - started) * 1000
+        decoded = json.loads("".join(content)) if content else None
+        valid = isinstance(decoded, dict) and required.issubset(decoded)
+        ids: set[str] = set()
+        if isinstance(decoded, dict):
+            for key in ("evidence_segment_ids", "evidenceIds"):
+                ids.update(str(item) for item in decoded.get(key, []) if item)
+            for collection in ("claims", "tasks", "questions_and_decisions"):
+                for item in decoded.get(collection, []) if isinstance(decoded.get(collection), list) else []:
+                    if isinstance(item, dict):
+                        ids.update(str(value) for value in item.get("evidence_segment_ids", item.get("evidenceIds", [])) if value)
+        if kind == "ASSISTANT_GROUNDING":
+            valid = valid and ids and ids.issubset(expected_ids) and ids == expected_ids
+        else:
+            valid = valid and ids and ids.issubset(expected_ids)
+        return {"status": "READY" if valid and chunks else "FAILED", "firstTokenMs": round(first_token_ms, 3) if first_token_ms is not None else None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks}
+    except Exception as exc:
+        return {"status": "FAILED", "firstTokenMs": None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks, "error": type(exc).__name__}
+
+
 def _resident_base_url() -> str | None:
     port = int(os.getenv("LLM_LOCAL_PORT", "18080"))
     base_url = f"http://127.0.0.1:{port}/v1"
@@ -127,8 +210,16 @@ def main() -> int:
             base_url = server.base_url
             started_here = True
         result["modelLoadMs"] = round((time.perf_counter() - started) * 1000, 3)
-        result["probe"] = _probe(base_url, os.getenv("LLM_MODEL_ALIAS", "qwen3-8b"))
-        result["status"] = "READY" if result["probe"].get("status") == "READY" else "GENERATION_FAILED"
+        model_alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
+        result["probe"] = _probe(base_url, model_alias)
+        result["probes"] = {
+            "LLM_RUNTIME": {"status": result["probe"].get("status"), "timings": {"firstTokenMs": result["probe"].get("firstTokenMs"), "totalMs": result["probe"].get("totalMs")}},
+            "ASSISTANT_JSON": _contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING"),
+            "ASSISTANT_GROUNDING": _contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING"),
+            "SUMMARY_JSON": _contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU"),
+            "MEETING_PROTOCOL_RU": _contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU"),
+        }
+        result["status"] = "READY" if all(item.get("status") == "READY" for item in result["probes"].values()) else "GENERATION_FAILED"
     except FileNotFoundError:
         result.update({"status": "MODEL_LOAD_FAILED", "probe": None})
     except Exception as exc:  # doctor output is intentionally stable and secret-free

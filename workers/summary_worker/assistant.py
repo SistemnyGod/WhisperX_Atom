@@ -122,6 +122,10 @@ ASSISTANT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "text": {"type": "string", "maxLength": 1000},
                     "evidenceIds": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
+                    "subject": {"type": "string", "maxLength": 300},
+                    "predicate": {"type": "string", "maxLength": 80},
+                    "value": {"type": "string", "maxLength": 500},
+                    "polarity": {"type": "string", "enum": ["POSITIVE", "NEGATIVE", "UNKNOWN"]},
                 },
             },
         },
@@ -1509,9 +1513,10 @@ class AssistantWorker:
                     "voice_answer сделай коротким: не более трёх предложений для озвучивания."
                 )
                 user_content = f"Вопрос: {query}\nПлан запроса (не evidence): {answer_plan}\n\nКонтекст стенограмм:\n{context}"
+            prompt_history = history if assistant_mode == "GENERAL_CHAT" else [item for item in history if item.get("role") == "user"]
             messages = [
                 {"role": "system", "content": system_prompt},
-                *history,
+                *prompt_history,
                 {"role": "user", "content": user_content},
             ]
             synthesis_completed = False

@@ -33,6 +33,15 @@ _NON_NAME_CAPITALIZED = {
     "Нужна", "Можно", "Следует", "Поэтому", "Также", "Тогда", "Это", "Этот", "Эта",
 }
 
+_PREDICATE_MARKERS = {
+    "responsible": ("ответствен", "отвечает", "назначен", "исполнитель"),
+    "deadline": ("срок", "до ", "дата", "заверш"),
+    "decision": ("решил", "решен", "договорил", "утверд", "согласовал"),
+    "task": ("поруч", "задач", "подготов", "провер", "сдела"),
+    "cause": ("потому что", "из-за", "из за", "по причине", "поэтому"),
+    "status": ("статус", "продвига", "останов", "готов", "заверш"),
+}
+
 
 def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tuple[str, int, int, str, str, str, int]], assistant_mode: str) -> bool:
     claims = result.get("claims")
@@ -46,6 +55,12 @@ def claims_are_structurally_grounded(result: dict[str, Any], valid: dict[str, tu
         ids = claim.get("evidenceIds")
         if not isinstance(ids, list) or not ids or any(str(item).removeprefix("SEG-") not in valid for item in ids):
             return False
+        structured_fields = [claim.get(name) for name in ("subject", "predicate", "value", "polarity")]
+        if any(field is not None for field in structured_fields):
+            if any(not isinstance(field, str) or not field.strip() for field in structured_fields):
+                return False
+            if str(claim.get("polarity")).upper() not in {"POSITIVE", "NEGATIVE", "UNKNOWN"}:
+                return False
     return True
 
 
@@ -114,6 +129,24 @@ def claims_are_semantically_grounded(result: dict[str, Any], valid: dict[str, tu
             return False
         if not protected_number_tokens(claim_text).issubset(protected_number_tokens(evidence_text)):
             return False
+        if any(claim.get(name) is not None for name in ("subject", "predicate", "value", "polarity")):
+            subject = str(claim.get("subject", "")).lower()
+            predicate = str(claim.get("predicate", "")).lower()
+            value = str(claim.get("value", "")).lower()
+            polarity = str(claim.get("polarity", "UNKNOWN")).upper()
+            if subject and not (grounding_tokens(subject) & grounding_tokens(evidence_text)):
+                return False
+            markers = _PREDICATE_MARKERS.get(predicate)
+            if markers and not any(marker in evidence_text for marker in markers):
+                return False
+            if value and not all(token in evidence_text for token in grounding_tokens(value)):
+                return False
+            if polarity == "NEGATIVE" and "NEGATION" not in polarity_markers(evidence_text):
+                return False
+            if polarity == "POSITIVE" and "NEGATION" in polarity_markers(evidence_text):
+                return False
+            if predicate == "cause" and not any(marker in evidence_text for marker in _PREDICATE_MARKERS["cause"]):
+                return False
 
     cited = " ".join(
         valid[str(item).removeprefix("SEG-")][3]

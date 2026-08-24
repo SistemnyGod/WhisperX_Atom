@@ -10,10 +10,12 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .contracts import SUMMARY_SCHEMA_VERSION
+from .fact_extraction import DerivedFact, extract_transcript_facts
 from .summarizer import TranscriptSegment, transcript_source_hash
 
 
-DETERMINISTIC_SUMMARY_MODEL = "deterministic-v1"
+DETERMINISTIC_SUMMARY_MODEL = "deterministic-v2"
+LEGACY_DETERMINISTIC_SUMMARY_MODEL = "deterministic-v1"
 
 
 def _clean(text: str, limit: int = 280) -> str:
@@ -37,6 +39,7 @@ def _item(text: str, segment_id: str) -> dict[str, Any]:
 def build_deterministic_summary(
     segments: Iterable[TranscriptSegment],
     profile: str | None = None,
+    facts: Iterable[DerivedFact] | None = None,
 ) -> dict[str, Any]:
     """Build a conservative, schema-compatible summary from canonical text.
 
@@ -48,6 +51,26 @@ def build_deterministic_summary(
     material = [segment for segment in segments if str(segment.text).strip()]
     if not material:
         raise ValueError("transcript_has_no_segments")
+
+    segment_by_id = {str(segment.id): segment for segment in material}
+    # Facts are a derived index only. Rehydrate every evidence id against the
+    # canonical segment set before it can enter the fallback projection.
+    derived_facts = list(facts or ())
+    if not derived_facts:
+        derived_facts = extract_transcript_facts(
+            [{"id": segment.id, "startMs": segment.start_ms, "endMs": segment.end_ms, "text": segment.text, "speakerId": segment.speaker}
+             for segment in material],
+            meeting_id="",
+            transcript_id="",
+            transcript_version=0,
+            minimum_confidence=0.70,
+        )
+    valid_facts: list[DerivedFact] = []
+    for fact in derived_facts:
+        evidence = tuple(str(item) for item in fact.evidence_segment_ids if str(item) in segment_by_id)
+        if not evidence or fact.state != "ACTIVE":
+            continue
+        valid_facts.append(fact)
 
     decisions: list[dict[str, Any]] = []
     action_items: list[dict[str, Any]] = []
@@ -86,6 +109,31 @@ def build_deterministic_summary(
             open_questions.append(_item(segment.text, segment.id))
         else:
             notable_facts.append(_item(segment.text, segment.id))
+
+    # Add only explicit fact types. Values, names and dates remain exactly as
+    # present in the rehydrated canonical evidence; missing fields stay null.
+    fact_decisions = [fact for fact in valid_facts if fact.fact_type == "DECISION"]
+    fact_tasks = [fact for fact in valid_facts if fact.fact_type in {"TASK", "STATUS"}]
+    fact_responsibles = {fact.subject or "": fact.value for fact in valid_facts if fact.fact_type == "RESPONSIBLE"}
+    fact_deadlines = {fact.subject or "": fact.value for fact in valid_facts if fact.fact_type == "DEADLINE"}
+    for fact in fact_decisions:
+        decisions.append({
+            "subject": fact.subject or "",
+            "decision": _clean(segment_by_id[fact.evidence_segment_ids[0]].text, 1200),
+            "evidence_segment_ids": list(fact.evidence_segment_ids),
+            "validation": {"evidence": True, "needs_review": True, "review_reasons": ["LLM_ENHANCEMENT_PENDING"]},
+        })
+    for fact in fact_tasks:
+        evidence_id = str(fact.evidence_segment_ids[0])
+        subject = fact.subject or ""
+        action_items.append({
+            "task": _clean(segment_by_id[evidence_id].text, 1200),
+            "responsible": fact_responsibles.get(subject),
+            "deadline_text": fact_deadlines.get(subject),
+            "deadline_iso": None,
+            "evidence_segment_ids": list(fact.evidence_segment_ids),
+            "validation": {"evidence": True, "responsible": subject in fact_responsibles, "deadline": subject in fact_deadlines, "needs_review": True, "review_reasons": ["LLM_ENHANCEMENT_PENDING"]},
+        })
 
     # Keep the visible draft short and deterministic. Every sentence is copied
     # from a canonical segment; no connective claim is generated.
