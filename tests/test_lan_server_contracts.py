@@ -351,6 +351,8 @@ def test_server_runtime_supervisor_respects_explicit_maintenance_mode():
     assert "enter-server-maintenance.ps1" in stop_bundle
     assert "MANUAL_SERVER_STOP" in stop_bundle
     assert "SERVER_RUNTIME_RESTART_SUPPRESSED=true" in stop_bundle
+    assert '$env:WHISPERX_RELEASE_TAG = $releaseTag' in stop_bundle
+    assert "'--profile','memory'" in stop_bundle
     assert "exit-server-maintenance.ps1" in start_bundle
     assert "SERVER_MAINTENANCE_DISABLE_FAILED" in start_bundle
 
