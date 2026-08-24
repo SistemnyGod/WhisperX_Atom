@@ -18,6 +18,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "SERVER_
 if (-not (Test-Path -LiteralPath (Join-Path $bundle "compose.release.yml") -PathType Leaf)) { throw "SERVER_RELEASE_COMPOSE_MISSING" }
 $maintenanceExitScript = Join-Path $bundle "exit-server-maintenance.ps1"
 if (-not (Test-Path -LiteralPath $maintenanceExitScript -PathType Leaf)) { throw "SERVER_MAINTENANCE_SCRIPT_MISSING" }
+$maintenanceEnterScript = Join-Path $bundle "enter-server-maintenance.ps1"
+if (-not (Test-Path -LiteralPath $maintenanceEnterScript -PathType Leaf)) { throw "SERVER_MAINTENANCE_SCRIPT_MISSING" }
 $tokenScript = Join-Path $bundle "ensure-supervisor-health-token.ps1"
 if (-not (Test-Path -LiteralPath $tokenScript -PathType Leaf)) { throw "SERVER_HEALTH_TOKEN_SCRIPT_MISSING" }
 & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $tokenScript -EnvFile $envFile
@@ -25,12 +27,6 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.buildIdentity -match 'dev|dirty' -or $manifest.releaseTag -match 'dev|dirty') { throw "SERVER_RELEASE_IDENTITY_INVALID" }
 $tag = [string]$manifest.releaseTag
 $identity = [string]$manifest.buildIdentity
-
-# Starting the bundle is an explicit operator action, so it also exits the
-# maintenance mode established by stop-server-bundle.ps1.  A direct
-# start-runtime.ps1 call intentionally does not clear the marker.
-& (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $maintenanceExitScript -ConfigRoot $config
-if ($LASTEXITCODE -ne 0) { throw "SERVER_MAINTENANCE_DISABLE_FAILED" }
 
 function Get-DockerImageMetadata([string]$image) {
     # Parsing JSON avoids a Windows PowerShell quoting bug in `docker inspect
@@ -118,20 +114,6 @@ foreach ($property in $manifest.infrastructureImages.PSObject.Properties) {
     if ($actualId -ne [string]$property.Value.imageId) { throw "SERVER_INFRA_IMAGE_ID_MISMATCH: $image" }
 }
 
-New-Item -ItemType Directory -Force -Path (Join-Path $config 'backups') | Out-Null
-if (-not $SkipBackup) {
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $backupDir = Join-Path $config "backups\$stamp"
-    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-    $env:COMPOSE_PROJECT_NAME = 'whisperx-atom'
-    foreach ($name in @('POSTGRES_DB','POSTGRES_USER','POSTGRES_PASSWORD')) {
-        $value = Read-EnvValue $name
-        if ($value) { [Environment]::SetEnvironmentVariable($name, $value, 'Process') }
-    }
-    & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'backup.ps1') -OutputDirectory $backupDir -ComposeFile (Join-Path $bundle 'compose.dev.yml') -MigrationRoot (Join-Path $bundle 'migrations')
-    if ($LASTEXITCODE -ne 0) { throw 'SERVER_POSTGRES_BACKUP_FAILED' }
-}
-
 $compose = @('compose','--project-name','whisperx-atom','--env-file',$envFile,'-f',(Join-Path $bundle 'compose.dev.yml'),'-f',(Join-Path $bundle 'compose.lan.yml'),'-f',(Join-Path $bundle 'compose.release.yml'))
 $profiles = @('--profile','core','--profile','gpu','--profile','lan')
 # Assistant and automatic summaries share the Summary Worker/Qwen profile.
@@ -155,6 +137,30 @@ $previousServices = @()
 foreach ($line in ($previousStateJson -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     try { $previousServices += @($line | ConvertFrom-Json) } catch { }
 }
+$previouslyRunningServices = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($service in $previousServices) {
+    if ([string]$service.State -eq 'running' -and -not [string]::IsNullOrWhiteSpace([string]$service.Service)) {
+        [void]$previouslyRunningServices.Add([string]$service.Service)
+    }
+}
+$previouslyRunningServiceNames = @($previousServices | Where-Object { [string]$_.State -eq 'running' } | ForEach-Object { [string]$_.Service } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+function Wait-ComposeServiceReady([string]$Service, [int]$TimeoutSeconds = 120) {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $containerId = ((& docker @compose @profiles ps -q $Service) | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($containerId)) {
+            $raw = (& docker inspect $containerId | Out-String)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($raw)) {
+                $record = @($raw | ConvertFrom-Json)[0]
+                $state = if ($null -ne $record.State.Health) { [string]$record.State.Health.Status } else { [string]$record.State.Status }
+                if ($state -eq 'healthy' -or $state -eq 'running') { return }
+            }
+        }
+        Start-Sleep -Seconds 2
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "SERVER_PREREQUISITE_NOT_READY: $Service"
+}
 
 # Materialize a rollback overlay before quiescing anything. If additive
 # migrations or the recovery transaction fails, the two stopped workers are
@@ -172,15 +178,40 @@ foreach ($service in $previousServices) {
 }
 if ($rollbackLines.Count -gt 1) { $rollbackLines -join "`r`n" | Set-Content -LiteralPath $rollbackPath -Encoding utf8 }
 
-# Quiesce only the two GPU owners before migration/recovery. PostgreSQL, NATS,
-# media, recordings, archives and all volumes remain online.
+# A fully stopped Server Node is a supported maintenance state. Bring up only
+# PostgreSQL and NATS before backup/migration, then restore their prior stopped
+# state if preflight fails. This does not recreate or remove either volume.
+$preflightServices = @('postgres','nats')
+$preflightStartedServices = @($preflightServices | Where-Object { -not $previouslyRunningServices.Contains($_) })
 $gpuQuiesced = $false
 $quiesceServices = @("gpu-worker", "summary-worker")
 if ((Read-EnvValue "MEETING_MEMORY_ENABLED") -ne "false") { $quiesceServices += "memory-worker" }
-& docker @compose @profiles stop @quiesceServices
-if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_QUIESCE_FAILED' }
-$gpuQuiesced = $true
+$quiesceRestoreServices = @($quiesceServices | Where-Object { $previouslyRunningServices.Contains($_) })
 try {
+    & docker @compose @profiles up -d --no-deps @preflightServices
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_PREREQUISITE_START_FAILED' }
+    foreach ($service in $preflightServices) { Wait-ComposeServiceReady $service }
+
+    New-Item -ItemType Directory -Force -Path (Join-Path $config 'backups') | Out-Null
+    if (-not $SkipBackup) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $backupDir = Join-Path $config "backups\$stamp"
+        New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+        $env:COMPOSE_PROJECT_NAME = 'whisperx-atom'
+        foreach ($name in @('POSTGRES_DB','POSTGRES_USER','POSTGRES_PASSWORD')) {
+            $value = Read-EnvValue $name
+            if ($value) { [Environment]::SetEnvironmentVariable($name, $value, 'Process') }
+        }
+        & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bundle 'backup.ps1') -OutputDirectory $backupDir -ComposeFile (Join-Path $bundle 'compose.dev.yml') -PostgresContainer 'whisperx-atom-postgres-1' -MigrationRoot (Join-Path $bundle 'migrations')
+        if ($LASTEXITCODE -ne 0) { throw 'SERVER_POSTGRES_BACKUP_FAILED' }
+    }
+
+    # Quiesce only active compute owners before migration/recovery. Media,
+    # recordings, archives and all volumes remain untouched.
+    & docker @compose @profiles stop @quiesceServices
+    if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_QUIESCE_FAILED' }
+    $gpuQuiesced = $true
+
     # Run the new image's additive migrations as a one-shot job before
     # replacing the API. No `down -v` or volume recreation is ever issued.
     & docker @compose @profiles run --rm --no-deps -e WHISPERX_MIGRATION_ONLY=true api
@@ -193,14 +224,24 @@ try {
     & docker @compose @profiles run --rm --no-deps gpu-worker python -m workers.ml_worker.recovery --apply
     if ($LASTEXITCODE -ne 0) { throw 'SERVER_GPU_RECOVERY_APPLY_FAILED' }
 } catch {
-    if ($gpuQuiesced) {
+    if ($gpuQuiesced -and $quiesceRestoreServices.Count -gt 0) {
         $rollbackCompose = if (Test-Path -LiteralPath $rollbackPath) { $compose + @('-f',$rollbackPath) } else { $compose }
-        & docker @rollbackCompose @profiles up -d --no-deps --pull never @quiesceServices
+        & docker @rollbackCompose @profiles up -d --no-deps --pull never @quiesceRestoreServices
         if ($LASTEXITCODE -ne 0) { Write-Warning 'SERVER_GPU_RESTORE_AFTER_PRESTART_FAILURE_FAILED=true' }
+    }
+    if ($preflightStartedServices.Count -gt 0) {
+        & docker @compose @profiles stop @preflightStartedServices
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'SERVER_PREREQUISITE_RESTORE_FAILED=true' }
     }
     throw
 }
 try {
+    # Only a successful preflight may release maintenance mode. A failed
+    # backup, migration or recovery therefore remains fail-closed and cannot
+    # race with the scheduled Supervisor.
+    & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $maintenanceExitScript -ConfigRoot $config
+    if ($LASTEXITCODE -ne 0) { throw "SERVER_MAINTENANCE_DISABLE_FAILED" }
+
     & docker @compose @profiles up -d --pull never
     if ($LASTEXITCODE -ne 0) { throw 'SERVER_RELEASE_START_FAILED' }
     $rollbackPath = Join-Path $config 'rollback-compose.yml'
@@ -224,9 +265,16 @@ try {
     if ($rollbackLines.Count -gt 1) {
         $rollbackLines -join "`r`n" | Set-Content -LiteralPath $rollbackPath -Encoding utf8
         $rollbackCompose = $compose + @('-f',$rollbackPath)
-        & docker @rollbackCompose @profiles up -d --pull never
-        if ($LASTEXITCODE -eq 0) { Write-Warning 'SERVER_RELEASE_ROLLED_BACK=true' }
-        else { Write-Warning 'SERVER_RELEASE_ROLLBACK_FAILED=true' }
+        & docker @compose @profiles stop
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'SERVER_RELEASE_PARTIAL_STOP_FAILED=true' }
+        if ($previouslyRunningServiceNames.Count -gt 0) {
+            & docker @rollbackCompose @profiles up -d --pull never @previouslyRunningServiceNames
+            if ($LASTEXITCODE -eq 0) { Write-Warning 'SERVER_RELEASE_ROLLED_BACK=true' }
+            else { Write-Warning 'SERVER_RELEASE_ROLLBACK_FAILED=true' }
+        }
+        else {
+            Write-Warning 'SERVER_RELEASE_ROLLED_BACK_TO_STOPPED=true'
+        }
     } else {
         Write-Warning 'SERVER_RELEASE_ROLLBACK_UNAVAILABLE=true'
     }

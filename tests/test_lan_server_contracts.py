@@ -355,6 +355,22 @@ def test_server_runtime_supervisor_respects_explicit_maintenance_mode():
     assert "SERVER_MAINTENANCE_DISABLE_FAILED" in start_bundle
 
 
+def test_server_bundle_cold_start_prepares_database_without_false_worker_restore():
+    start_bundle = read("scripts/start-server-bundle.ps1")
+    assert "Wait-ComposeServiceReady" in start_bundle
+    assert "$preflightServices = @('postgres','nats')" in start_bundle
+    assert "SERVER_PREREQUISITE_START_FAILED" in start_bundle
+    assert "SERVER_PREREQUISITE_NOT_READY" in start_bundle
+    assert "$quiesceRestoreServices" in start_bundle
+    assert "@quiesceRestoreServices" in start_bundle
+    assert "@preflightStartedServices" in start_bundle
+    assert "-PostgresContainer 'whisperx-atom-postgres-1'" in start_bundle
+    assert "$previouslyRunningServiceNames" in start_bundle
+    assert "@previouslyRunningServiceNames" in start_bundle
+    assert "SERVER_RELEASE_ROLLED_BACK_TO_STOPPED" in start_bundle
+    assert start_bundle.index("SERVER_MAINTENANCE_DISABLE_FAILED") > start_bundle.index("SERVER_GPU_RECOVERY_APPLY_FAILED")
+
+
 def test_reconnect_makes_only_retryable_delivery_due():
     spool = read("apps/recorder-agent/SpoolStore.cs")
     client = read("apps/recorder-agent/AgentApiClient.cs")
