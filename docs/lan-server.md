@@ -127,6 +127,34 @@ Copy-Item .env.lan.example .env.lan
 после входа без ручной консоли. Supervisor не выполняет `prune`, не удаляет
 volumes и не трогает Patrol360.
 
+### Ручная остановка Server Node
+
+Не останавливайте обслуживаемый контейнер только командой `docker stop`: при
+работающем Supervisor отсутствие обязательного сервиса считается сбоем и
+контейнер будет восстановлен. Для плановой ручной остановки используйте
+скрипт из текущего Server Bundle:
+
+```powershell
+.\stop-server-bundle.ps1 -BundleRoot <путь-к-bundle> -ConfigRoot C:\ProgramData\WhisperXAtom\Server
+```
+
+Скрипт сначала атомарно создаёт
+`C:\ProgramData\WhisperXAtom\Server\maintenance.lock`, а затем останавливает
+WhisperX Compose. Пока marker существует, Supervisor не запускает Docker
+Desktop, не выполняет `compose up` и не восстанавливает отдельные сервисы.
+
+Для штатного возобновления используйте:
+
+```powershell
+.\start-server-bundle.ps1 -BundleRoot <путь-к-bundle> -ConfigRoot C:\ProgramData\WhisperXAtom\Server
+```
+
+Явный запуск удаляет marker и поднимает runtime. Для обслуживания одного
+контейнера marker можно включить и выключить отдельно скриптами
+`enter-server-maintenance.ps1` и `exit-server-maintenance.ps1`. Политика
+`restart: unless-stopped` сохраняется для автоматического восстановления
+после реального сбоя; volumes, записи и Patrol360 эти операции не изменяют.
+
 ## Server Node и Client Node
 
 Server Node — отдельный LAN-компьютер с Docker Desktop, PostgreSQL, NATS,

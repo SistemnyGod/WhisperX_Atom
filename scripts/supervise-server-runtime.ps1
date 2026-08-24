@@ -14,6 +14,7 @@ $manifestPath = Join-Path $bundle "release-manifest.json"
 $startScript = Join-Path $bundle "start-runtime.ps1"
 $logRoot = Join-Path $config "Logs"
 $logPath = Join-Path $logRoot "server-supervisor.log"
+$maintenancePath = Join-Path $config "maintenance.lock"
 $mutex = $null
 $mutexOwned = $false
 $script:ConsecutiveFailures = 0
@@ -21,6 +22,7 @@ $script:RecoveryCycles = 0
 $script:RestartHistory = @{}
 $script:UnhealthyServices = @()
 $script:IdentityMismatch = $false
+$script:MaintenanceLogged = $false
 
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 if (Test-Path -LiteralPath $logPath -PathType Leaf) {
@@ -41,6 +43,10 @@ function Read-EnvValue([string]$Name) {
     $line = Get-Content -LiteralPath $envFile -Encoding utf8 | Where-Object { $_ -match "^$Name=" } | Select-Object -First 1
     if ($null -eq $line) { return $null }
     return ($line -replace "^$Name=", '').Trim()
+}
+
+function Test-MaintenanceMode {
+    return Test-Path -LiteralPath $maintenancePath -PathType Leaf
 }
 
 function Assert-StaticRuntimeFiles {
@@ -76,8 +82,9 @@ function Wait-DockerEngine([int]$TimeoutSeconds) {
     $delay = 5
     $requested = $false
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        if (Test-MaintenanceMode) { return "Maintenance" }
         & docker info 1>$null 2>$null
-        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($LASTEXITCODE -eq 0) { return "Ready" }
         if (-not $requested) {
             Start-DockerDesktopIfNeeded
             $requested = $true
@@ -85,7 +92,7 @@ function Wait-DockerEngine([int]$TimeoutSeconds) {
         Start-Sleep -Seconds $delay
         $delay = [Math]::Min(30, $delay * 2)
     }
-    return $false
+    return "Timeout"
 }
 
 function Get-ComposeArguments([object]$Manifest) {
@@ -299,7 +306,25 @@ try {
     Write-SupervisorLog ("Supervisor started for identity " + [string]$manifest.buildIdentity)
     while ($true) {
         try {
-            if (-not (Wait-DockerEngine $DockerTimeoutSeconds)) {
+            if (Test-MaintenanceMode) {
+                if (-not $script:MaintenanceLogged) {
+                    Write-SupervisorLog "Server maintenance mode is active; Docker startup and runtime recovery are suspended" "WARN"
+                    $script:MaintenanceLogged = $true
+                }
+                $script:ConsecutiveFailures = 0
+                $script:RecoveryCycles = 0
+                Start-Sleep -Seconds ([Math]::Max(5, $PollSeconds))
+                continue
+            }
+            if ($script:MaintenanceLogged) {
+                Write-SupervisorLog "Server maintenance mode cleared; runtime supervision resumed"
+                $script:MaintenanceLogged = $false
+            }
+            $dockerState = Wait-DockerEngine $DockerTimeoutSeconds
+            if ($dockerState -eq "Maintenance") {
+                continue
+            }
+            if ($dockerState -eq "Timeout") {
                 Write-SupervisorLog "Docker Engine did not become ready within timeout" "ERROR"
             }
             elseif (-not (Test-WhisperXRuntime $manifest)) {

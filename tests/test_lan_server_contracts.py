@@ -328,7 +328,31 @@ def test_server_runtime_supervisor_is_user_session_owned_and_bounded():
     assert "release-manifest.json" in startup and "DOCKER_DESKTOP_NOT_FOUND" in startup
     assert "supervise-server-runtime.ps1" in bundle
     assert "ensure-supervisor-health-token.ps1" in bundle
+    assert "enter-server-maintenance.ps1" in bundle
+    assert "exit-server-maintenance.ps1" in bundle
     assert "runtimeScripts" in bundle
+
+
+def test_server_runtime_supervisor_respects_explicit_maintenance_mode():
+    supervisor = read("scripts/supervise-server-runtime.ps1")
+    enter = read("scripts/enter-server-maintenance.ps1")
+    exit_script = read("scripts/exit-server-maintenance.ps1")
+    assert 'Join-Path $config "maintenance.lock"' in supervisor
+    assert "Test-MaintenanceMode" in supervisor
+    assert 'return "Maintenance"' in supervisor
+    assert "Docker startup and runtime recovery are suspended" in supervisor
+    assert "Start-DockerDesktopIfNeeded" in supervisor
+    assert 'Join-Path $config "maintenance.lock"' in enter
+    assert "SERVER_MAINTENANCE_ENABLED=true" in enter
+    assert 'Remove-Item -LiteralPath $marker -Force' in exit_script
+    assert "SERVER_MAINTENANCE_ENABLED=false" in exit_script
+    stop_bundle = read("scripts/stop-server-bundle.ps1")
+    start_bundle = read("scripts/start-server-bundle.ps1")
+    assert "enter-server-maintenance.ps1" in stop_bundle
+    assert "MANUAL_SERVER_STOP" in stop_bundle
+    assert "SERVER_RUNTIME_RESTART_SUPPRESSED=true" in stop_bundle
+    assert "exit-server-maintenance.ps1" in start_bundle
+    assert "SERVER_MAINTENANCE_DISABLE_FAILED" in start_bundle
 
 
 def test_reconnect_makes_only_retryable_delivery_due():

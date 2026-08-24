@@ -16,6 +16,8 @@ $manifestPath = Join-Path $bundle "release-manifest.json"
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw "SERVER_CONFIG_REQUIRED: $envFile" }
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "SERVER_RELEASE_MANIFEST_MISSING" }
 if (-not (Test-Path -LiteralPath (Join-Path $bundle "compose.release.yml") -PathType Leaf)) { throw "SERVER_RELEASE_COMPOSE_MISSING" }
+$maintenanceExitScript = Join-Path $bundle "exit-server-maintenance.ps1"
+if (-not (Test-Path -LiteralPath $maintenanceExitScript -PathType Leaf)) { throw "SERVER_MAINTENANCE_SCRIPT_MISSING" }
 $tokenScript = Join-Path $bundle "ensure-supervisor-health-token.ps1"
 if (-not (Test-Path -LiteralPath $tokenScript -PathType Leaf)) { throw "SERVER_HEALTH_TOKEN_SCRIPT_MISSING" }
 & (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $tokenScript -EnvFile $envFile
@@ -23,6 +25,12 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.buildIdentity -match 'dev|dirty' -or $manifest.releaseTag -match 'dev|dirty') { throw "SERVER_RELEASE_IDENTITY_INVALID" }
 $tag = [string]$manifest.releaseTag
 $identity = [string]$manifest.buildIdentity
+
+# Starting the bundle is an explicit operator action, so it also exits the
+# maintenance mode established by stop-server-bundle.ps1.  A direct
+# start-runtime.ps1 call intentionally does not clear the marker.
+& (Get-Command powershell.exe).Source -NoProfile -ExecutionPolicy Bypass -File $maintenanceExitScript -ConfigRoot $config
+if ($LASTEXITCODE -ne 0) { throw "SERVER_MAINTENANCE_DISABLE_FAILED" }
 
 function Get-DockerImageMetadata([string]$image) {
     # Parsing JSON avoids a Windows PowerShell quoting bug in `docker inspect
