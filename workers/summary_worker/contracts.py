@@ -28,7 +28,11 @@ def _evidence_schema(max_items: int = 8) -> dict[str, Any]:
     return {
         "type": "array",
         "maxItems": max_items,
-        "items": {"type": "string", "pattern": "^(SEG-)?[^\\s]+$"},
+        # llama.cpp's JSON-schema grammar does not support the PCRE ``\s``
+        # escape. Evidence IDs are opaque, whitespace-free tokens, so the
+        # equivalent portable character class keeps the production grammar
+        # valid for both llama.cpp and regular JSON-schema validators.
+        "items": {"type": "string", "pattern": "^(SEG-)?[^ ]+$"},
     }
 
 
