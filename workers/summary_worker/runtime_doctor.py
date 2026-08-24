@@ -71,7 +71,11 @@ def _probe(base_url: str, model: str) -> dict[str, Any]:
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": "Верни JSON с полем answer и значением готов."}],
-        "max_tokens": 8,
+        # Eight tokens are not enough for a complete JSON object with the
+        # production response envelope, so the probe can report a false
+        # generation failure even when streaming is healthy. Keep this probe
+        # deliberately small but give the schema room to close its braces.
+        "max_tokens": 64,
         "temperature": 0,
         "response_format": {"type": "json_object", "schema": response_schema},
         "stream": True,
