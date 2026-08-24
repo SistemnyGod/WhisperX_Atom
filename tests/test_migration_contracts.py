@@ -26,6 +26,17 @@ def test_migration_runner_uses_immutable_id_and_checksum_history():
     assert "MIGRATION_CHECKSUM_MISMATCH" in source
 
 
+def test_migration_checksum_accepts_only_line_ending_equivalence():
+    source = (ROOT / "apps" / "server" / "WhisperX.Atom.Api" / "Program.cs").read_text(encoding="utf-8")
+
+    assert "IsLineEndingCompatibleChecksum(sql, knownChecksum)" in source
+    assert 'sql.Replace("\\r\\n", "\\n", StringComparison.Ordinal)' in source
+    assert '.Replace("\\r", "\\n", StringComparison.Ordinal)' in source
+    assert 'lf.Replace("\\n", "\\r\\n", StringComparison.Ordinal)' in source
+    assert "MigrationChecksum(lf)" in source
+    assert "MigrationChecksum(crlf)" in source
+
+
 def test_live_memory_retention_migration_keeps_stop_to_v1_handoff_bounded():
     migration = (MIGRATIONS / "036_live_meeting_retention.sql").read_text(encoding="utf-8")
     assert "retention_policy" in migration

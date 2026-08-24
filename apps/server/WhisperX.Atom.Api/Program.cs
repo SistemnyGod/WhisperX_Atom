@@ -2732,6 +2732,7 @@ public sealed class Database(IConfiguration configuration)
                 var stored = await known.ExecuteScalarAsync();
                 if (stored is string knownChecksum &&
                     !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase) &&
+                    !IsLineEndingCompatibleChecksum(sql, knownChecksum) &&
                     !IsKnownRollingCompatibleChecksum(version, knownChecksum, checksum))
                     throw new InvalidOperationException($"MIGRATION_CHECKSUM_MISMATCH:{version}");
                 if (stored is null or DBNull)
@@ -2760,6 +2761,22 @@ public sealed class Database(IConfiguration configuration)
             await transaction.CommitAsync();
         }
     }
+
+    private static bool IsLineEndingCompatibleChecksum(string sql, string stored)
+    {
+        // Git checkouts on Windows may materialize SQL with CRLF while clean
+        // release worktrees and Linux images use LF. Accept only hashes that
+        // differ by line-ending representation; any SQL content drift remains
+        // fail-closed.
+        var lf = sql.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal);
+        var crlf = lf.Replace("\n", "\r\n", StringComparison.Ordinal);
+        return string.Equals(stored, MigrationChecksum(lf), StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(stored, MigrationChecksum(crlf), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string MigrationChecksum(string sql) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
 
     private static bool IsKnownRollingCompatibleChecksum(string version, string stored, string current)
     {
