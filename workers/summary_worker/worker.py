@@ -812,7 +812,14 @@ async def run() -> None:
         model_available = os.path.isfile(model_path) and os.path.getsize(model_path) > 0
         manifest_available = os.path.isfile(manifest_path)
         try:
-            model_key = (model_path, os.path.getsize(model_path), os.path.getmtime_ns(model_path), manifest_path, os.path.getmtime_ns(manifest_path), os.getenv("LLM_MODEL_SHA256", ""))
+            model_key = (
+                model_path,
+                os.path.getsize(model_path),
+                os.stat(model_path).st_mtime_ns,
+                manifest_path,
+                os.stat(manifest_path).st_mtime_ns,
+                os.getenv("LLM_MODEL_SHA256", ""),
+            )
         except OSError:
             model_key = (model_path, 0, 0, manifest_path, 0, os.getenv("LLM_MODEL_SHA256", ""))
         if model_key != model_attestation_key:
