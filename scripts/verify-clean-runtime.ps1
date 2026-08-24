@@ -41,6 +41,7 @@ $required = [ordered]@{
     Desktop = "Desktop\WhisperX.Atom.Desktop.exe"
     RecorderHost = "RecorderHost\WhisperX.Atom.Recorder.Host.exe"
     VoiceHost = "VoiceHost\WhisperX.Atom.Voice.Host.exe"
+    VoiceRefinerHost = "VoiceRefinerHost\WhisperX.Atom.Voice.Refiner.Host.exe"
     Updater = "Desktop\WhisperX.Atom.Updater.exe"
     TtsHost = "TtsHost\TtsHost.exe"
 }
@@ -88,7 +89,7 @@ if ($installedPresent) {
 
 $runningResults = @()
 if ($CheckRunningProcesses) {
-    $processNames = @("WhisperX.Atom.Desktop", "WhisperX.Atom.Recorder.Host", "WhisperX.Atom.Voice.Host", "TtsHost")
+    $processNames = @("WhisperX.Atom.Desktop", "WhisperX.Atom.Recorder.Host", "WhisperX.Atom.Voice.Host", "WhisperX.Atom.Voice.Refiner.Host", "TtsHost")
     $runningProcesses = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
     $ttsProcesses = @($runningProcesses | Where-Object { $_.ProcessName -ieq "TtsHost" })
     if ($ttsProcesses.Count -gt 1) { Fail "RUNTIME_MULTIPLE_TTS_HOSTS" "count=$($ttsProcesses.Count)" }

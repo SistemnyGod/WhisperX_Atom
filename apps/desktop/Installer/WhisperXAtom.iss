@@ -28,6 +28,7 @@ Source: "..\..\..\artifacts\desktop\Desktop\*"; DestDir: "{app}\Desktop"; Flags:
 Source: "..\..\..\artifacts\desktop\Service\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\..\artifacts\desktop\RecorderHost\*"; DestDir: "{app}\RecorderHost"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\..\artifacts\desktop\VoiceHost\*"; DestDir: "{app}\VoiceHost"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\..\artifacts\desktop\VoiceRefinerHost\*"; DestDir: "{app}\VoiceRefinerHost"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\..\artifacts\desktop\TtsHost\*"; DestDir: "{app}\TtsHost"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Install-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Uninstall-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion

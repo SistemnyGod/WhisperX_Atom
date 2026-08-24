@@ -2,6 +2,7 @@ param(
     [string]$OutputRoot = (Join-Path $PSScriptRoot "..\artifacts\desktop"),
     [switch]$NoRestore,
     [switch]$AllowDirty,
+    [switch]$RequireVoiceRefinerAssets,
     [string]$TtsWheelhouse = ''
 )
 
@@ -18,6 +19,10 @@ foreach ($proxyVariable in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy'
 }
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:MSBuildEnableWorkloadResolver = 'false'
+if ($RequireVoiceRefinerAssets) {
+    & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+}
 $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ([string]::IsNullOrWhiteSpace($gitCommit) -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
     throw "Unable to resolve a full release commit; refusing to publish an unidentified runtime."
@@ -52,11 +57,13 @@ $desktopProject = Join-Path $repoRoot "apps\desktop\WhisperX.Atom.Desktop\Whispe
 $serviceProject = Join-Path $repoRoot "apps\recorder-agent\WhisperX.Atom.Recorder.Service.csproj"
 $recorderHostProject = Join-Path $repoRoot "apps\recorder-host\WhisperX.Atom.Recorder.Host.csproj"
 $voiceHostProject = Join-Path $repoRoot "apps\voice-host\WhisperX.Atom.Voice.Host\WhisperX.Atom.Voice.Host.csproj"
+$voiceRefinerHostProject = Join-Path $repoRoot "apps\voice-host\WhisperX.Atom.Voice.Refiner.Host\WhisperX.Atom.Voice.Refiner.Host.csproj"
 $updaterProject = Join-Path $repoRoot "apps\desktop\Updater\WhisperX.Atom.Updater.csproj"
 $desktopOut = Join-Path $output "Desktop"
 $serviceOut = Join-Path $output "Service"
 $recorderHostOut = Join-Path $output "RecorderHost"
 $voiceHostOut = Join-Path $output "VoiceHost"
+$voiceRefinerHostOut = Join-Path $output "VoiceRefinerHost"
 $updaterOut = Join-Path $output "Updater"
 $publishRestoreArgs = if ($NoRestore) { @("--no-restore") } else { @() }
 
@@ -69,6 +76,7 @@ $desktopPublishArgs = @($desktopProject, "-c", "Release", "-r", "win-x64", "--se
 $servicePublishArgs = @($serviceProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $serviceOut) + $publishRestoreArgs
 $recorderHostPublishArgs = @($recorderHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $recorderHostOut) + $publishRestoreArgs
 $voiceHostPublishArgs = @($voiceHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $voiceHostOut) + $publishRestoreArgs
+$voiceRefinerHostPublishArgs = @($voiceRefinerHostProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $voiceRefinerHostOut) + $publishRestoreArgs
 $updaterPublishArgs = @($updaterProject, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true") + $restoreProperties + @($identityArg, "-o", $updaterOut) + $publishRestoreArgs
 function Invoke-Publish([string[]]$Arguments) {
     $proxyNames = @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')
@@ -86,6 +94,7 @@ Invoke-Publish $desktopPublishArgs
 Invoke-Publish $servicePublishArgs
 Invoke-Publish $recorderHostPublishArgs
 Invoke-Publish $voiceHostPublishArgs
+Invoke-Publish $voiceRefinerHostPublishArgs
 Invoke-Publish $updaterPublishArgs
 Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Destination (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") -Force
 
@@ -159,7 +168,7 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
     commit = $gitCommit
     dirty = $dirtyFiles.Count -gt 0
     runtimeEntrypoint = "WhisperX.Atom.Desktop.exe"
-    supportedWindowsRuntime = @("Desktop", "AudioGraphRecorderHost", "VoiceHost", "SileroTtsHost")
+    supportedWindowsRuntime = @("Desktop", "AudioGraphRecorderHost", "VoiceHost", "VoiceRefinerHost", "SileroTtsHost")
     legacyService = [ordered]@{ path = "Service\\WhisperX.Atom.Recorder.Service.exe"; supported = $false; mode = "manual-fallback-only" }
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     components = @(
@@ -167,6 +176,7 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
         @{ name = "RecorderService"; path = (Join-Path $serviceOut "WhisperX.Atom.Recorder.Service.exe") },
         @{ name = "RecorderHost"; path = (Join-Path $recorderHostOut "WhisperX.Atom.Recorder.Host.exe") },
         @{ name = "VoiceHost"; path = (Join-Path $voiceHostOut "WhisperX.Atom.Voice.Host.exe") },
+        @{ name = "VoiceRefinerHost"; path = (Join-Path $voiceRefinerHostOut "WhisperX.Atom.Voice.Refiner.Host.exe") },
         @{ name = "Updater"; path = (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") },
         @{ name = "TtsHost"; path = (Join-Path $output "TtsHost\TtsHost.exe") }
     ) | ForEach-Object {

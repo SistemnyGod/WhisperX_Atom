@@ -156,6 +156,7 @@ public sealed record VoiceHostSnapshot(
     string? VoiceRefinerProvider = null,
     string? VoiceRefinerModel = null,
     double? VoiceRefinerProcessingMs = null,
+    double? VoiceRefinerQueueWaitMs = null,
     string? VoiceRefinerAgreement = null,
     string? VoiceRefinerError = null,
     IReadOnlyList<string>? Capabilities = null);

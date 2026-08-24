@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$SkipPublish,
     [switch]$NoRestore,
+    [switch]$RequireVoiceRefinerAssets,
     [string]$ServerOrigin = "http://192.168.2.194:8080",
     [string]$TtsWheelhouse = '',
     [string]$ServerBundleRoot = 'artifacts/server-bundle',
@@ -15,6 +16,11 @@ $validOrigin = (
 )
 if (-not $validOrigin) { throw "INSTALLER_SERVER_ORIGIN_INVALID: $ServerOrigin" }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$assetVerifier = Join-Path $PSScriptRoot "verify-voice-refiner-assets.ps1"
+if ($RequireVoiceRefinerAssets) {
+    & $assetVerifier
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+}
 $publish = Join-Path $repoRoot "scripts\publish-desktop.ps1"
 $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
 $artifact = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
@@ -25,14 +31,14 @@ if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
     # payload stale while the installer is being created.
     if ($TtsWheelhouse) {
         if ($NoRestore) {
-            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse
+            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
         } else {
-            & $publish -TtsWheelhouse $TtsWheelhouse
+            & $publish -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
         }
     } elseif ($NoRestore) {
-        & $publish -NoRestore
+        & $publish -NoRestore -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
     } else {
-        & $publish
+        & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
     }
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue

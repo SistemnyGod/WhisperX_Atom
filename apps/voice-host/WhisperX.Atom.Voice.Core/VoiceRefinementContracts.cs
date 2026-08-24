@@ -15,7 +15,10 @@ public sealed record VoiceUtteranceEnvelope(
     string VoskText,
     VoiceIntent VoskIntent,
     double VoskConfidence,
-    string Route);
+    string Route,
+    long Sequence = 0,
+    double DurationMs = 0,
+    double? QueueWaitMs = null);
 
 public enum VoiceRefinementState
 {
@@ -37,7 +40,12 @@ public sealed record VoiceRefinementResult(
     string? Model = null,
     double? Confidence = null,
     double ProcessingMs = 0,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? UtteranceId = null,
+    long Sequence = 0,
+    double? QueueWaitMs = null,
+    string? AgreementCategory = null,
+    bool WakeWordDetected = false);
 
 public interface IVoiceAsrRefiner : IDisposable
 {
