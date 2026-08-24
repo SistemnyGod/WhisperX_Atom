@@ -10,6 +10,7 @@
     "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "expectedMode": { "enum": ["AUTO", "GENERAL_CHAT", "CURRENT_MEETING", "LIVE_MEETING", "MEETING_MEMORY"] },
     "expectedOutcome": { "enum": ["ANSWER", "NO_EVIDENCE", "GROUNDING_REJECTED", "LOCAL_STATUS"] },
+    "executionTarget": { "enum": ["ASSISTANT_API", "VOICE_LOCAL"] },
     "expectedIntent": { "enum": ["FACT_LOOKUP", "DECISION", "RESPONSIBLE", "DEADLINE", "TASK", "CAUSE", "STATUS", "TIMELINE", "COMPARISON", "SUMMARY", "FOLLOW_UP"] },
     "answerType": { "enum": ["DIRECT_FACT", "MULTI_FACT", "SUMMARY", "COMPARISON", "CONTRADICTION", "PARTIAL", "NO_EVIDENCE"] },
     "mustNotInfer": { "type": "array", "items": { "type": "string", "maxLength": 40 }, "maxItems": 16 },

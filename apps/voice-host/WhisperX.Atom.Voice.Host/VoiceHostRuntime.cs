@@ -39,6 +39,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static readonly bool VoiceRefinerAssistantOnly = VoiceRefinerConfiguration.Mode is VoiceRefinerMode.AssistantOnly or VoiceRefinerMode.WakeAudit;
     private static readonly bool VoiceRefinerWakeAudit = VoiceRefinerConfiguration.Mode == VoiceRefinerMode.WakeAudit;
     private static readonly string? VoiceRefinerModeError = VoiceRefinerConfiguration.Error;
+    private static readonly (int Threads, string? Error) VoiceRefinerThreadsConfiguration = ParseVoiceRefinerThreads(
+        Environment.GetEnvironmentVariable("VOICE_REFINER_THREADS"));
     private const int AssistantRefinementBudgetMs = 5_000;
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
@@ -75,6 +77,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         if (string.Equals(value, "ASSISTANT_ONLY", StringComparison.OrdinalIgnoreCase)) return (VoiceRefinerMode.AssistantOnly, null);
         if (string.Equals(value, "WAKE_AUDIT", StringComparison.OrdinalIgnoreCase)) return (VoiceRefinerMode.WakeAudit, null);
         return (VoiceRefinerMode.Off, "VOICE_REFINER_MODE_INVALID");
+    }
+
+    private static (int Threads, string? Error) ParseVoiceRefinerThreads(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return (VoiceRefinerProtocol.DefaultThreads, null);
+        if (int.TryParse(value, out var parsed) && parsed is >= VoiceRefinerProtocol.DefaultThreads and <= VoiceRefinerProtocol.MaxThreads)
+            return (parsed, null);
+        return (VoiceRefinerProtocol.DefaultThreads, "VOICE_REFINER_THREADS_INVALID");
     }
 
     private static string[] CreateWakeGrammar()
@@ -360,11 +370,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var timeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_CLIENT_TIMEOUT_MS"), out var clientConfigured)
                 ? Math.Max(Math.Clamp(clientConfigured, 3_000, 60_000), hostTimeoutMs + 1_000)
                 : legacyTimeout > 0 ? Math.Max(legacyTimeout + 3_000, 3_000) : VoiceRefinerProtocol.ClientTimeoutMs;
-            _voiceRefiner = new ResidentVoiceRefinerClient(refinerHost, refinerModel, refinerNative, TimeSpan.FromMilliseconds(timeoutMs), BuildIdentity, TimeSpan.FromMilliseconds(hostTimeoutMs));
+            _voiceRefiner = new ResidentVoiceRefinerClient(refinerHost, refinerModel, refinerNative, TimeSpan.FromMilliseconds(timeoutMs), BuildIdentity, TimeSpan.FromMilliseconds(hostTimeoutMs), VoiceRefinerThreadsConfiguration.Threads);
             _voiceRefinerProvider = _voiceRefiner.Provider;
             _voiceRefinerModel = _voiceRefiner.Model;
             _voiceRefinerState = _voiceRefiner.IsAvailable ? VoiceRefinementState.Ready.ToString().ToUpperInvariant() : VoiceRefinementState.Unavailable.ToString().ToUpperInvariant();
-            _voiceRefinerError = _voiceRefiner.IsAvailable ? null : (_voiceRefiner as ResidentVoiceRefinerClient)?.AvailabilityError ?? "VOICE_REFINER_ASSETS_UNAVAILABLE";
+            _voiceRefinerError = VoiceRefinerThreadsConfiguration.Error
+                ?? (_voiceRefiner.IsAvailable ? null : (_voiceRefiner as ResidentVoiceRefinerClient)?.AvailabilityError ?? "VOICE_REFINER_ASSETS_UNAVAILABLE");
         }
         else
         {
@@ -478,6 +489,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceRefinerWakeVerification = _voiceRefinerWakeVerification,
                 VoiceRefinerRefinedQuestionUsed = _voiceRefinerRefinedQuestionUsed,
                 VoiceRefinerFallbackReason = _voiceRefinerFallbackReason,
+                VoiceRefinerThreads = VoiceRefinerThreadsConfiguration.Threads,
                 Capabilities = new[] { VoiceIpcCapabilities.VoiceGainControl },
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };

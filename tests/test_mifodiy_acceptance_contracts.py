@@ -108,3 +108,14 @@ def test_atom_wake_is_explicit_compatibility_toggle():
     assert "WHISPERX_WAKE_COMPAT_ATOM" in runtime
     assert "LegacyAtomWakeEnabled" in runtime
     assert "PrimaryWakeWords" in parser and "AllowsLegacyAtom" in parser
+
+
+def test_mifodiy_qa_fails_on_expected_actual_mismatch_and_keeps_reports_private():
+    runner = (ROOT / "scripts/run-mifodiy-qa.ps1").read_text(encoding="utf-8-sig")
+    schema = (ROOT / "docs/mifodiy-qa-case.schema.json").read_text(encoding="utf-8")
+    for marker in ("mifodiy-qa-v2", "modePassed", "intentPassed", "outcomePassed", "answerTypePassed", "evidencePassed", "groundingPassed", "casePassed"):
+        assert marker in runner
+    assert "VOICE_LOCAL_REQUIRES_BEHAVIORAL_RUNNER" in runner
+    assert "executedCaseCount" in runner and "exit 1" in runner
+    assert "executionTarget" in schema
+    assert "questionSha256" in runner

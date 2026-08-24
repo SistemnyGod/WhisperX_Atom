@@ -26,10 +26,10 @@ dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voic
 # Long-recording false-activation check
 dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj -c Release -- --replay "C:\path\meeting.wav" --dry-run
 
-# Far-field matrix (0.5/1/2/3 m × quiet/office/ventilation/conversation)
+# Far-field matrix (0.5/1/2/3 m × quiet/office/ventilation/conversation/TTS playback)
 pwsh -NoProfile -File scripts/e2e-far-field-voice.ps1 -Mode Installed `
   -FixtureRoot "C:\path\far-field-fixtures" `
-  -OutputPath artifacts/acceptance/far-field-voice-v1.json
+  -OutputPath artifacts/acceptance/far-field-voice-v2.json
 ```
 
 The matrix expects explicit replay fixtures named
@@ -93,7 +93,7 @@ installed Russian Windows voice.
   the Desktop text Assistant.
 - The bundled small model uses a documented phonetic `Мефодий` grammar fallback. Set `ATOM_VOSK_EXACT_WAKE_WORD=true` only with a model that contains the canonical `Мифодий` token; the runtime reports the active mode in health.
 - START/PAUSE/RESUME and product markers require confidence >= 0.70. STOP executes immediately at confidence >= 0.75, asks for `Мифодий, подтверждаю` from 0.55 to 0.75, and requests a repeat below 0.55.
-- An optional CPU-only resident `whisper.cpp` `ggml-small` second pass runs in `SHADOW` mode for every accepted wake candidate. `VoiceRefinerHost` loads the pinned native bridge/model once and receives memory-only PCM through a current-user named pipe. The queue is bounded to two requests and has no effect on Recorder routing or user-visible latency. Configure it with `VOICE_ASR_REFINER_MODE`, `VOICE_ASR_REFINER_HOST_EXECUTABLE`, `VOICE_ASR_REFINER_MODEL`, `VOICE_ASR_REFINER_SHA256`, `VOICE_ASR_REFINER_NATIVE_LIBRARY`, `VOICE_ASR_REFINER_NATIVE_SHA256`, `VOICE_ASR_REFINER_HOST_TIMEOUT_MS=15000`, and `VOICE_ASR_REFINER_CLIENT_TIMEOUT_MS=18000`. Missing or unverified assets report `UNAVAILABLE`; they never fall back to a per-utterance CLI or temporary WAV. The host exits with code 73 after a native inference timeout and is recreated for the next Shadow request.
+- An optional CPU-only resident `whisper.cpp` `ggml-small` second pass runs in `SHADOW` mode for every accepted wake candidate. `VoiceRefinerHost` loads the pinned native bridge/model once and receives memory-only PCM through a current-user named pipe. The queue is bounded to two requests and has no effect on Recorder routing or user-visible latency. Configure it with `VOICE_ASR_REFINER_MODE`, `VOICE_ASR_REFINER_HOST_EXECUTABLE`, `VOICE_ASR_REFINER_MODEL`, `VOICE_ASR_REFINER_SHA256`, `VOICE_ASR_REFINER_NATIVE_LIBRARY`, `VOICE_ASR_REFINER_NATIVE_SHA256`, `VOICE_ASR_REFINER_HOST_TIMEOUT_MS=15000`, `VOICE_ASR_REFINER_CLIENT_TIMEOUT_MS=18000`, and `VOICE_REFINER_THREADS=1..4`. Invalid thread values fail closed to one thread and publish `VOICE_REFINER_THREADS_INVALID`. Missing or unverified assets report `UNAVAILABLE`; they never fall back to a per-utterance CLI or temporary WAV. The host exits with code 73 after a native inference timeout and is recreated for the next Shadow request.
 - To stage verified Shadow assets locally, check out whisper.cpp at `f049fff95a089aa9969deb009cdd4892b3e74916` and pass that directory as `-WhisperCppSource` (or `WHISPER_CPP_SOURCE_DIR`) to both native build/staging scripts. Staging also requires the model/native paths, full model and bridge provenance, and the clean build identity. The required multilingual `ggml-small.bin` revision is `c521a4b02f422512d734391fdf08bb08c0862f68` with SHA256 `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`. The resulting manifest is schema v2 and is verified by `scripts\verify-voice-refiner-assets.ps1`. Release packaging fails closed unless the manifest, ABI and both SHA256 values verify. Development builds may run only with `VOICE_ASR_REFINER_MODE=OFF` when assets are unavailable.
 - Managed startup validates the installed path, build identity, PID and parent process. `STATUS` remains available while startup is in progress; commands return `VOICE_HOST_NOT_INITIALIZED` until the runtime is ready.
 - `TEST_SPEECH` is parse-only and never calls Recorder. The latest microphone telemetry contains RMS, peak, clipping, signal state and effective endpoint; pre-wake audio is discarded.

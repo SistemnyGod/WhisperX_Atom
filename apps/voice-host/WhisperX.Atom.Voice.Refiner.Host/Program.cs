@@ -20,6 +20,17 @@ var expectedAbi = int.TryParse(Environment.GetEnvironmentVariable("VOICE_REFINER
     ? configuredAbi : VoiceRefinerProtocol.NativeAbiVersion;
 var inferenceTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_REFINER_HOST_TIMEOUT_MS"), out var configuredTimeout)
     ? Math.Clamp(configuredTimeout, 1_000, 60_000) : VoiceRefinerProtocol.HostInferenceTimeoutMs;
+var configuredThreadsText = Environment.GetEnvironmentVariable("VOICE_REFINER_THREADS");
+var refinerThreads = string.IsNullOrWhiteSpace(configuredThreadsText)
+    ? VoiceRefinerProtocol.DefaultThreads
+    : int.TryParse(configuredThreadsText, out var configuredThreads) && configuredThreads is >= VoiceRefinerProtocol.DefaultThreads and <= VoiceRefinerProtocol.MaxThreads
+        ? configuredThreads
+        : -1;
+if (refinerThreads < VoiceRefinerProtocol.DefaultThreads)
+{
+    await RunUnavailableAsync("VOICE_REFINER_THREADS_INVALID", expectedIdentity, options, ReadParentPid(args));
+    return;
+}
 using var backend = NativeWhisperBackend.TryCreate(modelPath, nativePath, modelHash, nativeHash, manifestPath, expectedIdentity, expectedAbi, out var backendError);
 if (backend is null)
 {

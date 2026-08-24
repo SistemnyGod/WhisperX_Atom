@@ -135,6 +135,9 @@ def test_acceptance_registry_is_single_source_and_uses_container_gpu_release():
     assert "acceptance-scenarios.json" in gate
     assert "acceptance-scenarios.json" in bundle
     assert 'gpuWorkerMode' in gate and "container" in gate
+    assert "voice-shadow-corpus" in names
+    assert "far-field-voice" in names
+    assert "nativeSha256" in gate and "releaseThreadCount" in gate
 
 
 def test_runtime_doctor_publishes_fields_consumed_by_release_gate():

@@ -113,6 +113,12 @@ $summaryQualityGreen = @($chains | Where-Object { $_.summaryQualityGreen }).Coun
 $requiredAcceptanceScenarios = @($scenarioRegistry | Where-Object { @($_.requiredFor) -contains 'full' } | ForEach-Object { [string]$_.name })
 $acceptanceRoot = Join-Path $repo "artifacts\acceptance"
 $acceptanceBlockers = [System.Collections.Generic.List[string]]::new()
+$releaseIdentityPath = Join-Path $repo "artifacts\desktop\build-identity.json"
+$releaseManifest = if (Test-Path -LiteralPath $releaseIdentityPath -PathType Leaf) { Get-Content -LiteralPath $releaseIdentityPath -Raw | ConvertFrom-Json } else { $null }
+$releaseIdentity = if ($releaseManifest) { [string]$releaseManifest.buildIdentity } else { $null }
+$releaseThreadCount = if ($releaseManifest -and $releaseManifest.voiceRefinerThreads) { [int]$releaseManifest.voiceRefinerThreads } else { 1 }
+$voiceManifestPath = Join-Path $repo "apps\voice-host\Models\Voice\whisper-shadow\voice-refiner.manifest.json"
+$voiceManifest = if (Test-Path -LiteralPath $voiceManifestPath -PathType Leaf) { Get-Content -LiteralPath $voiceManifestPath -Raw | ConvertFrom-Json } else { $null }
 if ($requiredAcceptanceScenarios.Count -eq 0) { $acceptanceBlockers.Add('ACCEPTANCE_SCENARIO_REGISTRY_MISSING') }
 foreach ($scenario in $requiredAcceptanceScenarios) {
     $scenarioRoot = Join-Path $acceptanceRoot $scenario
@@ -127,6 +133,28 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                 # summaries and playable audio.  Keep the gate fail-closed
                 # until the operator records those content checks.
                 $scenarioReady = ($json.backupVerified -eq $true -and $json.cleanRestore -eq $true -and $json.contentChecksPassed -eq $true)
+            } elseif ($scenario -in @("voice-shadow-corpus", "far-field-voice")) {
+                $scenarioReady = ($json.schema -in @("voice-shadow-corpus-v2", "far-field-voice-acceptance-v2")) -and
+                    $json.status -eq "PASSED" -and
+                    ($scenario -ne "voice-shadow-corpus" -or $json.assetAttestationValid -eq $true) -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
+                    [string]$json.buildIdentity -eq $releaseIdentity
+                if ($scenarioReady -and $null -eq $json.refiner) {
+                    $scenarioReady = $false
+                } elseif ($scenarioReady) {
+                    $scenarioReady = -not [string]::IsNullOrWhiteSpace([string]$json.refiner.modelSha256) -and
+                        -not [string]::IsNullOrWhiteSpace([string]$json.refiner.nativeSha256) -and
+                        [int]$json.refiner.abiVersion -eq 1
+                    if ($scenarioReady -and $null -ne $voiceManifest) {
+                        $scenarioReady = [string]$json.refiner.modelRevision -eq [string]$voiceManifest.model.revision -and
+                            [string]$json.refiner.modelSha256 -eq [string]$voiceManifest.model.sha256 -and
+                            [string]$json.refiner.whisperCppRevision -eq [string]$voiceManifest.native.whisperCppRevision -and
+                            [string]$json.refiner.bridgeRevision -eq [string]$voiceManifest.native.bridgeRevision -and
+                            [string]$json.refiner.nativeSha256 -eq [string]$voiceManifest.native.sha256 -and
+                            [int]$json.threadCount -eq $releaseThreadCount
+                    } else { $scenarioReady = $false }
+                }
             } else {
                 $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
             }

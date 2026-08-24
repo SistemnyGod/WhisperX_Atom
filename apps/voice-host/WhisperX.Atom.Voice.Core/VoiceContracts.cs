@@ -168,7 +168,8 @@ public sealed record VoiceHostSnapshot(
     string? VoiceRefinerMode = null,
     string? VoiceRefinerWakeVerification = null,
     bool VoiceRefinerRefinedQuestionUsed = false,
-    string? VoiceRefinerFallbackReason = null);
+    string? VoiceRefinerFallbackReason = null,
+    int? VoiceRefinerThreads = null);
 
 public sealed record VoiceResponse(
     string Text,

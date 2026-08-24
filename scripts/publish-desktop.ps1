@@ -43,6 +43,11 @@ if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
 $dirtySuffix = if ($dirtyFiles.Count -gt 0) { "-dirty" } else { "" }
 $buildIdentity = "1.0.1+$gitCommit$dirtySuffix"
 Write-Host "Publishing build identity $buildIdentity"
+$voiceThreadsText = $env:VOICE_REFINER_THREADS
+$voiceThreads = 1
+if (-not [string]::IsNullOrWhiteSpace($voiceThreadsText)) {
+    if (-not [int]::TryParse($voiceThreadsText, [ref]$voiceThreads) -or $voiceThreads -lt 1 -or $voiceThreads -gt 4) { throw "VOICE_REFINER_THREADS_INVALID" }
+}
 if ($DevelopmentNoVoiceRefinerAssets) {
     if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
         throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
@@ -170,6 +175,7 @@ foreach ($target in @($serviceOut, $recorderHostOut)) {
     product = "WhisperX Atom"
     version = "1.0.1"
     buildIdentity = $buildIdentity
+    voiceRefinerThreads = $voiceThreads
     commit = $gitCommit
     dirty = $dirtyFiles.Count -gt 0
     runtimeEntrypoint = "WhisperX.Atom.Desktop.exe"

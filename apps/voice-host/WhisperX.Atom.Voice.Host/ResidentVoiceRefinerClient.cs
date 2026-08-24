@@ -24,6 +24,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
     private readonly int _nativeAbiVersion;
     private readonly TimeSpan _timeout;
     private readonly TimeSpan _hostTimeout;
+    private readonly int _threads;
     private readonly object _gate = new();
     private readonly FileAttestationCache _attestations = new();
     private readonly string? _manifestError;
@@ -31,7 +32,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
     private int _restartCount;
     private bool _disposed;
 
-    public ResidentVoiceRefinerClient(string executablePath, string modelPath, string nativeLibraryPath, TimeSpan timeout, string expectedBuildIdentity, TimeSpan? hostTimeout = null)
+    public ResidentVoiceRefinerClient(string executablePath, string modelPath, string nativeLibraryPath, TimeSpan timeout, string expectedBuildIdentity, TimeSpan? hostTimeout = null, int threads = VoiceRefinerProtocol.DefaultThreads)
     {
         _executablePath = Path.GetFullPath(executablePath);
         _modelPath = Path.GetFullPath(modelPath);
@@ -54,6 +55,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
         _hostTimeout = hostTimeout is { } configured && configured > TimeSpan.Zero
             ? configured
             : TimeSpan.FromMilliseconds(VoiceRefinerProtocol.HostInferenceTimeoutMs);
+        _threads = Math.Clamp(threads, VoiceRefinerProtocol.DefaultThreads, VoiceRefinerProtocol.MaxThreads);
         _expectedBuildIdentity = expectedBuildIdentity ?? string.Empty;
         Provider = "whisper.cpp-native";
         Model = Path.GetFileName(modelPath);
@@ -184,6 +186,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
                     ["VOICE_REFINER_MANIFEST"] = _manifestPath,
                     ["VOICE_REFINER_NATIVE_ABI_VERSION"] = VoiceRefinerProtocol.NativeAbiVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["VOICE_REFINER_HOST_TIMEOUT_MS"] = ((int)_hostTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["VOICE_REFINER_THREADS"] = _threads.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["WHISPERX_BUILD_IDENTITY"] = _expectedBuildIdentity
                 }
             });

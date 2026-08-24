@@ -10,6 +10,8 @@ public static class VoiceRefinerProtocol
     public const string PipePrefix = "WhisperXAtomVoiceRefiner-";
     public const int MaxPcmBytes = 960_000; // 30 seconds, 16 kHz mono PCM16
     public const int QueueCapacity = 2;
+    public const int DefaultThreads = 1;
+    public const int MaxThreads = 4;
     public const int HostInferenceTimeoutMs = 15_000;
     public const int ClientTimeoutMs = 18_000;
     public const int InferenceTimeoutExitCode = 73;

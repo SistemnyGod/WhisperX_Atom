@@ -2,13 +2,24 @@
 #include "whisper.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 struct whisperx_refiner_context {
     whisper_context * whisper = nullptr;
+    int threads = 1;
 };
+
+static int configured_threads() {
+    const char *value = std::getenv("VOICE_REFINER_THREADS");
+    if (value == nullptr || *value == '\0') return 1;
+    char *end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 1 || parsed > 4) return 1;
+    return static_cast<int>(parsed);
+}
 
 int whisperx_refiner_abi_version(void) {
     return WHISPERX_REFINER_ABI_VERSION;
@@ -17,6 +28,7 @@ int whisperx_refiner_abi_version(void) {
 void * whisperx_refiner_init(const char * model_path_utf8) {
     if (model_path_utf8 == nullptr || *model_path_utf8 == '\0') return nullptr;
     auto * context = new whisperx_refiner_context();
+    context->threads = configured_threads();
     auto params = whisper_context_default_params();
     params.use_gpu = false;
     params.flash_attn = false;
@@ -36,7 +48,7 @@ int whisperx_refiner_transcribe(void * raw_context, const int16_t * pcm16k_mono,
     for (int i = 0; i < samples_count; ++i) samples[static_cast<size_t>(i)] = static_cast<float>(pcm16k_mono[i]) / 32768.0f;
 
     auto params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.n_threads = 1;
+    params.n_threads = context->threads;
     params.no_context = true;
     params.no_timestamps = true;
     params.single_segment = false;

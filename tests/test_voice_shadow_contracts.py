@@ -118,4 +118,30 @@ def test_shadow_agreement_is_diagnostic_and_corpus_is_release_gated():
     assert "refinedAccuracyGain" in corpus
     assert "wakeByDistance" in corpus
     assert "actualRecorderMutation" in corpus
-    assert "if ($status -ne 'READY_FOR_REVIEW') { exit 2 }" in corpus
+    assert "if ($status -ne 'PASSED') { exit 2 }" in corpus
+    assert "operatorUnconfirmedCases" in corpus
+    assert "VOICE_REFINER_THREADS_INVALID" in corpus
+
+
+def test_voice_release_evidence_is_identity_bound_and_threads_are_capped():
+    corpus = (ROOT / "scripts/voice-shadow-corpus.ps1").read_text(encoding="utf-8-sig")
+    far_field = (ROOT / "scripts/e2e-far-field-voice.ps1").read_text(encoding="utf-8-sig")
+    gate = (ROOT / "scripts/release-gate.ps1").read_text(encoding="utf-8-sig")
+    assert "voice-refiner.manifest.json" in corpus
+    assert "VOICE_SHADOW_BUILD_IDENTITY_MISMATCH" in corpus
+    assert "far-field-voice-acceptance-v2" in far_field
+    assert "tts-playback" in far_field
+    assert "VOICE_REFINER_MANIFEST_MISMATCH" in far_field
+    assert "voice-shadow-corpus" in gate and "far-field-voice" in gate
+    assert "nativeSha256" in gate and "releaseThreadCount" in gate
+
+
+def test_voice_refiner_threads_use_safe_default_and_are_forwarded_to_host():
+    protocol = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceRefinerProtocol.cs").read_text(encoding="utf-8")
+    runtime = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/VoiceHostRuntime.cs").read_text(encoding="utf-8")
+    client = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/ResidentVoiceRefinerClient.cs").read_text(encoding="utf-8")
+    bridge = (ROOT / "apps/voice-host/native/whisper-refiner/whisperx_refiner_bridge.cpp").read_text(encoding="utf-8")
+    assert "DefaultThreads = 1" in protocol and "MaxThreads = 4" in protocol
+    assert "VOICE_REFINER_THREADS_INVALID" in runtime
+    assert '"VOICE_REFINER_THREADS"' in client
+    assert "configured_threads" in bridge and "params.n_threads = context->threads" in bridge
