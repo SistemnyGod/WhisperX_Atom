@@ -54,23 +54,29 @@ def build_deterministic_summary(
 
     segment_by_id = {str(segment.id): segment for segment in material}
     # Facts are a derived index only. Rehydrate every evidence id against the
-    # canonical segment set before it can enter the fallback projection.
-    derived_facts = list(facts or ())
-    if not derived_facts:
-        derived_facts = extract_transcript_facts(
-            [{"id": segment.id, "startMs": segment.start_ms, "endMs": segment.end_ms, "text": segment.text, "speakerId": segment.speaker}
-             for segment in material],
-            meeting_id="",
-            transcript_id="",
-            transcript_version=0,
-            minimum_confidence=0.70,
-        )
+    # canonical segment set before it can enter the fallback projection.  The
+    # value/subject from a caller-provided index is never trusted directly:
+    # matching canonical extraction supplies the value again from segment text.
+    canonical_facts = extract_transcript_facts(
+        [{"id": segment.id, "startMs": segment.start_ms, "endMs": segment.end_ms, "text": segment.text, "speakerId": segment.speaker}
+         for segment in material],
+        meeting_id="",
+        transcript_id="",
+        transcript_version=0,
+        minimum_confidence=0.70,
+    )
+    derived_facts = list(canonical_facts) if facts is None else list(facts)
     valid_facts: list[DerivedFact] = []
     for fact in derived_facts:
         evidence = tuple(str(item) for item in fact.evidence_segment_ids if str(item) in segment_by_id)
         if not evidence or fact.state != "ACTIVE":
             continue
-        valid_facts.append(fact)
+        canonical = next((candidate for candidate in canonical_facts
+                          if candidate.fact_type == fact.fact_type
+                          and tuple(str(item) for item in candidate.evidence_segment_ids) == evidence), None)
+        if canonical is None:
+            continue
+        valid_facts.append(canonical)
 
     decisions: list[dict[str, Any]] = []
     action_items: list[dict[str, Any]] = []
