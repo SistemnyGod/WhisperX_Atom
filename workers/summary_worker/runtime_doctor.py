@@ -182,10 +182,19 @@ def _resident_base_url() -> str | None:
         return None
 
 
+def _failed_contract_probes(error_code: str) -> dict[str, dict[str, Any]]:
+    """Keep the v2 probe surface stable even when model setup fails."""
+    return {
+        name: {"status": "FAILED", "error": error_code, "firstTokenMs": None, "totalMs": None, "chunks": 0}
+        for name in ("LLM_RUNTIME", "ASSISTANT_JSON", "ASSISTANT_GROUNDING", "SUMMARY_JSON", "MEETING_PROTOCOL_RU")
+    }
+
+
 def main() -> int:
     attestation = attest_llm_model()
     result: dict[str, Any] = {
         "schemaVersion": 1,
+        "doctorVersion": 2,
         "provider": "llama.cpp",
         "device": "CUDA",
         "model": attestation,
@@ -193,7 +202,7 @@ def main() -> int:
         "checkedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if not attestation.get("manifestValid"):
-        result.update({"status": "MODEL_INVALID", "probe": None})
+        result.update({"status": "MODEL_INVALID", "probe": None, "probes": _failed_contract_probes("MODEL_INVALID")})
         print(json.dumps(result, ensure_ascii=False))
         return 2
     runtime = LocalLlamaRuntime()
@@ -221,9 +230,9 @@ def main() -> int:
         }
         result["status"] = "READY" if all(item.get("status") == "READY" for item in result["probes"].values()) else "GENERATION_FAILED"
     except FileNotFoundError:
-        result.update({"status": "MODEL_LOAD_FAILED", "probe": None})
+        result.update({"status": "MODEL_LOAD_FAILED", "probe": None, "probes": _failed_contract_probes("MODEL_LOAD_FAILED")})
     except Exception as exc:  # doctor output is intentionally stable and secret-free
-        result.update({"status": "LLM_UNAVAILABLE", "probe": None, "error": type(exc).__name__})
+        result.update({"status": "LLM_UNAVAILABLE", "probe": None, "probes": _failed_contract_probes(type(exc).__name__), "error": type(exc).__name__})
     finally:
         if started_here:
             runtime.stop()
