@@ -26,13 +26,22 @@ dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voic
 # Long-recording false-activation check
 dotnet run --project apps/voice-host/WhisperX.Atom.Voice.Host/WhisperX.Atom.Voice.Host.csproj -c Release -- --replay "C:\path\meeting.wav" --dry-run
 
-# Far-field matrix (0.5/1/2/3 m × quiet/office/ventilation/conversation/TTS playback)
+# Fixture replay is diagnostic only; it cannot produce production PASSED.
 pwsh -NoProfile -File scripts/e2e-far-field-voice.ps1 -Mode Installed `
   -FixtureRoot "C:\path\far-field-fixtures" `
   -OutputPath artifacts/acceptance/far-field-voice-v2.json
+
+# Production evidence: live operator-assisted matrix, privacy-safe metrics only
+$identity = (Get-Content artifacts/desktop/build-identity.json | ConvertFrom-Json).buildIdentity
+$voiceHost = "C:\path\to\WhisperX.Atom.Voice.Host.exe"
+pwsh -NoProfile -File scripts/run-far-field-voice-live.ps1 `
+  -VoiceHostPath $voiceHost `
+  -VoiceManifestPath "apps/voice-host/Models/Voice/whisper-shadow/voice-refiner.manifest.json" `
+  -BuildIdentity $identity -OperatorConfirmed `
+  -OutputPath artifacts/acceptance/far-field-voice/live.json
 ```
 
-The matrix expects explicit replay fixtures named
+The diagnostic matrix expects explicit replay fixtures named
 `<distance>\<condition>.wav`. It reports recall, recognized endpoints and
 false activations without writing recorder data or forwarding commands. A
 missing fixture, dirty Voice Host identity, timeout or false activation keeps

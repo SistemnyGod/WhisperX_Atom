@@ -1,10 +1,25 @@
 # «Мифодий»: фактическое состояние и план завершения
 
-Дата ревью: 18 августа 2026 года.
+Дата последнего обновления: 24 августа 2026 года.
 
 Этот документ отделяет реализованный код от установленного runtime и от
-запланированных функций. Он является текущим источником истины для голосового
-помощника и Assistant-контура.
+запланированных функций. Для release identity, Voice assets, hardware gates и
+актуальных блокеров приоритет имеет [Production readiness](production-readiness.md).
+
+## Важное обновление RC
+
+На clean source `894966a` завершены bounded natural command normalization,
+fail-closed Voice release gate, deterministic summary v2, LLM Doctor v2,
+structured grounding/history isolation и privacy-safe Mifodiy QA runners.
+Автоматические source checks зелёные: Python `827 passed, 62 skipped`, Voice
+`33/33`, API `20/20`, Voice Host Release build/self-test. Это не является
+установленной Voice/Assistant приёмкой.
+
+Текущий Docker runtime остаётся на старом image identity
+`1.0.1-21a28029a49b`; исходники в контейнеры не монтируются. Verified Voice
+assets, live 700-case corpus, far-field matrix, thread benchmark и
+authenticated 700-case Assistant QA пока отсутствуют. Поэтому состояние RC —
+`SOURCE_TESTS_GREEN / RELEASE_BLOCKED`, а не `PRODUCTION_READY`.
 
 ## Обозначения готовности
 
@@ -190,19 +205,25 @@ Broker и текущую пользовательскую сессию.
 - `AUTOMATED_VERIFIED`: `.env.lan` включает `ASSISTANT_ENABLED=true` и
   `AUTO_SUMMARY_ENABLED=true`.
 
-Эти проверки не заменяют реальный voice-to-answer gate.
+Эти проверки относятся к ранее снятому healthy Docker inventory и не означают
+совпадение image identity с текущим source. Они также не заменяют реальный
+voice-to-answer gate.
 
 ## Текущее состояние установленного приложения
 
-Рабочая ветка на момент ревью основана на commit
-`d5e4a2639913d74da9f9ae92061eef406e1bc1c2` и содержит дополнительные
-незакоммиченные изменения.
+Записи ниже о старом установленном Desktop/Voice Host сохранены как история и
+не являются текущей identity. Для текущей проверки действует следующая матрица:
 
-Установленные Desktop и Voice Host имеют identity
-`1.0.1+349570081037edae4ebfc3984ea1477d939c65d3-dirty`. Следовательно, текущие
-изменения Assistant-вопросов и live Irina TTS ещё не подтверждены в
-`Program Files`. До новой чистой сборки runtime нельзя помечать как
-`VOICE_ASSISTANT_READY`.
+| Контур | Текущее состояние |
+| --- | --- |
+| Исходники | baseline `894966a`; документационные изменения требуют новой release identity |
+| Docker Server Node | healthy, но image `1.0.1-21a28029a49b` старше исходников |
+| Desktop/Voice Host | новая установка из текущего source не подтверждена |
+| Voice-to-answer | `RUNTIME_REQUIRED`; нужен authenticated smoke с микрофоном |
+| `VOICE_ASSISTANT_READY` | не выставлять до clean installer, совпадающей identity и hardware evidence |
+
+Исходники не монтируются в контейнеры. Поэтому healthy Docker не доказывает,
+что в нём уже работают изменения текущей ветки.
 
 ## Найденные дефекты и незавершённые части
 

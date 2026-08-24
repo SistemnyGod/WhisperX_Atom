@@ -20,6 +20,7 @@
 | [API и IPC](api-and-ipc.md) | Основные REST, SSE, TUS и Named Pipe контракты |
 | [Тестирование](testing.md) | Сборка, targeted tests, doctor и E2E |
 | [«Мифодий»: текущее состояние](mifodiy-current-state.md) | Реализованные функции, подтверждённые gates и оставшиеся дефекты Voice/Assistant |
+| [Production readiness](production-readiness.md) | Актуальная identity, safety-инварианты, Voice/LLM/QA gates и текущие блокеры выпуска |
 
 ## Справочные и исторические документы
 

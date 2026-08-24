@@ -99,6 +99,65 @@ if (-not (Test-Path -LiteralPath $audio -PathType Leaf)) { throw "REGRESSION_AUD
 - GPU E2E зависит от локального CUDA/WhisperX окружения и HF доступа.
 - Qwen Summary/Assistant не является условием готовности Transcript MVP, если `AUTO_SUMMARY_ENABLED=false`.
 - Исторические contract tests могут проверять структуру кода; для критических изменений приоритет имеют behavioral tests и реальный E2E.
+
+## Python 3.12 и Mifodiy QA
+
+Полный Python suite запускается только в подготовленной среде Python 3.12.
+`pytest` не является системной зависимостью проекта: установите pinned lock из
+локального wheelhouse без сети:
+
+```powershell
+py -3.12 -m pip install --no-index `
+  --find-links artifacts/python-test-wheelhouse-source `
+  --require-hashes -r requirements.test.lock.txt
+py -3.12 -m pytest -q
+```
+
+Offline reasoning и synthetic A→B→C — это preflight, а не release acceptance:
+
+```powershell
+py -3.12 scripts/run-mifodiy-reasoning-qa.py --production `
+  --output artifacts/acceptance/mifodiy-reasoning-preflight.json
+py -3.12 scripts/run-mifodiy-intelligence-e2e.py `
+  --output artifacts/acceptance/mifodiy-intelligence-e2e.json
+```
+
+Для production gate нужен `scripts/run-mifodiy-qa.ps1` с
+`executionTarget=ASSISTANT_API`, реально выполненными случаями и ненулевым
+числом executed cases. Local status-команды допускаются только в
+`VOICE_LOCAL` behavioral runner; через Assistant API они являются ошибкой
+корпуса. В отчёте должны быть IDs, hashes, metrics и pass-flags, но не вопрос,
+ответ или evidence text.
+
+## Voice acceptance: diagnostic против production
+
+`scripts/e2e-far-field-voice.ps1` и fixture replay полезны для contract/diagnostic
+проверки, но не могут сформировать production `PASSED`. Для release нужен live
+операторский прогон:
+
+```powershell
+$identity = (Get-Content artifacts/desktop/build-identity.json | ConvertFrom-Json).buildIdentity
+$voiceHost = "C:\path\to\WhisperX.Atom.Voice.Host.exe"
+pwsh -NoProfile -File scripts/run-far-field-voice-live.ps1 `
+  -VoiceHostPath $voiceHost `
+  -VoiceManifestPath "apps/voice-host/Models/Voice/whisper-shadow/voice-refiner.manifest.json" `
+  -BuildIdentity $identity -OperatorConfirmed `
+  -OutputPath artifacts/acceptance/far-field-voice/live.json
+pwsh -NoProfile -File scripts/voice-shadow-corpus.ps1 `
+  -BuildIdentity $identity -CorpusRoot "C:\ProgramData\WhisperXAtom\QA\Mifodiy\voice-shadow" `
+  -CaptureMode LIVE `
+  -OutputPath artifacts/acceptance/voice-shadow-corpus/evidence.json
+```
+
+Требования: не менее 700 подтверждённых случаев, матрица
+`0.5/1/2/3 м × quiet/office/ventilation/conversation/TTS playback`, минимум 20
+повторов на ячейку, ноль ложных Recorder mutations/STOP, timeout rate менее 1%,
+очередь без drops и совпадающая identity assets. Acceptance artifact не содержит
+аудио, PCM, расшифровку или текст Assistant.
+
+Актуальные результаты и причины `BLOCKED` перечислены в
+[Production readiness](production-readiness.md). Не переводите `SKIPPED`,
+`CONTRACT_ONLY` или `BLOCKED_BY_HARDWARE` в зелёный статус вручную.
 ### Far-field voice acceptance
 
 The installed replay gate uses explicit WAV fixtures for every distance and

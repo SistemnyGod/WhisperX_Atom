@@ -62,6 +62,34 @@ Copy-Item .env.example .env
 | `WHISPERX_STORAGE_POSTPROCESSING_RESERVE_BYTES` | Резерв под WAV/FLAC/temp после завершения захвата | `1073741824` |
 | `WHISPERX_STORAGE_EMERGENCY_STOP_FREE_BYTES` | Нижний порог свободного места во время активной записи | `1207959552` |
 
+### Голосовой контур и Refiner
+
+| Переменная | Назначение | Production policy |
+| --- | --- | --- |
+| `VOICE_ASR_REFINER_MODE` | Режим resident Voice Refiner | `SHADOW`; `ASSISTANT_ONLY` и `WAKE_AUDIT` только после corpus gates |
+| `VOICE_REFINER_THREADS` | CPU-параллелизм Refiner | только `1`, `2` или `4`; invalid → default `1` |
+| `VOICE_ASR_REFINER_HOST_TIMEOUT_MS` | Watchdog timeout native Host | `15000` |
+| `VOICE_ASR_REFINER_CLIENT_TIMEOUT_MS` | Timeout клиента IPC | `18000` |
+| `VOICE_ASR_REFINER_MODEL` / `VOICE_ASR_REFINER_SHA256` | Проверенная multilingual `ggml-small` | обязательны для production assets |
+| `VOICE_ASR_REFINER_NATIVE_LIBRARY` / `VOICE_ASR_REFINER_NATIVE_SHA256` | Проверенный whisper.cpp bridge ABI 1 | обязательны для production assets |
+| `VOICE_ASR_REFINER_HOST_EXECUTABLE` | Путь к resident Refiner Host | не скачивается runtime |
+| `WHISPERX_WAKE_COMPAT_ATOM` | Исторический alias «Атом» | `false` по умолчанию |
+
+Пути модели, bridge и Host должны соответствовать одному manifest schema v2 и
+одной `buildIdentity`. Не заполняйте их плавающими версиями или URL загрузки.
+
+### Summary и Assistant fallback
+
+| Переменная | Назначение | Значение |
+| --- | --- | --- |
+| `DETERMINISTIC_SUMMARY_MODEL` | Версия безопасного fallback summary | `deterministic-v2` |
+| `ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS` | Глубина transcript fallback | `365` |
+| `ASSISTANT_EMBEDDING_REQUIRE_VERIFIED` | Fail-closed для ONNX snapshot | `true` в Server Bundle |
+
+При отказе Qwen запись, V1 и V2 продолжают работать; summary сохраняется как
+`DETERMINISTIC_FALLBACK` с `NEEDS_REVIEW`/`VERIFIED_PARTIAL`, если transcript
+quality gate пройден.
+
 ## Каталоги
 
 | Переменная | Содержимое |

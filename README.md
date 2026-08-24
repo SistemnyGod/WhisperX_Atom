@@ -85,6 +85,7 @@ WhisperX Atom — локальная система записи совещан�
 - [Эксплуатация host-runtime](docs/operations-host-runtime.md)
 - [API и IPC](docs/api-and-ipc.md)
 - [Тестирование и приёмка](docs/testing.md)
+- [Production readiness и текущие release-gates](docs/production-readiness.md)
 
 Исторические ADR, планы и WSL2-инструкции сохранены в [docs/](docs/) и отмечены в индексе как справочные материалы.
 
@@ -101,3 +102,8 @@ compose.dev.yml        Docker core и резервный container GPU runtime
 ```
 
 Legacy `app.py`, `app/` и старые watch/runtime-сценарии не удалены: они используются для совместимости и regression-проверок, но не являются вторым рекомендуемым production pipeline.
+
+Текущий source и Docker identity могут различаться: исходники не монтируются в
+контейнеры. Перед release сверяйте [Production readiness](docs/production-readiness.md)
+и запускайте `scripts/release-gate.ps1`; одного `docker ps` или зелёных unit-тестов
+недостаточно для production-приёмки.

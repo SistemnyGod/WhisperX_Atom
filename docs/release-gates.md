@@ -22,12 +22,20 @@ The following evidence is deliberately outside commit CI and must be recorded as
 - delete-locked-media recovery;
 - 30-minute, 2-hour, 4-hour and 8-hour endurance;
 - backup/restore acceptance;
-- RBAC isolation.
+- RBAC isolation;
+- verified Voice Refiner assets and manifest v2;
+- `voice-refiner-thread-benchmark` for the selected 1/2/4-thread mode;
+- live `voice-shadow-corpus` with at least 700 manually confirmed cases;
+- live `far-field-voice` matrix for 0.5/1/2/3 m and quiet/office/ventilation/
+  conversation/TTS playback;
+- authenticated `mifodiy-intelligence-acceptance` with at least 700 executed
+  Assistant API cases and complete expected/actual result flags.
 
 Set `MVP_V1_READY=true` only after every required record is available. The
-release script is fail-closed: a missing physical/hardware artifact blocks the
-release even when all .NET/Python CI checks are green. Create a release tag
-only after the protected `main` merge is green.
+release script is fail-closed: a missing physical/hardware artifact, offline
+preflight, fixture replay, mismatched identity, `BLOCKED` or
+`BLOCKED_BY_HARDWARE` blocks the release even when all .NET/Python CI checks are
+green. Create a release tag only after the protected `main` merge is green.
 
 Acceptance artifacts live below `artifacts/acceptance/<scenario>/` and must be
 JSON with `status` (or `result`) equal to `READY`, `PASSED` or `GREEN` (or
@@ -70,6 +78,10 @@ endurance-2h
 8h-recording
 backup-restore
 rbac-isolation
+voice-refiner-thread-benchmark
+voice-shadow-corpus
+far-field-voice
+mifodiy-intelligence-acceptance
 ```
 
 If branch protection cannot be changed by automation, open `Settings` → `Rules` → `Rulesets` → `New branch ruleset` for `main` (or `Settings` → `Branches` on repositories using legacy protection). Require a pull request, require the four named checks above, require the branch to be up to date, and disallow force pushes and deletions.
