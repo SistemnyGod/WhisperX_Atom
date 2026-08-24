@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
+using WhisperX.Atom.Recorder;
 using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
 
@@ -26,8 +27,11 @@ public sealed class HomeViewModel : ObservableObject
     private string _microphoneSignalState = "UNKNOWN";
     private double _microphoneLevel;
     private string _microphoneDbLabel = "Нет измерения";
+    private string _microphoneRmsDbText = "RMS —";
+    private string _microphonePeakDbText = "Peak —";
     private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
     private bool _microphoneTelemetryStale = true;
+    private int _voiceProcessingGainDb;
     private string _storageText = "Ожидание проверки";
     private string _pendingUploadsText = "—";
     private string _archiveText = "Путь архива будет показан после проверки Agent";
@@ -42,10 +46,17 @@ public sealed class HomeViewModel : ObservableObject
     private string _activeProcessingTitle = "Нет активной обработки";
     private string _activeProcessingStage = "Очередь обработки пуста";
     private int _activeProcessingProgress;
+    private readonly Dictionary<string, MeetingMetrics> _meetingMetrics = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, LocalSessionSummary> _localSessionsByMeeting = new(StringComparer.OrdinalIgnoreCase);
 
-    public HomeViewModel(FrontendServices services) => _services = services;
+    public HomeViewModel(FrontendServices services)
+    {
+        _services = services;
+        VoiceProcessingGainDb = Math.Clamp(services.Settings.Load().VoiceProcessingGainDb, 0, 18);
+    }
 
     public ObservableCollection<DesktopMeeting> RecentMeetings { get; } = [];
+    public ObservableCollection<HomeMeetingRowViewModel> RecentMeetingRows { get; } = [];
     public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
     public bool ApiAvailable { get => _apiAvailable; private set => SetProperty(ref _apiAvailable, value); }
     public bool AgentAvailable { get => _agentAvailable; private set => SetProperty(ref _agentAvailable, value); }
@@ -61,8 +72,20 @@ public sealed class HomeViewModel : ObservableObject
     public string MicrophoneSignalState { get => _microphoneSignalState; private set => SetProperty(ref _microphoneSignalState, value); }
     public double MicrophoneLevel { get => _microphoneLevel; private set => SetProperty(ref _microphoneLevel, value); }
     public string MicrophoneDbLabel { get => _microphoneDbLabel; private set => SetProperty(ref _microphoneDbLabel, value); }
+    public string MicrophoneRmsDbText { get => _microphoneRmsDbText; private set => SetProperty(ref _microphoneRmsDbText, value); }
+    public string MicrophonePeakDbText { get => _microphonePeakDbText; private set => SetProperty(ref _microphonePeakDbText, value); }
     public IReadOnlyList<double> MicrophoneWaveform { get => _microphoneWaveform; private set => SetProperty(ref _microphoneWaveform, value); }
     public bool MicrophoneTelemetryStale { get => _microphoneTelemetryStale; private set => SetProperty(ref _microphoneTelemetryStale, value); }
+    public int VoiceProcessingGainDb
+    {
+        get => _voiceProcessingGainDb;
+        private set
+        {
+            if (!SetProperty(ref _voiceProcessingGainDb, Math.Clamp(value, 0, 18))) return;
+            OnPropertyChanged(nameof(VoiceProcessingGainText));
+        }
+    }
+    public string VoiceProcessingGainText => VoiceProcessingGainDb == 0 ? "Без усиления" : $"+{VoiceProcessingGainDb} дБ";
     public string StorageText { get => _storageText; private set => SetProperty(ref _storageText, value); }
     public string PendingUploadsText { get => _pendingUploadsText; private set => SetProperty(ref _pendingUploadsText, value); }
     public string ArchiveText { get => _archiveText; private set => SetProperty(ref _archiveText, value); }
@@ -97,6 +120,18 @@ public sealed class HomeViewModel : ObservableObject
     }
     public string ActiveProcessingProgressText => $"{ActiveProcessingProgress}%";
     public bool HasMeetings => RecentMeetings.Count > 0;
+
+    public async Task<bool> SetVoiceProcessingGainAsync(int gainDb, CancellationToken cancellationToken = default)
+    {
+        var normalized = Math.Clamp(gainDb, 0, 18);
+        var current = _services.Settings.Load();
+        _services.Settings.Save(current with { VoiceProcessingGainDb = normalized });
+        VoiceProcessingGainDb = normalized;
+        OnPropertyChanged(nameof(VoiceProcessingGainText));
+        var ok = await _services.VoiceHost.SetVoiceProcessingGainAsync(normalized, cancellationToken);
+        if (!ok) ErrorText = "Усиление голоса недоступно в текущем Voice Host. Запись и архив не изменены.";
+        return ok;
+    }
 
     public async Task StartPollingAsync(CancellationToken cancellationToken = default)
     {
@@ -185,6 +220,8 @@ public sealed class HomeViewModel : ObservableObject
                 MicrophoneTelemetryStale = health.MicrophoneTelemetryStale;
                 MicrophoneLevel = Math.Clamp((health.MicrophonePeak ?? 0d) * 100d, 0d, 100d);
                 MicrophoneDbLabel = health.MicrophoneRmsDb is double rms ? $"{rms:0.0} dBFS" : "Нет измерения";
+                MicrophoneRmsDbText = health.MicrophoneRmsDb is double rmsValue ? $"RMS {rmsValue:0.0} dBFS" : "RMS —";
+                MicrophonePeakDbText = health.MicrophonePeak is double peakValue && peakValue > 0 ? $"Peak {20d * Math.Log10(Math.Clamp(peakValue, 0.000001, 1d)):0.0} dBFS" : "Peak —";
                 MicrophoneWaveform = AppendWaveformSample(MicrophoneWaveform, health.MicrophonePeak);
             }
             else
@@ -197,6 +234,8 @@ public sealed class HomeViewModel : ObservableObject
                 MicrophoneTelemetryStale = true;
                 MicrophoneLevel = 0;
                 MicrophoneDbLabel = "Нет измерения";
+                MicrophoneRmsDbText = "RMS —";
+                MicrophonePeakDbText = "Peak —";
                 MicrophoneWaveform = Array.Empty<double>();
             }
 
@@ -228,6 +267,8 @@ public sealed class HomeViewModel : ObservableObject
             MicrophoneTelemetryStale = true;
             MicrophoneLevel = 0;
             MicrophoneDbLabel = "Нет измерения";
+            MicrophoneRmsDbText = "RMS —";
+            MicrophonePeakDbText = "Peak —";
             MicrophoneWaveform = Array.Empty<double>();
             ErrorText = SafeError(ex);
         }
@@ -261,12 +302,14 @@ public sealed class HomeViewModel : ObservableObject
             {
                 MeetingsMessage = "API недоступен. Проверьте подключение в Настройках.";
                 RecentMeetings.Clear();
+                RecentMeetingRows.Clear();
                 ResetMeetingMetrics("История недоступна", "Подключите API, чтобы увидеть конвейер");
             }
             else if (!_services.Backend.HasSession)
             {
                 MeetingsMessage = "Войдите в API, чтобы загрузить совещания";
                 RecentMeetings.Clear();
+                RecentMeetingRows.Clear();
                 ResetMeetingMetrics("Войдите в API", "После входа здесь появится состояние конвейера");
             }
             else
@@ -289,6 +332,7 @@ public sealed class HomeViewModel : ObservableObject
             ServerSummary = "Сервер недоступен";
             WhisperXSummary = "Статус не получен";
             RecentMeetings.Clear();
+            RecentMeetingRows.Clear();
             ResetMeetingMetrics("История недоступна", "Подключите API, чтобы увидеть конвейер");
             OnPropertyChanged(nameof(HasMeetings));
         }
@@ -296,6 +340,7 @@ public sealed class HomeViewModel : ObservableObject
 
     private void ResetMeetingMetrics(string title, string stage)
     {
+        _meetingMetrics.Clear();
         ProcessingText = "—";
         ReadySummariesText = "—";
         OpenTasksText = "—";
@@ -312,21 +357,34 @@ public sealed class HomeViewModel : ObservableObject
             .ToArray();
         try
         {
+            _localSessionsByMeeting.Clear();
+            try
+            {
+                var local = await _services.Recorder.ListLocalSessionsAsync(200, cancellationToken);
+                foreach (var session in local.LocalSessions ?? [])
+                    if (session.MeetingId is Guid meetingId)
+                        _localSessionsByMeeting[meetingId.ToString()] = session;
+            }
+            catch { }
             var aggregate = await _services.Backend.GetMeetingMetricsAsync(meetingIds, cancellationToken);
             var byMeeting = aggregate.ToDictionary(item => item.MeetingId, StringComparer.OrdinalIgnoreCase);
             var aggregateMetrics = RecentMeetings.Select(meeting =>
             {
                 if (!byMeeting.TryGetValue(meeting.Id, out var item))
-                    return new MeetingMetrics(meeting.DisplayTitle, false, false, 0, meeting.Status, 0);
+                    return new MeetingMetrics(meeting.Id, meeting.DisplayTitle, false, false, 0, meeting.Status, 0, [], null, null);
                 var current = item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status))
                     ?? item.Jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
                 return new MeetingMetrics(
+                    meeting.Id,
                     meeting.DisplayTitle,
                     item.Jobs.Any(job => !IsTerminal(job.Status)),
                     SummaryPresentation.IsDisplayable(item.Summary),
                     item.OpenTasks.Count,
                     current?.Stage ?? meeting.Status,
-                    Math.Clamp(current?.Progress ?? 0, 0, 100));
+                    Math.Clamp(current?.Progress ?? 0, 0, 100),
+                    item.Pipeline,
+                    item.Jobs.FirstOrDefault(job => job.Retryable),
+                    item.Summary?.ErrorCode);
             }).ToArray();
             ApplyMeetingMetrics(aggregateMetrics);
             return;
@@ -348,13 +406,23 @@ public sealed class HomeViewModel : ObservableObject
         OpenTasksText = metrics.Sum(item => item.OpenTasks).ToString(CultureInfo.InvariantCulture);
         var active = processing.OrderByDescending(item => item.Progress).FirstOrDefault();
         ActiveProcessingTitle = active?.Title ?? "Нет активной обработки";
-        ActiveProcessingStage = active is null ? "Все последние совещания обработаны" : $"{DisplayStage(active.Stage)} · {active.Progress}%";
-        ActiveProcessingProgress = active?.Progress ?? 0;
+        ActiveProcessingStage = active is null ? "Все последние совещания обработаны" : active.DisplayStage;
+        ActiveProcessingProgress = 0;
+        _meetingMetrics.Clear();
+        foreach (var item in metrics) _meetingMetrics[item.MeetingId] = item;
+        RecentMeetingRows.Clear();
+        foreach (var meeting in RecentMeetings)
+        {
+            _meetingMetrics.TryGetValue(meeting.Id, out var item);
+            _localSessionsByMeeting.TryGetValue(meeting.Id, out var localSession);
+            RecentMeetingRows.Add(HomeMeetingRowViewModel.Create(meeting, item, localSession));
+        }
+        OnPropertyChanged(nameof(RecentMeetingRows));
     }
 
     private async Task<MeetingMetrics> LoadMeetingMetricsAsync(DesktopMeeting meeting, CancellationToken cancellationToken)
     {
-            if (!Guid.TryParse(meeting.Id, out var meetingId)) return new MeetingMetrics(meeting.DisplayTitle, false, false, 0, "Этап не указан", 0);
+            if (!Guid.TryParse(meeting.Id, out var meetingId)) return new MeetingMetrics(meeting.Id, meeting.DisplayTitle, false, false, 0, "Этап не указан", 0, [], null, null);
         try
         {
             var jobsTask = _services.Backend.GetJobsAsync(meetingId, cancellationToken);
@@ -366,17 +434,21 @@ public sealed class HomeViewModel : ObservableObject
             var tasks = await tasksTask;
             var current = jobs.OrderByDescending(job => job.Attempt).FirstOrDefault(job => !IsTerminal(job.Status)) ?? jobs.OrderByDescending(job => job.Attempt).FirstOrDefault();
             return new MeetingMetrics(
+                meeting.Id,
                 meeting.DisplayTitle,
                 jobs.Any(job => !IsTerminal(job.Status)),
                 SummaryPresentation.IsDisplayable(summary),
                 tasks.Count(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase) && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)),
                 current?.Stage ?? meeting.Status,
-                Math.Clamp(current?.Progress ?? 0, 0, 100));
+                Math.Clamp(current?.Progress ?? 0, 0, 100),
+                [],
+                jobs.FirstOrDefault(job => job.Retryable),
+                summary?.ErrorCode);
         }
         catch
         {
             var isProcessing = !IsTerminal(meeting.Status);
-            return new MeetingMetrics(meeting.Title, isProcessing, false, 0, meeting.Status, 0);
+            return new MeetingMetrics(meeting.Id, meeting.Title, isProcessing, false, 0, meeting.Status, 0, [], null, "MEETING_METRICS_UNAVAILABLE");
         }
     }
 
@@ -416,6 +488,8 @@ public sealed class HomeViewModel : ObservableObject
 
     private static bool IsTerminal(string status) => status.Equals("READY", StringComparison.OrdinalIgnoreCase)
         || status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("COMPLETED", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("CONFIRMED", StringComparison.OrdinalIgnoreCase)
         || status.Equals("ADMIN_REVIEW", StringComparison.OrdinalIgnoreCase)
         || status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
         || status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
@@ -446,7 +520,155 @@ public sealed class HomeViewModel : ObservableObject
         };
     }
 
-    private sealed record MeetingMetrics(string Title, bool IsProcessing, bool HasSummary, int OpenTasks, string Stage, int Progress);
+    public sealed record MeetingMetrics(string MeetingId, string Title, bool IsProcessing, bool HasSummary, int OpenTasks, string Stage, int Progress, IReadOnlyList<DesktopPipelineRun> Pipeline, DesktopJob? RetryableJob, string? ErrorCode)
+    {
+        public string DisplayStage => Stage switch
+        {
+            "TRANSCRIBING" or "ALIGNING" or "DIARIZING" => "Получение стенограммы",
+            "SUMMARIZING" => "Саммари",
+            "ADMIN_REVIEW" => "Требует проверки",
+            _ => string.IsNullOrWhiteSpace(Stage) ? "Этап не указан" : DisplayStageValue(Stage)
+        };
+
+        private static string DisplayStageValue(string value) => value switch
+        {
+            "READY" or "PARTIAL_READY" => "Стенограмма готова",
+            _ => value
+        };
+    }
 
     private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Не удалось обновить состояние рабочего стола.");
+}
+
+public sealed class HomeMeetingRowViewModel
+{
+    private static readonly IReadOnlyList<string> PipelineSteps =
+        ["Доставляется", "Доставлено", "Получение стенограммы", "Стенограмма готова", "Саммари", "Саммари готово"];
+
+    private HomeMeetingRowViewModel(DesktopMeeting meeting, MeetingRowState state)
+    {
+        Meeting = meeting;
+        CreatedAtText = meeting.CreatedAtText;
+        DisplayTitle = meeting.DisplayTitle;
+        Description = meeting.Description ?? string.Empty;
+        Steps = PipelineSteps;
+        CurrentIndex = state.CurrentIndex;
+        CurrentStageText = state.CurrentStageText;
+        ErrorText = state.ErrorText;
+        LocalSessionId = state.LocalSessionId;
+        RetryJobId = state.RetryJobId;
+        CanStopDelivery = state.CanStopDelivery;
+        CanRetry = state.CanRetry;
+        CanCancel = state.CanCancel;
+        CanDelete = state.CanDelete;
+    }
+
+    public DesktopMeeting Meeting { get; }
+    public string Id => Meeting.Id;
+    public string CreatedAtText { get; }
+    public string DisplayTitle { get; }
+    public string Description { get; }
+    public string StatusText => Meeting.StatusText;
+    public IReadOnlyList<string> Steps { get; }
+    public int CurrentIndex { get; }
+    public string CurrentStageText { get; }
+    public string? ErrorText { get; }
+    public string? LocalSessionId { get; }
+    public string? RetryJobId { get; }
+    public bool CanStopDelivery { get; }
+    public bool CanRetry { get; }
+    public bool CanCancel { get; }
+    public bool CanDelete { get; }
+
+    public static HomeMeetingRowViewModel Create(DesktopMeeting meeting, HomeViewModel.MeetingMetrics? metrics, LocalSessionSummary? localSession)
+    {
+        string? error = null;
+        var stage = meeting.Status;
+        var currentIndex = 0;
+        string? retryJobId = null;
+        var hasSummary = false;
+        IReadOnlyList<DesktopPipelineRun> pipeline = [];
+        if (metrics is not null)
+        {
+            stage = metrics.Stage;
+            hasSummary = metrics.HasSummary;
+            retryJobId = metrics.RetryableJob?.Id;
+            error = metrics.ErrorCode;
+            pipeline = metrics.Pipeline ?? [];
+        }
+
+        var snapshot = pipeline.Select(run => run.Snapshot).FirstOrDefault(item => item is not null);
+        var deliveryDone = IsDone(snapshot?.Delivery.Status)
+            || pipeline.Any(run => IsDone(run.MediaStatus))
+            || meeting.Status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+            || meeting.Status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase);
+        var mediaDone = IsDone(snapshot?.Media.Status) || pipeline.Any(run => IsDone(run.MediaStatus));
+        var transcriptDone = IsDone(snapshot?.TranscriptV2.Status)
+            || IsDone(snapshot?.TranscriptV1.Status)
+            || pipeline.Any(run => IsDone(run.TranscriptV2Status) || IsDone(run.TranscriptV1Status))
+            || meeting.Status.Equals("READY", StringComparison.OrdinalIgnoreCase)
+            || meeting.Status.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase);
+        var summaryRunning = IsRunning(snapshot?.Summary.Status)
+            || pipeline.Any(run => IsRunning(run.SummaryJobStatus));
+        if (localSession is not null && localSession.DeliveryState is not ("CONFIRMED" or "COMPLETED")) deliveryDone = false;
+
+        // Older API versions may not expose a pipeline snapshot. Keep the
+        // compact stepper truthful by using the job stage as a compatibility
+        // signal instead of falling back to the first delivery step.
+        switch (stage.ToUpperInvariant())
+        {
+            case "MEDIA_READY":
+            case "ASR_QUEUED":
+            case "TRANSCRIBING":
+            case "ALIGNING":
+            case "DIARIZING":
+            case "SUMMARIZING":
+            case "READY":
+            case "PARTIAL_READY":
+                deliveryDone = true;
+                mediaDone = true;
+                break;
+        }
+        if (stage.Equals("READY", StringComparison.OrdinalIgnoreCase) || stage.Equals("PARTIAL_READY", StringComparison.OrdinalIgnoreCase))
+            transcriptDone = true;
+
+        if (!deliveryDone) currentIndex = 0;
+        else if (!mediaDone) currentIndex = 1;
+        else if (!transcriptDone) currentIndex = 2;
+        else if (hasSummary) currentIndex = 5;
+        else if (summaryRunning || stage.Equals("SUMMARIZING", StringComparison.OrdinalIgnoreCase)) currentIndex = 4;
+        else currentIndex = 3;
+
+        if (meeting.Status is "FAILED" or "ADMIN_REVIEW" && string.IsNullOrWhiteSpace(error)) error = meeting.Status;
+        if (!string.IsNullOrWhiteSpace(error)) error = FormatMeetingError(error);
+        var activeRecording = localSession?.State is "RECORDING" or "PAUSED";
+        var canStop = !activeRecording && localSession is not null
+            && localSession.DeliveryState is not ("CONFIRMED" or "COMPLETED" or "PAUSED")
+            && localSession.State is not ("FINALIZED" or "CANCELLED");
+        var canRetry = !activeRecording && (localSession is not null
+            && (localSession.DeliveryState is "PAUSED" or "DELIVERY_ERROR" or "DELIVERY_FAILED" or "PENDING_SERVER" or "WAITING_SERVER" or "WAITING_SERVER_ASSEMBLY")
+            || !string.IsNullOrWhiteSpace(retryJobId));
+        var canCancel = !activeRecording && meeting.Status is not ("READY" or "PARTIAL_READY" or "FAILED" or "CANCELLED" or "ADMIN_REVIEW");
+        var canDelete = !activeRecording && Guid.TryParse(meeting.Id, out _);
+        return new HomeMeetingRowViewModel(meeting, new MeetingRowState(
+            currentIndex,
+            PipelineSteps[currentIndex],
+            error,
+            localSession?.SessionId,
+            retryJobId,
+            canStop,
+            canRetry,
+            canCancel,
+            CanDelete: canDelete));
+    }
+
+    private static bool IsDone(string? value) => value is "READY" or "COMPLETED" or "CONFIRMED" or "PARTIAL_READY";
+    private static bool IsRunning(string? value) => !string.IsNullOrWhiteSpace(value) && value is not ("READY" or "COMPLETED" or "FAILED" or "CANCELLED" or "PARTIAL_READY");
+    private static string FormatMeetingError(string value) => value switch
+    {
+        "ADMIN_REVIEW" => "Требует проверки",
+        "FAILED" => "Ошибка обработки",
+        _ => $"Требует проверки: {value}"
+    };
+    private sealed record MeetingRowState(int CurrentIndex, string CurrentStageText, string? ErrorText, string? LocalSessionId, string? RetryJobId, bool CanStopDelivery, bool CanRetry, bool CanCancel, bool CanDelete);
 }

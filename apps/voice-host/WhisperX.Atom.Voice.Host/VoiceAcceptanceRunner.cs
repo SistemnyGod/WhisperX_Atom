@@ -299,6 +299,7 @@ internal static class VoiceAcceptanceRunner
                     or VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.70,
                 VoiceIntent.AssistantQuery => VoiceIntentParser.DefaultMinimumConfidence,
                 VoiceIntent.RepeatAnswer or VoiceIntent.ShortenAnswer or VoiceIntent.ElaborateAnswer or VoiceIntent.PreviousQuestion => VoiceIntentParser.DefaultMinimumConfidence,
+                VoiceIntent.GenerateSummary or VoiceIntent.GetSummaryStatus => VoiceIntentParser.DefaultMinimumConfidence,
                 _ => VoiceIntentParser.DefaultMinimumConfidence
             };
             var accepted = hasWake && !result.Text.Contains("[unk]", StringComparison.OrdinalIgnoreCase)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import logging
 import subprocess
 import threading
@@ -11,13 +13,109 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger("whisperx.summary.llama")
+_ATTESTATION_LOCK = threading.RLock()
+_ATTESTATION_KEY: tuple[str, int, int, str, int, str] | None = None
+_ATTESTATION_VALUE: dict[str, object] | None = None
+
+
+def resolve_llm_model_path() -> Path:
+    """Resolve the one canonical model path used by worker and doctor.
+
+    ``LLM_MODEL_PATH`` remains a backwards-compatible explicit override. New
+    deployments may provide ``LLM_MODEL_ROOT``, ``LLM_MODEL_DIR`` and
+    ``LLM_MODEL_FILE`` so Compose and Python cannot silently select different
+    GGUF files.
+    """
+    explicit = os.getenv("LLM_MODEL_PATH", "").strip()
+    if explicit:
+        return Path(explicit)
+    root = Path(os.getenv("LLM_MODEL_ROOT", "/models").strip() or "/models")
+    directory = os.getenv("LLM_MODEL_DIR", "qwen3-8b").strip().strip("/\\") or "qwen3-8b"
+    filename = os.getenv("LLM_MODEL_FILE", "Qwen3-8B-Q5_K_M.gguf").strip()
+    return root / directory / filename
+
+
+def resolve_llm_manifest_path(model_path: Path | None = None) -> Path:
+    configured = os.getenv("LLM_MODEL_MANIFEST", "").strip()
+    return Path(configured) if configured else Path(model_path or resolve_llm_model_path()).with_suffix(".gguf.manifest.json")
+
+
+def attest_llm_model() -> dict[str, object]:
+    """Return a secret-free model attestation for readiness and Doctor."""
+    global _ATTESTATION_KEY, _ATTESTATION_VALUE
+    path = resolve_llm_model_path()
+    manifest_path = resolve_llm_manifest_path(path)
+    expected = os.getenv("LLM_MODEL_SHA256", "").strip().lower()
+    try:
+        key = (
+            str(path),
+            int(path.stat().st_size),
+            int(path.stat().st_mtime_ns),
+            str(manifest_path),
+            int(manifest_path.stat().st_mtime_ns),
+            expected,
+        )
+    except OSError:
+        key = (str(path), 0, 0, str(manifest_path), 0, expected)
+    with _ATTESTATION_LOCK:
+        if _ATTESTATION_KEY == key and _ATTESTATION_VALUE is not None:
+            return dict(_ATTESTATION_VALUE)
+    actual = ""
+    size = 0
+    try:
+        size = path.stat().st_size
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual = digest.hexdigest().lower()
+    except OSError:
+        pass
+    manifest: dict[str, object] = {}
+    try:
+        with manifest_path.open("r", encoding="utf-8") as stream:
+            value = json.load(stream)
+            if isinstance(value, dict):
+                manifest = value
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    manifest_sha = str(manifest.get("sha256", "")).lower()
+    expected_revision = os.getenv("LLM_MODEL_REVISION", "").strip()
+    manifest_revision = str(manifest.get("revision", ""))
+    hash_matches = bool(actual) and (not expected or actual == expected) and (not manifest_sha or actual == manifest_sha)
+    revision_matches = not expected_revision or expected_revision.startswith("replace-with-") or manifest_revision == expected_revision
+    try:
+        manifest_schema = int(manifest.get("schemaVersion", 0) or 0)
+        manifest_size = int(manifest.get("size", 0) or 0)
+    except (TypeError, ValueError):
+        manifest_schema = -1
+        manifest_size = -1
+    valid = bool(actual) and bool(manifest) and manifest_schema == 1 and hash_matches and revision_matches and manifest_size == size
+    value = {
+        "modelPath": str(path),
+        "manifestPath": str(manifest_path),
+        "modelAvailable": bool(actual),
+        "modelSize": size,
+        "expectedSha256Configured": bool(expected),
+        "sha256": actual or None,
+        "manifestSha256": manifest_sha or None,
+        "revision": manifest_revision or None,
+        "expectedRevision": expected_revision or None,
+        "revisionMatches": revision_matches,
+        "manifestValid": valid,
+        "reason": "ready" if valid else ("model_missing" if not actual else "model_manifest_mismatch"),
+    }
+    with _ATTESTATION_LOCK:
+        _ATTESTATION_KEY = key
+        _ATTESTATION_VALUE = dict(value)
+    return value
 
 
 class LocalLlamaServer:
     """Managed llama.cpp subprocess used under the worker GPU lease."""
 
     def __init__(self) -> None:
-        self.model_path = Path(os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf"))
+        self.model_path = resolve_llm_model_path()
         self.alias = os.getenv("LLM_MODEL_ALIAS", "qwen3-8b")
         self.port = int(os.getenv("LLM_LOCAL_PORT", "18080"))
         self.start_timeout = max(30, int(os.getenv("LLM_START_TIMEOUT_SECONDS", "300")))
@@ -116,6 +214,7 @@ class LocalLlamaRuntime:
     _server: LocalLlamaServer | None = None
     _fingerprint: tuple[str, int, int, str, str, str] | None = None
     _last_used = 0.0
+    _last_probe: dict[str, object] = {"status": "NOT_RUN"}
 
     def __init__(self, idle_seconds: int | None = None) -> None:
         self.idle_seconds = max(60, idle_seconds or int(os.getenv("LLM_IDLE_UNLOAD_SECONDS", "900")))
@@ -126,7 +225,7 @@ class LocalLlamaRuntime:
 
     @staticmethod
     def _model_fingerprint() -> tuple[str, int, int, str, str, str]:
-        path = Path(os.getenv("LLM_MODEL_PATH", "/models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf"))
+        path = resolve_llm_model_path()
         try:
             stat = path.stat()
             return (
@@ -144,6 +243,10 @@ class LocalLlamaRuntime:
             )
 
     def ensure_started(self, cancellation: threading.Event | None = None) -> LocalLlamaServer:
+        attestation = attest_llm_model()
+        if not bool(attestation.get("manifestValid")):
+            reason = str(attestation.get("reason") or "model_manifest_mismatch")
+            raise RuntimeError(f"model_manifest_invalid:{reason}")
         fingerprint = self._model_fingerprint()
         runtime = type(self)
         with runtime._gate:
@@ -179,6 +282,24 @@ class LocalLlamaRuntime:
             if process is None or process.poll() is not None:
                 return "FAILED"
             return "READY"
+
+    @property
+    def last_probe(self) -> dict[str, object]:
+        runtime = type(self)
+        with runtime._gate:
+            return dict(runtime._last_probe)
+
+    def record_probe(self, status: str, *, total_ms: float | None = None, first_token_ms: float | None = None, error: str | None = None) -> None:
+        runtime = type(self)
+        with runtime._gate:
+            value: dict[str, object] = {"status": status}
+            if total_ms is not None and total_ms >= 0:
+                value["totalMs"] = round(float(total_ms), 3)
+            if first_token_ms is not None and first_token_ms >= 0:
+                value["firstTokenMs"] = round(float(first_token_ms), 3)
+            if error:
+                value["error"] = error[:120]
+            runtime._last_probe = value
 
     def release_idle(self) -> None:
         runtime = type(self)

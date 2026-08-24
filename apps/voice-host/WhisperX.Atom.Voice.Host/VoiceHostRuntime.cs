@@ -33,6 +33,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         Environment.GetEnvironmentVariable("WHISPERX_WAKE_COMPAT_ATOM"));
     private static readonly bool WakeBargeInEnabled = !string.Equals(
         Environment.GetEnvironmentVariable("VOICE_BARGE_IN_MODE"), "OFF", StringComparison.OrdinalIgnoreCase);
+    private static readonly bool VoiceRefinerEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_MODE"), "OFF", StringComparison.OrdinalIgnoreCase);
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
     private static readonly string[] CommandGrammar = CreateCommandGrammar();
@@ -124,6 +126,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     internal static IReadOnlyList<string> WakePhrases => WakeGrammar;
     private readonly VoiceStateMachine _state = new();
     private readonly VoiceIntentParser _parser = new(LegacyAtomWakeEnabled);
+    private readonly VoiceCommandArbiter _arbiter;
+    private readonly IVoiceAsrRefiner? _voiceRefiner;
     private readonly VoiceAudioCapture _audio;
     private readonly RecorderPipeClient _recorder = new();
     private readonly SpeechResponder _speech = new(BuildIdentity);
@@ -154,6 +158,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly object _recognitionGate = new();
+    private readonly object _shadowGate = new();
+    private readonly List<Task> _shadowTasks = [];
     private readonly SemaphoreSlim _livePublishGate = new(1, 1);
     private readonly object _pttGate = new();
     private readonly MemoryStream _pttBuffer = new();
@@ -165,6 +171,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     // memory so the first words after the wake word are available to the
     // unrestricted recognizer. The buffer is never persisted or transmitted.
     private readonly VoiceRingBuffer _preRoll = new(64_000);
+    // A bounded in-memory copy is used only for Shadow diagnostics. It is
+    // cleared at every utterance boundary and never crosses an IPC boundary.
+    private readonly VoiceRingBuffer _shadowBuffer = new(320_000);
     private AudioPcmConverter? _converter;
     private Task? _audioWorker;
     private Task? _liveStatusPollTask;
@@ -244,6 +253,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private int _bargeHits;
     private DateTimeOffset _lastBargeHitAtUtc;
     private bool _bargeDucked;
+    private string? _voiceRefinerState;
+    private string? _voiceRefinerProvider;
+    private string? _voiceRefinerModel;
+    private double? _voiceRefinerProcessingMs;
+    private string? _voiceRefinerAgreement;
+    private string? _voiceRefinerError;
     private int _audioQueueOverflow;
     private VoiceCalibrationAccumulator? _calibration;
     private VoiceCommand? _pendingStop;
@@ -256,6 +271,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     public VoiceHostRuntime(ILogger<VoiceHostRuntime>? logger = null)
     {
         _logger = logger;
+        _arbiter = new VoiceCommandArbiter(_parser);
         LoadAssistantTombstones();
         _audio = new VoiceAudioCapture();
         _audio.AudioAvailable += OnAudioAvailable;
@@ -303,6 +319,28 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _modelError = "VOICE_MODEL_LOAD_FAILED";
             _lastErrorCode = _modelError;
             _logger?.LogWarning(ex, "Vosk voice model or native runtime could not be loaded.");
+        }
+
+        if (VoiceRefinerEnabled)
+        {
+            var refinerRoot = Path.Combine(root, "Models", "Voice", "whisper-shadow");
+            var refinerExecutable = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_EXECUTABLE")
+                ?? Path.Combine(refinerRoot, OperatingSystem.IsWindows() ? "whisper-cli.exe" : "whisper-cli");
+            var refinerModel = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_MODEL")
+                ?? Path.Combine(refinerRoot, "ggml-small.bin");
+            var refinerTemp = Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_TEMP")
+                ?? Path.Combine(Path.GetTempPath(), "WhisperXAtom", "voice-shadow");
+            var timeoutMs = int.TryParse(Environment.GetEnvironmentVariable("VOICE_ASR_REFINER_TIMEOUT_MS"), out var configuredTimeout)
+                ? Math.Clamp(configuredTimeout, 500, 30_000) : 8_000;
+            _voiceRefiner = new WhisperCppVoiceRefiner(refinerExecutable, refinerModel, refinerTemp, TimeSpan.FromMilliseconds(timeoutMs));
+            _voiceRefinerProvider = _voiceRefiner.Provider;
+            _voiceRefinerModel = _voiceRefiner.Model;
+            _voiceRefinerState = _voiceRefiner.IsAvailable ? VoiceRefinementState.Ready.ToString().ToUpperInvariant() : VoiceRefinementState.Unavailable.ToString().ToUpperInvariant();
+            _voiceRefinerError = _voiceRefiner.IsAvailable ? null : "VOICE_REFINER_ASSETS_UNAVAILABLE";
+        }
+        else
+        {
+            _voiceRefinerState = VoiceRefinementState.Disabled.ToString().ToUpperInvariant();
         }
 
         _liveAudio = new LiveAudioClient();
@@ -394,6 +432,14 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 LastRecognitionRoute = _lastRecognitionRoute,
                 LastRecognitionConfidence = _lastRecognitionConfidence,
                 LastNormalizationReason = _lastNormalizationReason,
+                VoiceProcessingGainDb = _voiceFrontEnd.ManualGainDb,
+                VoiceRefinerState = _voiceRefinerState,
+                VoiceRefinerProvider = _voiceRefinerProvider,
+                VoiceRefinerModel = _voiceRefinerModel,
+                VoiceRefinerProcessingMs = _voiceRefinerProcessingMs,
+                VoiceRefinerAgreement = _voiceRefinerAgreement,
+                VoiceRefinerError = _voiceRefinerError,
+                Capabilities = new[] { VoiceIpcCapabilities.VoiceGainControl },
                 RestartState = _lastErrorCode is "VOICE_HOST_RESTART_LIMIT" or "VOICE_HOST_RESTART_FAILED" ? "DEGRADED" : null
             };
         }
@@ -438,6 +484,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var ttsSampleRate = ReadNullableInt(payload, "ttsSampleRate");
             var ttsCpuThreads = ReadNullableInt(payload, "ttsCpuThreads");
             var ttsFallbackEnabled = ReadBool(payload, "ttsFallbackEnabled", true);
+            if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("voiceProcessingGainDb", out var gain)
+                && gain.TryGetInt32(out var gainDb))
+                _voiceFrontEnd.SetManualGainDb(gainDb);
             var ttsReady = await _speech.ConfigureAsync(windowsFallbackVoice, voiceRate, voiceVolume, ttsVoice, ttsSampleRate, ttsCpuThreads, ttsFallbackEnabled, cancellationToken, ttsEngine).ConfigureAwait(false);
             _logger?.LogInformation(
                 "Voice response engine configured. Engine={Engine}, Model={Model}, Voice={Voice}, Ready={Ready}, Fallback={Fallback}, FallbackReason={FallbackReason}, TtsHostPid={TtsHostPid}",
@@ -659,6 +708,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             case "PUSH_TO_TALK": return new VoiceHostResponse(true, await SubmitTextAsync(ReadString(payload, "text") ?? "", true, cancellationToken));
             case "TEXT": return new VoiceHostResponse(true, await SubmitTextAsync(ReadString(payload, "text") ?? "", false, cancellationToken));
             case "SET_SENSITIVITY": SetSensitivity(ReadString(payload, "sensitivity")); return new VoiceHostResponse(true, Snapshot);
+            case "SET_VOICE_PROCESSING_GAIN":
+                if (!payload.TryGetProperty("voiceProcessingGainDb", out var gain) || !gain.TryGetInt32(out var requestedGain))
+                    return new VoiceHostResponse(false, Error: "VOICE_GAIN_INVALID");
+                _voiceFrontEnd.SetManualGainDb(requestedGain);
+                return new VoiceHostResponse(true, Snapshot);
             case "QUIET_MODE": QuietMode = ReadBool(payload, "enabled", false); return new VoiceHostResponse(true, Snapshot);
             case "TEST_TTS":
                 if (_speech.QuietMode) return new VoiceHostResponse(false, Error: "VOICE_QUIET_MODE");
@@ -936,7 +990,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                     _voiceFrontEnd.Process(pcm);
                     // During TTS the cancel recognizer is the only consumer;
                     // response audio must never enter the normal pre-roll.
-                    if (!_speech.IsBusy) _preRoll.Append(pcm);
+                    if (!_speech.IsBusy)
+                    {
+                        _preRoll.Append(pcm);
+                        _shadowBuffer.Append(pcm);
+                    }
 
                     var handledByPtt = false;
                     lock (_pttGate)
@@ -1093,10 +1151,6 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 return;
             }
             var confidence = utterance.Confidence > 0 ? utterance.Confidence : wakeResult.Confidence;
-            var command = _parser.Parse(text, confidence, MinimumConfidence());
-            // Prefer the dedicated command grammar result. The wake grammar
-            // remains a compatibility fallback because older bundled Vosk
-            // models include wake+command phrases but not command-only items.
             var grammarText = !string.IsNullOrWhiteSpace(_pendingCommandText)
                 && !_pendingCommandText.Contains("[unk]", StringComparison.OrdinalIgnoreCase)
                 ? _pendingCommandText
@@ -1107,29 +1161,15 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var grammarConfidence = _pendingCommandConfidence > 0
                 ? _pendingCommandConfidence
                 : commandUtterance.Confidence > 0 ? commandUtterance.Confidence : wakeResult.Confidence;
-            var grammarInput = _parser.HasWakeWord(grammarText)
-                ? grammarText
-                : $"Мифодий {grammarText}";
-            var grammarCommand = _parser.Parse(grammarInput, grammarConfidence, MinimumConfidence());
-            if (grammarCommand.Intent is not VoiceIntent.Unknown
-                && grammarCommand.Intent is not VoiceIntent.AssistantQuery
-                && _parser.IsSafeRecorderCommand(text)
-                && grammarCommand.Confidence >= MinimumConfidence())
-            {
-                command = grammarCommand;
-                confidence = grammarCommand.Confidence;
-                _lastRecognizer = "VOSK_COMMAND_GRAMMAR";
-                _lastRecognitionRoute = "LOCAL_COMMAND";
-                _lastNormalizationReason = "GRAMMAR_CANONICALIZED_ASR";
-            }
-            else
-            {
-                _lastRecognizer = "VOSK_UNRESTRICTED";
-                _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
-                _lastNormalizationReason = null;
-            }
+            var arbitration = _arbiter.Resolve(text, confidence, grammarText, grammarConfidence, MinimumConfidence());
+            var command = arbitration.Command;
+            confidence = arbitration.Confidence;
+            _lastRecognizer = arbitration.Recognizer;
+            _lastRecognitionRoute = arbitration.Route;
+            _lastNormalizationReason = arbitration.NormalizationReason;
             _lastRecognitionConfidence = confidence;
             _lastUtteranceAtUtc = DateTimeOffset.UtcNow;
+            QueueShadowRefinement(text, command, confidence, _shadowBuffer.Snapshot());
             if (confidence < MinimumConfidence())
             {
                 _lastErrorCode = "VOICE_CONFIDENCE_TOO_LOW";
@@ -1494,28 +1534,19 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             return;
         }
         var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
-        var command = _parser.Parse(normalized, confidence, MinimumConfidence());
-        var grammarCommand = string.IsNullOrWhiteSpace(commandText)
-            ? new VoiceCommand(VoiceIntent.Unknown, normalized, 0)
-            : _parser.Parse($"Мифодий {commandText}", commandConfidence, MinimumConfidence());
-        if (grammarCommand.Intent is not VoiceIntent.Unknown
-            && grammarCommand.Intent is not VoiceIntent.AssistantQuery
-            && _parser.IsSafeRecorderCommand(normalized)
-            && grammarCommand.Confidence >= MinimumConfidence())
-        {
-            command = grammarCommand;
-            confidence = grammarCommand.Confidence;
-            _lastRecognizer = "VOSK_COMMAND_GRAMMAR";
-            _lastRecognitionRoute = "LOCAL_COMMAND";
-            _lastNormalizationReason = "GRAMMAR_CANONICALIZED_ASR";
-        }
-        else
-        {
-            _lastRecognizer = "VOSK_UNRESTRICTED";
-            _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
-            _lastNormalizationReason = null;
-        }
+        var arbitration = _arbiter.Resolve(
+            normalized,
+            confidence,
+            string.IsNullOrWhiteSpace(commandText) ? null : commandText,
+            commandConfidence,
+            MinimumConfidence());
+        var command = arbitration.Command;
+        confidence = arbitration.Confidence;
+        _lastRecognizer = arbitration.Recognizer;
+        _lastRecognitionRoute = arbitration.Route;
+        _lastNormalizationReason = arbitration.NormalizationReason;
         _lastRecognitionConfidence = confidence;
+        QueueShadowRefinement(normalized, command, confidence, _shadowBuffer.Snapshot());
         if (confidence < MinimumConfidence() || command.Intent == VoiceIntent.Unknown || !IsConfidenceSufficient(command))
         {
             ResetRecognitionSessions();
@@ -1705,6 +1736,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 VoiceIntent.GetServerStatus => await SendLocalStatusAsync("SERVER", cancellationToken, traceId, commandId),
                 VoiceIntent.GetPipelineStatus => await SendLocalStatusAsync("PIPELINE", cancellationToken, traceId, commandId),
                 VoiceIntent.GetStorageStatus => await SendLocalStatusAsync("STORAGE", cancellationToken, traceId, commandId),
+                VoiceIntent.GenerateSummary when _desktopBroker is null => new VoiceResponse("Саммари доступно только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.GenerateSummary => await SendSummaryCommandAsync("GENERATE", cancellationToken, traceId, commandId),
+                VoiceIntent.GetSummaryStatus when _desktopBroker is null => new VoiceResponse("Статус саммари доступен только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId),
+                VoiceIntent.GetSummaryStatus => await SendSummaryCommandAsync("STATUS", cancellationToken, traceId, commandId),
                 VoiceIntent.Farewell => new VoiceResponse(FarewellText(command.Parameter ?? command.Text), true, true, CommandId: commandId, TraceId: traceId),
                 // Greetings are deterministic local UX.  Keeping the exact
                 // phrase out of Assistant avoids a cold Qwen load for a
@@ -1878,6 +1913,21 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             return new VoiceResponse(response.SpokenText ?? VoiceErrorText(_lastErrorCode), true, false, CommandId: commandId, TraceId: traceId);
         }
         return new VoiceResponse(response.SpokenText ?? "Состояние доступно.", true, true, CommandId: commandId, TraceId: traceId);
+    }
+
+    private async Task<VoiceResponse> SendSummaryCommandAsync(string operation, CancellationToken cancellationToken, string? traceId, string? commandId)
+    {
+        if (_desktopBroker is null)
+            return new VoiceResponse("Саммари доступно только при открытом Desktop.", true, false, CommandId: commandId, TraceId: traceId);
+        var intent = operation == "GENERATE" ? VoiceIntent.GenerateSummary.ToString() : VoiceIntent.GetSummaryStatus.ToString();
+        var response = await _desktopBroker.ExecuteAsync(intent, operation, 1.0, false, cancellationToken, traceId, commandId).ConfigureAwait(false);
+        _lastTraceId = response.TraceId ?? traceId ?? _lastTraceId;
+        if (!response.Ok)
+        {
+            _lastErrorCode = response.ErrorCode ?? "VOICE_SUMMARY_UNAVAILABLE";
+            return new VoiceResponse(response.SpokenText ?? VoiceErrorText(_lastErrorCode), true, false, CommandId: commandId, TraceId: traceId);
+        }
+        return new VoiceResponse(response.SpokenText ?? "Состояние саммари доступно.", true, true, CommandId: commandId, TraceId: traceId);
     }
 
     private void UpdateLiveRecordingState(string command, string? sessionId)
@@ -2174,6 +2224,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _commandStartedAt = default;
         _frameAssembler.Reset();
         _preRoll.Clear();
+        _shadowBuffer.Clear();
     }
 
     private void ReplayPreRoll(byte[] pcm)
@@ -2215,16 +2266,12 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     {
         VoiceIntent.StopRecording => 0.75,
         VoiceIntent.StopSpeaking => 0.70,
-        VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => _sensitivity switch
-        {
-            "high" => 0.65,
-            "low" => 0.55,
-            _ => 0.60
-        },
-        VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.55,
+        VoiceIntent.StartRecording or VoiceIntent.PauseRecording or VoiceIntent.ResumeRecording => 0.70,
+        VoiceIntent.AddMarker or VoiceIntent.MarkDecision or VoiceIntent.MarkActionItem => 0.70,
         VoiceIntent.AssistantQuery => MinimumConfidence(),
         VoiceIntent.RepeatAnswer or VoiceIntent.ShortenAnswer or VoiceIntent.ElaborateAnswer or VoiceIntent.PreviousQuestion => MinimumConfidence(),
         VoiceIntent.Farewell => MinimumConfidence(),
+        VoiceIntent.GenerateSummary or VoiceIntent.GetSummaryStatus => MinimumConfidence(),
         _ => MinimumConfidence()
     };
 
@@ -2260,6 +2307,57 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
 
     private static string NormalizeCommandText(string? text) =>
         string.Join(' ', (text ?? string.Empty).Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private void QueueShadowRefinement(string text, VoiceCommand command, double confidence, byte[] pcm)
+    {
+        var refiner = _voiceRefiner;
+        if (refiner is null || !VoiceRefinerEnabled || pcm.Length < 1600) return;
+        // Exact local actions are already decided by the constrained grammar.
+        // Shadow is useful for questions, malformed command-shaped utterances
+        // and longer phrases only; it must never add latency to a command.
+        if (command.Intent is not (VoiceIntent.AssistantQuery or VoiceIntent.Unknown)
+            && text.Length <= 45) return;
+
+        var envelope = new VoiceUtteranceEnvelope(
+            Guid.NewGuid().ToString("N"),
+            DateTimeOffset.UtcNow,
+            _lastWakeAtUtc,
+            _wakeSpeechStartedAt == default ? null : _wakeSpeechStartedAt,
+            DateTimeOffset.UtcNow,
+            pcm,
+            text,
+            command.Intent,
+            confidence,
+            _lastRecognitionRoute ?? "UNKNOWN");
+        _voiceRefinerState = VoiceRefinementState.Running.ToString().ToUpperInvariant();
+        var shadowTask = Task.Run(async () =>
+        {
+            VoiceRefinementResult result;
+            try { result = await refiner.RefineAsync(envelope, _shutdown.Token).ConfigureAwait(false); }
+            catch { result = new(VoiceRefinementState.Failed, Provider: refiner.Provider, Model: refiner.Model, ErrorCode: "VOICE_REFINER_FAILED"); }
+
+            _voiceRefinerState = result.State.ToString().ToUpperInvariant();
+            _voiceRefinerProcessingMs = result.ProcessingMs;
+            _voiceRefinerError = result.ErrorCode;
+            _voiceRefinerProvider = result.Provider;
+            _voiceRefinerModel = result.Model ?? refiner.Model;
+            if (result.State == VoiceRefinementState.Ready && !string.IsNullOrWhiteSpace(result.Text))
+            {
+                var refinedText = _parser.HasWakeWord(result.Text) ? result.Text : $"Мифодий {result.Text}";
+                var refined = _parser.Parse(refinedText, 0.95, 0.55);
+                _voiceRefinerAgreement = refined.Intent == command.Intent
+                    ? VoiceRefinementState.Agree.ToString().ToUpperInvariant()
+                    : VoiceRefinementState.Disagree.ToString().ToUpperInvariant();
+                _voiceRefinerState = _voiceRefinerAgreement;
+            }
+            else _voiceRefinerAgreement = null;
+        }, CancellationToken.None);
+        lock (_shadowGate) _shadowTasks.Add(shadowTask);
+        _ = shadowTask.ContinueWith(completed =>
+        {
+            lock (_shadowGate) _shadowTasks.Remove(completed);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
 
     private static string FarewellText(string? phrase)
     {
@@ -2428,6 +2526,9 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _audioQueue.Writer.TryComplete();
         _liveFrameQueue.Writer.TryComplete();
         _shutdown.Cancel();
+        Task[] shadowTasks;
+        lock (_shadowGate) shadowTasks = _shadowTasks.ToArray();
+        try { await Task.WhenAll(shadowTasks).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         try { if (_audioWorker is not null) await _audioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         try { if (_liveAudioWorker is not null) await _liveAudioWorker.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
         try { if (_liveStatusPollTask is not null) await _liveStatusPollTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
@@ -2440,6 +2541,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _liveRecognizer?.Dispose();
         _liveLocalRecognizer?.Dispose();
         _liveRemoteRecognizer?.Dispose();
+        _voiceRefiner?.Dispose();
         _speech.Dispose();
         _executionGate.Dispose();
         _audioOperationGate.Dispose();

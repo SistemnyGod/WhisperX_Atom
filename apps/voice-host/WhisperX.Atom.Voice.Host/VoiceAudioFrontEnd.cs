@@ -15,6 +15,15 @@ internal sealed class VoiceAudioFrontEnd
     private double _previousOutput;
     private double _noiseFloor = 0.003d;
     private double _gain = 1.0d;
+    private double _manualGain = 1.0d;
+
+    public int ManualGainDb { get; private set; }
+
+    public void SetManualGainDb(int gainDb)
+    {
+        ManualGainDb = Math.Clamp(gainDb, 0, 18);
+        _manualGain = Math.Pow(10d, ManualGainDb / 20d);
+    }
 
     public void Process(Span<byte> pcm16)
     {
@@ -45,7 +54,7 @@ internal sealed class VoiceAudioFrontEnd
         for (var i = 0; i < sampleCount; i++)
         {
             var filtered = BinaryPrimitives.ReadInt16LittleEndian(pcm16.Slice(i * 2, 2)) / (double)short.MaxValue;
-            var limited = Math.Clamp(filtered * _gain, -0.92d, 0.92d);
+            var limited = Math.Clamp(filtered * _gain * _manualGain, -0.92d, 0.92d);
             BinaryPrimitives.WriteInt16LittleEndian(pcm16.Slice(i * 2, 2), (short)Math.Round(limited * short.MaxValue));
         }
     }

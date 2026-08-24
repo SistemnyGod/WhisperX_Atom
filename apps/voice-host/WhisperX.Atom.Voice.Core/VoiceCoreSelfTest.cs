@@ -60,6 +60,9 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, стенограмма готова").Intent == VoiceIntent.GetPipelineStatus, "transcript status fast path");
         Assert(parser.Parse("Мифодий, свободное место").Intent == VoiceIntent.GetStorageStatus, "storage status fast path");
         Assert(parser.Parse("Мифодий, сколько осталось места").Intent == VoiceIntent.GetStorageStatus, "storage remaining fast path");
+        Assert(parser.Parse("Мифодий, сделай саммари").Intent == VoiceIntent.GenerateSummary, "summary command");
+        Assert(parser.Parse("Мифодий, статус саммари").Intent == VoiceIntent.GetSummaryStatus, "summary status command");
+        Assert(parser.Parse("Мифодий, как сделать хорошее саммари?").Intent == VoiceIntent.AssistantQuery, "summary question remains conversational");
 
         var commands = new (string Text, VoiceIntent Intent)[]
         {

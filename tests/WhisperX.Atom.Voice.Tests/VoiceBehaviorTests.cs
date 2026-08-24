@@ -10,6 +10,8 @@ public sealed class VoiceBehaviorTests
     [InlineData("Мифодий, останови запись останови запись", VoiceIntent.StopRecording)]
     [InlineData("Мифодий, останови запись мефодий", VoiceIntent.StopRecording)]
     [InlineData("Мифодий, пока", VoiceIntent.Farewell)]
+    [InlineData("Мифодий, сделай саммари", VoiceIntent.GenerateSummary)]
+    [InlineData("Мифодий, статус саммари", VoiceIntent.GetSummaryStatus)]
     [InlineData("Мифодий, кто отвечает за ремонт?", VoiceIntent.AssistantQuery)]
     public void NormalVoiceUtterancesHaveStableIntent(string text, VoiceIntent expected)
     {
@@ -24,6 +26,7 @@ public sealed class VoiceBehaviorTests
     [InlineData("Мифодий, запустить запись")]
     [InlineData("Мифодий, останови запись?")]
     [InlineData("Мифодий, пока идёт запись?")]
+    [InlineData("Мифодий, как сделать хорошее саммари?")]
     public void ConversationalPhrasesCannotMutateRecorder(string text)
     {
         var intent = new VoiceIntentParser(allowLegacyAtom: false).Parse(text, confidence: 0.95).Intent;
@@ -57,6 +60,34 @@ public sealed class VoiceBehaviorTests
         var parser = new VoiceIntentParser(allowLegacyAtom: false);
 
         Assert.True(parser.IsSafeRecorderCommand(text));
+    }
+
+    [Fact]
+    public void ArbiterPromotesOnlySafeGrammarCommands()
+    {
+        var parser = new VoiceIntentParser(allowLegacyAtom: false);
+        var arbiter = new VoiceCommandArbiter(parser);
+
+        var safe = arbiter.Resolve("Мифодий останови запись останови запись", .92, "останови запись", .88);
+        Assert.Equal(VoiceIntent.StopRecording, safe.Command.Intent);
+        Assert.Equal("VOSK_COMMAND_GRAMMAR", safe.Recognizer);
+        Assert.Equal("LOCAL_COMMAND", safe.Route);
+
+        var question = arbiter.Resolve("Мифодий останови запись?", .92, "останови запись", .88);
+        Assert.Equal(VoiceIntent.AssistantQuery, question.Command.Intent);
+        Assert.Equal("VOSK_UNRESTRICTED", question.Recognizer);
+    }
+
+    [Fact]
+    public void ArbiterKeepsMalformedImperativeInLocalRecoveryRoute()
+    {
+        var parser = new VoiceIntentParser(allowLegacyAtom: false);
+        var arbiter = new VoiceCommandArbiter(parser);
+
+        var decision = arbiter.Resolve("Мифодий останови запись входе остановит запись", .92, null, 0);
+
+        Assert.Equal(VoiceIntent.AssistantQuery, decision.Command.Intent);
+        Assert.Equal("ASSISTANT_QUERY", decision.Route);
     }
 
     [Theory]

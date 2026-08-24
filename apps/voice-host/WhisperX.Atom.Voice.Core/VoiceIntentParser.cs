@@ -36,6 +36,12 @@ public sealed class VoiceIntentParser
         "отметь поручение", "зафиксируй поручение"
     ];
 
+    private static readonly string[] SummaryCommandCandidates =
+    [
+        "сделай саммари", "создай саммари", "пересобери саммари",
+        "статус саммари", "готово ли саммари"
+    ];
+
     public VoiceIntentParser(bool allowLegacyAtom = true)
     {
         _allowLegacyAtom = allowLegacyAtom;
@@ -61,7 +67,10 @@ public sealed class VoiceIntentParser
     {
         var normalized = VoiceCommandText.Normalize(text);
         var withoutWake = RemoveWakeWord(normalized);
-        var commandCandidate = VoiceCommandText.NormalizeCommandCandidate(withoutWake, WakeWords, RecorderCommandCandidates);
+        var commandCandidate = VoiceCommandText.NormalizeCommandCandidate(
+            withoutWake,
+            WakeWords,
+            RecorderCommandCandidates.Concat(SummaryCommandCandidates));
         // Punctuation is intentionally removed for matching, but a question
         // marker remains a semantic guard.  «Останови запись?» is a question,
         // not permission to mutate Recorder.  This check happens before the
@@ -122,6 +131,8 @@ public sealed class VoiceIntentParser
                 "какая стадия обработки", "стенограмма готова") => VoiceIntent.GetPipelineStatus,
             var value when IsExact(value,
                 "состояние диска", "свободное место", "сколько места", "сколько осталось места") => VoiceIntent.GetStorageStatus,
+            var value when IsExact(value, "сделай саммари", "создай саммари", "пересобери саммари") => VoiceIntent.GenerateSummary,
+            var value when IsExact(value, "статус саммари", "готово ли саммари") => VoiceIntent.GetSummaryStatus,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
             // AssistantQuery is the canonical conversational intent.
@@ -163,8 +174,15 @@ public sealed class VoiceIntentParser
     /// </summary>
     public bool IsSafeRecorderCommand(string text)
     {
+        var normalizedText = VoiceCommandText.Normalize(text);
+        var withoutWake = RemoveWakeWord(normalizedText);
+        // The grammar result is only safe when the unrestricted utterance was
+        // an imperative.  Punctuation is removed for matching, so retain a
+        // semantic question guard here to prevent «останови запись?» from
+        // being promoted back into STOP by the constrained recognizer.
+        if (ContainsQuestionMarker(text) || IsQuestion(withoutWake)) return false;
         var normalized = VoiceCommandText.NormalizeCommandCandidate(
-            RemoveWakeWord(VoiceCommandText.Normalize(text)),
+            withoutWake,
             WakeWords,
             RecorderCommandCandidates);
         return RecorderCommandCandidates.Contains(normalized, StringComparer.Ordinal);

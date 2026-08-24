@@ -283,7 +283,7 @@ public sealed class VoiceHostController : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
     }
 
-    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90, string? ttsEngine = null, string? ttsVoice = null, int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string? windowsFallbackVoice = null)
+    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90, string? ttsEngine = null, string? ttsVoice = null, int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string? windowsFallbackVoice = null, int voiceProcessingGainDb = 0)
     {
         if (!enabled && (_process is null || _process.HasExited))
         {
@@ -312,7 +312,8 @@ public sealed class VoiceHostController : IAsyncDisposable
                 ttsSampleRate,
                 ttsCpuThreads,
                 ttsFallbackEnabled,
-                windowsFallbackVoice
+                windowsFallbackVoice,
+                voiceProcessingGainDb = Math.Clamp(voiceProcessingGainDb, 0, 18)
             }, cancellationToken).ConfigureAwait(false);
             if (!response.Ok)
             {
@@ -332,6 +333,31 @@ public sealed class VoiceHostController : IAsyncDisposable
             return false;
         }
         finally { _lifecycleGate.Release(); }
+    }
+
+    public async Task<bool> SetVoiceProcessingGainAsync(int gainDb, CancellationToken cancellationToken = default)
+    {
+        var normalized = Math.Clamp(gainDb, 0, 18);
+        if (!await StartAsync(cancellationToken).ConfigureAwait(false)) return false;
+        try
+        {
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync(
+                "SET_VOICE_PROCESSING_GAIN",
+                new { voiceProcessingGainDb = normalized },
+                cancellationToken).ConfigureAwait(false);
+            if (!response.Ok)
+            {
+                LastErrorCode = response.Error ?? "VOICE_GAIN_UNSUPPORTED";
+                return false;
+            }
+            LastErrorCode = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastErrorCode = ex is TimeoutException ? "VOICE_HOST_HEARTBEAT_EXPIRED" : "VOICE_GAIN_UNSUPPORTED";
+            return false;
+        }
     }
 
     private async Task StopCoreAsync()

@@ -57,7 +57,19 @@ $torchRuntime = if ($python) { Invoke-Safe { & $python -c "import torch; print({
 $ffmpeg = Invoke-Safe { & (Get-Command ffmpeg.exe -ErrorAction Stop).Source -version }
 $ffprobe = Invoke-Safe { & (Get-Command ffprobe.exe -ErrorAction Stop).Source -version }
 $dotnet = Invoke-Safe { & dotnet --version }
-$modelPath = $env:LLM_MODEL_FILE
+$modelRoot = if ([string]::IsNullOrWhiteSpace($env:LLM_MODEL_ROOT)) { "/models" } else { $env:LLM_MODEL_ROOT }
+$modelDir = if ([string]::IsNullOrWhiteSpace($env:LLM_MODEL_DIR)) { "qwen3-8b" } else { $env:LLM_MODEL_DIR.Trim('/','\') }
+$modelFile = if ([string]::IsNullOrWhiteSpace($env:LLM_MODEL_FILE)) { "Qwen3-8B-Q5_K_M.gguf" } else { $env:LLM_MODEL_FILE }
+$modelPath = if (-not [string]::IsNullOrWhiteSpace($env:LLM_MODEL_PATH)) {
+    $env:LLM_MODEL_PATH
+} else {
+    Join-Path (Join-Path $modelRoot $modelDir) $modelFile
+}
+$modelManifestPath = if (-not [string]::IsNullOrWhiteSpace($env:LLM_MODEL_MANIFEST)) {
+    $env:LLM_MODEL_MANIFEST
+} else {
+    "$modelPath.manifest.json"
+}
 $modelHash = $env:LLM_MODEL_SHA256
 $asrRepository = if ($env:WHISPERX_MODEL_REPOSITORY) { $env:WHISPERX_MODEL_REPOSITORY } else { "Systran/faster-whisper-large-v3" }
 $asrSnapshot = Get-HfSnapshot $asrRepository $env:WHISPERX_MODEL_REVISION
@@ -125,7 +137,7 @@ $manifest = [ordered]@{
         ffprobe = $ffprobe
         nats = if ($env:NATS_IMAGE) { $env:NATS_IMAGE } else { "nats:2.11.6-alpine3.21" }
         postgres = if ($env:POSTGRES_IMAGE) { $env:POSTGRES_IMAGE } else { "postgres:17.5-alpine3.21" }
-        qwen = $env:LLM_MODEL_FILE
+        qwen = $modelPath
         llamaCpp = $env:LLAMA_IMAGE
         vosk = $env:VOSK_MODEL_PATH
     }
@@ -143,11 +155,13 @@ $manifest = [ordered]@{
         sha256 = $env:DIARIZATION_MODEL_SHA256
         fileInventoryHash = $diarizationInventoryHash
     }, [ordered]@{
-        name = $env:LLM_MODEL_FILE
+        name = $modelFile
         revision = $env:LLM_MODEL_REVISION
         quantization = $env:LLM_QUANTIZATION
-        identifier = $env:LLM_MODEL_FILE
+        identifier = $modelPath
         sha256 = $modelHash
+        path = $modelPath
+        manifestPath = $modelManifestPath
     })
     productionDownloads = "DISABLED"
 }

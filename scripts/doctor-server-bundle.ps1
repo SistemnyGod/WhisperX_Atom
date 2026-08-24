@@ -114,10 +114,14 @@ if ($Mode -eq 'Release') {
         )
         foreach ($spec in $modelFiles) {
             $configured = Read-EnvValue $spec.env
+            $llmModelDir = Read-EnvValue 'LLM_MODEL_DIR'
+            if ([string]::IsNullOrWhiteSpace($llmModelDir)) { $llmModelDir = 'qwen3-8b' }
             $path = if ([string]::IsNullOrWhiteSpace($configured)) {
                 Join-Path $modelRoot $spec.default
             } elseif ([IO.Path]::IsPathRooted($configured) -and $configured -notlike '/models/*') {
                 [IO.Path]::GetFullPath($configured)
+            } elseif ($spec.env -eq 'LLM_MODEL_FILE' -and $configured -notmatch '[/\\]') {
+                Join-Path (Join-Path $modelRoot $llmModelDir) $configured
             } else {
                 Join-Path $modelRoot (($configured -replace '^/models[\\/]?', '') -replace '/', '\\')
             }
@@ -129,6 +133,19 @@ if ($Mode -eq 'Release') {
             $modelChecks.Add([ordered]@{ name = $spec.env; status = $(if ($actual -eq $expected.ToLowerInvariant()) { 'READY' } else { 'FAILED' }); detail = $(if ($actual -eq $expected.ToLowerInvariant()) { 'SHA256_MATCH' } else { 'SHA256_MISMATCH' }) })
         }
         $checks.Add([ordered]@{ name = 'modelSnapshot'; status = $(if (@($modelChecks | Where-Object status -eq 'FAILED').Count -eq 0) { 'READY' } else { 'FAILED' }); detail = @($modelChecks) })
+
+        # File/hash checks are not sufficient for release readiness. Run the
+        # same production JSON inference path inside summary-worker. The
+        # probe reuses a resident llama-server when one is already present and
+        # emits only timings/status, never generated text or credentials.
+        try {
+            $probeOutput = (& docker @compose @profiles exec -T summary-worker python3.12 -m workers.summary_worker.runtime_doctor 2>$null | Out-String).Trim()
+            $probe = $probeOutput | ConvertFrom-Json
+            $probeStatus = [string]$probe.status
+            $checks.Add([ordered]@{ name = 'llmInferenceProbe'; status = $(if ($probeStatus -eq 'READY') { 'READY' } else { 'FAILED' }); detail = [ordered]@{ status = $probeStatus; modelLoadMs = $probe.modelLoadMs; firstTokenMs = $probe.probe.firstTokenMs; totalMs = $probe.probe.totalMs } })
+        } catch {
+            $checks.Add([ordered]@{ name = 'llmInferenceProbe'; status = 'FAILED'; detail = 'LLM_INFERENCE_PROBE_FAILED' })
+        }
     }
 }
 $health = [ordered]@{

@@ -671,7 +671,13 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             hfDiarization = new { status = hf },
             memory,
             recorder = new { status = "OPTIONAL" },
-            qwen
+            qwen,
+            // Optional diagnostics are sourced from the same summary-worker
+            // heartbeat that owns the resident runtime. They are additive and
+            // contain no prompt, answer or model secret.
+            qwenRuntime = fresh.TryGetValue("summary-worker", out var qwenWorkerDiagnostics)
+                ? qwenWorkerDiagnostics.Capabilities
+                : (JsonDocument?)null
         },
         queue = operations is null ? null : new
         {

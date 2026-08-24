@@ -193,6 +193,14 @@ public sealed class AgentPipeHost(
                     return new AgentIpcResponse(true, RecorderState.Finalizing.ToString(), retrySessionId,
                         null, null, null, null, AgentIpcProtocol.Version, null,
                         await BuildSessionStatusAsync(retrySessionId, cancellationToken));
+                case "STOP_DELIVERY":
+                    var stopDeliverySessionId = ReadString(request.Payload, "sessionId");
+                    if (string.IsNullOrWhiteSpace(stopDeliverySessionId)) return Error("session_required");
+                    var stopped = await spool.StopDeliveryAsync(stopDeliverySessionId, cancellationToken);
+                    return stopped
+                        ? new AgentIpcResponse(true, "PAUSED", stopDeliverySessionId, null, null, ProtocolVersion: AgentIpcProtocol.Version,
+                            SessionStatus: await BuildSessionStatusAsync(stopDeliverySessionId, cancellationToken))
+                        : Error("delivery_not_pending");
                 case "START":
                     var meetingId = ReadGuid(request.Payload, "meetingId");
                     var ownerUserId = ReadGuid(request.Payload, "ownerUserId");
@@ -268,11 +276,11 @@ public sealed class AgentPipeHost(
 
     private static bool IsMutatingCommand(string command) => command is
         "CONFIGURE" or "UPDATE_SERVER_URL" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
-        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "MARKER" or "DECISION" or
+        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "STOP_DELIVERY" or "MARKER" or "DECISION" or
         "ACTION_ITEM" or "VOICE_EVENT";
 
     private static bool IsCaptureOrDeliveryCommand(string command) => command is
-        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or
+        "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "STOP_DELIVERY" or
         "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or "TEST_AUDIO_SOURCE" or
         "MICROPHONE_TEST" or "TEST_AUDIO_DEVICE" or "SELECT_AUDIO_DEVICE";
 

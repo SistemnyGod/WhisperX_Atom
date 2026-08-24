@@ -166,7 +166,8 @@ public sealed record LocalSessionSummary(
     DateTimeOffset? PlayableAudioCreatedAtUtc,
     DateTimeOffset? NextRetryAtUtc,
     DateTimeOffset? PlayableAudioNextRetryAtUtc,
-    IReadOnlyList<PlayableAudioFile> PlayableFiles);
+    IReadOnlyList<PlayableAudioFile> PlayableFiles,
+    Guid? MeetingId = null);
 
 public sealed record RecordingManifest(Guid ServerSessionId, IReadOnlyList<RecordingManifestTrack> Tracks);
 
@@ -550,17 +551,18 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
+        command.CommandText = "SELECT id,meeting_id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
         var result = new List<LocalSessionSummary>();
-        var rows = new List<(string Id, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext)>();
+        var rows = new List<(string Id, Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext)>();
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 DateTimeOffset? Parse(int ordinal) => reader.IsDBNull(ordinal) || !DateTimeOffset.TryParse(reader.GetString(ordinal), out var value) ? null : value;
-                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), Parse(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), Parse(9), Parse(10), Parse(11)));
+                rows.Add((reader.GetString(0), reader.IsDBNull(1) || !Guid.TryParse(reader.GetString(1), out var meetingId) ? null : meetingId,
+                    reader.IsDBNull(2) ? null : reader.GetString(2), Parse(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), Parse(10), Parse(11), Parse(12)));
             }
         }
 
@@ -586,8 +588,19 @@ public sealed class SpoolStore
 
         foreach (var row in rows)
             result.Add(new LocalSessionSummary(row.Id, row.Title, row.StartedAt, row.State, row.Local, row.Delivery, row.Playable,
-                row.Path, row.Error, row.Created, row.Next, row.PlayableNext, filesBySession[row.Id]));
+                row.Path, row.Error, row.Created, row.Next, row.PlayableNext, filesBySession[row.Id], row.MeetingId));
         return result;
+    }
+
+    public async Task<bool> StopDeliveryAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) return false;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET delivery_state='PAUSED',next_retry_at=NULL WHERE id=$id AND state NOT IN ('CANCELLED','FINALIZED') AND delivery_state NOT IN ('CONFIRMED','COMPLETED')";
+        command.Parameters.AddWithValue("$id", sessionId);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
     public async Task SetMeetingBindStateAsync(string sessionId, string state, CancellationToken cancellationToken = default)

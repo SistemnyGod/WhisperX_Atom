@@ -92,7 +92,8 @@ installed Russian Windows voice.
   that policy lives in the server `AssistantModeResolver` and is shared with
   the Desktop text Assistant.
 - The bundled small model uses a documented phonetic `Мефодий` grammar fallback. Set `ATOM_VOSK_EXACT_WAKE_WORD=true` only with a model that contains the canonical `Мифодий` token; the runtime reports the active mode in health.
-- Stop executes immediately at confidence >= 0.70; otherwise it requires a separate `Мифодий, подтверждаю` within 10 seconds.
+- START/PAUSE/RESUME and product markers require confidence >= 0.70. STOP executes immediately at confidence >= 0.75, asks for `Мифодий, подтверждаю` from 0.55 to 0.75, and requests a repeat below 0.55.
+- An optional CPU-only `whisper.cpp` `ggml-small` second pass runs in `SHADOW` mode for questions and malformed utterances. It is bounded, requires a configured SHA-256, writes no transcript text, and can never change Recorder routing or add user-visible latency. Configure it with `VOICE_ASR_REFINER_MODE`, `VOICE_ASR_REFINER_MODEL`, `VOICE_ASR_REFINER_EXECUTABLE`, and `VOICE_ASR_REFINER_SHA256`.
 - Managed startup validates the installed path, build identity, PID and parent process. `STATUS` remains available while startup is in progress; commands return `VOICE_HOST_NOT_INITIALIZED` until the runtime is ready.
 - `TEST_SPEECH` is parse-only and never calls Recorder. The latest microphone telemetry contains RMS, peak, clipping, signal state and effective endpoint; pre-wake audio is discarded.
 - Responses use `SpeechResponder` → `TtsEngineRouter` → local Silero

@@ -48,6 +48,9 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> RetryUploadAsync(string sessionId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("RETRY_UPLOAD", new { sessionId }, cancellationToken);
 
+    public Task<AgentIpcResponse> StopDeliveryAsync(string sessionId, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("STOP_DELIVERY", new { sessionId }, cancellationToken);
+
     public Task<AgentIpcResponse> ConfigureAgentAsync(string serverUrl, Guid agentId, string token, string archiveRoot, string? microphoneDeviceId, string? systemAudioDeviceId, CancellationToken cancellationToken = default) =>
         _client.SendAsync("CONFIGURE", new { serverUrl, agentId, token, archiveRoot, microphoneDeviceId, systemAudioDeviceId }, cancellationToken);
 

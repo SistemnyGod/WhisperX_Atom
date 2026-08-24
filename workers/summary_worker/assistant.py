@@ -84,6 +84,20 @@ def is_retryable_assistant_error(exc: BaseException) -> bool:
         "503", "502", "llama", "gpu", "cuda", "nats", "postgres", "psycopg",
         "broken pipe", "server_exit", "lease", "busy",
     ))
+
+
+def assistant_failure_code(exc: BaseException) -> str:
+    """Map internal failures to stable, user-safe Assistant diagnostics."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(token in text for token in ("model_not_found", "model_manifest", "invalid_llm_", "gpu_required_but_no_layers")):
+        return "MODEL_INVALID"
+    if any(token in text for token in ("llm_server_start", "llama_server_exit", "model_load", "file_not_found")):
+        return "MODEL_LOAD_FAILED"
+    if any(token in text for token in ("invalid_json", "schema_invalid", "response_content_is_not_text")):
+        return "GENERATION_FAILED"
+    if any(token in text for token in ("timeout", "connection", "refused", "unavailable", "503", "502", "server_exit")):
+        return "LLM_UNAVAILABLE"
+    return type(exc).__name__.upper()[:80]
 # Kept as a compatibility marker for older Desktop/Voice clients. New
 # clients receive the explicit NO_EVIDENCE error code below, while rolling
 # upgrades may still look for the historical empty-context name.
@@ -1532,6 +1546,14 @@ class AssistantWorker:
                     if client.last_first_token_ms is not None:
                         timings["first_token_ms"] = round(client.last_first_token_ms, 3)
                     timings["generation_ms"] = round((time.perf_counter() - generation_started) * 1000.0, 3)
+                    record_probe = getattr(self._llm_runtime, "record_probe", None)
+                    if callable(record_probe):
+                        await asyncio.to_thread(
+                            record_probe,
+                            "READY",
+                            total_ms=timings["generation_ms"],
+                            first_token_ms=client.last_first_token_ms,
+                        )
                     await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GROUNDING")
                     retrieval_anchors = int(self._last_retrieval_metadata.get("anchorCount", 0) or 0)
                     if assistant_mode != "GENERAL_CHAT" and retrieval_anchors > 0 and not claims_are_semantically_grounded(result, valid, assistant_mode):
@@ -1582,6 +1604,9 @@ class AssistantWorker:
             return
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
+            record_probe = getattr(self._llm_runtime, "record_probe", None)
+            if callable(record_probe):
+                await asyncio.to_thread(record_probe, "FAILED", error=type(exc).__name__)
             if is_retryable_assistant_error(exc):
                 scheduled_attempt = await asyncio.to_thread(
                     self.repository.schedule_retry,
@@ -1602,12 +1627,12 @@ class AssistantWorker:
                 # The retry budget is exhausted.  Persist a terminal state and
                 # let the consumer ACK the current delivery; a terminal
                 # assistant request must not loop forever in JetStream.
-                self.repository.set_status(query_id, "LLM_UNAVAILABLE", error="ASSISTANT_RETRY_EXHAUSTED")
+                self.repository.set_status(query_id, "LLM_UNAVAILABLE", error=assistant_failure_code(exc))
                 LOGGER.error("assistant query=%s retry budget exhausted: %s", query_id, detail)
                 return
             # Deterministic validation/scope/model configuration failures are
             # terminal.  They remain visible to Desktop and cannot be retried
             # by a stale NATS delivery.
-            self.repository.set_status(query_id, "FAILED", error=type(exc).__name__.upper())
+            self.repository.set_status(query_id, "FAILED", error=assistant_failure_code(exc))
             LOGGER.error("assistant query=%s entered terminal failure: %s", query_id, detail)
             return

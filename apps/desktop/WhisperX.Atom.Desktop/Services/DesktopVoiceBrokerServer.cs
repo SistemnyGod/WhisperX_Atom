@@ -304,6 +304,13 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
             return localStatus;
         }
 
+        if (intent.ToUpperInvariant() is "GENERATESUMMARY" or "GETSUMMARYSTATUS")
+        {
+            var summaryResponse = await HandleSummaryIntentAsync(intent.ToUpperInvariant(), traceId, commandId, cancellationToken).ConfigureAwait(false);
+            CacheCommand(commandId, summaryResponse);
+            return summaryResponse;
+        }
+
         AgentIpcResponse response;
         try
         {
@@ -408,6 +415,52 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         catch (Exception exception)
         {
             return new(false, "VOICE_STATUS_UNAVAILABLE", Detail: exception.GetType().Name, TraceId: traceId, CommandId: commandId);
+        }
+    }
+
+    private async Task<BrokerResponse> HandleSummaryIntentAsync(string intent, string? traceId, string? commandId, CancellationToken cancellationToken)
+    {
+        if (!_backend.HasSession)
+            return new(false, "VOICE_ASSISTANT_AUTH_REQUIRED", SpokenText: "Для работы с саммари требуется вход в Desktop.", TraceId: traceId, CommandId: commandId);
+        var meetingId = _activeMeeting.MeetingId;
+        if (meetingId is null)
+            return new(false, "VOICE_SUMMARY_MEETING_REQUIRED", SpokenText: "Откройте нужное совещание в Desktop.", TraceId: traceId, CommandId: commandId);
+
+        try
+        {
+            if (intent == "GENERATESUMMARY")
+            {
+                var capture = await ReadCaptureContextAsync(cancellationToken).ConfigureAwait(false);
+                if (capture.IsActive)
+                    return new(true, RecorderState: "SUMMARY_WAITING_FOR_V2", SpokenText: "Саммари будет доступно после завершения записи и обработки стенограммы.", TraceId: traceId, CommandId: commandId);
+                var job = await _backend.QueueSummaryRebuildAsync(meetingId.Value, cancellationToken).ConfigureAwait(false);
+                if (job is not null)
+                    return new(true, RecorderState: "SUMMARY_QUEUED", SpokenText: "Саммари поставлено в обработку.", Detail: job.Stage, TraceId: traceId, CommandId: commandId);
+                var existing = await _backend.GetSummaryAsync(meetingId.Value, cancellationToken).ConfigureAwait(false);
+                return existing is not null
+                    ? new(true, RecorderState: "SUMMARY_RETRY_PENDING", SpokenText: "Саммари уже есть и будет пересобрано после проверки готовности сервера.", Detail: existing.Status, TraceId: traceId, CommandId: commandId)
+                    : new(false, "VOICE_SUMMARY_TRANSCRIPT_REQUIRED", SpokenText: "Стенограмма для этого совещания ещё не готова.", TraceId: traceId, CommandId: commandId);
+            }
+
+            var summary = await _backend.GetSummaryAsync(meetingId.Value, cancellationToken).ConfigureAwait(false);
+            if (summary is null)
+                return new(true, RecorderState: "SUMMARY_NOT_READY", SpokenText: "Саммари пока не готово.", TraceId: traceId, CommandId: commandId);
+            var status = summary.Status.ToUpperInvariant();
+            var spoken = status switch
+            {
+                "READY" => "Саммари готово.",
+                "NEEDS_REVIEW" => string.Equals(summary.ModelName, "deterministic-v1", StringComparison.OrdinalIgnoreCase)
+                    ? "Есть подтверждённый черновик саммари, но его нужно проверить; сервер попробует улучшить его через Qwen."
+                    : "Саммари готово, но требует проверки.",
+                "FAILED" => "Формирование саммари завершилось ошибкой.",
+                _ => "Саммари ещё формируется."
+            };
+            return new(true, RecorderState: "SUMMARY_" + status, SpokenText: spoken, Detail: summary.ModelName, TraceId: traceId, CommandId: commandId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            return new(false, "VOICE_SUMMARY_UNAVAILABLE", Detail: exception.GetType().Name, SpokenText: "Статус саммари пока недоступен.", TraceId: traceId, CommandId: commandId);
         }
     }
 

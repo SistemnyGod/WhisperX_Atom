@@ -316,7 +316,7 @@ services:
     restart: unless-stopped
     command:
       - --model
-      - /models/qwen3-8b/${LLM_MODEL_FILE:-Qwen3-8B-Q5_K_M.gguf}
+      - /models/${LLM_MODEL_DIR:-qwen3-8b}/${LLM_MODEL_FILE:-Qwen3-8B-Q5_K_M.gguf}
       - --alias
       - qwen3-8b
       - --host
@@ -380,14 +380,17 @@ services:
     environment:
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       NATS_URL: nats://nats:4222
-      LLM_MODEL_PATH: /models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf
-      LLM_MODEL_MANIFEST: /models/qwen3-8b/Qwen3-8B-Q5_K_M.gguf.manifest.json
+      LLM_MODEL_ROOT: /models
+      LLM_MODEL_DIR: ${LLM_MODEL_DIR:-qwen3-8b}
+      LLM_MODEL_FILE: ${LLM_MODEL_FILE:-Qwen3-8B-Q5_K_M.gguf}
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH:-}
+      LLM_MODEL_MANIFEST: ${LLM_MODEL_MANIFEST:-}
       LLM_MODEL_REVISION: ${LLM_MODEL_REVISION:-7c41481f57cb95916b40956ab2f0b139b296d974}
       LLM_MODEL_SHA256: ${LLM_MODEL_SHA256:-068BAE163FAA96AD48032DAF4E071A6A28FE67D8DCC95367609C2FF165E52738}
       LLM_GPU_LAYERS: ${LLM_GPU_LAYERS:-99}
       LLM_REQUIRE_GPU: ${LLM_REQUIRE_GPU:-true}
       LLM_CONTEXT_SIZE: ${LLM_CONTEXT_SIZE:-16384}
-      LLM_MODEL_ALIAS: qwen3-8b
+      LLM_MODEL_ALIAS: ${LLM_MODEL_ALIAS:-qwen3-8b}
       LLM_BLOCK_MAX_CHARS: ${LLM_BLOCK_MAX_CHARS:-16000}
       ASSISTANT_CONTEXT_SIZE: ${ASSISTANT_CONTEXT_SIZE:-8192}
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-3072}

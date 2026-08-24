@@ -14,22 +14,21 @@
                     <Button x:Name="OpenSetupWizardButton" Content="Повторить настройку" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSetupWizardButton_Click" AutomationProperties.Name="Повторить мастер настройки" ToolTipService.ToolTip="Проверить основные компоненты по шагам" />
                 </controls:PageHeader.Actions>
             </controls:PageHeader>
-            <Border Style="{StaticResource CardStyle}" Padding="10">
-                <StackPanel x:Name="SettingsSectionActionsPanel" Orientation="Horizontal" Spacing="6">
-                    <Button Content="Подключение" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToConnectionButton_Click" AutomationProperties.Name="Перейти к настройкам подключения" />
-                    <Button Content="Мифодий" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToMifodiyButton_Click" AutomationProperties.Name="Перейти к настройкам Мифодия" />
-                    <Button Content="Запись и архив" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToArchiveButton_Click" AutomationProperties.Name="Перейти к настройкам записи и архива" />
-                    <Button Content="Диагностика" Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToDiagnosticsButton_Click" AutomationProperties.Name="Открыть техническую диагностику" />
+            <Border Style="{StaticResource CardStyle}" Padding="8" AutomationProperties.Name="Разделы настроек">
+                <StackPanel x:Name="SettingsSectionActionsPanel" Orientation="Horizontal" Spacing="4">
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToConnectionButton_Click" AutomationProperties.Name="Перейти к настройкам подключения" ToolTipService.ToolTip="Подключение к LAN-серверу">
+                        <StackPanel Orientation="Horizontal" Spacing="7"><SymbolIcon Symbol="Link"/><TextBlock Text="Подключение" VerticalAlignment="Center"/></StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToMifodiyButton_Click" AutomationProperties.Name="Перейти к настройкам Мифодия" ToolTipService.ToolTip="Голосовой помощник">
+                        <StackPanel Orientation="Horizontal" Spacing="7"><SymbolIcon Symbol="Audio"/><TextBlock Text="Мифодий" VerticalAlignment="Center"/></StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToArchiveButton_Click" AutomationProperties.Name="Перейти к настройкам записи и архива" ToolTipService.ToolTip="Локальная запись и архив">
+                        <StackPanel Orientation="Horizontal" Spacing="7"><SymbolIcon Symbol="OpenFile"/><TextBlock Text="Запись и архив" VerticalAlignment="Center"/></StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Click="ScrollToDiagnosticsButton_Click" AutomationProperties.Name="Открыть техническую диагностику" ToolTipService.ToolTip="Диагностика Recorder и Мифодия">
+                        <StackPanel Orientation="Horizontal" Spacing="7"><SymbolIcon Symbol="ReportHacked"/><TextBlock Text="Диагностика" VerticalAlignment="Center"/></StackPanel>
+                    </Button>
                 </StackPanel>
-            </Border>
-            <Border x:Name="UserSettingsCard" Style="{StaticResource CardStyle}">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="Основные настройки" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="Для записи достаточно выбрать микрофон и папку архива. Технические данные находятся ниже." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Button Grid.Column="1" Content="Открыть запись" Style="{StaticResource SecondaryButtonStyle}" Click="OpenRecordingButton_Click" AutomationProperties.Name="Открыть настройки записи" />
-                </Grid>
             </Border>
             <Border x:Name="UpdatesCard" Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="10">
@@ -77,20 +76,39 @@
                     </Border>
                 </StackPanel>
             </Border>
-            <Grid x:Name="SettingsLayoutGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
+            <Grid x:Name="SettingsLayoutGrid" ColumnDefinitions="1.55*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
                 <Border x:Name="ApiSettingsCard" Style="{StaticResource CardStyle}">
                     <StackPanel Spacing="10">
-                        <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
-                        <TextBlock Text="Сервер" Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" IsReadOnly="{Binding ServerOriginManaged}" Style="{StaticResource InputStyle}" />
-                        <TextBlock Text="Текущий пользователь" Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBox Text="{Binding Username, Mode=TwoWay}" IsReadOnly="True" Style="{StaticResource InputStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Адрес сервера и учётная запись Desktop" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Border Grid.Column="1" Style="{StaticResource StatusBadgeStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" VerticalAlignment="Top">
+                                <TextBlock Text="LAN" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Адрес сервера" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" IsReadOnly="{Binding ServerOriginManaged}" Style="{StaticResource InputStyle}" AutomationProperties.Name="Адрес LAN-сервера" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock Text="Текущий пользователь" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox Text="{Binding Username, Mode=TwoWay}" IsReadOnly="True" Style="{StaticResource InputStyle}" AutomationProperties.Name="Текущий пользователь" />
+                            </StackPanel>
+                        </Grid>
                         <TextBlock x:Name="LoginHintText" Text="Для входа используйте окно авторизации приложения." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
-                        <StackPanel x:Name="PasswordFieldsPanel" Spacing="10" Visibility="Collapsed">
-                            <TextBlock x:Name="PasswordLabel" Text="Текущий пароль для смены" Foreground="{StaticResource MutedTextBrush}" />
-                            <PasswordBox x:Name="PasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Текущий пароль" />
-                            <PasswordBox x:Name="NewPasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Новый пароль (минимум 12 символов)" />
-                        </StackPanel>
+                        <Grid x:Name="PasswordFieldsPanel" ColumnDefinitions="*,*" ColumnSpacing="12" Visibility="Collapsed">
+                            <StackPanel Spacing="4">
+                                <TextBlock x:Name="PasswordLabel" Text="Текущий пароль для смены" Foreground="{StaticResource MutedTextBrush}" />
+                                <PasswordBox x:Name="PasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Текущий пароль" AutomationProperties.Name="Текущий пароль" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock Text="Новый пароль" Foreground="{StaticResource MutedTextBrush}" />
+                                <PasswordBox x:Name="NewPasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Минимум 12 символов" AutomationProperties.Name="Новый пароль" />
+                            </StackPanel>
+                        </Grid>
                         <StackPanel x:Name="ApiActionsPanel" Orientation="Horizontal" Spacing="8">
                             <Button x:Name="ChangePasswordButton" Content="Сменить пароль" Style="{StaticResource SecondaryButtonStyle}" Click="ChangePasswordButton_Click" IsEnabled="{Binding CanChangePassword}" />
                             <Button Content="Применить адрес сервера" Style="{StaticResource SecondaryButtonStyle}" Click="ApplyServerOriginButton_Click" IsEnabled="{Binding CanChangeServerOrigin}" AutomationProperties.Name="Применить адрес сервера" />
@@ -135,9 +153,9 @@
                     </StackPanel>
                 </Border>
             </Grid>
-            <Expander x:Name="MifodiySectionExpander" Header="Мифодий" IsExpanded="True">
-                <Border x:Name="MifodiyDiagnosticsCard" Style="{StaticResource CardStyle}" Padding="20">
-                    <StackPanel Spacing="16">
+            <Expander x:Name="MifodiySectionExpander" Header="Голосовой помощник «Мифодий» — быстрый просмотр" IsExpanded="True" AutomationProperties.Name="Быстрый просмотр Мифодия">
+                <Border x:Name="MifodiyDiagnosticsCard" Style="{StaticResource CardStyle}" Padding="14">
+                    <StackPanel Spacing="12">
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
                             <StackPanel Spacing="4">
                                 <TextBlock Text="Голосовой помощник" Style="{StaticResource SectionTitleStyle}" />
@@ -151,7 +169,7 @@
                             </Border>
                         </Grid>
 
-                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,12">
+                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
                             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="20">
                                 <StackPanel Spacing="3">
                                     <TextBlock Text="Состояние" Style="{StaticResource CaptionStyle}" />
@@ -169,8 +187,8 @@
                             </Grid>
                         </Border>
 
-                        <Grid x:Name="MifodiyPrimaryGrid" ColumnDefinitions="*,*" RowDefinitions="Auto" ColumnSpacing="16" RowSpacing="16">
-                            <Border x:Name="MifodiySignalCard" Style="{StaticResource CardStyle}" Padding="14" Background="{StaticResource SurfaceBlueBrush}" MinHeight="236">
+                        <Grid x:Name="MifodiyPrimaryGrid" ColumnDefinitions="1.05*,*" RowDefinitions="Auto" ColumnSpacing="12" RowSpacing="12">
+                            <Border x:Name="MifodiySignalCard" Style="{StaticResource CardStyle}" Padding="12" Background="{StaticResource SurfaceBlueBrush}" MinHeight="206" AutomationProperties.Name="Сигнал микрофона Мифодия">
                                 <Grid RowDefinitions="Auto,Auto,Auto,72,Auto,*" RowSpacing="8">
                                     <TextBlock Text="Микрофон и сигнал" Style="{StaticResource SectionTitleStyle}" />
                                     <StackPanel Grid.Row="1" Spacing="2">
@@ -192,7 +210,7 @@
                                 </Grid>
                             </Border>
 
-                            <Border x:Name="MifodiyControlsCard" Style="{StaticResource CardStyle}" Padding="14" MinHeight="236">
+                            <Border x:Name="MifodiyControlsCard" Style="{StaticResource CardStyle}" Padding="12" MinHeight="206" AutomationProperties.Name="Команды и голос Мифодия">
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Команды и голос" Style="{StaticResource SectionTitleStyle}" />
                                     <TextBlock Text="Чувствительность" Style="{StaticResource CaptionStyle}" />
@@ -246,7 +264,7 @@
                             </Border>
                         </Grid>
 
-                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
                             <StackPanel Spacing="10">
                                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                                     <StackPanel Spacing="3">

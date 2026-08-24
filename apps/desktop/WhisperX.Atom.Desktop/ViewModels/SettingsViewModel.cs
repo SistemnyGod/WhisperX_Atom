@@ -35,6 +35,7 @@ public sealed class SettingsViewModel : ObservableObject
     private int _ttsCpuThreads = 4;
     private bool _ttsFallbackEnabled = true;
     private string _windowsFallbackVoice = "Microsoft Irina";
+    private int _voiceProcessingGainDb;
     private string _voiceStatus = "Проверка Мифодия…";
     private string _voiceLastRecognition = "—";
     private string _voiceErrorCode = "—";
@@ -89,6 +90,7 @@ public sealed class SettingsViewModel : ObservableObject
         _ttsCpuThreads = settings.TtsCpuThreads;
         _ttsFallbackEnabled = settings.TtsFallbackEnabled;
         _windowsFallbackVoice = settings.WindowsFallbackVoice;
+        _voiceProcessingGainDb = settings.VoiceProcessingGainDb;
     }
 
     public string ApiUrl { get => _apiUrl; set { if (!ServerOriginManaged) SetProperty(ref _apiUrl, value); } }
@@ -130,6 +132,7 @@ public sealed class SettingsViewModel : ObservableObject
     public int TtsCpuThreads { get => _ttsCpuThreads; set { var v = Math.Clamp(value, 1, 32); if (SetProperty(ref _ttsCpuThreads, v)) _ = ApplyVoiceSettingsAsync(); } }
     public bool TtsFallbackEnabled { get => _ttsFallbackEnabled; set { if (SetProperty(ref _ttsFallbackEnabled, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string WindowsFallbackVoice { get => _windowsFallbackVoice; set { if (SetProperty(ref _windowsFallbackVoice, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public int VoiceProcessingGainDb { get => _voiceProcessingGainDb; set { var v = Math.Clamp(value, 0, 18); if (SetProperty(ref _voiceProcessingGainDb, v)) _ = ApplyVoiceSettingsAsync(); } }
     public string VoiceEffectiveVoice { get => _voiceEffectiveVoice; private set { if (SetProperty(ref _voiceEffectiveVoice, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
     public string VoiceTtsStatus { get => _voiceTtsStatus; private set => SetProperty(ref _voiceTtsStatus, value); }
     public bool VoiceFallbackUsed { get => _voiceFallbackUsed; private set { if (SetProperty(ref _voiceFallbackUsed, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
@@ -465,7 +468,7 @@ public sealed class SettingsViewModel : ObservableObject
     private async Task ApplyVoiceSettingsAsync()
     {
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity, VoiceName = VoiceName, VoiceRate = VoiceRate, VoiceVolume = VoiceVolume, TtsEngine = TtsEngine, TtsVoice = TtsVoice, TtsSampleRate = TtsSampleRate, TtsCpuThreads = TtsCpuThreads, TtsFallbackEnabled = TtsFallbackEnabled, WindowsFallbackVoice = WindowsFallbackVoice });
+        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity, VoiceName = VoiceName, VoiceRate = VoiceRate, VoiceVolume = VoiceVolume, TtsEngine = TtsEngine, TtsVoice = TtsVoice, TtsSampleRate = TtsSampleRate, TtsCpuThreads = TtsCpuThreads, TtsFallbackEnabled = TtsFallbackEnabled, WindowsFallbackVoice = WindowsFallbackVoice, VoiceProcessingGainDb = VoiceProcessingGainDb });
         try
         {
             var effectiveMicrophone = current.MicrophoneDeviceId;
@@ -477,7 +480,7 @@ public sealed class SettingsViewModel : ObservableObject
                     ?? effectiveMicrophone;
             }
             catch { }
-            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity, voiceName: VoiceName, voiceRate: VoiceRate, voiceVolume: VoiceVolume, ttsEngine: TtsEngine, ttsVoice: TtsVoice, ttsSampleRate: TtsSampleRate, ttsCpuThreads: TtsCpuThreads, ttsFallbackEnabled: TtsFallbackEnabled, windowsFallbackVoice: WindowsFallbackVoice))
+            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity, voiceName: VoiceName, voiceRate: VoiceRate, voiceVolume: VoiceVolume, ttsEngine: TtsEngine, ttsVoice: TtsVoice, ttsSampleRate: TtsSampleRate, ttsCpuThreads: TtsCpuThreads, ttsFallbackEnabled: TtsFallbackEnabled, windowsFallbackVoice: WindowsFallbackVoice, voiceProcessingGainDb: VoiceProcessingGainDb))
                 VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE";
         }
         catch { if (VoiceAlwaysListening) _ = _services.VoiceHost.StartAsync(); }
@@ -845,7 +848,7 @@ public sealed class SettingsViewModel : ObservableObject
         DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc,
             current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed,
-            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel, current.TtsEngine, current.TtsVoice, current.TtsSampleRate, current.TtsCpuThreads, current.TtsFallbackEnabled, current.WindowsFallbackVoice);
+            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel, current.TtsEngine, current.TtsVoice, current.TtsSampleRate, current.TtsCpuThreads, current.TtsFallbackEnabled, current.WindowsFallbackVoice, current.VoiceProcessingGainDb);
     }
 
     private static string SafeError(Exception ex, string? fallback = null) => UiErrorFormatter.Format(ex, fallback ?? "Не удалось выполнить операцию с настройками.");

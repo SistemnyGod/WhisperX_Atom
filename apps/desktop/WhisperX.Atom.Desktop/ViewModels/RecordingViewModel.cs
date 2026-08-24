@@ -1106,7 +1106,8 @@ public sealed class RecordingViewModel : ObservableObject
                         ttsSampleRate: settings.TtsSampleRate,
                         ttsCpuThreads: settings.TtsCpuThreads,
                         ttsFallbackEnabled: settings.TtsFallbackEnabled,
-                        windowsFallbackVoice: settings.WindowsFallbackVoice))
+                        windowsFallbackVoice: settings.WindowsFallbackVoice,
+                        voiceProcessingGainDb: settings.VoiceProcessingGainDb))
                     throw new InvalidOperationException(_services.VoiceHost.LastErrorCode ?? "VOICE_MICROPHONE_UNAVAILABLE");
             }
             _confirmedMicrophoneDeviceId = _microphoneDeviceId;
@@ -1144,7 +1145,8 @@ public sealed class RecordingViewModel : ObservableObject
                         ttsSampleRate: settings.TtsSampleRate,
                         ttsCpuThreads: settings.TtsCpuThreads,
                         ttsFallbackEnabled: settings.TtsFallbackEnabled,
-                        windowsFallbackVoice: settings.WindowsFallbackVoice);
+                        windowsFallbackVoice: settings.WindowsFallbackVoice,
+                        voiceProcessingGainDb: settings.VoiceProcessingGainDb);
                 }
                 catch { /* the next settings refresh will retry synchronization */ }
             }

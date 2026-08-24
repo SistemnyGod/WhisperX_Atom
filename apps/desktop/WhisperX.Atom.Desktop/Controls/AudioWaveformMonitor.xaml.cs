@@ -58,6 +58,7 @@ public sealed partial class AudioWaveformMonitor : UserControl
         {
             "CLIPPING" => "DangerBrush",
             "READY_NO_SIGNAL" or "NO_PACKETS" => "WarningBrush",
+            "UNAVAILABLE" or "FORMAT_MISMATCH" => "DangerBrush",
             "READY" => "SuccessBrush",
             _ => "AccentBrush"
         });

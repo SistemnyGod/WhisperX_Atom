@@ -1,5 +1,10 @@
 namespace WhisperX.Atom.Voice;
 
+public static class VoiceIpcCapabilities
+{
+    public const string VoiceGainControl = "VOICE_GAIN_CONTROL_V1";
+}
+
 public enum VoiceHostState
 {
     Disabled,
@@ -48,7 +53,11 @@ public enum VoiceIntent
     // compatibility; they never create an Assistant query.
     GetServerStatus,
     GetPipelineStatus,
-    GetStorageStatus
+    GetStorageStatus,
+    // Append-only summary controls. Existing numeric intent values remain
+    // stable for Voice IPC consumers.
+    GenerateSummary,
+    GetSummaryStatus
 }
 
 public sealed record VoiceCommand(
@@ -141,7 +150,15 @@ public sealed record VoiceHostSnapshot(
     string? LastRecognizer = null,
     string? LastRecognitionRoute = null,
     double? LastRecognitionConfidence = null,
-    string? LastNormalizationReason = null);
+    string? LastNormalizationReason = null,
+    int VoiceProcessingGainDb = 0,
+    string? VoiceRefinerState = null,
+    string? VoiceRefinerProvider = null,
+    string? VoiceRefinerModel = null,
+    double? VoiceRefinerProcessingMs = null,
+    string? VoiceRefinerAgreement = null,
+    string? VoiceRefinerError = null,
+    IReadOnlyList<string>? Capabilities = null);
 
 public sealed record VoiceResponse(
     string Text,

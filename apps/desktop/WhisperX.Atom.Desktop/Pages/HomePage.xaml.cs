@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Pickers;
@@ -14,6 +15,7 @@ public sealed partial class HomePage : Page
 {
     private FrontendServices? _services;
     private CancellationTokenSource? _pageCts;
+    private bool _applyingVoiceGain;
     public HomeViewModel? ViewModel { get; private set; }
 
     public HomePage()
@@ -55,6 +57,8 @@ public sealed partial class HomePage : Page
             or nameof(HomeViewModel.ServerSummary)
             or nameof(HomeViewModel.WhisperXSummary)
             or nameof(HomeViewModel.VoiceStatus)
+            or nameof(HomeViewModel.VoiceProcessingGainDb)
+            or nameof(HomeViewModel.RecentMeetingRows)
             or nameof(HomeViewModel.MicrophoneSignalState)
             or nameof(HomeViewModel.RecordingBadgeText)
             or nameof(HomeViewModel.MediaTimeText))
@@ -69,7 +73,6 @@ public sealed partial class HomePage : Page
         MeetingsList.Visibility = ViewModel.IsLoading || !ViewModel.HasMeetings ? Visibility.Collapsed : Visibility.Visible;
         RefreshButton.IsEnabled = !ViewModel.IsLoading;
         EmptyImportButton.IsEnabled = ViewModel.ApiAvailable && !ViewModel.IsLoading;
-        QuickImportButton.IsEnabled = ViewModel.ApiAvailable && !ViewModel.IsLoading;
         var statusBrushKey = !ViewModel.AgentAvailable
             ? "DangerBrush"
             : ViewModel.MicrophoneSignalState is "READY_NO_SIGNAL" or "CLIPPING" or "NO_PACKETS"
@@ -90,7 +93,7 @@ public sealed partial class HomePage : Page
                     || ViewModel.VoiceStatus.Contains("озвучивает", StringComparison.OrdinalIgnoreCase)
                     ? "SuccessBrush"
                     : "NeutralStatusBrush";
-        AgentRailIndicator.Fill = (Brush)Application.Current.Resources[voiceBrushKey];
+        VoiceSummaryIndicator.Fill = (Brush)Application.Current.Resources[voiceBrushKey];
         UpdateRecordingBadge();
         OfflineInfoBar.IsOpen = !ViewModel.IsLoading && !ViewModel.ApiAvailable;
         ErrorInfoBar.IsOpen = !string.IsNullOrWhiteSpace(ViewModel.ErrorText) && ViewModel.ApiAvailable;
@@ -129,14 +132,53 @@ public sealed partial class HomePage : Page
 
     private void HomePage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (HomeContentGrid is null || HomeMainColumn is null || HomeRailColumn is null || KpiGrid is null) return;
-        ResponsiveLayout.SetTwoColumn(HomeContentGrid, HomeMainColumn, HomeRailColumn, 320, e.NewSize.Width);
+        if (HomeContentGrid is null || HomeMainColumn is null || KpiGrid is null) return;
         ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement?[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
         var compact = ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact;
         HeroIdentityRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
         HeroIdentityRow.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
         HeroCommandRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
+        HeroRecorderPanel.ColumnDefinitions.Clear();
+        HeroRecorderPanel.RowDefinitions.Clear();
+        HeroRecorderPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        if (compact)
+        {
+            HeroRecorderPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            HeroRecorderPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(HeroRecorderColumn, 0);
+            Grid.SetRow(HeroRecorderColumn, 0);
+            Grid.SetColumn(VoiceGainCard, 0);
+            Grid.SetRow(VoiceGainCard, 1);
+            VoiceGainCard.Margin = new Thickness(0, 12, 0, 0);
+        }
+        else
+        {
+            HeroRecorderPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(260) });
+            Grid.SetColumn(HeroRecorderColumn, 0);
+            Grid.SetRow(HeroRecorderColumn, 0);
+            Grid.SetColumn(VoiceGainCard, 1);
+            Grid.SetRow(VoiceGainCard, 0);
+            VoiceGainCard.Margin = new Thickness(0);
+        }
         HomeNotices.Width = Math.Min(380, Math.Max(260, e.NewSize.Width - 56));
+    }
+
+    private async void VoiceGainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (_applyingVoiceGain || ViewModel is null || _pageCts is null) return;
+        _applyingVoiceGain = true;
+        try
+        {
+            await ViewModel.SetVoiceProcessingGainAsync((int)Math.Round(e.NewValue), _pageCts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            ErrorInfoBar.Severity = InfoBarSeverity.Warning;
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось применить усиление голосового мониторинга.");
+            ErrorInfoBar.IsOpen = true;
+        }
+        finally { _applyingVoiceGain = false; }
     }
 
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
@@ -183,5 +225,101 @@ public sealed partial class HomePage : Page
             ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось импортировать файл.");
             ErrorInfoBar.IsOpen = true;
         }
+    }
+
+    private static HomeMeetingRowViewModel? GetMeetingRow(object sender) => sender switch
+    {
+        MenuFlyoutItem { Tag: HomeMeetingRowViewModel row } => row,
+        FrameworkElement { DataContext: HomeMeetingRowViewModel row } => row,
+        _ => null
+    };
+
+    private async void StopDeliveryMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetMeetingRow(sender);
+        if (row?.LocalSessionId is null || _services is null || _pageCts is null) return;
+        try
+        {
+            var response = await _services.Recorder.StopDeliveryAsync(row.LocalSessionId, _pageCts.Token);
+            if (!response.Ok) ShowError(response.Error ?? "Не удалось приостановить доставку.");
+            else await ViewModel!.RefreshAsync(_pageCts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось приостановить доставку.")); }
+    }
+
+    private async void RetryMeetingMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetMeetingRow(sender);
+        if (row is null || _services is null || _pageCts is null) return;
+        try
+        {
+            if (row.LocalSessionId is not null)
+            {
+                var response = await _services.Recorder.RetryUploadAsync(row.LocalSessionId, _pageCts.Token);
+                if (!response.Ok) { ShowError(response.Error ?? "Не удалось повторить отправку."); return; }
+            }
+            else if (Guid.TryParse(row.RetryJobId, out var jobId) && await _services.Backend.RetryJobAsync(jobId, _pageCts.Token) is null)
+            {
+                ShowError("Сервер не принял повторную постановку задания.");
+                return;
+            }
+            await ViewModel!.RefreshAsync(_pageCts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось повторить отправку.")); }
+    }
+
+    private async void CancelMeetingMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetMeetingRow(sender);
+        if (row is null || _services is null || _pageCts is null || !Guid.TryParse(row.Id, out var meetingId)) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Отменить обработку?",
+            Content = "Новые этапы обработки будут остановлены. Уже готовые результаты останутся доступными.",
+            PrimaryButtonText = "Отменить обработку",
+            CloseButtonText = "Не отменять",
+            DefaultButton = ContentDialogButton.Close
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            if (await _services.Backend.CancelMeetingAsync(meetingId, _pageCts.Token) is null) { ShowError("Не удалось отменить обработку."); return; }
+            await ViewModel!.RefreshAsync(_pageCts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось отменить обработку.")); }
+    }
+
+    private async void DeleteMeetingMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var row = GetMeetingRow(sender);
+        if (row is null || _services is null || _pageCts is null || !Guid.TryParse(row.Id, out var meetingId)) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Удалить запись?",
+            Content = "Серверные результаты и медиа будут удалены. Локальный архив Recorder останется на диске.",
+            PrimaryButtonText = "Удалить",
+            CloseButtonText = "Отмена",
+            DefaultButton = ContentDialogButton.Close
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            if (!await _services.Backend.DeleteMeetingAsync(meetingId, _pageCts.Token)) { ShowError("Не удалось удалить запись."); return; }
+            await ViewModel!.RefreshAsync(_pageCts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось удалить запись.")); }
+    }
+
+    private void ShowError(string message)
+    {
+        ErrorInfoBar.Severity = InfoBarSeverity.Error;
+        ErrorInfoBar.Message = message;
+        ErrorInfoBar.IsOpen = true;
     }
 }

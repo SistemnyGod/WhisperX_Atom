@@ -23,6 +23,7 @@ public static class AgentIpcProtocol
     // track without changing the v6 wire shape. Older clients simply ignore
     // this additive capability and continue using the room microphone track.
     public const string IndependentSystemAudioTrackCapability = "SYSTEM_AUDIO_TRACK_V1";
+    public const string DeliveryControlCapability = "DELIVERY_CONTROL_V1";
 
     public static string CurrentBuildIdentity
     {

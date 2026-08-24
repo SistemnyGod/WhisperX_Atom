@@ -146,17 +146,19 @@ internal static class NativeVosk
 /// <summary>
 /// Kept for the deferred free-question path. Fixed commands must not use it.
 /// </summary>
-public sealed class WhisperCppRecognizer(string executablePath, string modelPath, string tempDirectory) : IDisposable
+public sealed class WhisperCppRecognizer(string executablePath, string modelPath, string tempDirectory, string filePrefix = "voice") : IDisposable
 {
     public async Task<string?> RecognizeAsync(ReadOnlyMemory<byte> pcm16kMono, CancellationToken cancellationToken)
     {
         if (!File.Exists(executablePath) || !File.Exists(modelPath)) return null;
         Directory.CreateDirectory(tempDirectory);
-        var wavPath = Path.Combine(tempDirectory, $"voice-{Guid.NewGuid():N}.wav");
+        var safePrefix = string.IsNullOrWhiteSpace(filePrefix) ? "voice" : filePrefix.Trim();
+        var wavPath = Path.Combine(tempDirectory, $"{safePrefix}-{Guid.NewGuid():N}.wav");
+        Process? process = null;
         try
         {
             await WriteWavAsync(wavPath, pcm16kMono, cancellationToken);
-            using var process = new Process
+            process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
@@ -179,6 +181,12 @@ public sealed class WhisperCppRecognizer(string executablePath, string modelPath
         }
         finally
         {
+            try
+            {
+                if (process is { HasExited: false }) process.Kill(entireProcessTree: true);
+            }
+            catch { }
+            process?.Dispose();
             try { if (File.Exists(wavPath)) File.Delete(wavPath); } catch (IOException) { }
         }
     }

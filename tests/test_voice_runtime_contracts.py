@@ -182,7 +182,7 @@ def test_free_question_recognizer_is_separate_from_the_strict_wake_word_path():
     assert "_utteranceRecognizer!.Accept(pcm)" in VOICE_RUNTIME
     # Actions remain parser-controlled, therefore arbitrary text cannot call
     # Recorder before it is classified as an explicit intent.
-    assert "var command = _parser.Parse(text, confidence, MinimumConfidence());" in VOICE_RUNTIME
+    assert "_arbiter.Resolve(text, confidence, grammarText, grammarConfidence, MinimumConfidence())" in VOICE_RUNTIME
     assert "IsAssistantUtterance" in VOICE_PARSER
     assert "IsSafeRecorderCommand" in VOICE_PARSER
     assert "MergeFinalSegments" in (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceCommandText.cs").read_text(encoding="utf-8")
@@ -224,7 +224,7 @@ def test_far_field_front_end_never_mutates_recorder_audio_and_commands_have_sepa
     assert "durable PCM" in runtime
     assert "HighPassCutoffHz" in front_end
     assert "MaxGain = 4.0d" in front_end
-    assert "Math.Clamp(filtered * _gain, -0.92d, 0.92d)" in front_end
+    assert "Math.Clamp(filtered * _gain * _manualGain, -0.92d, 0.92d)" in front_end
     assert '"high" => 0.45' in runtime
     assert 'VoiceIntent.StopRecording => 0.75' in runtime
     assert 'VoiceIntent.StopSpeaking => 0.70' in runtime
