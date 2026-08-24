@@ -2,6 +2,7 @@
 param(
     [string]$RepoRoot = (Join-Path $PSScriptRoot '..'),
     [string]$KeepIdentity,
+    [string[]]$KeepIdentities = @(),
     [switch]$IncludeArchives,
     [switch]$IncludeNodeModules,
     [switch]$Apply
@@ -11,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath($RepoRoot)
 if (-not (Test-Path -LiteralPath $repo -PathType Container)) { throw "REPO_ROOT_MISSING: $repo" }
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repo 'artifacts'))
+$protectedIdentities = @($KeepIdentity) + @($KeepIdentities) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
 function Assert-Under([string]$path, [string]$root) {
     $resolvedPath = [IO.Path]::GetFullPath($path).TrimEnd('\') + '\'
@@ -109,28 +111,33 @@ Get-ChildItem -LiteralPath $repo -Directory -Force -ErrorAction SilentlyContinue
 # and names a rollback identity to keep. The active bundle directory is never
 # selected by this script.
 $archiveRoot = Join-Path $artifactRoot ''
-if ($IncludeArchives -and -not [string]::IsNullOrWhiteSpace($KeepIdentity) -and (Test-Path -LiteralPath $archiveRoot -PathType Container)) {
+if ($IncludeArchives -and $protectedIdentities.Count -gt 0 -and (Test-Path -LiteralPath $archiveRoot -PathType Container)) {
     Get-ChildItem -LiteralPath $archiveRoot -File -Filter 'WhisperXAtom-Server-*.zip' -Force -ErrorAction SilentlyContinue |
         ForEach-Object {
-            if ([string]::IsNullOrWhiteSpace($KeepIdentity) -or $_.Name -notmatch [regex]::Escape($KeepIdentity)) {
+            $keep = $false
+            foreach ($identity in $protectedIdentities) { if ($_.Name -match [regex]::Escape([string]$identity)) { $keep = $true; break } }
+            if (-not $keep) {
                 Add-CleanupCandidate $_.FullName 'superseded server archive'
             }
         }
     Get-ChildItem -LiteralPath $archiveRoot -Directory -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^server-bundle-[0-9a-fA-F]+$' } |
         ForEach-Object {
-            if ($_.Name -notmatch [regex]::Escape($KeepIdentity)) {
+            $keep = $false
+            foreach ($identity in $protectedIdentities) { if ($_.Name -match [regex]::Escape([string]$identity)) { $keep = $true; break } }
+            if (-not $keep) {
                 Add-CleanupCandidate $_.FullName 'superseded extracted server bundle'
             }
         }
 }
-$archivesSkipped = -not $IncludeArchives -or [string]::IsNullOrWhiteSpace($KeepIdentity)
+$archivesSkipped = -not $IncludeArchives -or $protectedIdentities.Count -eq 0
 $topLevelCandidates = Get-TopLevelCandidates
 
 $report = [ordered]@{
     mode = if ($Apply) { 'apply' } else { 'preview' }
     repoRoot = $repo
     keepIdentity = $KeepIdentity
+    keepIdentities = @($protectedIdentities)
     includeArchives = [bool]$IncludeArchives
     includeNodeModules = [bool]$IncludeNodeModules
     archivesSkipped = $archivesSkipped
