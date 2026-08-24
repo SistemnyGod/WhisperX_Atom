@@ -12,8 +12,13 @@ def test_shadow_is_optional_and_never_part_of_readiness_failure():
     assert 'ParseVoiceRefinerMode' in HOST
     assert 'VoiceRefinerMode.Shadow' in HOST
     assert 'VoiceRefinerMode.Off' in HOST
+    assert 'VoiceRefinerMode.AssistantOnly' in HOST
+    assert 'VoiceRefinerMode.WakeAudit' in HOST
+    assert 'VOICE_REFINER_MODE_INVALID' in HOST
     assert "IVoiceAsrRefiner" in HOST
     assert "QueueShadowRefinement" in HOST
+    assert "ApplyAssistantRefinementAsync" in HOST
+    assert "AssistantRefinementBudgetMs = 5_000" in HOST
     assert 'VoiceRefinerState' in HOST
 
 
@@ -77,6 +82,8 @@ def test_shadow_rc_uses_resident_attestation_and_host_watchdog():
     assert "VerifyManifest" in host
     assert "VOICE_REFINER_ASSET_CHANGED" in client
     assert "CancelAfter(_timeout)" in client
+    assert "response.SampleRate" in client
+    assert "TryApplyRefinerSequence" in HOST
 
 
 def test_shadow_rc_manifest_v2_and_real_capture_windows():
@@ -98,3 +105,17 @@ def test_shadow_rc_manifest_v2_and_real_capture_windows():
     assert "c521a4b02f422512d734391fdf08bb08c0862f68" in stage
     assert "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" in verify
     assert "WHISPER_CPP_SOURCE_DIR" in (ROOT / "apps/voice-host/native/whisper-refiner/CMakeLists.txt").read_text(encoding="utf-8")
+
+
+def test_shadow_agreement_is_diagnostic_and_corpus_is_release_gated():
+    parser = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Core/VoiceIntentParser.cs").read_text(encoding="utf-8")
+    corpus = (ROOT / "scripts/voice-shadow-corpus.ps1").read_text(encoding="utf-8-sig")
+    assert "ParseIntentForComparison" in parser
+    assert "_parser.ParseIntentForComparison" in HOST
+    assert "result.Confidence ?? 0" not in HOST
+    assert "voice-shadow-corpus-v2" in corpus
+    assert "$minimumCases = 700" in corpus
+    assert "refinedAccuracyGain" in corpus
+    assert "wakeByDistance" in corpus
+    assert "actualRecorderMutation" in corpus
+    assert "if ($status -ne 'READY_FOR_REVIEW') { exit 2 }" in corpus

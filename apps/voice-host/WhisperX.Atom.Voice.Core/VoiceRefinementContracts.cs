@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace WhisperX.Atom.Voice;
 
 /// <summary>
@@ -11,8 +13,8 @@ public sealed record VoiceUtteranceEnvelope(
     DateTimeOffset? WakeAtUtc,
     DateTimeOffset? SpeechStartedAtUtc,
     DateTimeOffset? SpeechEndedAtUtc,
-    byte[] Pcm16kMono,
-    string VoskText,
+    [property: JsonIgnore] byte[] Pcm16kMono,
+    [property: JsonIgnore] string VoskText,
     VoiceIntent VoskIntent,
     double VoskConfidence,
     string Route,
@@ -37,9 +39,18 @@ public enum VoiceRefinementState
     Failed
 }
 
+/// <summary>Diagnostic-only wake comparison result. It never blocks wake or commands.</summary>
+public enum WakeVerificationResult
+{
+    Confirmed,
+    Ambiguous,
+    Rejected,
+    RefinerUnavailable
+}
+
 public sealed record VoiceRefinementResult(
     VoiceRefinementState State,
-    string? Text = null,
+    [property: JsonIgnore] string? Text = null,
     string Provider = "whisper.cpp",
     string? Model = null,
     double? Confidence = null,

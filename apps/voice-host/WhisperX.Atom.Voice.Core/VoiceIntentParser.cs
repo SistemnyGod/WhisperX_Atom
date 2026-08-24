@@ -156,6 +156,14 @@ public sealed class VoiceIntentParser
     }
 
     /// <summary>
+    /// Classifies a second-pass transcript for diagnostics only. This deliberately
+    /// bypasses the production confidence gate; it never authorizes a Recorder
+    /// action and therefore must not be used by the execution path.
+    /// </summary>
+    public VoiceIntent ParseIntentForComparison(string text)
+        => Parse(text, confidence: 1.0, minimumConfidence: 0.0).Intent;
+
+    /// <summary>
     /// Returns true only when the utterance starts with an approved
     /// imperative. Questions and infinitives remain conversational text.
     /// A true result is a local repeat/recovery path, never an Assistant query.

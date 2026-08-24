@@ -23,6 +23,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
     private readonly string _expectedBuildIdentity;
     private readonly int _nativeAbiVersion;
     private readonly TimeSpan _timeout;
+    private readonly TimeSpan _hostTimeout;
     private readonly object _gate = new();
     private readonly FileAttestationCache _attestations = new();
     private readonly string? _manifestError;
@@ -30,7 +31,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
     private int _restartCount;
     private bool _disposed;
 
-    public ResidentVoiceRefinerClient(string executablePath, string modelPath, string nativeLibraryPath, TimeSpan timeout, string expectedBuildIdentity)
+    public ResidentVoiceRefinerClient(string executablePath, string modelPath, string nativeLibraryPath, TimeSpan timeout, string expectedBuildIdentity, TimeSpan? hostTimeout = null)
     {
         _executablePath = Path.GetFullPath(executablePath);
         _modelPath = Path.GetFullPath(modelPath);
@@ -50,6 +51,9 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
             ?? (manifest.BuildIdentity is not null && !string.IsNullOrWhiteSpace(expectedBuildIdentity) && !string.Equals(manifest.BuildIdentity, expectedBuildIdentity, StringComparison.OrdinalIgnoreCase) ? "VOICE_REFINER_BUILD_IDENTITY_MISMATCH" : null)
             ?? (BridgeRevisionMatchesIdentity(manifest.BridgeRevision, expectedBuildIdentity) ? null : "VOICE_REFINER_BRIDGE_IDENTITY_MISMATCH");
         _timeout = timeout <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(VoiceRefinerProtocol.ClientTimeoutMs) : timeout;
+        _hostTimeout = hostTimeout is { } configured && configured > TimeSpan.Zero
+            ? configured
+            : TimeSpan.FromMilliseconds(VoiceRefinerProtocol.HostInferenceTimeoutMs);
         _expectedBuildIdentity = expectedBuildIdentity ?? string.Empty;
         Provider = "whisper.cpp-native";
         Model = Path.GetFileName(modelPath);
@@ -99,6 +103,17 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
             var line = await ReadLineAsync(pipe, operationToken).ConfigureAwait(false);
             var response = JsonSerializer.Deserialize<VoiceRefinerResponse>(line ?? string.Empty, JsonOptions);
             if (response is null) return Failure(utterance, "VOICE_REFINER_INVALID_RESPONSE", started);
+            if (!string.Equals(response.RequestId, request.RequestId, StringComparison.Ordinal))
+                return Failure(utterance, "VOICE_REFINER_RESPONSE_CORRELATION_FAILED", started);
+            if (response.NativeAbiVersion is { } responseAbi && responseAbi != VoiceRefinerProtocol.NativeAbiVersion)
+                return Failure(utterance, "VOICE_REFINER_NATIVE_ABI_MISMATCH", started);
+            if (response.SampleRate is { } responseSampleRate && responseSampleRate != 16_000)
+                return Failure(utterance, "VOICE_REFINER_SAMPLE_RATE_INVALID", started);
+            if (response.Ok && (!string.Equals(response.BuildIdentity, _expectedBuildIdentity, StringComparison.Ordinal)
+                || !string.Equals(response.UtteranceId, utterance.UtteranceId, StringComparison.Ordinal)
+                || response.Sequence != utterance.Sequence
+                || response.SampleRate != 16_000))
+                return Failure(utterance, "VOICE_REFINER_RESPONSE_CORRELATION_FAILED", started);
             return new(
                 response.Ok && !string.IsNullOrWhiteSpace(response.Text) ? VoiceRefinementState.Ready : MapState(response.ErrorCode),
                 response.Text,
@@ -168,7 +183,7 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
                     ["VOICE_ASR_REFINER_NATIVE_SHA256"] = _nativeHash,
                     ["VOICE_REFINER_MANIFEST"] = _manifestPath,
                     ["VOICE_REFINER_NATIVE_ABI_VERSION"] = VoiceRefinerProtocol.NativeAbiVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    ["VOICE_REFINER_HOST_TIMEOUT_MS"] = VoiceRefinerProtocol.HostInferenceTimeoutMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["VOICE_REFINER_HOST_TIMEOUT_MS"] = ((int)_hostTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["WHISPERX_BUILD_IDENTITY"] = _expectedBuildIdentity
                 }
             });
@@ -228,6 +243,11 @@ internal sealed class ResidentVoiceRefinerClient : IVoiceAsrRefiner
     {
         "VOICE_REFINER_TIMEOUT" => VoiceRefinementState.Timeout,
         "VOICE_REFINER_NO_SPEECH" => VoiceRefinementState.NoSpeech,
+        "VOICE_REFINER_NATIVE_ABI_MISMATCH" or
+        "VOICE_REFINER_MANIFEST_UPGRADE_REQUIRED" or
+        "VOICE_REFINER_ASSET_CHANGED" or
+        "VOICE_REFINER_ASSETS_UNAVAILABLE" or
+        "VOICE_REFINER_BUILD_IDENTITY_MISMATCH" => VoiceRefinementState.Unavailable,
         _ => VoiceRefinementState.Failed
     };
 

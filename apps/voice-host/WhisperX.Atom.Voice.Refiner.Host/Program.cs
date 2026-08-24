@@ -73,6 +73,11 @@ static async Task HandleConnectionAsync(NamedPipeServerStream pipe, ChannelWrite
             await WriteResponseAsync(pipe, new(false, request.RequestId, ErrorCode: "VOICE_REFINER_NATIVE_ABI_MISMATCH"), options, cancellationToken);
             return;
         }
+        if (request.SampleRate != 16_000)
+        {
+            await WriteResponseAsync(pipe, new(false, request.RequestId, ErrorCode: "VOICE_REFINER_SAMPLE_RATE_INVALID"), options, cancellationToken);
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(identity) && !string.Equals(identity, request.BuildIdentity, StringComparison.Ordinal))
         {
             await WriteResponseAsync(pipe, new(false, request.RequestId, ErrorCode: "VOICE_REFINER_BUILD_IDENTITY_MISMATCH"), options, cancellationToken);
@@ -127,7 +132,7 @@ static async Task ProcessQueueAsync(ChannelReader<WorkItem> reader, NativeWhispe
                 Environment.Exit(VoiceRefinerProtocol.InferenceTimeoutExitCode);
                 return;
             }
-            var response = new VoiceRefinerResponse(result.Ok, work.Request.RequestId, result.Ok ? "READY" : "FAILED", VoiceRefinerHostState.Ready.ToString().ToUpperInvariant(), result.Text, null, result.ProcessingMs, queueWait, result.ErrorCode, identity, backend.ModelName, "whisper.cpp-native", result.Ok, VoiceRefinerProtocol.QueueCapacity, VoiceRefinerProtocol.NativeAbiVersion);
+            var response = new VoiceRefinerResponse(result.Ok, work.Request.RequestId, result.Ok ? "READY" : "FAILED", VoiceRefinerHostState.Ready.ToString().ToUpperInvariant(), result.Text, null, result.ProcessingMs, queueWait, result.ErrorCode, identity, backend.ModelName, "whisper.cpp-native", result.Ok, VoiceRefinerProtocol.QueueCapacity, VoiceRefinerProtocol.NativeAbiVersion, work.Request.UtteranceId, work.Request.Sequence, work.Request.SampleRate);
             await WriteResponseAsync(work.Pipe, response, options, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -313,7 +318,8 @@ sealed class NativeWhisperBackend : IDisposable
                 var started = Stopwatch.GetTimestamp();
                 var length = _transcribe!(_context, input.AddrOfPinnedObject(), pcm.Length, handle.AddrOfPinnedObject(), output.Length);
                 var text = length > 0 ? Encoding.UTF8.GetString(output, 0, Math.Min(length, output.Length)).Trim() : null;
-                return new NativeResult(length > 0, text, Stopwatch.GetElapsedTime(started).TotalMilliseconds, length > 0 ? null : "VOICE_REFINER_NO_SPEECH");
+                return new NativeResult(length > 0, text, Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                    length < 0 ? "VOICE_REFINER_NATIVE_INFERENCE_FAILED" : "VOICE_REFINER_NO_SPEECH");
             }
             finally { input.Free(); handle.Free(); }
         }, CancellationToken.None);

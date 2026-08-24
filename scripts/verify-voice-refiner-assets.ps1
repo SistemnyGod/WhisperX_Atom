@@ -46,6 +46,31 @@ foreach ($entry in $entries) {
     if ($actual -ne $entry.expected) { throw "VOICE_REFINER_ASSET_HASH_MISMATCH: $($entry.relative)" }
 }
 if ($entries[0].expected -ne $expectedModelSha256) { throw "VOICE_REFINER_MODEL_SHA256_MISMATCH" }
+$nativePath = [IO.Path]::GetFullPath((Join-Path $root ([string]$manifest.native.file)))
+$abiProbeSource = @'
+using System;
+using System.Runtime.InteropServices;
+public static class WhisperXVoiceRefinerAbiProbeVerify {
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] private static extern IntPtr LoadLibrary(string name);
+    [DllImport("kernel32", SetLastError = true)] private static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32", SetLastError = true)] private static extern bool FreeLibrary(IntPtr module);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int AbiDelegate();
+    public static int Read(string path) {
+        var module = LoadLibrary(path);
+        if (module == IntPtr.Zero) throw new InvalidOperationException("VOICE_REFINER_NATIVE_LOAD_FAILED");
+        try {
+            var symbol = GetProcAddress(module, "whisperx_refiner_abi_version");
+            if (symbol == IntPtr.Zero) throw new InvalidOperationException("VOICE_REFINER_NATIVE_ABI_MISSING");
+            return Marshal.GetDelegateForFunctionPointer<AbiDelegate>(symbol)();
+        } finally { FreeLibrary(module); }
+    }
+}
+'@
+if (-not ('WhisperXVoiceRefinerAbiProbeVerify' -as [type])) {
+    Add-Type -TypeDefinition $abiProbeSource -ErrorAction Stop
+}
+$actualAbi = [WhisperXVoiceRefinerAbiProbeVerify]::Read($nativePath)
+if ($actualAbi -ne [int]$manifest.native.abiVersion) { throw "VOICE_REFINER_NATIVE_ABI_MISMATCH: expected=$([int]$manifest.native.abiVersion) actual=$actualAbi" }
 Write-Host "VOICE_REFINER_ASSETS=VERIFIED"
 Write-Host "VOICE_REFINER_BUILD_IDENTITY=$([string]$manifest.buildIdentity)"
 Write-Host "VOICE_REFINER_MODEL=$([string]$manifest.model.file)"

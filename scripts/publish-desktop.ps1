@@ -3,6 +3,7 @@ param(
     [switch]$NoRestore,
     [switch]$AllowDirty,
     [switch]$RequireVoiceRefinerAssets,
+    [switch]$DevelopmentNoVoiceRefinerAssets,
     [string]$TtsWheelhouse = ''
 )
 
@@ -19,10 +20,6 @@ foreach ($proxyVariable in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy'
 }
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:MSBuildEnableWorkloadResolver = 'false'
-if ($RequireVoiceRefinerAssets) {
-    & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1')
-    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
-}
 $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ([string]::IsNullOrWhiteSpace($gitCommit) -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') {
     throw "Unable to resolve a full release commit; refusing to publish an unidentified runtime."
@@ -46,6 +43,14 @@ if ($dirtyFiles.Count -gt 0 -and -not $dirtyAllowed) {
 $dirtySuffix = if ($dirtyFiles.Count -gt 0) { "-dirty" } else { "" }
 $buildIdentity = "1.0.1+$gitCommit$dirtySuffix"
 Write-Host "Publishing build identity $buildIdentity"
+if ($DevelopmentNoVoiceRefinerAssets) {
+    if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
+    }
+} else {
+    & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1') -ExpectedBuildIdentity $buildIdentity
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+}
 $finalOutput = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
 if ([string]::IsNullOrWhiteSpace($finalOutput) -or $finalOutput -eq $repoRoot -or $finalOutput.Length -lt ($repoRoot.Length + 8)) {
     throw "Refusing unsafe output path: $finalOutput"

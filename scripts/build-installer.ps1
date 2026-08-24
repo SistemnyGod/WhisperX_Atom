@@ -2,6 +2,7 @@
     [switch]$SkipPublish,
     [switch]$NoRestore,
     [switch]$RequireVoiceRefinerAssets,
+    [switch]$DevelopmentNoVoiceRefinerAssets,
     [string]$ServerOrigin = "http://192.168.2.194:8080",
     [string]$TtsWheelhouse = '',
     [string]$ServerBundleRoot = 'artifacts/server-bundle',
@@ -17,10 +18,6 @@ $validOrigin = (
 if (-not $validOrigin) { throw "INSTALLER_SERVER_ORIGIN_INVALID: $ServerOrigin" }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $assetVerifier = Join-Path $PSScriptRoot "verify-voice-refiner-assets.ps1"
-if ($RequireVoiceRefinerAssets) {
-    & $assetVerifier
-    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
-}
 $publish = Join-Path $repoRoot "scripts\publish-desktop.ps1"
 $iss = Join-Path $repoRoot "apps\desktop\Installer\WhisperXAtom.iss"
 $artifact = Join-Path $repoRoot "artifacts\desktop\Desktop\WhisperX.Atom.Desktop.exe"
@@ -31,14 +28,14 @@ if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
     # payload stale while the installer is being created.
     if ($TtsWheelhouse) {
         if ($NoRestore) {
-            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
+            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
         } else {
-            & $publish -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
+            & $publish -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
         }
     } elseif ($NoRestore) {
-        & $publish -NoRestore -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
+        & $publish -NoRestore -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
     } else {
-        & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets
+        & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
     }
 }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
@@ -78,6 +75,14 @@ $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
 $buildIdentity = [string]$identity.buildIdentity
 if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
     throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
+}
+if ($DevelopmentNoVoiceRefinerAssets) {
+    if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
+    }
+} else {
+    & $assetVerifier -ExpectedBuildIdentity $buildIdentity
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
 }
 $runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
 if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }

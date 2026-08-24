@@ -274,7 +274,7 @@ def test_settings_exposes_repeatable_setup_wizard_and_collapses_technical_detail
     assert 'x:Name="OpenSetupWizardButton"' in page
     assert 'Content="Повторить настройку"' in page
     assert 'Header="Техническая диагностика Recorder Host"' in page
-    assert 'Header="Мифодий"' in page
+    assert 'Мифодий' in page and 'MifodiySectionExpander' in page
     assert 'OpenSetupWizardButton_Click' in codebehind
     assert 'Шаг 1 из 7 · Вход' in codebehind
     assert 'Начать первую запись' in codebehind
@@ -316,8 +316,8 @@ def test_global_recording_controller_keeps_stop_available_across_navigation():
 
 def test_home_activity_card_explains_independent_background_pipeline():
     page = (DESKTOP / "Pages" / "HomePage.xaml").read_text(encoding="utf-8")
-    assert 'Text="Активность"' in page
-    assert 'Локальная запись, кодирование, доставка и WhisperX выполняются независимо.' in page
+    assert 'Text="Активные записи"' in page and 'Text="Активная обработка"' in page
+    assert 'Аудио сохраняется локально и отправится после подключения сервера' in page
 
 
 def test_meeting_workspace_uses_overflow_actions_and_protocol_tab():
@@ -452,9 +452,9 @@ def test_settings_offer_section_navigation_without_changing_runtime_contracts():
     page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
     assert 'x:Name="SettingsSectionActionsPanel"' in page
-    assert 'Content="Подключение"' in page
-    assert 'Content="Мифодий"' in page
-    assert 'Content="Запись и архив"' in page
+    assert 'Text="Подключение"' in page
+    assert 'Text="Мифодий"' in page
+    assert 'Text="Запись и архив"' in page
     assert 'x:Name="RecorderDiagnosticsExpander"' in page
     assert 'x:Name="MifodiyTechnicalDiagnosticsExpander"' in page
     assert 'StartBringIntoView(new BringIntoViewOptions' in codebehind

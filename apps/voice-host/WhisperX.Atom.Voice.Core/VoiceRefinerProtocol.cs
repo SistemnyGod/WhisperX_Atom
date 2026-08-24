@@ -26,7 +26,9 @@ public static class VoiceRefinerProtocol
 public enum VoiceRefinerMode
 {
     Off,
-    Shadow
+    Shadow,
+    AssistantOnly,
+    WakeAudit
 }
 
 public enum VoiceRefinerHostState
@@ -64,4 +66,7 @@ public sealed record VoiceRefinerResponse(
     [property: JsonPropertyName("provider")] string? Provider = null,
     [property: JsonPropertyName("modelReady")] bool ModelReady = false,
     [property: JsonPropertyName("queueDepth")] int QueueDepth = 0,
-    [property: JsonPropertyName("nativeAbiVersion")] int? NativeAbiVersion = null);
+    [property: JsonPropertyName("nativeAbiVersion")] int? NativeAbiVersion = null,
+    [property: JsonPropertyName("utteranceId")] string? UtteranceId = null,
+    [property: JsonPropertyName("sequence")] long? Sequence = null,
+    [property: JsonPropertyName("sampleRate")] int? SampleRate = null);

@@ -164,7 +164,11 @@ public sealed record VoiceHostSnapshot(
     bool? VoiceRefinerAssetsAttested = null,
     int VoiceRefinerHostRestartCount = 0,
     int VoiceRefinerTimeoutCount = 0,
-    long VoiceRefinerLastAppliedSequence = 0);
+    long VoiceRefinerLastAppliedSequence = 0,
+    string? VoiceRefinerMode = null,
+    string? VoiceRefinerWakeVerification = null,
+    bool VoiceRefinerRefinedQuestionUsed = false,
+    string? VoiceRefinerFallbackReason = null);
 
 public sealed record VoiceResponse(
     string Text,

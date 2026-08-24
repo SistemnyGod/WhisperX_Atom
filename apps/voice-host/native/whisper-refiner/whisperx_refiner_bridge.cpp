@@ -29,7 +29,7 @@ void * whisperx_refiner_init(const char * model_path_utf8) {
 }
 
 int whisperx_refiner_transcribe(void * raw_context, const int16_t * pcm16k_mono, int pcm_bytes, char * utf8_output, int output_capacity) {
-    if (raw_context == nullptr || pcm16k_mono == nullptr || utf8_output == nullptr || output_capacity <= 1 || pcm_bytes <= 0 || (pcm_bytes % 2) != 0) return 0;
+    if (raw_context == nullptr || pcm16k_mono == nullptr || utf8_output == nullptr || output_capacity <= 1 || pcm_bytes <= 0 || (pcm_bytes % 2) != 0) return -1;
     auto * context = static_cast<whisperx_refiner_context *>(raw_context);
     const int samples_count = pcm_bytes / 2;
     std::vector<float> samples(static_cast<size_t>(samples_count));
@@ -50,7 +50,7 @@ int whisperx_refiner_transcribe(void * raw_context, const int16_t * pcm16k_mono,
     params.temperature = 0.0f;
     params.temperature_inc = 0.0f;
 
-    if (whisper_full(context->whisper, params, samples.data(), samples_count) != 0) return 0;
+    if (whisper_full(context->whisper, params, samples.data(), samples_count) != 0) return -1;
     std::string text;
     const int segments = whisper_full_n_segments(context->whisper);
     for (int i = 0; i < segments; ++i) {
