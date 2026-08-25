@@ -574,10 +574,13 @@ async def run() -> None:
                     local_model_path = Path(configured_model_path)
                     if not local_model_path.exists():
                         raise FileNotFoundError("diarization_model_path_missing")
-                    # pyannote distinguishes a local pipeline from a Hub repo by
-                    # type. Passing an absolute path as ``str`` makes the Hub
-                    # validator reject it as an invalid repository id.
-                    diarization_model = local_model_path
+                    diarization_model = (
+                        local_model_path / "config.yaml"
+                        if local_model_path.is_dir()
+                        else local_model_path
+                    )
+                    if not diarization_model.is_file():
+                        raise FileNotFoundError("diarization_model_config_missing")
                 else:
                     diarization_model = os.getenv(
                         "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"

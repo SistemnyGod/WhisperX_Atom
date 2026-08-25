@@ -64,9 +64,12 @@ def test_qwen_and_diarization_readiness_use_actual_runtime_probe_state():
     assert "llamaRuntimeState" in api
     assert "llama_runtime_failed" in api
     assert "DiarizationPipeline" in worker
-    assert "diarization_model = local_model_path" in worker
+    assert 'local_model_path / "config.yaml"' in worker
+    assert 'diarization_model.is_file()' in worker
     pipeline = read("app/transcription_pipeline.py")
-    assert "pipeline_model: str | Path = Path(resolved_model) if explicit_path else resolved_model" in pipeline
+    assert 'resolved_path / "config.yaml" if resolved_path.is_dir() else resolved_path' in pipeline
+    assert "DIARIZATION_MODEL_CONFIG_NOT_FOUND" in pipeline
+    assert "model_name=Path(resolved_pipeline)" in pipeline
     assert "pyannote_model_loaded" in worker
     assert "LLAMA_RUNTIME_FAILED" in summary
 

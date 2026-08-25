@@ -45,7 +45,7 @@ def _resolve_pinned_snapshot(identifier: str, revision: str | None, *, local_onl
     candidate = (identifier or "").strip()
     if not candidate:
         raise RuntimeError(f"{label}_IDENTIFIER_MISSING")
-    if Path(candidate).is_dir():
+    if Path(candidate).exists():
         return str(Path(candidate).resolve())
     if _is_placeholder_revision(revision):
         return candidate
@@ -362,7 +362,7 @@ class ModelCacheManager:
 
     def get_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool, model_path: str | None = None):
         explicit_path = (model_path or "").strip()
-        if explicit_path and not Path(explicit_path).is_dir():
+        if explicit_path and not Path(explicit_path).exists():
             raise FileNotFoundError(f"DIARIZATION_MODEL_PATH_NOT_FOUND:{explicit_path}")
         resolved_model = self._resolve_snapshot(
             explicit_path or model_name,
@@ -370,14 +370,21 @@ class ModelCacheManager:
             local_only=model_local_only,
             label="DIARIZATION_MODEL",
         )
-        key = (device, hf_token, resolved_model)
+        resolved_path = Path(resolved_model)
+        pipeline_config = resolved_path / "config.yaml" if resolved_path.is_dir() else resolved_path
+        if not pipeline_config.is_file():
+            raise FileNotFoundError(f"DIARIZATION_MODEL_CONFIG_NOT_FOUND:{pipeline_config}")
+        resolved_pipeline = str(pipeline_config.resolve())
+        key = (device, hf_token, resolved_pipeline)
         if key not in self._diarizer:
             started = time.perf_counter()
-            # pyannote uses ``Path`` to select local pipeline loading. An
-            # absolute path passed as ``str`` is interpreted as a Hub repo id
-            # and rejected by huggingface_hub validation.
-            pipeline_model: str | Path = Path(resolved_model) if explicit_path else resolved_model
-            self._diarizer[key] = WhisperXDiarizationPipeline(model_name=pipeline_model, use_auth_token=hf_token, device=device)
+            # pyannote.audio 3.3 accepts a local pipeline YAML, not the
+            # directory that contains it. Passing the directory reaches the
+            # Hub repo-id validator and makes an otherwise valid offline
+            # snapshot fail with HFValidationError.
+            self._diarizer[key] = WhisperXDiarizationPipeline(
+                model_name=Path(resolved_pipeline), use_auth_token=hf_token, device=device
+            )
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
 
