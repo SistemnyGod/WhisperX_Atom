@@ -54,6 +54,7 @@ builder.Services.AddSingleton<IAudioCaptureEngine>(services => services.GetRequi
 builder.Services.AddSingleton<SystemAudioDeviceCatalog>();
 builder.Services.AddSingleton<SystemAudioCaptureEngine>();
 builder.Services.AddSingleton<WasapiRawDiagnosticCaptureEngine>();
+builder.Services.AddSingleton<WasapiSharedNativeDiagnosticCaptureEngine>();
 builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
 builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
 builder.Services.AddSingleton<RecorderHostRuntime>();

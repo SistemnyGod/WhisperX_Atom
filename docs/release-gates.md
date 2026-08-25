@@ -16,6 +16,10 @@ The following evidence is deliberately outside commit CI and must be recorded as
   evidence;
 - capture quality evidence (native and normalized clipping, RMS/noise/DC and
   frame continuity);
+- live `audio-capture-parity` evidence for Audacity, AudioGraph, WASAPI Shared
+  Native and RAW, with the native candidate still diagnostic-only;
+- `transcription-quality-ab` evidence with a fixed reference transcript and
+  privacy-safe WER/CER/domain-term aggregates;
 - microphone and system-audio device-loss recovery;
 - low-disk recording protection;
 - cold model runtime and GPU-OOM recovery;
@@ -66,6 +70,8 @@ no-console-start
 no-console-20x10s
 audio-quality
 audio-quality-ab
+audio-capture-parity
+transcription-quality-ab
 audio-device-loss
 system-audio-device-loss
 low-disk-during-recording

@@ -66,6 +66,9 @@ public sealed class RecorderPipeService : IRecorderService
     public Task<AgentIpcResponse> TestAudioSourceAsync(string? deviceId, bool systemAudio = false, CancellationToken cancellationToken = default, int durationSeconds = 3) =>
         _client.SendAsync("TEST_AUDIO_SOURCE", new { deviceId, systemAudio, durationSeconds = Math.Clamp(durationSeconds, 1, 10) }, cancellationToken);
 
+    public Task<AgentIpcResponse> RunRoomCheckV2Async(string? deviceId, CancellationToken cancellationToken = default) =>
+        _client.SendAsync("RUN_ROOM_CHECK_V2", new { deviceId }, cancellationToken);
+
     public Task<AgentIpcResponse> SetArchiveRootAsync(string archiveRoot, CancellationToken cancellationToken = default) =>
         _client.SendAsync("SET_ARCHIVE_ROOT", new { archiveRoot }, cancellationToken);
 }

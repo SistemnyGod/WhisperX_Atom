@@ -8,6 +8,8 @@
   {"name":"no-console-20x10s","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"audio-quality","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"audio-quality-ab","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"audio-capture-parity","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
+  {"name":"transcription-quality-ab","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"voice-shadow-corpus","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"voice-refiner-thread-benchmark","aliases":[],"nodeRole":"Client","requiredFor":["full"]},
   {"name":"far-field-voice","aliases":[],"nodeRole":"Client","requiredFor":["full"]},

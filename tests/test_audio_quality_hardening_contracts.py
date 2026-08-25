@@ -31,6 +31,41 @@ def test_probe_and_ab_capability_are_additive_and_ab_is_explicit():
     assert "NoiseWindowConfirmed" in contracts
     assert "LastProbePcm16" in read("apps/recorder-host/AudioGraphCaptureEngine.cs")
     assert "AudioGraphSha256 = graphHash" in runtime
+    assert "AUDIO_CAPTURE_BENCHMARK_V2" in protocol
+    assert '"RUN_AUDIO_CAPTURE_BENCHMARK"' in runtime
+    assert "WASAPI_SHARED_NATIVE" in read("apps/recorder-host/WasapiSharedNativeDiagnosticCaptureEngine.cs")
+    assert "merge-audio-capture-parity.ps1" in read("scripts/build-server-bundle.ps1")
+    assert "RUN_ROOM_CHECK_V2" in runtime
+    assert "RoomAcousticCheckResult" in contracts
+    assert "AUDIO_NATIVE_CAPTURE_NOT_PROMOTED" in runtime
+
+
+def test_transcription_quality_benchmark_is_privacy_safe_and_hash_only():
+    runner = read("scripts/transcription-quality-ab.py")
+    assert "wer" in runner and "cer" in runner and "speechRecall" in runner
+    assert "referenceSha256" in runner and "transcriptSha256" in runner
+    assert '"transcriptIncluded": False' in runner
+    assert "candidateText" not in runner
+    assert '"status"' in runner and "baselineCandidate" in runner
+
+
+def test_room_check_uses_one_capture_and_preserves_legacy_fallback():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    desktop = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    service = read("apps/desktop/WhisperX.Atom.Desktop/Services/RecorderPipeService.cs")
+    assert "TimeSpan.FromSeconds(10)" in runtime
+    assert "sampleRate * 3" in runtime and "sampleRate * 7" in runtime
+    assert "IsLegacyRoomCheckUnsupported" in desktop
+    assert '"RUN_ROOM_CHECK_V2"' in service
+
+
+def test_capture_parity_release_gate_requires_complete_live_aggregate():
+    gate = read("scripts/release-gate.ps1")
+    merger = read("scripts/merge-audio-capture-parity.ps1")
+    assert "parityComplete" in gate and "WASAPI_SHARED_NATIVE" in gate
+    assert "OperatorConfirmed" in merger
+    assert "READY_FOR_REVIEW" in merger
+    assert "audioIncluded = $false" in merger
 
 
 def test_raw_diagnostic_capture_uses_polling_without_unbound_event_callback():

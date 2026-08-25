@@ -991,9 +991,33 @@ public sealed class RecordingViewModel : ObservableObject
     {
         if (!CanRunRoomAcousticCheck) return;
         IsRoomAcousticCheckRunning = true;
-        RoomAcousticCheckStatus = "Сначала 3 секунды тишины: не говорите…";
+        RoomAcousticCheckStatus = "Проверяю единый фрагмент: 3 секунды тишины, затем 7 секунд речи…";
         try
         {
+            // Prefer the coherent V2 probe so noise and speech are measured
+            // from the same endpoint/session. Older Recorder Hosts fall back
+            // to the legacy two-probe flow below.
+            var v2 = await _services.Recorder.RunRoomCheckV2Async(_microphoneDeviceId);
+            if (v2.RoomCheck is not null || !IsLegacyRoomCheckUnsupported(v2.Error))
+            {
+                var check = v2.RoomCheck;
+                if (check is null || !check.Success || check.Quality is null)
+                {
+                    RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(check?.ErrorCode ?? v2.Error ?? "AUDIO_TEST_FAILED")}.";
+                }
+                else if (!check.Quality.Passed || !check.NoiseWindowConfirmed)
+                {
+                    RoomAcousticCheckStatus = $"Качество: {check.Quality.Grade}. Шум {check.Quality.NoiseFloorDb:0} dBFS, речь {check.Quality.SpeechRmsDb:0} dBFS, SNR {check.Quality.EstimatedSnrDb:0.0} dB, clipping {check.Quality.NormalizedClippingRatio:0.###}%, фаза {check.PhaseMetadata}. {check.Quality.Recommendation}";
+                }
+                else
+                {
+                    RoomAcousticCheckStatus = $"Качество: {check.Quality.Grade}. Шум {check.Quality.NoiseFloorDb:0} dBFS, речь {check.Quality.SpeechRmsDb:0} dBFS, SNR {check.Quality.EstimatedSnrDb:0.0} dB, clipping {check.Quality.NormalizedClippingRatio:0.###}%. Фаза подтверждена. {check.Quality.Recommendation}";
+                }
+                await RefreshAsync();
+                return;
+            }
+
+            RoomAcousticCheckStatus = "Совместимый режим: сначала 3 секунды тишины…";
             var silenceResponse = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 3);
             var silenceProbe = silenceResponse.AudioGraphProbe;
             if (silenceProbe is null || !silenceProbe.Ready)
@@ -1032,6 +1056,10 @@ public sealed class RecordingViewModel : ObservableObject
         }
         finally { IsRoomAcousticCheckRunning = false; }
     }
+
+    private static bool IsLegacyRoomCheckUnsupported(string? error)
+        => string.Equals(error, "unsupported_command", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(error, "ROOM_CHECK_V2_UNSUPPORTED", StringComparison.OrdinalIgnoreCase);
 
     public async Task TestSystemAudioAsync()
     {

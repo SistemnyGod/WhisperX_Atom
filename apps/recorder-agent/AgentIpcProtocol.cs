@@ -15,6 +15,9 @@ public static class AgentIpcProtocol
     public const string DeviceEventStreamCapability = "DEVICE_EVENT_STREAM";
     public const string AudioTelemetryStreamCapability = "AUDIO_TELEMETRY_STREAM_V1";
     public const string AudioCaptureAbCapability = "AUDIO_CAPTURE_AB_V1";
+    // Diagnostic-only parity runner. It never selects a production capture
+    // engine and is additive to the existing IPC contract.
+    public const string AudioCaptureBenchmarkCapability = "AUDIO_CAPTURE_BENCHMARK_V2";
     // Stable localTrackId binding is required for exactly-once server track
     // creation.  The API rejects recording writes from agents that do not
     // advertise this capability instead of allowing an unsafe legacy bind.
@@ -105,7 +108,8 @@ public sealed record AgentIpcResponse(
     string? ErrorDetail = null,
     AgentIpcAudioTelemetry? AudioTelemetry = null,
     IReadOnlyList<LocalSessionSummary>? LocalSessions = null,
-    AudioCaptureAbResult? AudioCaptureAb = null)
+    AudioCaptureAbResult? AudioCaptureAb = null,
+    RoomAcousticCheckResult? RoomCheck = null)
 {
     /// <summary>
     /// True when the local IPC endpoint answered with a state payload. Health
@@ -213,6 +217,7 @@ public sealed record AgentIpcHealth(
     string? EncoderCurrentChunkId = null,
     DateTimeOffset? EncoderLastSuccessAtUtc = null,
     string? EncoderLastErrorCode = null,
+    string CaptureEngineSelection = "AUDIOGRAPH",
     int EncoderQueueDepth = 0,
     // Additive storage-retention diagnostics. Older Desktop clients ignore
     // these optional tail fields; newer clients can show cleanup health

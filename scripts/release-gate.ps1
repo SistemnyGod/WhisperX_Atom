@@ -137,6 +137,8 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
             } elseif ($scenario -eq "voice-refiner-thread-benchmark") {
                 $scenarioReady = $json.schema -eq "voice-refiner-thread-benchmark-v1" -and
                     $json.status -eq "PASSED" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
                     [string]$json.buildIdentity -eq $releaseIdentity -and
                     $null -ne $json.selectedThreadCount -and
                     $json.promotionAllowed -eq $false
@@ -177,6 +179,39 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                     [int]$json.executedCaseCount -ge 700 -and
                     [int]$json.failedCaseCount -eq 0 -and
                     $json.caseResultsComplete -eq $true
+            } elseif ($scenario -eq "audio-capture-parity") {
+                # A fixture or an old A/B report must not satisfy the new
+                # parity gate.  Only a live native-format probe with privacy
+                # guarantees and attested aggregate metadata is eligible.
+                $scenarioReady = $json.schemaVersion -eq 2 -and
+                    [string]$json.scenario -eq "audio-capture-parity" -and
+                    [string]$json.captureMode -eq "LIVE" -and
+                    $json.status -eq "PASSED" -and
+                    $json.parityComplete -eq $true -and
+                    @($json.inputs) -contains "AUDACITY_BASELINE" -and
+                    @($json.inputs) -contains "AUDIOGRAPH" -and
+                    @($json.inputs) -contains "WASAPI_RAW" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
+                    [string]$json.buildIdentity -eq $releaseIdentity -and
+                    $null -ne $json.measurements -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.measurements.audioGraph.sha256) -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.measurements.wasapiRaw.sha256) -and
+                    [string]$json.measurements.wasapiSharedNative.variant -eq "WASAPI_SHARED_NATIVE" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.measurements.wasapiSharedNative.sha256) -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.baseline.sourceSha256) -and
+                    $json.safety.audioIncluded -eq $false -and
+                    $json.safety.transcriptIncluded -eq $false -and
+                    $json.safety.credentialsIncluded -eq $false -and
+                    $json.safety.tokensIncluded -eq $false
+            } elseif ($scenario -eq "transcription-quality-ab") {
+                $scenarioReady = $json.schemaVersion -eq 1 -and
+                    [string]$json.scenario -eq "transcription-quality-ab" -and
+                    $json.status -eq "PASSED" -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    @($json.candidates).Count -ge 2 -and
+                    $json.safety.transcriptIncluded -eq $false -and
+                    $json.safety.audioIncluded -eq $false
             } else {
                 $scenarioReady = ($json.status -in @("READY", "PASSED", "GREEN") -or $json.result -in @("READY", "PASSED", "GREEN") -or $json.passed -eq $true)
             }

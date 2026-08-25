@@ -33,6 +33,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
     private readonly LiveAudioBroadcaster _liveAudio;
     private readonly StorageRetentionMetrics _retentionMetrics;
     private readonly WasapiRawDiagnosticCaptureEngine _rawDiagnostic;
+    private readonly WasapiSharedNativeDiagnosticCaptureEngine _sharedNativeDiagnostic;
     private readonly ILogger<RecorderHostRuntime> _logger;
     private readonly SemaphoreSlim _audioOperationGate = new(1, 1);
     private readonly SemaphoreSlim _recoveryGate = new(1, 1);
@@ -69,6 +70,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         LiveAudioBroadcaster liveAudio,
         StorageRetentionMetrics retentionMetrics,
         WasapiRawDiagnosticCaptureEngine rawDiagnostic,
+        WasapiSharedNativeDiagnosticCaptureEngine sharedNativeDiagnostic,
         ILogger<RecorderHostRuntime> logger)
     {
         _spool = spool;
@@ -87,6 +89,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         _liveAudio = liveAudio;
         _retentionMetrics = retentionMetrics;
         _rawDiagnostic = rawDiagnostic;
+        _sharedNativeDiagnostic = sharedNativeDiagnostic;
         _logger = logger;
         _engine.CaptureFailed += OnCaptureFailed;
         _systemEngine.CaptureFailed += OnCaptureFailed;
@@ -308,6 +311,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             ServerConnectionState: _api.ServerConnectionState,
             LastHeartbeatAtUtc: _api.LastHeartbeatAtUtc,
             CaptureEngine: "AUDIOGRAPH",
+            CaptureEngineSelection: AudioCaptureEngineSelection.Current,
             RecorderProcessModel: "CURRENT_USER_HOST",
             DeviceWatcherReady: _engine.DeviceCatalog.IsReady,
             AudioGraphReady: _engine.DeviceCatalog.IsReady && (!microphoneRequired || microphoneReady),
@@ -322,6 +326,7 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 AgentIpcProtocol.AudioTelemetryStreamCapability,
                 AgentIpcProtocol.IndependentSystemAudioTrackCapability,
                 AgentIpcProtocol.AudioCaptureAbCapability,
+                AgentIpcProtocol.AudioCaptureBenchmarkCapability,
                 AgentIpcProtocol.StableTrackBindingCapability
             },
             EffectiveMicrophoneDeviceName: effectiveDevice?.Name,
@@ -505,6 +510,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         try
         {
             if (_sessionId is not null) return Error("RECORDING_ALREADY_ACTIVE");
+            // The shared-native path is a diagnostic candidate in this
+            // release. Never claim it is canonical while the durable writer
+            // still accepts the AudioGraph PCM16 contract.
+            if (!AudioCaptureEngineSelection.IsCanonicalAudioGraph)
+                return Error("AUDIO_NATIVE_CAPTURE_NOT_PROMOTED");
             if (_hostRuntimeLease is null)
                 throw new InvalidOperationException("RECORDER_HOST_NOT_INITIALIZED");
             _lastCaptureFailureCode = null;
@@ -933,7 +943,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             AudioGraphSha256 = graphHash,
             AudioGraphQuality = graphQuality,
             NoiseWindowConfirmed = phaseConfirmed,
-            PhaseMetadata = phaseMetadata
+            PhaseMetadata = phaseMetadata,
+            BuildIdentity = AgentIpcProtocol.CurrentBuildIdentity
         };
         return new AgentIpcResponse(
             report.Success,
@@ -942,6 +953,87 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             report.ErrorCode,
             null,
             AudioCaptureAb: report);
+    }
+
+    /// <summary>
+    /// Captures the endpoint's shared mix format for parity experiments. This
+    /// command is diagnostic-only and never changes the active recorder.
+    /// </summary>
+    public async Task<AgentIpcResponse> RunSharedNativeCaptureAsync(
+        string? deviceId,
+        int durationSeconds,
+        bool keepAudio,
+        CancellationToken cancellationToken)
+    {
+        if (_sessionId is not null)
+            return new AgentIpcResponse(false, "RECORDING", _sessionId, "AUDIO_BENCHMARK_RECORDING_ACTIVE", null);
+        var runId = Guid.NewGuid().ToString("N");
+        var directory = Path.Combine(DataRoot(), "diagnostics", "audio-benchmark", runId);
+        var result = (await _sharedNativeDiagnostic.CaptureAsync(deviceId, durationSeconds, keepAudio, directory, cancellationToken).ConfigureAwait(false)) with
+        {
+            BuildIdentity = AgentIpcProtocol.CurrentBuildIdentity
+        };
+        return new AgentIpcResponse(result.Success, result.Success ? "AUDIO_BENCHMARK_READY" : "AUDIO_BENCHMARK_FAILED", null, result.ErrorCode, null, AudioCaptureAb: result);
+    }
+
+    /// <summary>
+    /// Runs one coherent 3s-noise + 7s-speech probe.  This is additive to the
+    /// legacy two-probe Room Check and keeps the captured PCM in the engine's
+    /// bounded diagnostic buffer only.
+    /// </summary>
+    public async Task<AgentIpcResponse> RunRoomCheckV2Async(
+        string? deviceId,
+        CancellationToken cancellationToken)
+    {
+        if (_sessionId is not null)
+        {
+            var busy = new RoomAcousticCheckResult(false, deviceId, null, 10, 0, 0, null, false,
+                "RECORDING_ACTIVE", "AUDIO_CAPTURE_BUSY");
+            return new AgentIpcResponse(false, "RECORDING", _sessionId, "AUDIO_CAPTURE_BUSY", null, RoomCheck: busy);
+        }
+
+        await _audioOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var mode = string.IsNullOrWhiteSpace(deviceId) ? AudioSelectionMode.Default : AudioSelectionMode.Fixed;
+            var probe = await _engine.ProbeAsync(mode, deviceId, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            var pcm = _engine.LastProbePcm16;
+            const int sampleRate = SampleRate;
+            var totalSamples = pcm.Length / sizeof(short);
+            var silenceSamples = Math.Min(totalSamples, sampleRate * 3);
+            var speechSamples = Math.Min(Math.Max(0, totalSamples - silenceSamples), sampleRate * 7);
+            AudioQualityAssessment? quality = null;
+            var phase = AudioPhaseQualityResult.NotConfirmed("NO_AUDIO");
+            if (silenceSamples > 0 && speechSamples > 0)
+            {
+                var samples = new short[totalSamples];
+                Buffer.BlockCopy(pcm, 0, samples, 0, pcm.Length);
+                quality = AudioQualityAnalyzer.AnalyzePcm16(
+                    samples.AsSpan(silenceSamples, speechSamples),
+                    samples.AsSpan(0, silenceSamples), sampleRate);
+                phase = AudioPhaseQualityGate.Evaluate(
+                    quality,
+                    silenceSamples / (double)sampleRate,
+                    speechSamples / (double)sampleRate,
+                    3d, 7d);
+            }
+
+            var result = new RoomAcousticCheckResult(
+                probe.Ready && quality is not null,
+                probe.DeviceId,
+                probe.DeviceName,
+                10,
+                silenceSamples / (double)sampleRate,
+                speechSamples / (double)sampleRate,
+                quality,
+                phase.Confirmed,
+                phase.Reason,
+                probe.Ready ? null : probe.ErrorCode ?? "AUDIO_TEST_FAILED",
+                quality?.Recommendation);
+            return new AgentIpcResponse(result.Success, result.Success ? "ROOM_CHECK_READY" : "ROOM_CHECK_FAILED",
+                null, result.ErrorCode, null, AudioGraphProbe: probe, RoomCheck: result);
+        }
+        finally { _audioOperationGate.Release(); }
     }
 
     public async Task<AgentIpcResponse> ProbeSystemAsync(string? deviceId, CancellationToken cancellationToken, int durationMs = 3000)
@@ -2215,6 +2307,13 @@ public sealed class RecorderHostPipeServer : BackgroundService
                     ReadDouble(request.Payload, "silenceSeconds", 3),
                     ReadDouble(request.Payload, "speechSeconds", 10),
                     cancellationToken).ConfigureAwait(false),
+                "RUN_AUDIO_CAPTURE_BENCHMARK" => await _runtime.RunSharedNativeCaptureAsync(
+                    ReadString(request.Payload, "deviceId"),
+                    ReadDurationSeconds(request.Payload),
+                    ReadBool(request.Payload, "keepAudio"),
+                    cancellationToken).ConfigureAwait(false),
+                "RUN_ROOM_CHECK_V2" => await _runtime.RunRoomCheckV2Async(
+                    ReadString(request.Payload, "deviceId"), cancellationToken).ConfigureAwait(false),
                 "SET_AUDIO_DEVICES" or "SELECT_AUDIO_DEVICE" => await _runtime.SetAudioDevicesAsync(
                     ReadString(request.Payload, "microphoneDeviceId") ?? ReadString(request.Payload, "deviceId"),
                     ReadString(request.Payload, "systemAudioDeviceId"), cancellationToken).ConfigureAwait(false),

@@ -155,6 +155,28 @@ pwsh -NoProfile -File scripts/voice-shadow-corpus.ps1 `
 очередь без drops и совпадающая identity assets. Acceptance artifact не содержит
 аудио, PCM, расшифровку или текст Assistant.
 
+Для parity capture используйте установленный Recorder Host вне активной
+записи; native probe сохраняет фактический shared mix format и по умолчанию
+удаляет диагностический WAV:
+
+```powershell
+powershell -NoProfile -File scripts/run-audio-capture-benchmark.ps1 `
+  -DurationSeconds 10 `
+  -OutputRoot artifacts/acceptance/audio-capture-parity
+```
+
+Качество транскрипции сравнивается отдельно на одинаковом reference-файле:
+
+```powershell
+py -3.12 scripts/transcription-quality-ab.py `
+  --reference reference.txt `
+  --candidate audacity audacity.txt `
+  --candidate audiograph audiograph.txt `
+  --candidate shared-native shared-native.txt `
+  --build-identity $identity `
+  --output artifacts/acceptance/transcription-quality-ab/report.json
+```
+
 Актуальные результаты и причины `BLOCKED` перечислены в
 [Production readiness](production-readiness.md). Не переводите `SKIPPED`,
 `CONTRACT_ONLY` или `BLOCKED_BY_HARDWARE` в зелёный статус вручную.

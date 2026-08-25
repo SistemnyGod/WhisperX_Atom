@@ -10,7 +10,27 @@ public enum AudioEngineKind
     // Diagnostic-only capture path. It is never selected as the canonical
     // recorder engine and is appended to preserve the existing numeric wire
     // values.
-    WasapiRawDiagnostic
+    WasapiRawDiagnostic,
+    WasapiSharedNativeDiagnostic
+}
+
+public static class AudioCaptureEngineSelection
+{
+    public const string EnvironmentVariable = "ATOM_MIC_CAPTURE_ENGINE";
+    public const string AudioGraph = "AUDIOGRAPH";
+    public const string SharedNative = "WASAPI_SHARED_NATIVE";
+
+    // The native candidate is intentionally diagnostic-only until a matching
+    // capture/transcription evidence artifact is supplied. Keeping the
+    // default explicit prevents an operator environment variable from
+    // silently changing the canonical recorder.
+    public static string Current => (Environment.GetEnvironmentVariable(EnvironmentVariable) ?? AudioGraph).Trim().ToUpperInvariant() switch
+    {
+        SharedNative => SharedNative,
+        _ => AudioGraph
+    };
+
+    public static bool IsCanonicalAudioGraph => Current == AudioGraph;
 }
 
 public enum AudioSelectionMode
@@ -149,7 +169,32 @@ public sealed record AudioCaptureAbResult(
     double SilenceSeconds = 0,
     double SpeechSeconds = 0,
     bool NoiseWindowConfirmed = false,
-    string PhaseMetadata = "UNCONFIRMED");
+    string PhaseMetadata = "UNCONFIRMED",
+    string CaptureVariant = "AUDIOGRAPH",
+    int? NativeSampleRate = null,
+    int? NativeChannels = null,
+    string? NativeSampleFormat = null,
+    string? NativeSha256 = null,
+    string? BuildIdentity = null);
+
+/// <summary>
+/// One coherent ten-second room check.  The payload contains only aggregate
+/// quality metrics; probe PCM is never serialized or persisted.
+/// </summary>
+public sealed record RoomAcousticCheckResult(
+    bool Success,
+    string? DeviceId,
+    string? DeviceName,
+    int DurationSeconds,
+    double SilenceSeconds,
+    double SpeechSeconds,
+    AudioQualityAssessment? Quality,
+    bool NoiseWindowConfirmed,
+    string PhaseMetadata,
+    string? ErrorCode = null,
+    string? Recommendation = null,
+    string? DiagnosticAudioPath = null,
+    bool AudioDeletedByDefault = true);
 
 /// <summary>
 /// Persistent diagnostics for one AudioGraph attempt. This is deliberately a

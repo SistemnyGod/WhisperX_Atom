@@ -4,7 +4,11 @@
 
 Recorder Host продолжает сохранять исходный AudioGraph PCM16 48 kHz mono. `AudioQualityAnalyzer` только измеряет сигнал и не применяет AGC, шумоподавление, limiter или другие необратимые фильтры к master-файлу.
 
-Room Check выполняется в две фазы: 3 секунды тишины и 7 секунд обычной речи. Отчёт содержит noise floor, RMS/peak речи, SNR, crest factor, DC offset, native/normalized clipping и continuity. Итоговые градации:
+Room Check V2 выполняется одним десятисекундным захватом: первые 3 секунды — тишина,
+следующие 7 секунд — обычная речь. Это исключает расхождение endpoint/telemetry
+между фазами. Старый Host поддерживает прежний двухпробный fallback. Отчёт
+содержит noise floor, RMS/peak речи, SNR, crest factor, DC offset,
+native/normalized clipping и continuity. Итоговые градации:
 
 - `GOOD`: clipping до 0,01%, SNR не ниже 20 dB;
 - `WARNING`: clipping до 0,1% или SNR 12–20 dB;
@@ -24,6 +28,28 @@ Room Check выполняется в две фазы: 3 секунды тиши�
 В отчёте A/B теперь присутствуют отдельные SHA256 `audiograph.wav` и `raw.wav`,
 а также quality-метрики обоих путей. AudioGraph PCM собирается только в
 ограниченном probe-буфере и не попадает в обычный durable master.
+
+### Capture parity v2
+
+Для объективного сравнения доступен диагностический capability
+`AUDIO_CAPTURE_BENCHMARK_V2` и команда `RUN_AUDIO_CAPTURE_BENCHMARK`.
+Она использует WASAPI Shared Native и сохраняет фактический mix format
+(sample rate, channels, subtype) без downmix/resample. Канонический AudioGraph
+остаётся default; native-файл удаляется автоматически, если `keepAudio=false`.
+
+Сравнение выполняется по четырём входам: Audacity baseline, AudioGraph, WASAPI
+Shared Native и WASAPI RAW. Для одинакового reference transcript используется
+`scripts/transcription-quality-ab.py`; он выдаёт только hashes и агрегаты WER,
+CER, speech recall и domain-term accuracy. Текст и аудио не входят в
+acceptance evidence.
+
+Локальный шаблон конфигурации Audacity находится в
+`docs/audacity-baseline.example.json`. Полный endpoint/device ID заполняется
+только локально; в evidence публикуется его SHA256.
+
+Promotion candidate не включается автоматически. Требуются dropout=0,
+clipping<0,1%, SNR не хуже Audacity более чем на 2 dB и WER не хуже более чем
+на 2 процентных пункта. До этого native capture остаётся диагностическим.
 
 ## Hardware runner
 

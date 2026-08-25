@@ -131,9 +131,19 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     preview = output_dir / "preview.opus"
     asr = output_dir / "asr.wav"
 
-    _run_ffmpeg(input_path, archive, ["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "flac", "-compression_level", "5"])
+    # The archive is the lossless master. Preserve source sample rate and
+    # channel layout; only the preview and ASR derivative are normalized.
+    _run_ffmpeg(input_path, archive, ["-map", "0:a:0", "-c:a", "flac", "-compression_level", "5"])
     _run_ffmpeg(input_path, preview, ["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k"])
-    _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+    asr_resampler = "soxr"
+    try:
+        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-af", "aresample=16000:resampler=soxr:precision=28", "-c:a", "pcm_s16le"])
+    except subprocess.CalledProcessError:
+        # Some development FFmpeg builds omit libsoxr. Keep the derivative
+        # usable while exposing the downgrade in quality metadata; release
+        # acceptance can require soxr explicitly.
+        asr_resampler = "swresample-fallback"
+        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
 
     audio_stream = next(stream for stream in probe["streams"] if stream.get("codec_type") == "audio")
     assembly_input = input_path.parent / "assembly-input.json"
@@ -166,6 +176,11 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "echo_cancellation": assembly_result.get("echoCancellation", assembly_result.get("echo_cancellation", "NONE")),
         "derived_sample_rate": 16000,
         "derived_channels": 1,
+        "master_sample_rate": int(audio_stream.get("sample_rate") or 0),
+        "master_channels": int(audio_stream.get("channels") or 0),
+        "master_codec": audio_stream.get("codec_name"),
+        "asr_resampler": asr_resampler,
+        "asr_resampler_precision": 28,
         "warnings": (["DERIVED_MIX_NO_AEC"] if assembly_result.get("masterKind", assembly_result.get("master_kind")) == "DERIVED_MIX_NO_AEC" else []),
         "recording_tracks": recording_tracks,
         # Keep the independent assembled files discoverable to later
@@ -184,6 +199,8 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     with input_path.open("rb") as source:
         for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
+    quality_report["master_sha256"] = digest.hexdigest()
+    quality_report["asr_sha256"] = hashlib.sha256(asr.read_bytes()).hexdigest() if asr.is_file() else None
     (output_dir / "audio-quality.json").write_text(
         json.dumps(quality_report, ensure_ascii=False, indent=2),
         encoding="utf-8",

@@ -37,6 +37,7 @@ class Track:
     encoding: str | None = None
     bits_per_sample: int | None = None
     sample_rate: int = 48000
+    channels: int = 1
 
 
 def _conninfo() -> str:
@@ -112,7 +113,7 @@ def _expected_duration_ms(track: Track) -> int:
 
 def _validate_output(path: Path, track: Track) -> dict:
     details = _probe_audio_format(path)
-    if details["codec"] != "flac" or details["sample_rate"] != track.sample_rate or details["channels"] != 1:
+    if details["codec"] != "flac" or details["sample_rate"] != track.sample_rate or details["channels"] != track.channels:
         raise ValueError(f"recording_track_output_format_invalid:{track.track_id}")
     actual_duration_ms = _probe_duration_ms(path)
     expected_duration_ms = _expected_duration_ms(track)
@@ -185,7 +186,7 @@ def _concat_track(track: Track, output: Path) -> dict:
         and item["channels"] == first["channels"]
         and item["bits_per_sample"] == first["bits_per_sample"]
         for item in formats[1:]
-    ) and first["codec"] == "flac" and first["sample_rate"] == track.sample_rate and first["channels"] == 1
+    ) and first["codec"] == "flac" and first["sample_rate"] == track.sample_rate and first["channels"] == track.channels
     started = time.perf_counter()
     method = "STREAM_COPY" if compatible else "REENCODE_FALLBACK"
     try:
@@ -218,7 +219,7 @@ def _load_tracks(session_id: str) -> list[Track]:
     with psycopg.connect(_conninfo()) as connection:
         rows = connection.execute(
             """
-            SELECT t.id::text,t.track_type,t.device_id,t.device_name,t.selection_mode,t.recording_profile,t.encoding,t.bits_per_sample,t.sample_rate,c.sequence,c.storage_key,c.start_sample,c.sample_count,c.size_bytes,c.sha256
+            SELECT t.id::text,t.track_type,t.device_id,t.device_name,t.selection_mode,t.recording_profile,t.encoding,t.bits_per_sample,t.sample_rate,t.channels,c.sequence,c.storage_key,c.start_sample,c.sample_count,c.size_bytes,c.sha256
             FROM recording_tracks t
             LEFT JOIN recording_chunks c ON c.track_id=t.id AND c.status='CONFIRMED'
             WHERE t.session_id=%s
@@ -228,12 +229,12 @@ def _load_tracks(session_id: str) -> list[Track]:
         ).fetchall()
 
     grouped: dict[str, tuple[tuple, list[Chunk]]] = {}
-    for track_id, track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, sample_rate, sequence, storage_key, start_sample, sample_count, size_bytes, sha256 in rows:
+    for track_id, track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, sample_rate, channels, sequence, storage_key, start_sample, sample_count, size_bytes, sha256 in rows:
         if track_id not in grouped:
-            grouped[track_id] = ((track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, int(sample_rate or 48000)), [])
+            grouped[track_id] = ((track_type, device_id, device_name, selection_mode, recording_profile, encoding, bits_per_sample, int(sample_rate or 48000), int(channels or 1)), [])
         if sequence is not None:
             grouped[track_id][1].append(Chunk(sequence, storage_key, start_sample, sample_count, size_bytes, sha256))
-    return [Track(track_id=track_id, track_type=metadata[0], device_id=metadata[1], device_name=metadata[2], selection_mode=metadata[3], recording_profile=metadata[4], encoding=metadata[5], bits_per_sample=metadata[6], sample_rate=metadata[7], chunks=tuple(chunks)) for track_id, (metadata, chunks) in grouped.items()]
+    return [Track(track_id=track_id, track_type=metadata[0], device_id=metadata[1], device_name=metadata[2], selection_mode=metadata[3], recording_profile=metadata[4], encoding=metadata[5], bits_per_sample=metadata[6], sample_rate=metadata[7], channels=metadata[8], chunks=tuple(chunks)) for track_id, (metadata, chunks) in grouped.items()]
 
 
 def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict:
@@ -245,7 +246,7 @@ def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict
             "start_offset_ms": 0,
             "drift_ms": 0,
             "sample_rate": track.sample_rate,
-            "channels": 1,
+            "channels": int(track.channels),
         }
     first = track.chunks[0].start_sample
     end = track.chunks[-1].start_sample + track.chunks[-1].sample_count
@@ -259,7 +260,7 @@ def _timeline_metadata(track: Track, path: Path, base_start_sample: int) -> dict
         "start_offset_ms": round((first - base_start_sample) * 1000 / rate),
         "drift_ms": actual - expected,
         "sample_rate": track.sample_rate,
-        "channels": 1,
+            "channels": int(track.channels),
     }
 
 
@@ -310,7 +311,7 @@ def _build_track_files(
                 "relative_path": _relative_output_name(path, output_dir),
                 "storage_key": _media_storage_key(path, output_dir),
                 "sample_rate": int(track.sample_rate),
-                "channels": 1,
+                "channels": int(track.channels),
                 "duration_ms": int(item.get("actual_duration_ms", 0)),
                 "start_offset_ms": int(item.get("start_offset_ms", 0)),
                 "drift_ms": int(item.get("drift_ms", 0)),
@@ -327,7 +328,7 @@ def assemble_recording_session(session_id: str, output_dir: Path) -> Path:
     if not tracks:
         raise ValueError("recording_tracks_required")
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "assembly-input.json").write_text(json.dumps({"recording_tracks": [{"track_id": track.track_id, "track_type": track.track_type, "device_id": track.device_id, "device_name": track.device_name, "selection_mode": track.selection_mode, "recording_profile": track.recording_profile, "encoding": track.encoding, "bits_per_sample": track.bits_per_sample} for track in tracks]}, ensure_ascii=False), encoding="utf-8")
+    (output_dir / "assembly-input.json").write_text(json.dumps({"recording_tracks": [{"track_id": track.track_id, "track_type": track.track_type, "device_id": track.device_id, "device_name": track.device_name, "selection_mode": track.selection_mode, "recording_profile": track.recording_profile, "encoding": track.encoding, "bits_per_sample": track.bits_per_sample, "sample_rate": track.sample_rate, "channels": track.channels} for track in tracks]}, ensure_ascii=False), encoding="utf-8")
     assembled: list[Path] = []
     assembly_methods: list[dict] = []
     for track in tracks:
