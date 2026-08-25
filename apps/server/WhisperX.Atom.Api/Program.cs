@@ -989,15 +989,17 @@ app.MapGet("/api/meetings", async (int? limit, int? offset, HttpContext context)
 {
     if (CurrentUserId(context) is not Guid userId)
         return Results.Unauthorized();
-    return Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), userId, IsPrivileged(context)));
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    return Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), userId, includeAll));
 });
 
 app.MapGet("/api/transcripts", async (int? limit, int? offset, string? search, string? status, DateTime? dateFrom, DateTime? dateTo, HttpContext context) =>
 {
     if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
     if (search?.Length > 200 || status?.Length > 80) return Results.BadRequest(new { error = "invalid_registry_filter" });
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
     var rows = await db.ListTranscriptRegistryAsync(
-        Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), search?.Trim(), status?.Trim(), dateFrom, dateTo, userId, IsPrivileged(context));
+        Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), search?.Trim(), status?.Trim(), dateFrom, dateTo, userId, includeAll);
     return Results.Ok(rows);
 });
 
@@ -1010,22 +1012,25 @@ app.MapGet("/api/search", async (string? q, Guid? meetingId, int? limit, int? of
         return Results.BadRequest(new { error = "query_required" });
     if (query.Length > 200)
         return Results.BadRequest(new { error = "query_too_long" });
-    if (meetingId is Guid selectedMeeting && !await CanAccessMeetingAsync(context, selectedMeeting))
+    if (meetingId is Guid selectedMeeting && !await CanReadMeetingAsync(context, selectedMeeting))
         return Results.NotFound();
+
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
 
     return Results.Ok(await store.SearchAsync(
         query,
         meetingId,
         userId,
-        IsPrivileged(context),
+        includeAll,
         Math.Clamp(limit ?? 50, 1, 200),
         Math.Max(offset ?? 0, 0)));
 });
 
 app.MapGet("/api/meetings/{id:guid}", async (Guid id, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
-    var meeting = await db.GetMeetingAsync(id, CurrentUserId(context), IsPrivileged(context));
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    var meeting = await db.GetMeetingAsync(id, CurrentUserId(context), includeAll);
     return meeting is null ? Results.NotFound() : Results.Ok(meeting);
 });
 
@@ -1158,6 +1163,16 @@ static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user
 static bool IsAdministrator(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
     string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase);
 
+// DEPLOYMENT was the original name used by the LAN pilot. ORGANIZATION is the
+// public additive name; both values intentionally mean read-only sharing of
+// canonical meeting data while mutations remain owner/privileged-only.
+static bool IsSharedMeetingReadScope(IConfiguration configuration)
+{
+    var value = configuration["MEETING_READ_SCOPE"]?.Trim();
+    return string.Equals(value, "DEPLOYMENT", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(value, "ORGANIZATION", StringComparison.OrdinalIgnoreCase);
+}
+
 static bool IsValidEmbeddingJson(JsonDocument? document)
 {
     if (document is null || document.RootElement.ValueKind != JsonValueKind.Array)
@@ -1179,6 +1194,26 @@ async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
     if (IsPrivileged(context)) return true;
     var userId = CurrentUserId(context);
     return userId.HasValue && await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
+
+async Task<bool> CanAccessAssistantMeetingAsync(HttpContext context, Guid meetingId)
+{
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    if (!userId.HasValue) return false;
+    if (IsSharedMeetingReadScope(builder.Configuration))
+        return true;
+    return await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
+
+async Task<bool> CanReadMeetingAsync(HttpContext context, Guid meetingId)
+{
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    if (!userId.HasValue) return false;
+    if (IsSharedMeetingReadScope(builder.Configuration))
+        return true;
+    return await db.UserOwnsMeetingAsync(meetingId, userId.Value);
 }
 
 static bool RoleAllows(string role, string method, PathString path)
@@ -1582,8 +1617,28 @@ app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, Record
 
 app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.GetLatestSummaryAsync(id));
+});
+app.MapGet("/api/assistant/memory/status", async (HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(configuration);
+    var configuredScope = configuration["MEETING_READ_SCOPE"]?.Trim().ToUpperInvariant();
+    return Results.Ok(await store.GetMemoryCoverageAsync(userId, includeAll, configuredScope));
+});
+app.MapPost("/api/admin/memory/rebuild", async (MemoryRebuildRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    var mode = string.IsNullOrWhiteSpace(request?.Mode) ? "PREVIEW" : request!.Mode.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "memory_rebuild_mode_invalid" });
+    Guid? cursor = null;
+    if (!string.IsNullOrWhiteSpace(request?.Cursor) && !Guid.TryParse(request.Cursor, out var parsedCursor))
+        return Results.BadRequest(new { error = "memory_rebuild_cursor_invalid" });
+    if (!string.IsNullOrWhiteSpace(request?.Cursor)) cursor = Guid.Parse(request!.Cursor);
+    var limit = Math.Clamp(request?.Limit ?? 500, 1, 500);
+    return Results.Ok(await store.RebuildMemoryAsync(userId, includeAll: true, apply: mode == "APPLY", limit, cursor, request?.RebuildExisting == true));
 });
 // Home uses this bounded aggregate to avoid the historical jobs/summary/tasks
 // N+1 refresh.  Each meeting is scope-checked before any child resource is
@@ -1602,7 +1657,7 @@ app.MapGet("/api/meetings/metrics", async (string? ids, HttpContext context, Uni
         .ToArray();
     if (meetingIds.Length == 0) return Results.BadRequest(new { error = "meeting_ids_required" });
 
-    var includeAll = IsPrivileged(context);
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
     async Task<object?> Load(Guid meetingId)
     {
         if (await db.GetMeetingAsync(meetingId, userId, includeAll) is null) return null;
@@ -1628,7 +1683,7 @@ app.MapGet("/api/meetings/metrics", async (string? ids, HttpContext context, Uni
 });
 app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     var chains = await store.GetMeetingPipelineChainsAsync(id);
     var readiness = await TryGetPipelineReadinessAsync(store, configuration);
     return Results.Ok(chains.Select(chain => chain with { SnapshotOverride = RecordingPipelineSnapshotResolver.Resolve(chain, readiness) }).ToList());
@@ -1676,12 +1731,12 @@ app.MapPost("/api/admin/historical-imports", async (HistoricalImportRequest? req
 });
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.ListDecisionsAsync(id));
 });
 app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await store.ListActionItemsAsync(id));
 });
 // Paginated registries avoid walking every meeting and issuing one detail
@@ -1689,17 +1744,17 @@ app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, HttpContext context,
 app.MapGet("/api/summaries", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
-    return Results.Ok(await store.ListSummaryRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+    return Results.Ok(await store.ListSummaryRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
 });
 app.MapGet("/api/speakers", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
-    return Results.Ok(await store.ListSpeakerRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+    return Results.Ok(await store.ListSpeakerRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
 });
 app.MapGet("/api/speaker-profiles", async (int? page, int? pageSize, string? search, string? status, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
-    return Results.Ok(await store.ListSpeakerProfilesAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, userId.Value, IsPrivileged(context)));
+    return Results.Ok(await store.ListSpeakerProfilesAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
 });
 app.MapPost("/api/speaker-profiles", async (SpeakerProfileCreateRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1725,7 +1780,7 @@ app.MapPost("/api/speaker-profiles/{id:guid}/enroll", async (Guid id, SpeakerPro
 app.MapGet("/api/action-items", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
 {
     var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
-    return Results.Ok(await store.ListActionItemRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context)));
+    return Results.Ok(await store.ListActionItemRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
 });
 app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, HttpContext context, UnifiedProductStore store) =>
 {
@@ -1789,7 +1844,7 @@ app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRe
     var scope = request.ScopeType?.Trim().ToUpperInvariant();
     if (scope == "GLOBAL" && !IsPrivileged(context)
         && request.AssistantMode?.Trim().ToUpperInvariant() is not ("MEETING_MEMORY" or "MEETING_HISTORY")) return Results.Forbid();
-    if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
+    if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessAssistantMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
     if (scope is not ("MEETING" or "GLOBAL" or "GENERAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
     var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId, request.AssistantMode);
     return conversation is null ? Results.BadRequest(new { error = "assistant_context_not_ready" }) : Results.Created($"/api/assistant/conversations/{conversation.Id}", conversation);
@@ -1823,8 +1878,58 @@ app.MapPost("/api/assistant/conversations/{id:guid}/messages", async (Guid id, A
 {
     var userId = CurrentUserId(context);
     if (userId is null) return Results.Unauthorized();
+    var existing = await store.GetAssistantConversationAsync(id, userId.Value);
+    if (existing is null) return Results.NotFound(new { error = "assistant_conversation_not_found" });
+
+    // A Desktop user can change the selected mode/context while an older chat
+    // remains open. Never silently reuse that chat with a different factual
+    // scope: create a new conversation and keep the old history immutable.
+    var scopedConversation = existing;
+    var scopeChanged = false;
+    var requestedMode = request.RequestedMode?.Trim().ToUpperInvariant();
+    if (!string.IsNullOrWhiteSpace(requestedMode) && requestedMode != "AUTO")
+    {
+        var normalizedMode = requestedMode == "MEETING_HISTORY" ? "MEETING_MEMORY" : requestedMode;
+        if (normalizedMode is not ("GENERAL_CHAT" or "MEETING_MEMORY" or "CURRENT_MEETING" or "LIVE_MEETING"))
+            return Results.BadRequest(new { error = "ASSISTANT_MODE_INVALID" });
+        var expectedMeeting = normalizedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
+        if (normalizedMode is "CURRENT_MEETING" or "LIVE_MEETING" && expectedMeeting is null)
+            return Results.BadRequest(new { error = "ASSISTANT_MEETING_REQUIRED" });
+        if (expectedMeeting is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
+            return Results.NotFound();
+        var expectedScope = normalizedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
+        if (!string.Equals(existing.AssistantMode, normalizedMode, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase)
+            || existing.MeetingId != expectedMeeting)
+        {
+            scopedConversation = await store.CreateAssistantConversationAsync(
+                userId.Value,
+                "Мифодий",
+                expectedScope,
+                expectedMeeting,
+                normalizedMode);
+            if (scopedConversation is null)
+                return Results.Conflict(new { error = "assistant_context_not_ready" });
+            scopeChanged = true;
+            id = scopedConversation.Id;
+        }
+    }
+
     var result = await store.CreateAssistantMessageAsync(id, userId.Value, request.Content ?? string.Empty, request.RetryOf);
-    return result is null ? Results.BadRequest(new { error = "assistant_conversation_not_ready" }) : Results.Accepted($"/api/assistant/conversations/{id}/messages/{result.AssistantMessage.Id}/events", result);
+    if (result is null) return Results.BadRequest(new { error = "assistant_conversation_not_ready" });
+    return Results.Accepted($"/api/assistant/conversations/{id}/messages/{result.AssistantMessage.Id}/events", new
+    {
+        result.UserMessage,
+        result.AssistantMessage,
+        result.QueryId,
+        conversationId = id,
+        conversation = scopedConversation,
+        scopeChanged,
+        requestedMode = requestedMode ?? existing.AssistantMode,
+        resolvedMode = scopedConversation.AssistantMode,
+        resolvedMeetingId = scopedConversation.MeetingId,
+        routingReason = scopeChanged ? "conversation_scope_changed" : "conversation_scope_unchanged"
+    });
 });
 app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{messageId:guid}/events", async (Guid conversationId, Guid messageId, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
 {
@@ -1891,7 +1996,7 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
             });
         }
     }
-    if (request.ActiveMeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
+    if (request.ActiveMeetingId is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
         return Results.NotFound();
 
     var route = await modeResolver.ResolveAsync(new AssistantModeResolutionRequest(
@@ -1903,15 +2008,18 @@ app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, H
         request.CaptureState,
         request.ConversationId,
         request.PreviousResolvedMode,
-        IsPrivileged(context)), cancellationToken);
+        IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration),
+        request.TimeZone), cancellationToken);
     // The resolver may recover a meeting scope from a persisted conversation
     // after Desktop restart. Re-apply the HTTP RBAC check to that resolved
     // id; checking only ActiveMeetingId would allow a stale conversation to
     // create a query for a meeting the user no longer can access.
-    if (route.MeetingId is Guid resolvedMeetingForAccess && !await CanAccessMeetingAsync(context, resolvedMeetingForAccess))
+    if (route.MeetingId is Guid resolvedMeetingForAccess && !await CanAccessAssistantMeetingAsync(context, resolvedMeetingForAccess))
         return Results.NotFound();
     if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
         return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
+    if (string.Equals(route.ErrorCode, "ASSISTANT_MEETING_SELECTION_REQUIRED", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "MEETING_SELECTION_REQUIRED", spokenText = route.Clarification, meetings = route.MeetingCandidates ?? Array.Empty<AssistantMeetingCandidate>() });
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
     if (route.ResolvedMode == "LIVE_MEETING")
@@ -2012,7 +2120,7 @@ app.MapGet("/api/assistant/requests/by-command/{commandId}", async (string comma
 });
 app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store, AssistantModeResolver modeResolver, CancellationToken cancellationToken) =>
 {
-    if (request.MeetingId is Guid meetingId && !await CanAccessMeetingAsync(context, meetingId))
+    if (request.MeetingId is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
         return Results.NotFound();
     var userId = CurrentUserId(context);
     if (userId is null) return Results.Unauthorized();
@@ -2025,11 +2133,14 @@ app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, Http
         null,
         null,
         null,
-        IsPrivileged(context)), cancellationToken);
-    if (route.MeetingId is Guid queryMeetingForAccess && !await CanAccessMeetingAsync(context, queryMeetingForAccess))
+        IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration),
+        null), cancellationToken);
+    if (route.MeetingId is Guid queryMeetingForAccess && !await CanAccessAssistantMeetingAsync(context, queryMeetingForAccess))
         return Results.NotFound();
     if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
         return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
+    if (string.Equals(route.ErrorCode, "ASSISTANT_MEETING_SELECTION_REQUIRED", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "MEETING_SELECTION_REQUIRED", spokenText = route.Clarification, meetings = route.MeetingCandidates ?? Array.Empty<AssistantMeetingCandidate>() });
     if (!string.IsNullOrWhiteSpace(route.ErrorCode))
         return Results.BadRequest(new { error = route.ErrorCode, spokenText = route.Clarification });
     var requestedMode = string.IsNullOrWhiteSpace(request.AssistantMode) ? "AUTO" : request.AssistantMode.Trim().ToUpperInvariant();
@@ -2059,26 +2170,26 @@ app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpContex
 });
 app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await db.ListJobsAsync(id));
 });
 
 app.MapGet("/api/meetings/{id:guid}/media", async (Guid id, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await db.ListMediaAsync(id));
 });
 
 app.MapGet("/api/meetings/{id:guid}/speakers", async (Guid id, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await db.ListSpeakersAsync(id));
 });
 
 app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) =>
 {
     var media = await db.GetMediaAsync(id);
-    if (media is null || !await CanAccessMeetingAsync(context, media.MeetingId) || string.IsNullOrWhiteSpace(media.PreviewStorageKey)) return Results.NotFound();
+    if (media is null || !await CanReadMeetingAsync(context, media.MeetingId) || string.IsNullOrWhiteSpace(media.PreviewStorageKey)) return Results.NotFound();
     var path = StorageHelpers.StoragePath(media.PreviewStorageKey);
     if (!File.Exists(path)) return Results.NotFound();
     return Results.File(File.OpenRead(path), "audio/ogg", enableRangeProcessing: true);
@@ -2091,7 +2202,7 @@ app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) 
 app.MapGet("/api/media/{id:guid}/download", async (Guid id, string? variant, HttpContext context) =>
 {
     var media = await db.GetMediaAsync(id);
-    if (media is null || !await CanAccessMeetingAsync(context, media.MeetingId)) return Results.NotFound();
+    if (media is null || !await CanReadMeetingAsync(context, media.MeetingId)) return Results.NotFound();
 
     // Imported video has two intentionally distinct assets: the untouched
     // source and the derived FLAC archive. Never return a FLAC payload using
@@ -2138,7 +2249,7 @@ app.MapGet("/api/media/{id:guid}/download", async (Guid id, string? variant, Htt
 app.MapGet("/api/jobs/{id:guid}", async (Guid id, HttpContext context) =>
 {
     var job = await db.GetJobAsync(id);
-    return job is null || !await CanAccessMeetingAsync(context, job.MeetingId) ? Results.NotFound() : Results.Ok(job);
+    return job is null || !await CanReadMeetingAsync(context, job.MeetingId) ? Results.NotFound() : Results.Ok(job);
 });
 
 app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id, HttpContext context) =>
@@ -2154,7 +2265,7 @@ app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id, HttpContext context) =>
 app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, CancellationToken cancellationToken) =>
 {
     var initialJob = await db.GetJobAsync(id);
-    if (initialJob is null || !await CanAccessMeetingAsync(context, initialJob.MeetingId)) { response.StatusCode = 404; return; }
+    if (initialJob is null || !await CanReadMeetingAsync(context, initialJob.MeetingId)) { response.StatusCode = 404; return; }
     response.Headers.ContentType = "text/event-stream";
     response.Headers.CacheControl = "no-cache";
     for (var i = 0; i < 120 && !cancellationToken.IsCancellationRequested; i++)
@@ -2176,7 +2287,7 @@ app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, Ht
 
 app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, int? version, bool? includeWords, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     var transcript = await db.GetTranscriptAsync(id, version, includeWords == true);
     return Results.Ok(new
     {
@@ -2194,7 +2305,7 @@ app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, int? version, b
 
 app.MapGet("/api/meetings/{id:guid}/transcript/versions", async (Guid id, HttpContext context) =>
 {
-    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
     return Results.Ok(await db.ListTranscriptVersionsAsync(id));
 });
 
@@ -2288,15 +2399,23 @@ public record AssistantRequestRequest(
     string? TraceId = null,
     Guid? RecordingSessionId = null,
     string? CaptureState = null,
-    string? PreviousResolvedMode = null);
+    string? PreviousResolvedMode = null,
+    string? TimeZone = null);
 public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
     string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
 public sealed record LiveMeetingSegmentsRequest(Guid? RecordingSessionId, IReadOnlyList<LiveMeetingSegmentRequest> Segments);
 public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
-public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
+public record AssistantMessageCreateRequest(
+    string? Content,
+    Guid? RetryOf,
+    string? RequestedMode = null,
+    Guid? ActiveMeetingId = null,
+    string? TimeZone = null,
+    string? PreviousResolvedMode = null);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
 public record PipelineRepairRequest(string? Mode);
+public record MemoryRebuildRequest(string? Mode, int? Limit = null, string? Cursor = null, bool RebuildExisting = false);
 public sealed record HistoricalImportSegmentRequest(int Ordinal, long StartMs, long EndMs, string Text, string? Speaker = null);
 public sealed record HistoricalImportRequest(
     string Mode,
@@ -2357,7 +2476,7 @@ public sealed record UserRow(Guid Id, string Username, string PasswordHash, stri
 public sealed record AdminUserRow(Guid Id, string Username, string Role, bool IsActive, bool MustChangePassword, DateTime CreatedAt);
 public sealed record TemporaryPasswordResult(AdminUserRow User, string TemporaryPassword);
 public sealed record RefreshRotation(UserRow User, string RefreshToken);
-public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt);
+public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt, DateTime? OccurredAt = null);
 public sealed record JobRow(
     Guid Id,
     Guid MeetingId,
@@ -3168,14 +3287,26 @@ public sealed class Database(IConfiguration configuration)
             segmentCount = request.Segments.Count,
             warning = "HISTORICAL_IMPORT_UNVERIFIED"
         });
+        DateTimeOffset? importedOccurredAt = null;
+        var importedPrecision = request.DatePrecision.Trim().ToUpperInvariant();
+        if (importedPrecision == "DAY"
+            && DateOnly.TryParseExact(request.MeetingDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var importedDate))
+            importedOccurredAt = new DateTimeOffset(importedDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        else if (DateTimeOffset.TryParse(request.MeetingDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AllowWhiteSpaces, out var importedTimestamp))
+            importedOccurredAt = importedTimestamp.ToUniversalTime();
+        var storedOccurrencePrecision = importedOccurredAt is null
+            ? "UNKNOWN"
+            : importedPrecision == "DAY" ? "IMPORTED_DATE" : "IMPORTED_TIMESTAMP";
         const string warnings = "[\"HISTORICAL_IMPORT_UNVERIFIED\"]";
 
-        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,description,status) VALUES(@id,@owner,@title,@description,'TRANSCRIBED')", connection, transaction))
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,description,status,occurred_at,occurred_precision) VALUES(@id,@owner,@title,@description,'TRANSCRIBED',@occurred,@precision)", connection, transaction))
         {
             meeting.Parameters.AddWithValue("id", meetingId);
             meeting.Parameters.AddWithValue("owner", ownerId);
             meeting.Parameters.AddWithValue("title", title);
             meeting.Parameters.AddWithValue("description", $"Исторический импорт; дата: {request.MeetingDate ?? "не указана"}");
+            meeting.Parameters.Add("occurred", NpgsqlDbType.TimestampTz).Value = (object?)importedOccurredAt ?? DBNull.Value;
+            meeting.Parameters.AddWithValue("precision", storedOccurrencePrecision);
             await meeting.ExecuteNonQueryAsync();
         }
         await using (var transcript = new NpgsqlCommand("""
@@ -3231,7 +3362,7 @@ public sealed class Database(IConfiguration configuration)
             outbox.Parameters.AddWithValue("payload", payload);
             await outbox.ExecuteNonQueryAsync();
         }
-        var receipt = JsonSerializer.Serialize(new { importId, meetingId, transcriptId, memoryJobId, decision = "IMPORTED" });
+        var receipt = JsonSerializer.Serialize(new { importId, meetingId, transcriptId, memoryJobId, meetingDate = request.MeetingDate, datePrecision = importedPrecision, decision = "IMPORTED" });
         await using (var receiptCommand = new NpgsqlCommand("""
             INSERT INTO historical_transcript_imports(id,owner_user_id,source_name,source_format,source_sha256,canonical_content_sha256,parser_version,decision,meeting_id,transcript_id,memory_job_id,receipt)
             VALUES(@id,@owner,@name,@format,@source,@canonical,@parser,'IMPORTED',@meeting,@transcript,@memory,@receipt::jsonb)
@@ -3287,14 +3418,14 @@ public sealed class Database(IConfiguration configuration)
         var result = new List<MeetingRow>();
         await using var connection = await OpenAsync();
         await using var command = new NpgsqlCommand(
-            "SELECT id,title,description,status,created_at FROM meetings WHERE @include_all OR owner_id=@owner ORDER BY created_at DESC LIMIT @limit OFFSET @offset", connection);
+            "SELECT id,title,description,status,created_at,occurred_at FROM meetings WHERE @include_all OR owner_id=@owner ORDER BY COALESCE(occurred_at,created_at) DESC LIMIT @limit OFFSET @offset", connection);
         command.Parameters.AddWithValue("include_all", includeAll);
         command.Parameters.AddWithValue("owner", ownerId);
         command.Parameters.AddWithValue("limit", limit);
         command.Parameters.AddWithValue("offset", offset);
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
-            result.Add(new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4)));
+            result.Add(new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4), reader.IsDBNull(5) ? null : reader.GetDateTime(5)));
         return result;
     }
 
@@ -3311,10 +3442,10 @@ public sealed class Database(IConfiguration configuration)
             WHERE (@include_all OR m.owner_id=@owner)
               AND (@search IS NULL OR m.title ILIKE '%' || @search || '%')
               AND (@status IS NULL OR t.status=@status)
-              AND (@date_from IS NULL OR m.created_at >= @date_from)
-              AND (@date_to IS NULL OR m.created_at < @date_to)
+              AND (@date_from IS NULL OR COALESCE(m.occurred_at,m.created_at) >= @date_from)
+              AND (@date_to IS NULL OR COALESCE(m.occurred_at,m.created_at) < @date_to)
             GROUP BY t.id,m.id,m.title,m.created_at,t.version,t.status,t.quality_score,t.created_at
-            ORDER BY m.created_at DESC LIMIT @limit OFFSET @offset
+            ORDER BY COALESCE(m.occurred_at,m.created_at) DESC LIMIT @limit OFFSET @offset
             """, connection);
         // Explicit types are required for nullable filters. PostgreSQL cannot
         // infer the type of a NULL parameter used in an `IS NULL` predicate,
@@ -3334,13 +3465,13 @@ public sealed class Database(IConfiguration configuration)
     public async Task<MeetingRow?> GetMeetingAsync(Guid id, Guid? ownerId, bool includeAll)
     {
         await using var connection = await OpenAsync();
-        await using var command = new NpgsqlCommand("SELECT id,title,description,status,created_at FROM meetings WHERE id=@id AND (@include_all OR owner_id=@owner)", connection);
+        await using var command = new NpgsqlCommand("SELECT id,title,description,status,created_at,occurred_at FROM meetings WHERE id=@id AND (@include_all OR owner_id=@owner)", connection);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("owner", (object?)ownerId ?? DBNull.Value);
         command.Parameters.AddWithValue("include_all", includeAll);
         await using var reader = await command.ExecuteReaderAsync();
         return !await reader.ReadAsync() ? null :
-            new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4));
+            new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4), reader.IsDBNull(5) ? null : reader.GetDateTime(5));
     }
 
     public async Task CreateUploadReservationAsync(Guid meetingId, Guid uploadId, string fileName, long sizeBytes)

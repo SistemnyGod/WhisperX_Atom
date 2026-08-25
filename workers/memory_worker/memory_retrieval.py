@@ -16,6 +16,7 @@ class MemoryQueryPlan:
     temporal_mode: str
     include_superseded: bool
     topic: str | None
+    date_range: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -24,10 +25,11 @@ class MemoryQueryPlan:
             "temporalMode": self.temporal_mode,
             "includeSuperseded": self.include_superseded,
             "topic": self.topic,
+            "dateRange": self.date_range,
         }
 
 
-def build_memory_query_plan(intent: str, query: str, topic: str | None = None) -> MemoryQueryPlan:
+def build_memory_query_plan(intent: str, query: str, topic: str | None = None, date_range: str | None = None) -> MemoryQueryPlan:
     normalized = " ".join(re.sub(r"[^\wА-Яа-яЁё-]+", " ", query or "").lower().split())
     if any(word in normalized for word in ("впервые", "первый раз", "когда начали")):
         fact_types = ("DEADLINE", "RESPONSIBLE", "DECISION", "STATUS", "TASK", "CAUSE")
@@ -52,7 +54,7 @@ def build_memory_query_plan(intent: str, query: str, topic: str | None = None) -
             "FACT_LOOKUP": ("DECISION", "TASK", "RESPONSIBLE", "DEADLINE", "CAUSE", "STATUS"),
         }.get(intent, ("DECISION", "TASK", "RESPONSIBLE", "DEADLINE", "CAUSE", "STATUS"))
         temporal_mode, include_superseded = "FACT", False
-    return MemoryQueryPlan(intent, tuple(dict.fromkeys(fact_types)), temporal_mode, include_superseded, topic)
+    return MemoryQueryPlan(intent, tuple(dict.fromkeys(fact_types)), temporal_mode, include_superseded, topic, date_range)
 
 
 def rehydrate_evidence(facts: Iterable[MemoryFact], allowed_segment_ids: set[str] | None = None) -> tuple[str, ...]:

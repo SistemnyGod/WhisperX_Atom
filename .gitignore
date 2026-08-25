@@ -78,4 +78,11 @@ artifacts/
 .tmp-*/
 .tmp-pytest-*/
 .pytest-runtime-temp/
+.pytest-*/
+.codex-test-temp/
+.media-test-temp/
+.technical-test-*/
+.review-test-temp/
+.recording-contract-*/
 tmp-*/
+tmp[0-9a-z]*/

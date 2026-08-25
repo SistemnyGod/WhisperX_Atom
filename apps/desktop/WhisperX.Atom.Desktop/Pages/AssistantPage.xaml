@@ -22,10 +22,16 @@
 
         <Grid x:Name="AssistantShell" Grid.Row="2" ColumnDefinitions="260,*,340" ColumnSpacing="12" SizeChanged="AssistantShell_SizeChanged">
             <Border x:Name="ConversationCard" Style="{StaticResource CardStyle}" Padding="12">
-                <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
+                <Grid RowDefinitions="Auto,Auto,Auto,*" RowSpacing="10">
                     <TextBlock Text="Чаты" Style="{StaticResource SectionTitleStyle}" />
                         <TextBlock Grid.Row="1" Text="Режим и контекст фиксируются при создании чата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
-                    <ListView x:Name="ConversationsList" Grid.Row="2" ItemsSource="{Binding Conversations}" SelectionMode="Single" SelectionChanged="ConversationsList_SelectionChanged" BorderThickness="0">
+                    <StackPanel Grid.Row="2" Spacing="3" Margin="0,2,0,0">
+                        <TextBlock Text="Память Мифодия" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding MemoryCoverage.CoverageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" AutomationProperties.Name="Покрытие общей памяти" />
+                        <TextBlock Text="{Binding MemoryCoverage.StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <Button Content="Обновить индекс памяти" IsEnabled="{Binding CanRebuildMemory}" Style="{StaticResource CardButtonStyle}" Click="RebuildMemoryButton_Click" AutomationProperties.Name="Предпросмотр и обновление памяти Мифодия" />
+                    </StackPanel>
+                    <ListView x:Name="ConversationsList" Grid.Row="3" ItemsSource="{Binding Conversations}" SelectionMode="Single" SelectionChanged="ConversationsList_SelectionChanged" BorderThickness="0">
                         <ListView.ItemTemplate>
                             <DataTemplate>
                                 <Grid Padding="4,8" RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto">

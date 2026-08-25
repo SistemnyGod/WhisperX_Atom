@@ -71,7 +71,7 @@ public interface IBackendService : IDisposable
     Task<IReadOnlyList<DesktopAssistantConversation>> GetAssistantConversationsAsync(bool includeArchived = false, CancellationToken cancellationToken = default);
     Task<DesktopAssistantConversation?> CreateAssistantConversationAsync(string title, string scopeType, Guid? meetingId, string? assistantMode = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopAssistantMessage>> GetAssistantMessagesAsync(Guid conversationId, CancellationToken cancellationToken = default);
-    Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default);
+    Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, string? requestedMode = null, Guid? activeMeetingId = null, string? timeZone = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default);
     Task<DesktopAssistantMessage?> WaitForAssistantMessageAsync(Guid conversationId, Guid messageId, CancellationToken cancellationToken = default);
     Task<bool> UpdateAssistantConversationAsync(Guid conversationId, string? title = null, bool? archived = null, CancellationToken cancellationToken = default);
     Task<bool> DeleteAssistantConversationAsync(Guid conversationId, CancellationToken cancellationToken = default);
@@ -79,6 +79,8 @@ public interface IBackendService : IDisposable
     Task<DesktopAssistantQuery?> GetAssistantQueryAsync(Guid queryId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantRequestAccepted?> GetAssistantRequestByCommandAsync(string commandId, CancellationToken cancellationToken = default);
     Task<DesktopAssistantRequestAccepted?> CreateAssistantRequestAsync(string question, string? requestedMode = "AUTO", Guid? activeMeetingId = null, Guid? conversationId = null, string source = "DESKTOP", string? commandId = null, string? traceId = null, Guid? recordingSessionId = null, string? captureState = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default);
+    Task<DesktopMemoryCoverage?> GetMemoryCoverageAsync(CancellationToken cancellationToken = default);
+    Task<DesktopMemoryRebuildResult?> RebuildMemoryAsync(string mode, CancellationToken cancellationToken = default);
     Task<bool> PublishLiveMeetingSegmentsAsync(Guid meetingId, Guid? recordingSessionId, IReadOnlyList<DesktopLiveMeetingSegment> segments, CancellationToken cancellationToken = default);
     Task<bool> LoginAsync(string apiUrl, string username, string password, CancellationToken cancellationToken = default);
     Task<bool> RefreshAsync(CancellationToken cancellationToken = default);
@@ -152,6 +154,24 @@ public sealed record DesktopAssistantConversation(string Id, string Title, strin
         _ => "Совещание"
     };
 }
+public sealed record DesktopMemoryCoverage(
+    long MeetingCount,
+    long UsableTranscriptCount,
+    long CanonicalSegmentCount,
+    long ActiveFactCount,
+    long ReadyJobCount,
+    long FailedJobCount,
+    DateTime? LastIndexedAt,
+    string? LastErrorCode,
+    string ReadScope,
+    int IndexVersion = 1,
+    int NormalizerVersion = 1)
+{
+    public string CoverageText => $"{UsableTranscriptCount} из {MeetingCount} встреч · {ActiveFactCount} фактов · {CanonicalSegmentCount} сегментов";
+    public string StatusText => FailedJobCount > 0 ? $"Память требует внимания: ошибок индексации {FailedJobCount}." : ReadyJobCount > 0 ? "Память Мифодия готова." : "Индекс памяти ещё формируется.";
+}
+public sealed record DesktopMemoryRebuildCandidate(string MeetingId, string TranscriptId, int TranscriptVersion, string State, string? Reason, string? JobId = null);
+public sealed record DesktopMemoryRebuildResult(string Mode, int CandidateCount, int CreatedJobs, int ReusedJobs, IReadOnlyList<DesktopMemoryRebuildCandidate> Candidates, string? NextCursor = null);
 public sealed record DesktopAssistantMessage(string Id, string ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, string? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null, JsonDocument? AnswerMetadata = null)
 {
     public bool IsUser => Role.Equals("USER", StringComparison.OrdinalIgnoreCase);
@@ -171,7 +191,17 @@ public sealed record DesktopAssistantMessage(string Id, string ConversationId, s
         }
     }
 }
-public sealed record DesktopAssistantMessageCreateResult(DesktopAssistantMessage UserMessage, DesktopAssistantMessage AssistantMessage, string QueryId);
+public sealed record DesktopAssistantMessageCreateResult(
+    DesktopAssistantMessage UserMessage,
+    DesktopAssistantMessage AssistantMessage,
+    string QueryId,
+    string? ConversationId = null,
+    DesktopAssistantConversation? Conversation = null,
+    bool ScopeChanged = false,
+    string? RequestedMode = null,
+    string? ResolvedMode = null,
+    string? ResolvedMeetingId = null,
+    string? RoutingReason = null);
 
 public sealed record MeetingNavigationTarget(string MeetingId, string? SegmentId = null, long? StartMs = null);
 public sealed record MeetingNavigationRequest(FrontendServices Services, MeetingNavigationTarget Target);

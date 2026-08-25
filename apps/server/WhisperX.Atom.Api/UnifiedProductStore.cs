@@ -90,6 +90,27 @@ public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, strin
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record RegistryPage<T>(IReadOnlyList<T> Items, int TotalCount, bool HasMore);
 public sealed record SummaryRegistryRow(MeetingRow Meeting, SummaryRow? Summary);
+public sealed record MemoryCoverageSnapshot(
+    long MeetingCount,
+    long UsableTranscriptCount,
+    long CanonicalSegmentCount,
+    long ActiveFactCount,
+    long ReadyJobCount,
+    long FailedJobCount,
+    DateTime? LastIndexedAt,
+    string? LastErrorCode,
+    string ReadScope,
+    int IndexVersion = 1,
+    int NormalizerVersion = 1,
+    long IndexedTranscriptCount = 0,
+    long EntityCount = 0,
+    long ThreadCount = 0,
+    string WorkerState = "UNKNOWN",
+    DateTime? DateFrom = null,
+    DateTime? DateTo = null);
+public sealed record MemoryRebuildCandidate(Guid MeetingId, Guid TranscriptId, int TranscriptVersion, string State, string? Reason, Guid? JobId = null);
+public sealed record MemoryRebuildResult(string Mode, int CandidateCount, int CreatedJobs, int ReusedJobs, IReadOnlyList<MemoryRebuildCandidate> Candidates, string? NextCursor = null);
+public sealed record AssistantMeetingCandidate(Guid MeetingId, string Title, DateTime OccurredAt);
 public sealed record SpeakerRegistryRow(MeetingRow Meeting, SpeakerRow Speaker);
 public sealed record SpeakerProfileRow(Guid Id, string DisplayName, int EmbeddingDimensions, int Samples, double? Confidence, int MeetingsCount, long DurationMs, string Status, string? EmbeddingModel, DateTime? LastSeenAt);
 public sealed record ActionItemRegistryRow(MeetingRow Meeting, ActionItemRow Item);
@@ -132,7 +153,7 @@ public sealed record AssistantRetrievalProbe(int MatchCount, double BestRank)
 public sealed record LiveMeetingAppendResult(Guid RecordingSessionId, int AcceptedCount);
 public sealed record AssistantConversationRow(Guid Id, Guid? UserId, string Title, string ScopeType, Guid? MeetingId, bool Archived, DateTime CreatedAt, DateTime UpdatedAt, string AssistantMode = "MEETING_MEMORY");
 public sealed record AssistantMessageRow(Guid Id, Guid ConversationId, string Role, string Content, string Status, string? VoiceAnswer, JsonDocument Evidence, string? ErrorCode, Guid? QueryId, DateTime CreatedAt, DateTime? CompletedAt, JsonElement? Timings = null, string? ProcessingStage = null, DateTime? AcceptedAt = null, string? TraceId = null, string? CommandId = null, JsonDocument? AnswerMetadata = null);
-public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId);
+public sealed record AssistantMessageCreateResult(AssistantMessageRow UserMessage, AssistantMessageRow AssistantMessage, Guid QueryId, Guid ConversationId);
 public sealed record SearchResultRow(Guid MeetingId, string MeetingTitle, string MeetingStatus, Guid SegmentId, long StartMs, long EndMs, string? Speaker, string Text, double Rank, DateTime MeetingCreatedAt);
 public sealed record OperationsSnapshot(
     long QueuedJobs,
@@ -491,11 +512,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 return new RecordingSessionCreateResult(null, "AGENT_USER_LINK_REQUIRED", false);
         }
         var resolvedTitle = string.IsNullOrWhiteSpace(title) ? "Meeting " + DateTime.Now.ToString("dd.MM.yyyy HH:mm") : title.Trim();
-        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status) VALUES(@id,@owner,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status,occurred_at,occurred_precision) VALUES(@id,@owner,@title,'RECORDING',COALESCE(@started,now()),'CAPTURED') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING', occurred_at=COALESCE(meetings.occurred_at,excluded.occurred_at), occurred_precision=CASE WHEN meetings.occurred_at IS NULL THEN 'CAPTURED' ELSE meetings.occurred_precision END", connection, transaction))
         {
             meeting.Parameters.AddWithValue("id", resolvedMeetingId);
             meeting.Parameters.AddWithValue("owner", owner);
             meeting.Parameters.AddWithValue("title", resolvedTitle);
+            meeting.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value);
             await meeting.ExecuteNonQueryAsync();
         }
         await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,owner_user_id,state,started_at,pipeline_correlation_id,local_session_id,acoustic_profile) VALUES(@id,@meeting,@agent,@owner,'RECORDING',COALESCE(@started,now()),@correlation,@local,@acoustic) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
@@ -540,11 +562,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         if (resolvedOwnerUserId is not Guid owner || agentId is not Guid authenticatedAgent || !await AgentUserLinkedAsync(authenticatedAgent, owner))
             return null;
         var resolvedTitle = string.IsNullOrWhiteSpace(title) ? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}" : title.Trim();
-        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status) VALUES(@id,@owner,@title,'RECORDING') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING'", connection, transaction))
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,status,occurred_at,occurred_precision) VALUES(@id,@owner,@title,'RECORDING',COALESCE(@started,now()),'CAPTURED') ON CONFLICT(id) DO UPDATE SET owner_id=COALESCE(meetings.owner_id,excluded.owner_id), title=CASE WHEN meetings.title IS NULL OR meetings.title='' THEN excluded.title ELSE meetings.title END, status='RECORDING', occurred_at=COALESCE(meetings.occurred_at,excluded.occurred_at), occurred_precision=CASE WHEN meetings.occurred_at IS NULL THEN 'CAPTURED' ELSE meetings.occurred_precision END", connection, transaction))
         {
             meeting.Parameters.AddWithValue("id", resolvedMeetingId);
             meeting.Parameters.AddWithValue("owner", owner);
             meeting.Parameters.AddWithValue("title", resolvedTitle);
+            meeting.Parameters.AddWithValue("started", (object?)startedAt?.UtcDateTime ?? DBNull.Value);
             await meeting.ExecuteNonQueryAsync();
         }
         await using var command = new NpgsqlCommand("INSERT INTO recording_sessions(id,meeting_id,agent_id,owner_user_id,state,started_at,pipeline_correlation_id,local_session_id) VALUES(@id,@meeting,@agent,@owner,'RECORDING',COALESCE(@started,now()),@correlation,@local) RETURNING id,meeting_id,agent_id,state,started_at,finished_at,pipeline_correlation_id,local_session_id", connection, transaction);
@@ -1795,7 +1818,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var now = DateTime.UtcNow;
         var userRow = new AssistantMessageRow(userMessageId, conversationId, "USER", query, "READY", null, JsonDocument.Parse("[]"), null, queryId, now, now);
         var assistantRow = new AssistantMessageRow(assistantMessageId, conversationId, "ASSISTANT", string.Empty, "QUEUED", null, JsonDocument.Parse("[]"), null, queryId, now, null);
-        return new AssistantMessageCreateResult(userRow, assistantRow, queryId);
+        return new AssistantMessageCreateResult(userRow, assistantRow, queryId, conversationId);
     }
 
     public async Task<bool> UpdateAssistantConversationAsync(Guid id, Guid userId, string? title, bool? archived)
@@ -2118,6 +2141,321 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.GetString(7), reader.GetDouble(8), reader.GetDateTime(9)));
         return result;
+    }
+
+    /// <summary>
+    /// Returns only usable meetings for a calendar-scoped Assistant question.
+    /// The resolver uses this lightweight list to ask the user to choose when
+    /// a date contains more than one meeting; no LLM or transcript text is
+    /// involved.
+    /// </summary>
+    public async Task<IReadOnlyList<AssistantMeetingCandidate>> ListAssistantMeetingCandidatesAsync(
+        Guid userId, bool includeAll, DateTime fromUtc, DateTime toUtc, int limit = 8)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT m.id, m.title, COALESCE(m.occurred_at, m.created_at) AS occurred_at
+              FROM meetings m
+             WHERE (@include_all OR m.owner_id=@owner)
+               AND COALESCE(m.occurred_at, m.created_at) >= @from_utc
+               AND COALESCE(m.occurred_at, m.created_at) < @to_utc
+               AND m.status NOT IN ('CANCELLED','DELETED')
+               AND EXISTS (
+                    SELECT 1
+                      FROM transcripts t
+                     WHERE t.meeting_id=m.id
+                       AND t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=m.id)
+                       AND t.status IN ('READY','PARTIAL_READY')
+                       AND NOT (COALESCE(t.warnings,'[]'::jsonb) @> '["NO_SPEECH_DETECTED"]'::jsonb)
+                       AND EXISTS (SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'')
+               )
+             ORDER BY COALESCE(m.occurred_at, m.created_at), m.id
+             LIMIT @limit
+            """, connection);
+        command.Parameters.AddWithValue("owner", userId);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("from_utc", DateTime.SpecifyKind(fromUtc, DateTimeKind.Utc));
+        command.Parameters.AddWithValue("to_utc", DateTime.SpecifyKind(toUtc, DateTimeKind.Utc));
+        command.Parameters.AddWithValue("limit", Math.Clamp(limit, 1, 32));
+        var result = new List<AssistantMeetingCandidate>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AssistantMeetingCandidate(reader.GetGuid(0), reader.GetString(1), reader.GetDateTime(2)));
+        return result;
+    }
+
+    public async Task<MemoryCoverageSnapshot> GetMemoryCoverageAsync(Guid userId, bool includeAll, string? readScope = null)
+    {
+        await using var connection = await OpenAsync();
+        const string scope = "(@include_all OR m.owner_id=@owner)";
+
+        async Task<long> CountAsync(string from, string predicate = "true")
+        {
+            await using var command = new NpgsqlCommand($"SELECT COUNT(*) FROM {from} WHERE {scope} AND ({predicate})", connection);
+            command.Parameters.AddWithValue("owner", userId);
+            command.Parameters.AddWithValue("include_all", includeAll);
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+
+        var meetingCount = await CountAsync("meetings m");
+        var usableTranscriptCount = await CountAsync(
+            "transcripts t JOIN meetings m ON m.id=t.meeting_id",
+            "t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND EXISTS (SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') AND NOT (COALESCE(t.warnings,'[]'::jsonb) @> '[\"NO_SPEECH_DETECTED\"]'::jsonb)");
+        var canonicalSegmentCount = await CountAsync(
+            "transcript_segments s JOIN transcripts t ON t.id=s.transcript_id JOIN meetings m ON m.id=t.meeting_id",
+            "t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id) AND t.status IN ('READY','PARTIAL_READY') AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>''");
+        var activeFactCount = await CountAsync(
+            "transcript_facts f JOIN meetings m ON m.id=f.meeting_id",
+            "f.state='ACTIVE' AND f.transcript_version=(SELECT max(t.version) FROM transcripts t WHERE t.meeting_id=f.meeting_id)");
+        var readyJobCount = await CountAsync(
+            "memory_jobs j JOIN meetings m ON m.id=j.meeting_id",
+            "j.status='READY'");
+        var failedJobCount = await CountAsync(
+            "memory_jobs j JOIN meetings m ON m.id=j.meeting_id",
+            "j.status='FAILED'");
+
+        async Task<long> OwnerScopedCountAsync(string table)
+        {
+            await using var command = new NpgsqlCommand($"SELECT COUNT(*) FROM {table} WHERE (@include_all OR owner_user_id=@owner)", connection);
+            command.Parameters.AddWithValue("owner", userId);
+            command.Parameters.AddWithValue("include_all", includeAll);
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+        var entityCount = await OwnerScopedCountAsync("memory_entities");
+        var threadCount = await OwnerScopedCountAsync("memory_threads");
+
+        await using var dateRange = new NpgsqlCommand($"""
+            SELECT min(COALESCE(m.occurred_at,m.created_at)), max(COALESCE(m.occurred_at,m.created_at))
+              FROM meetings m
+             WHERE {scope}
+            """, connection);
+        dateRange.Parameters.AddWithValue("owner", userId);
+        dateRange.Parameters.AddWithValue("include_all", includeAll);
+        await using var dateReader = await dateRange.ExecuteReaderAsync();
+        DateTime? dateFrom = null;
+        DateTime? dateTo = null;
+        if (await dateReader.ReadAsync())
+        {
+            if (!dateReader.IsDBNull(0)) dateFrom = dateReader.GetDateTime(0);
+            if (!dateReader.IsDBNull(1)) dateTo = dateReader.GetDateTime(1);
+        }
+        await dateReader.DisposeAsync();
+
+        await using var last = new NpgsqlCommand($"""
+            SELECT max(j.completed_at),
+                   (array_agg(NULLIF(j.error_code,'') ORDER BY j.updated_at DESC)
+                       FILTER (WHERE j.status='FAILED'))[1]
+              FROM memory_jobs j
+              JOIN meetings m ON m.id=j.meeting_id
+             WHERE {scope}
+            """, connection);
+        last.Parameters.AddWithValue("owner", userId);
+        last.Parameters.AddWithValue("include_all", includeAll);
+        await using var reader = await last.ExecuteReaderAsync();
+        DateTime? indexedAt = null;
+        string? errorCode = null;
+        if (await reader.ReadAsync())
+        {
+            if (!reader.IsDBNull(0)) indexedAt = reader.GetDateTime(0);
+            if (!reader.IsDBNull(1)) errorCode = reader.GetString(1);
+        }
+
+        var workerState = failedJobCount > 0 ? "DEGRADED" : readyJobCount >= usableTranscriptCount && usableTranscriptCount > 0 ? "READY" : "PENDING";
+        return new MemoryCoverageSnapshot(
+            meetingCount,
+            usableTranscriptCount,
+            canonicalSegmentCount,
+            activeFactCount,
+            readyJobCount,
+            failedJobCount,
+            indexedAt,
+            errorCode,
+            includeAll ? (string.IsNullOrWhiteSpace(readScope) ? "DEPLOYMENT" : readScope.Trim().ToUpperInvariant()) : "OWNER",
+            IndexedTranscriptCount: usableTranscriptCount,
+            EntityCount: entityCount,
+            ThreadCount: threadCount,
+            WorkerState: workerState,
+            DateFrom: dateFrom,
+            DateTo: dateTo);
+    }
+
+    /// <summary>
+    /// Creates only missing derived Memory jobs.  The operation never touches
+    /// ASR, canonical transcripts or recordings and is safe to repeat while a
+    /// worker is processing the queue.
+    /// </summary>
+    public async Task<MemoryRebuildResult> RebuildMemoryAsync(Guid userId, bool includeAll, bool apply, int limit = 500, Guid? afterMeetingId = null, bool rebuildExisting = false)
+    {
+        limit = Math.Clamp(limit, 1, 500);
+        await using var connection = await OpenAsync();
+        var derivedFilter = rebuildExisting
+            ? "true"
+            : "(j.id IS NULL OR NOT EXISTS (SELECT 1 FROM transcript_facts f WHERE f.transcript_id=l.transcript_id AND f.transcript_version=l.version AND f.state='ACTIVE') OR j.status='FAILED')";
+        var candidateSql = $"""
+            WITH latest AS (
+                SELECT DISTINCT ON (t.meeting_id)
+                       t.id AS transcript_id,t.meeting_id,t.version,t.status,t.warnings,
+                       m.owner_id
+                  FROM transcripts t
+                  JOIN meetings m ON m.id=t.meeting_id
+                 WHERE {"(@include_all OR m.owner_id=@owner)"}
+                 ORDER BY t.meeting_id,t.version DESC,t.created_at DESC
+            )
+            SELECT l.meeting_id,l.transcript_id,l.version,l.owner_id,
+                   j.id,j.status,
+                   EXISTS (SELECT 1 FROM transcript_segments s
+                            WHERE s.transcript_id=l.transcript_id
+                              AND COALESCE(s.is_hidden,false)=false
+                              AND btrim(COALESCE(s.text,''))<>'') AS has_segments,
+                   EXISTS (SELECT 1 FROM transcript_facts f
+                            WHERE f.transcript_id=l.transcript_id
+                              AND f.transcript_version=l.version
+                              AND f.state='ACTIVE') AS has_facts
+              FROM latest l
+              LEFT JOIN memory_jobs j ON j.transcript_id=l.transcript_id AND j.transcript_version=l.version
+             WHERE l.status IN ('READY','PARTIAL_READY')
+               AND NOT (COALESCE(l.warnings,'[]'::jsonb) @> '[\"NO_SPEECH_DETECTED\"]'::jsonb)
+               AND EXISTS (SELECT 1 FROM transcript_segments s
+                            WHERE s.transcript_id=l.transcript_id
+                              AND COALESCE(s.is_hidden,false)=false
+                              AND btrim(COALESCE(s.text,''))<>'')
+               AND {derivedFilter}
+               AND (@after_meeting IS NULL OR l.meeting_id > @after_meeting)
+             ORDER BY l.meeting_id,l.version DESC
+             LIMIT @limit
+            """;
+        await using var candidatesCommand = new NpgsqlCommand(candidateSql, connection);
+        candidatesCommand.Parameters.AddWithValue("owner", userId);
+        candidatesCommand.Parameters.AddWithValue("include_all", includeAll);
+        candidatesCommand.Parameters.Add("after_meeting", NpgsqlDbType.Uuid).Value = (object?)afterMeetingId ?? DBNull.Value;
+        candidatesCommand.Parameters.AddWithValue("limit", limit);
+        var candidates = new List<(Guid MeetingId, Guid TranscriptId, int Version, Guid OwnerUserId, Guid? JobId, string? JobStatus, bool HasFacts)>();
+        await using (var reader = await candidatesCommand.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                candidates.Add((reader.GetGuid(0), reader.GetGuid(1), reader.GetInt32(2), reader.GetGuid(3), reader.IsDBNull(4) ? null : reader.GetGuid(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetBoolean(7)));
+            }
+        }
+
+        var actions = candidates.Select(candidate => new MemoryRebuildCandidate(
+            candidate.MeetingId,
+            candidate.TranscriptId,
+            candidate.Version,
+            rebuildExisting ? "REBUILD_EXISTING" : candidate.JobId is null ? "MISSING_JOB" : candidate.JobStatus == "FAILED" ? "RETRY_REQUIRED" : "MISSING_FACTS",
+            rebuildExisting ? "MEMORY_REBUILD_REQUESTED" : candidate.JobId is null ? "MEMORY_JOB_MISSING" : candidate.JobStatus == "FAILED" ? "MEMORY_JOB_FAILED" : "MEMORY_FACTS_MISSING",
+            candidate.JobId)).ToList();
+        var nextCursor = candidates.Count == limit ? candidates[^1].MeetingId.ToString() : null;
+        if (!apply || candidates.Count == 0)
+            return new MemoryRebuildResult(apply ? "APPLY" : "PREVIEW", actions.Count, 0, actions.Count(item => item.JobId.HasValue), actions, nextCursor);
+
+        var created = 0;
+        var reused = 0;
+        await using var transaction = await connection.BeginTransactionAsync();
+        foreach (var candidate in candidates)
+        {
+            await using (var advisory = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtext(@key))", connection, transaction))
+            {
+                advisory.Parameters.AddWithValue("key", $"memory:{candidate.TranscriptId}:{candidate.Version}");
+                await advisory.ExecuteNonQueryAsync();
+            }
+
+            Guid jobId;
+            if (candidate.JobId is Guid existingJob)
+            {
+                jobId = existingJob;
+                await using var reset = new NpgsqlCommand("""
+                    UPDATE memory_jobs
+                       SET status=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN 'QUEUED' ELSE status END,
+                           stage=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN 'QUEUED' ELSE stage END,
+                           progress=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN 0 ELSE progress END,
+                           worker_id=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN NULL ELSE worker_id END,
+                           lease_expires_at=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN NULL ELSE lease_expires_at END,
+                           last_heartbeat=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN NULL ELSE last_heartbeat END,
+                           error_code=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN NULL ELSE error_code END,
+                           error_message=CASE WHEN (@rebuild_existing AND status NOT IN ('RUNNING','QUEUED')) OR status='FAILED' OR NOT EXISTS (
+                                      SELECT 1 FROM transcript_facts f
+                                       WHERE f.transcript_id=memory_jobs.transcript_id
+                                         AND f.transcript_version=memory_jobs.transcript_version
+                                         AND f.state='ACTIVE') THEN NULL ELSE error_message END,
+                           updated_at=now()
+                     WHERE id=@job
+                    """, connection, transaction);
+                reset.Parameters.AddWithValue("job", jobId);
+                reset.Parameters.AddWithValue("rebuild_existing", rebuildExisting);
+                await reset.ExecuteNonQueryAsync();
+                reused++;
+            }
+            else
+            {
+                jobId = Guid.NewGuid();
+                await using var insert = new NpgsqlCommand("""
+                    INSERT INTO memory_jobs(id,owner_user_id,meeting_id,transcript_id,transcript_version,status,stage,progress,attempt)
+                    SELECT @id,m.owner_id,@meeting,@transcript,@version,'QUEUED','QUEUED',0,0
+                      FROM meetings m WHERE m.id=@meeting
+                    ON CONFLICT(transcript_id,transcript_version) DO NOTHING
+                    """, connection, transaction);
+                insert.Parameters.AddWithValue("id", jobId);
+                insert.Parameters.AddWithValue("meeting", candidate.MeetingId);
+                insert.Parameters.AddWithValue("transcript", candidate.TranscriptId);
+                insert.Parameters.AddWithValue("version", candidate.Version);
+                var inserted = await insert.ExecuteNonQueryAsync();
+                if (inserted == 0)
+                {
+                    await using var existing = new NpgsqlCommand("SELECT id FROM memory_jobs WHERE transcript_id=@transcript AND transcript_version=@version", connection, transaction);
+                    existing.Parameters.AddWithValue("transcript", candidate.TranscriptId);
+                    existing.Parameters.AddWithValue("version", candidate.Version);
+                    jobId = (Guid)(await existing.ExecuteScalarAsync() ?? jobId);
+                    reused++;
+                }
+                else created++;
+            }
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                jobId,
+                meetingId = candidate.MeetingId,
+                transcriptId = candidate.TranscriptId,
+                transcriptVersion = candidate.Version,
+                ownerUserId = candidate.OwnerUserId,
+                pipelineCorrelationId = (Guid?)null
+            });
+            await using var outboxExists = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic='memory.index' AND published_at IS NULL AND (payload->>'jobId'=@job OR payload->>'job_id'=@job))", connection, transaction);
+            outboxExists.Parameters.AddWithValue("job", jobId.ToString());
+            var hasOutbox = (bool)(await outboxExists.ExecuteScalarAsync() ?? false);
+            if (!hasOutbox)
+                await InsertOutboxAsync(connection, transaction, "memory.index", payload);
+        }
+        await transaction.CommitAsync();
+        return new MemoryRebuildResult("APPLY", actions.Count, created, reused, actions, nextCursor);
     }
 
     public async Task<OperationsSnapshot> GetOperationsSnapshotAsync()

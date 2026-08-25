@@ -74,8 +74,9 @@ def _topic(query: str, follow_up: bool, previous: "AssistantQueryPlan | None") -
     # отвечает за ремонт" should yield the useful topic "за ремонт", rather
     # than leaving "и кто" in the retrieval key.
     value = re.sub(
-        r"\b(?:а|и|ну|тогда|кто|что|какой|какая|какое|какие|когда|почему|зачем|как|где|сколько|"
-        r"отвечает|ответственный|срок|решили|решение|поручили|причина|кратко|расскажи|подробнее)\b",
+        r"\b(?:а|и|ну|тогда|кто|что|какой|какая|какое|какие|каков|когда|почему|зачем|как|где|сколько|"
+        r"обсуждали|обсудили|обсуждение|обзор|темы|тема|встреча|встречи|совещание|совещания|сегодня|вчера|"
+        r"отвечает|ответственный|срок|решили|решение|поручили|итог|итоги|резюме|причина|кратко|расскажи|подробнее)\b",
         " ",
         value,
     )
@@ -225,11 +226,15 @@ def understand_query(query: str, previous: AssistantQueryPlan | None = None, sem
     terms = _PROTOTYPES.get(intent, ("факт",))
     person_match = _PERSON_RE.search(query or "")
     person = person_match.group(1).strip() if person_match else (previous.person if follow_up and previous else None)
+    temporal_range = "TODAY" if "сегодня" in normalized else "YESTERDAY" if "вчера" in normalized else None
+    if temporal_range is None:
+        date_match = _DATE_RE.search(query or "")
+        temporal_range = date_match.group(0) if date_match else (previous.date_range if follow_up and previous else None)
     return AssistantQueryPlan(
         intent=intent,
         topic=_topic(query, follow_up, previous),
         person=person,
-        date_range=_DATE_RE.search(query or "").group(0) if _DATE_RE.search(query or "") else (previous.date_range if follow_up and previous else None),
+        date_range=temporal_range,
         requested_fields=tuple(requested),
         requires_explanation=requires_explanation,
         requires_comparison=requires_comparison,

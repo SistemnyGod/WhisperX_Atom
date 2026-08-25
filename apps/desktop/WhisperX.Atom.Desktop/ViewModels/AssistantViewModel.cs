@@ -48,6 +48,7 @@ public sealed class AssistantViewModel : ObservableObject
     private AssistantModeOption? _selectedMode;
     private DesktopAssistantConversation? _selectedConversation;
     private DesktopAssistantMessage? _selectedMessage;
+    private DesktopMemoryCoverage? _memoryCoverage;
 
     public AssistantViewModel(FrontendServices services) => _services = services;
 
@@ -62,9 +63,34 @@ public sealed class AssistantViewModel : ObservableObject
     public ObservableCollection<DesktopAssistantMessage> Messages { get; } = [];
     public ObservableCollection<AssistantEvidenceItem> Evidence { get; } = [];
 
-    public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
-    public bool IsAsking { get => _isAsking; private set => SetProperty(ref _isAsking, value); }
-    public bool IsGlobalAllowed { get => _isGlobalAllowed; private set => SetProperty(ref _isGlobalAllowed, value); }
+    public bool IsLoading
+    {
+        get => _isLoading;
+        private set
+        {
+            if (!SetProperty(ref _isLoading, value)) return;
+            OnPropertyChanged(nameof(CanRebuildMemory));
+        }
+    }
+    public bool IsAsking
+    {
+        get => _isAsking;
+        private set
+        {
+            if (!SetProperty(ref _isAsking, value)) return;
+            OnPropertyChanged(nameof(CanRebuildMemory));
+            OnPropertyChanged(nameof(CanAsk));
+        }
+    }
+    public bool IsGlobalAllowed
+    {
+        get => _isGlobalAllowed;
+        private set
+        {
+            if (!SetProperty(ref _isGlobalAllowed, value)) return;
+            OnPropertyChanged(nameof(CanRebuildMemory));
+        }
+    }
     public string Question { get => _question; set => SetProperty(ref _question, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
     public string ErrorText { get => _errorText; private set => SetProperty(ref _errorText, value); }
@@ -74,6 +100,8 @@ public sealed class AssistantViewModel : ObservableObject
     public string SourceSummaryText { get => _sourceSummaryText; private set => SetProperty(ref _sourceSummaryText, value); }
     public string MissingFieldsText { get => _missingFieldsText; private set => SetProperty(ref _missingFieldsText, value); }
     public string RoleText { get => _roleText; private set => SetProperty(ref _roleText, value); }
+    public DesktopMemoryCoverage? MemoryCoverage { get => _memoryCoverage; private set => SetProperty(ref _memoryCoverage, value); }
+    public bool CanRebuildMemory => IsGlobalAllowed && !IsLoading && !IsAsking;
     public bool HasConversations => Conversations.Count > 0;
     public bool HasMessages => Messages.Count > 0;
     /// <summary>Whether the selected chat still has server-side work queued.</summary>
@@ -160,6 +188,7 @@ public sealed class AssistantViewModel : ObservableObject
             }
             IsGlobalAllowed = user.IsPrivileged;
             RoleText = $"Роль API: {user.Role}";
+            MemoryCoverage = await _services.Backend.GetMemoryCoverageAsync(cancellationToken);
             await LoadContextsAsync(cancellationToken);
             SelectedMode = Modes.FirstOrDefault();
             await LoadConversationsAsync(cancellationToken);
@@ -168,6 +197,20 @@ public sealed class AssistantViewModel : ObservableObject
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { ErrorText = SafeError(ex); }
         finally { IsLoading = false; OnPropertyChanged(nameof(CanAsk)); }
+    }
+
+    public async Task<bool> RebuildMemoryAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsGlobalAllowed) return false;
+        var preview = await _services.Backend.RebuildMemoryAsync("PREVIEW", cancellationToken);
+        if (preview is null) return false;
+        if (preview.CandidateCount > 0)
+        {
+            var applied = await _services.Backend.RebuildMemoryAsync("APPLY", cancellationToken);
+            if (applied is null) return false;
+        }
+        MemoryCoverage = await _services.Backend.GetMemoryCoverageAsync(cancellationToken);
+        return true;
     }
 
     public async Task LoadConversationsAsync(CancellationToken cancellationToken = default)
@@ -246,7 +289,20 @@ public sealed class AssistantViewModel : ObservableObject
         var acceptedByServer = false;
         try
         {
-            var result = await _services.Backend.CreateAssistantMessageAsync(Guid.Parse(SelectedConversation!.Id), question, retryOf, cancellationToken);
+            var selectedConversationId = Guid.Parse(SelectedConversation!.Id);
+            var activeMeetingId = IsCurrentMeeting && Guid.TryParse(SelectedContext?.MeetingId, out var parsedMeeting)
+                ? parsedMeeting
+                : (Guid?)null;
+            var requestedMode = SelectedMode?.Value;
+            var result = await _services.Backend.CreateAssistantMessageAsync(
+                selectedConversationId,
+                question,
+                retryOf,
+                requestedMode,
+                activeMeetingId,
+                TimeZoneInfo.Local.Id,
+                SelectedConversation.AssistantMode,
+                cancellationToken);
             if (result is null)
             {
                 StatusText = "Запрос не принят";
@@ -254,6 +310,20 @@ public sealed class AssistantViewModel : ObservableObject
                 return;
             }
             acceptedByServer = true;
+            // The server may have created a new immutable conversation because
+            // the selected mode/meeting no longer matched the open chat.
+            // Switch the UI to that scope before rendering or polling the
+            // result; otherwise a correct answer would appear in the old chat.
+            var effectiveConversationId = selectedConversationId;
+            if (result.Conversation is not null && result.Conversation.Id != SelectedConversation.Id)
+            {
+                effectiveConversationId = Guid.Parse(result.Conversation.Id);
+                if (!Conversations.Any(item => item.Id == result.Conversation.Id))
+                    Conversations.Insert(0, result.Conversation);
+                SelectedConversation = result.Conversation;
+                Messages.Clear();
+                OnPropertyChanged(nameof(HasMessages));
+            }
             Messages.Add(result.UserMessage);
             Messages.Add(result.AssistantMessage);
             Question = string.Empty;
@@ -273,7 +343,7 @@ public sealed class AssistantViewModel : ObservableObject
                 try
                 {
                     completed = await _services.Backend.WaitForAssistantMessageAsync(
-                        Guid.Parse(SelectedConversation.Id),
+                        effectiveConversationId,
                         Guid.Parse(result.AssistantMessage.Id),
                         responseWait.Token);
                 }
@@ -363,9 +433,11 @@ public sealed class AssistantViewModel : ObservableObject
         Contexts.Clear();
         // Every user gets a history scope; the server applies ownership/RBAC
         // filtering. Privileged users see the same scope labelled globally.
-        Contexts.Add(new AssistantContextOption(IsGlobalAllowed ? "Вся история" : "Моя история", null, null));
+        var sharedMemory = IsGlobalAllowed
+            || string.Equals(MemoryCoverage?.ReadScope, "DEPLOYMENT", StringComparison.OrdinalIgnoreCase);
+        Contexts.Add(new AssistantContextOption(sharedMemory ? "Вся история" : "Моя история", null, null));
         var meetings = await LoadAllMeetingsAsync(cancellationToken);
-        foreach (var meeting in meetings.Where(item => item.Status is "READY" or "PARTIAL_READY" or "TRANSCRIPT_READY"))
+        foreach (var meeting in meetings.Where(item => item.Status is "READY" or "PARTIAL_READY" or "TRANSCRIPT_READY" or "TRANSCRIBED" or "COMPLETED"))
             Contexts.Add(new AssistantContextOption(meeting.Title, meeting.Id, meeting));
         SelectedContext = Contexts.FirstOrDefault();
     }

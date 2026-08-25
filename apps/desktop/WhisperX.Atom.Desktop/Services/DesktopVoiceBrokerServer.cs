@@ -423,6 +423,21 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         if (!_backend.HasSession)
             return new(false, "VOICE_ASSISTANT_AUTH_REQUIRED", SpokenText: "Для работы с саммари требуется вход в Desktop.", TraceId: traceId, CommandId: commandId);
         var meetingId = _activeMeeting.MeetingId;
+        if (meetingId is null && string.Equals(intent, "GETSUMMARYSTATUS", StringComparison.OrdinalIgnoreCase))
+        {
+            // A status request is read-only. When Desktop has no selected
+            // meeting, resolve the latest completed meeting from the current
+            // local day instead of forcing the user to open a detail view.
+            var localToday = DateTimeOffset.Now.Date;
+            var meetings = await _backend.GetMeetingsAsync(cancellationToken).ConfigureAwait(false);
+            var latest = meetings
+                .Where(item => (item.OccurredAt ?? item.CreatedAt).ToLocalTime().Date == localToday
+                    && item.Status is not ("RECORDING" or "FINALIZING" or "CANCELLED"))
+                .OrderByDescending(item => item.OccurredAt ?? item.CreatedAt)
+                .FirstOrDefault();
+            if (latest is not null && Guid.TryParse(latest.Id, out var latestId))
+                meetingId = latestId;
+        }
         if (meetingId is null)
             return new(false, "VOICE_SUMMARY_MEETING_REQUIRED", SpokenText: "Откройте нужное совещание в Desktop.", TraceId: traceId, CommandId: commandId);
 

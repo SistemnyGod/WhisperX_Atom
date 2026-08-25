@@ -39,7 +39,8 @@ public sealed class VoiceIntentParser
     private static readonly string[] SummaryCommandCandidates =
     [
         "сделай саммари", "создай саммари", "пересобери саммари",
-        "статус саммари", "готово ли саммари"
+        "статус саммари", "готово ли саммари", "саммари готово",
+        "готово саммари", "готовы ли итоги", "итоги готовы", "статус итогов"
     ];
 
     public VoiceIntentParser(bool allowLegacyAtom = true)
@@ -146,7 +147,7 @@ public sealed class VoiceIntentParser
             var value when IsExact(value,
                 "состояние диска", "свободное место", "сколько места", "сколько осталось места") => VoiceIntent.GetStorageStatus,
             var value when IsExact(value, "сделай саммари", "создай саммари", "пересобери саммари") => VoiceIntent.GenerateSummary,
-            var value when IsExact(value, "статус саммари", "готово ли саммари") => VoiceIntent.GetSummaryStatus,
+            var value when IsExact(value, "статус саммари", "готово ли саммари", "саммари готово", "готово саммари", "готовы ли итоги", "итоги готовы", "статус итогов") => VoiceIntent.GetSummaryStatus,
             var value when Matches(value, "да", "подтверждаю", "подтвердить", "подтверждение") => VoiceIntent.Confirm,
             var value when Matches(value, "нет", "отмена", "отмени", "не надо") => VoiceIntent.Cancel,
             // AssistantQuery is the canonical conversational intent.

@@ -39,5 +39,8 @@ def test_agent_token_is_never_logged_and_desktop_handles_rejection():
 
 def test_regular_meeting_routes_use_owner_access_guard():
     api = read("apps/server/WhisperX.Atom.Api/Program.cs")
-    assert api.count("CanAccessMeetingAsync(context, id)") >= 10
+    # Read-only canonical meeting routes may use the configured deployment
+    # scope; mutations must continue to use the owner/admin guard.
+    assert api.count("CanAccessMeetingAsync(context, id)") + api.count("CanReadMeetingAsync(context, id)") >= 14
+    assert api.count("CanAccessMeetingAsync(context, id)") >= 5
     assert "owner_id=@owner" in api

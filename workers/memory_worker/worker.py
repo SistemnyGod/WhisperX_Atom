@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - worker image installs psycopg
 
 from .indexer import MemoryIndex, build_memory_index
 from .models import MemoryFact
+from .fact_extractor import extract_memory_facts
 from .entity_resolver import SUBJECT_NORMALIZER_VERSION, canonical_topic_name, normalize_entity_name
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
@@ -236,6 +237,65 @@ class MemoryProjectionRepository:
     def _scope_key(fact: MemoryFact) -> str | None:
         return canonical_topic_name(fact.subject) if fact.subject else None
 
+    def _ensure_facts_from_canonical_segments(self, payload: Mapping[str, object]) -> int:
+        """Populate missing deterministic facts before projecting the index.
+
+        Historical imports and older V1/V2 paths may enqueue a memory job
+        before ``transcript_facts`` exists.  Extraction is bounded, evidence-
+        backed and protected by the same meeting/transcript identity lock, so
+        retries cannot create duplicate derived facts or touch ASR data.
+        """
+        owner_id = str(payload["ownerUserId"])
+        meeting_id = str(payload["meetingId"])
+        transcript_id = str(payload["transcriptId"])
+        transcript_version = int(payload["transcriptVersion"])
+        with self._connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"memory-facts:{meeting_id}:{transcript_id}:{transcript_version}",),
+                )
+                existing = connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM transcript_facts WHERE transcript_id=%s AND transcript_version=%s AND state='ACTIVE')",
+                    (transcript_id, transcript_version),
+                ).fetchone()
+                if existing and bool(existing[0]):
+                    return 0
+                rows = connection.execute(
+                    """SELECT id,start_ms,end_ms,speaker_label,text
+                         FROM transcript_segments
+                        WHERE transcript_id=%s AND COALESCE(is_hidden,false)=false
+                        ORDER BY ordinal,id
+                        LIMIT 20000""",
+                    (transcript_id,),
+                ).fetchall()
+                if not rows:
+                    return 0
+                segments = [
+                    {"id": str(row[0]), "startMs": int(row[1] or 0), "endMs": int(row[2] or 0), "speaker": row[3], "text": str(row[4] or "")}
+                    for row in rows if str(row[4] or "").strip()
+                ]
+                facts = extract_memory_facts(
+                    segments,
+                    owner_user_id=owner_id,
+                    meeting_id=meeting_id,
+                    transcript_id=transcript_id,
+                    transcript_version=transcript_version,
+                )[:MEMORY_MAX_FACTS_PER_JOB]
+                for fact in facts:
+                    connection.execute(
+                        """INSERT INTO transcript_facts(
+                             meeting_id,transcript_id,transcript_version,fact_type,subject,predicate,value,
+                             start_ms,end_ms,confidence,evidence_segment_ids,state,source_text,owner_user_id,derivation_type)
+                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)""",
+                        (
+                            meeting_id, transcript_id, transcript_version, fact.fact_type, fact.subject,
+                            fact.fact_type.lower(), fact.value, fact.start_ms, fact.end_ms, fact.confidence,
+                            json.dumps(list(fact.evidence_segment_ids)), fact.state, fact.source_text[:4000], owner_id, fact.derivation_type,
+                        ),
+                    )
+                return len(facts)
+
     def _load_facts(self, payload: Mapping[str, object]) -> tuple[list[MemoryFact], set[str]]:
         job_id = str(payload["jobId"])
         with self._connection() as connection:
@@ -311,6 +371,8 @@ class MemoryProjectionRepository:
 
     def process(self, payload: Mapping[str, object]) -> MemoryIndexResult:
         job_id = str(payload["jobId"])
+        self._set_stage(job_id, "EXTRACTING_FACTS", 15)
+        self._ensure_facts_from_canonical_segments(payload)
         _current_facts, subject_keys = self._load_facts(payload)
         if len(subject_keys) > MEMORY_MAX_SUBJECTS_PER_JOB:
             return self._complete_scope_review(job_id, "MEMORY_SCOPE_LIMIT_EXCEEDED")

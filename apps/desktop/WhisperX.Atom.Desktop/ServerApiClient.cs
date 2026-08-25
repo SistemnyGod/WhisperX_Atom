@@ -10,7 +10,7 @@ using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX.Atom.Desktop;
 
-public sealed record DesktopMeeting(string Id, string Title, string? Description, string Status, DateTimeOffset CreatedAt)
+public sealed record DesktopMeeting(string Id, string Title, string? Description, string Status, DateTimeOffset CreatedAt, DateTimeOffset? OccurredAt = null)
 {
     [JsonIgnore]
     public string StatusText => UiStatusMapper.Text(Status);
@@ -862,9 +862,9 @@ public sealed class ServerApiClient : IDisposable
         return await response.Content.ReadFromJsonAsync<List<DesktopAssistantMessage>>(_json, cancellationToken) ?? [];
     }
 
-    public async Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, CancellationToken cancellationToken = default)
+    public async Task<DesktopAssistantMessageCreateResult?> CreateAssistantMessageAsync(Guid conversationId, string content, Guid? retryOf = null, string? requestedMode = null, Guid? activeMeetingId = null, string? timeZone = null, string? previousResolvedMode = null, CancellationToken cancellationToken = default)
     {
-        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/assistant/conversations/{conversationId}/messages", new { content, retryOf }, cancellationToken);
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/assistant/conversations/{conversationId}/messages", new { content, retryOf, requestedMode, activeMeetingId, timeZone, previousResolvedMode }, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw await CreateApiExceptionAsync(response, "ASSISTANT_REQUEST_REJECTED", "Сервер отклонил сообщение помощника.", cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<DesktopAssistantMessageCreateResult>(_json, cancellationToken);
@@ -980,6 +980,23 @@ public sealed class ServerApiClient : IDisposable
         if (!response.IsSuccessStatusCode)
             throw await CreateApiExceptionAsync(response, "VOICE_ASSISTANT_REQUEST_REJECTED", "Сервер отклонил запрос Мифодия.", cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<DesktopAssistantRequestAccepted>(_json, cancellationToken);
+    }
+
+    public async Task<DesktopMemoryCoverage?> GetMemoryCoverageAsync(CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Get, "api/assistant/memory/status", null, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopMemoryCoverage>(_json, cancellationToken);
+    }
+
+    public Task<DesktopMemoryRebuildResult?> RebuildMemoryAsync(string mode, CancellationToken cancellationToken = default)
+        => RebuildMemoryPageAsync(mode, null, null, false, cancellationToken);
+
+    public async Task<DesktopMemoryRebuildResult?> RebuildMemoryPageAsync(string mode, int? limit, string? cursor, bool rebuildExisting, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, "api/admin/memory/rebuild", new { mode, limit, cursor, rebuildExisting }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopMemoryRebuildResult>(_json, cancellationToken);
     }
 
     public async Task<DesktopAssistantRequestAccepted?> GetAssistantRequestByCommandAsync(string commandId, CancellationToken cancellationToken = default)

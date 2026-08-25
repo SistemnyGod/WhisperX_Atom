@@ -9,9 +9,11 @@ import socket
 import hashlib
 import time
 import traceback
+from datetime import datetime, time as dt_time, timedelta, timezone
 from collections import deque
 from difflib import SequenceMatcher
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
 
@@ -339,6 +341,23 @@ class AssistantRepository:
         self._live_provenance: dict[str, tuple[str, str | None, str | None]] = {}
         self._last_query_plan: dict[str, Any] = {}
         self._last_answer_plan: dict[str, Any] = {}
+
+    @staticmethod
+    def _temporal_bounds(date_range: str | None) -> tuple[datetime | None, datetime | None]:
+        """Resolve user-local calendar scopes without putting date words into FTS."""
+        value = (date_range or "").strip().upper()
+        if value not in {"TODAY", "YESTERDAY"}:
+            return None, None
+        try:
+            zone = ZoneInfo(os.getenv("MEETING_TIMEZONE", "Asia/Yekaterinburg"))
+        except Exception:
+            zone = timezone.utc
+        local_date = datetime.now(zone).date()
+        if value == "YESTERDAY":
+            local_date -= timedelta(days=1)
+        start = datetime.combine(local_date, dt_time.min, tzinfo=zone)
+        end = start + timedelta(days=1)
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
     @staticmethod
     def _merge_memory_and_transcript_context(
@@ -703,7 +722,7 @@ class AssistantRepository:
                     )
                 return "EXPIRED" if expired else "NOOP"
 
-    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+    def context(self, meeting_id: str | None, query: str = "", owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1, date_range: str | None = None) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         """Retrieve scope-safe evidence with Russian FTS + embeddings.
 
         SQL remains responsible for RBAC, meeting boundaries and transcript
@@ -714,6 +733,7 @@ class AssistantRepository:
         fts_anchor_limit = max(8, min(int(os.getenv("ASSISTANT_FTS_ANCHOR_LIMIT", "64")), 512))
         semantic_candidate_limit = max(32, min(int(os.getenv("ASSISTANT_SEMANTIC_CANDIDATE_LIMIT", "512")), 4096))
         lookback_days = max(1, min(int(os.getenv("ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS", "365")), 3650))
+        date_start, date_end = self._temporal_bounds(date_range)
         with self._db.connection() as connection:
             rows = connection.execute(
                 """
@@ -733,6 +753,8 @@ class AssistantRepository:
                       AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
                       AND (%s::uuid IS NOT NULL OR m.created_at >= now()-make_interval(days => %s))
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) >= %s::timestamptz)
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) < %s::timestamptz)
                 ), fts_anchors AS (
                     SELECT base.*,
                            ts_rank_cd(base.search_vector, websearch_to_tsquery('russian', %s)) AS rank
@@ -756,7 +778,7 @@ class AssistantRepository:
                 FROM bounded
                 ORDER BY (rank > 0) DESC,rank DESC,meeting_created_at DESC,meeting_id,ordinal
                 """,
-                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, query, query, fts_anchor_limit, semantic_candidate_limit),
+                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, date_start, date_start, date_end, date_end, query, query, fts_anchor_limit, semantic_candidate_limit),
             ).fetchall()
 
             candidates = [
@@ -770,7 +792,23 @@ class AssistantRepository:
             ]
             final_top_k = max(4, min(int(os.getenv("ASSISTANT_FINAL_TOP_K", "12")), 64))
             neighbour_limit = max(final_top_k, min(int(os.getenv("ASSISTANT_NEIGHBOUR_LIMIT", "36")), 128))
-            ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
+            if not (query or '').strip():
+                # Broad timeline/summary requests have no useful lexical
+                # anchor. Keep a bounded chronological slice per meeting so
+                # Qwen receives actual discussion material instead of the
+                # literal word «сегодня» as an FTS term.
+                selected_candidates: list[RetrievalCandidate] = []
+                by_meeting: dict[str, list[RetrievalCandidate]] = {}
+                for candidate in candidates:
+                    by_meeting.setdefault(candidate.meeting_id, []).append(candidate)
+                for meeting_candidates in by_meeting.values():
+                    selected_candidates.extend(meeting_candidates[:12])
+                    if len(selected_candidates) >= 64:
+                        break
+                selected_candidates = selected_candidates[:64]
+                ranked = []
+            else:
+                ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
             if meeting_id is None and ranked:
                 # History mode is limited to five meetings *after* hybrid
                 # ranking, so a paraphrase can still select the relevant one.
@@ -781,7 +819,7 @@ class AssistantRepository:
                         allowed_meetings.append(value)
                 candidates = [item for item in candidates if item.meeting_id in allowed_meetings]
                 ranked = self._hybrid.rank(query, candidates, limit=final_top_k)
-            selected = self._hybrid.expand_neighbours(ranked, candidates, limit=neighbour_limit, window=neighbour_window)
+            selected = selected_candidates if not (query or '').strip() else self._hybrid.expand_neighbours(ranked, candidates, limit=neighbour_limit, window=neighbour_window)
             score_by_id = {item.candidate.segment_id: item.score for item in ranked}
             selected.sort(key=lambda item: (-score_by_id.get(item.segment_id, 0.0), item.meeting_id, item.ordinal, item.segment_id))
             rows = [
@@ -836,7 +874,7 @@ class AssistantRepository:
             valid = {key: value for key, value in valid.items() if key in allowed}
         return context, valid, ('ASR_DRAFT' if kinds and kinds <= {'ASR_DRAFT', 'V1'} else 'ENRICHED'), ('LOW_TRANSCRIPT_QUALITY' if low_quality else None)
 
-    def context_for_plan(self, meeting_id: str | None, queries: tuple[str, ...], owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
+    def context_for_plan(self, meeting_id: str | None, queries: tuple[str, ...], owner_user_id: str | None = None, include_all: bool = False, neighbour_window: int = 1, date_range: str | None = None) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None]:
         """Retrieve separate evidence bundles for a comparison plan.
 
         Each query uses the existing scope/RBAC/quality-filtered ``context``
@@ -845,14 +883,14 @@ class AssistantRepository:
         """
         unique_queries = tuple(dict.fromkeys(value.strip() for value in queries if value and value.strip()))
         if len(unique_queries) <= 1:
-            return self.context(meeting_id, unique_queries[0] if unique_queries else "", owner_user_id, include_all, neighbour_window)
+            return self.context(meeting_id, unique_queries[0] if unique_queries else "", owner_user_id, include_all, neighbour_window, date_range)
         contexts: list[str] = []
         merged: dict[str, tuple[str, int, int, str, str, str, int]] = {}
         kinds: set[str] = set()
         reasons: list[str] = []
         metadata_parts: list[dict[str, Any]] = []
         for query in unique_queries[:4]:
-            context, valid, transcript_kind, reason = self.context(meeting_id, query, owner_user_id, include_all, neighbour_window)
+            context, valid, transcript_kind, reason = self.context(meeting_id, query, owner_user_id, include_all, neighbour_window, date_range)
             if context:
                 contexts.append(context)
             merged.update({key: value for key, value in valid.items() if key not in merged})
@@ -882,6 +920,7 @@ class AssistantRepository:
         include_all: bool,
         memory_plan: MemoryQueryPlan,
         neighbour_window: int = 1,
+        date_range: str | None = None,
     ) -> tuple[str, dict[str, tuple[str, int, int, str, str, str, int]], str, str | None] | None:
         """Use the memory index only as a bounded canonical-segment locator.
 
@@ -892,6 +931,7 @@ class AssistantRepository:
         """
         topic = (memory_plan.topic or "").strip()
         topic_lookup = canonical_topic_name(topic) if topic else ""
+        date_start, date_end = self._temporal_bounds(date_range or memory_plan.date_range)
         try:
             with self._db.connection() as connection:
                 # Historical questions need chronological evidence.  Keep
@@ -909,6 +949,8 @@ class AssistantRepository:
                       AND f.fact_type = ANY(%s::text[])
                       AND (%s::uuid IS NULL OR f.meeting_id=%s::uuid)
                       AND (%s OR m.owner_id=%s::uuid)
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) >= %s::timestamptz)
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) < %s::timestamptz)
                       AND (
                            %s='' OR f.subject_normalized=%s
                            OR EXISTS (
@@ -934,12 +976,12 @@ class AssistantRepository:
                            WHERE r.source_fact_id=f.id
                              AND r.relation_type='SUPERSEDES'
                              AND r.invalidated_at IS NULL))
-                     ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) {order_direction} NULLS LAST,f.start_ms {order_direction},f.id
+                       ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) {order_direction} NULLS LAST,f.start_ms {order_direction},f.id
                     LIMIT 128
                     """,
                     (
                         SUBJECT_NORMALIZER_VERSION, list(memory_plan.fact_types), meeting_id, meeting_id,
-                        include_all, owner_user_id, topic_lookup, topic_lookup, topic_lookup, topic_lookup,
+                        include_all, owner_user_id, date_start, date_start, date_end, date_end, topic_lookup, topic_lookup, topic_lookup, topic_lookup,
                         memory_plan.temporal_mode, memory_plan.include_superseded,
                     ),
                 ).fetchall()
@@ -972,13 +1014,15 @@ class AssistantRepository:
                     WHERE s.id = ANY(%s::uuid[])
                       AND (%s::uuid IS NULL OR t.meeting_id=%s::uuid)
                       AND (%s OR m.owner_id=%s::uuid)
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) >= %s::timestamptz)
+                      AND (%s::timestamptz IS NULL OR COALESCE(m.occurred_at,m.created_at) < %s::timestamptz)
                       AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                       AND t.status IN ('READY','PARTIAL_READY')
                       AND COALESCE(s.is_hidden,false)=false
                     ORDER BY m.created_at {order_direction},t.meeting_id,t.version,s.ordinal
                     LIMIT 64
                     """,
-                    (segment_ids, meeting_id, meeting_id, include_all, owner_user_id),
+                    (segment_ids, meeting_id, meeting_id, include_all, owner_user_id, date_start, date_start, date_end, date_end),
                 ).fetchall()
                 if not rows:
                     return None
@@ -1486,6 +1530,15 @@ class AssistantWorker:
             self.repository.set_query_plan(query_plan_metadata)
             await asyncio.to_thread(self.repository.save_conversation_state, conversation_id, owner_user_id, meeting_id, query, query_plan.to_dict())
             retrieval_query = retrieval_plan.query
+            # Calendar-wide overview questions should retrieve the bounded
+            # timeline for the date scope, not search for the literal words
+            # «сегодня» or «обсуждали» inside transcript segments.
+            broad_intent = query_plan.intent in {"FACT_LOOKUP", "SUMMARY", "TIMELINE"}
+            if broad_intent and not query_plan.topic:
+                # Broad questions are timeline/summary requests even when
+                # the user omitted a calendar word. Do not send scaffolding
+                # such as «что обсуждали» through FTS: it is not evidence.
+                retrieval_query = ""
             answer_plan = build_answer_plan(query_plan)
             self.repository.set_answer_plan(answer_plan)
             if assistant_mode == "GENERAL_CHAT":
@@ -1523,14 +1576,15 @@ class AssistantWorker:
             else:
                 failure_stage = "RETRIEVAL"
                 retrieval_started = time.perf_counter()
-                include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
+                configured_read_scope = os.getenv("MEETING_READ_SCOPE", "OWNER").strip().upper()
+                include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"} or configured_read_scope in {"DEPLOYMENT", "ORGANIZATION"}
                 comparison_queries = tuple(
                     f"{topic} {' '.join(query_plan.retrieval_terms)}".strip()
                     for topic in retrieval_plan.split_topics
                 )
                 memory_result = None
                 if assistant_mode == "MEETING_MEMORY" and not comparison_queries:
-                    memory_plan = build_memory_query_plan(query_plan.intent, retrieval_query, query_plan.topic)
+                    memory_plan = build_memory_query_plan(query_plan.intent, retrieval_query, query_plan.topic, query_plan.date_range)
                     query_plan_metadata["memoryPlan"] = memory_plan.to_dict()
                     self.repository.set_query_plan(query_plan_metadata)
                     memory_result = await asyncio.to_thread(
@@ -1541,18 +1595,19 @@ class AssistantWorker:
                         include_all,
                         memory_plan,
                         retrieval_plan.neighbour_window,
+                        query_plan.date_range,
                     )
                 if memory_result is not None:
                     # Memory is a locator, not a substitute for transcript
                     # retrieval.  Always add the hybrid result so an omitted
                     # fact type cannot suppress a relevant canonical segment.
                     context_loader = self.repository.context_for_plan if comparison_queries else self.repository.context
-                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window)
+                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window, query_plan.date_range)
                     transcript_result = await asyncio.to_thread(context_loader, *context_args)
                     context, valid, transcript_kind, context_error = self.repository._merge_memory_and_transcript_context(memory_result, transcript_result)
                 else:
                     context_loader = self.repository.context_for_plan if comparison_queries else self.repository.context
-                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window)
+                    context_args = (meeting_id, comparison_queries or retrieval_query, owner_user_id, include_all, retrieval_plan.neighbour_window, query_plan.date_range)
                     context, valid, transcript_kind, context_error = await asyncio.to_thread(context_loader, *context_args)
                 timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
                 if not context:

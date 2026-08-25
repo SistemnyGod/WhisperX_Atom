@@ -17,7 +17,8 @@ public sealed record AssistantModeResolutionRequest(
     string? CaptureState = null,
     Guid? ConversationId = null,
     string? PreviousResolvedMode = null,
-    bool Privileged = false);
+    bool Privileged = false,
+    string? TimeZone = null);
 
 public sealed record AssistantModeResolution(
     string ResolvedMode,
@@ -26,9 +27,10 @@ public sealed record AssistantModeResolution(
     double Confidence,
     Guid? ConversationId = null,
     string? ErrorCode = null,
-    string? Clarification = null);
+    string? Clarification = null,
+    IReadOnlyList<AssistantMeetingCandidate>? MeetingCandidates = null);
 
-public sealed class AssistantModeResolver(UnifiedProductStore store)
+public sealed class AssistantModeResolver(UnifiedProductStore store, IConfiguration configuration)
 {
     private static readonly HashSet<string> AllowedModes = new(StringComparer.Ordinal)
     {
@@ -88,6 +90,19 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
             }
         }
 
+        if (normalizedMode is "MEETING_MEMORY" or "MEETING_HISTORY"
+            && scopedMeetingId is null
+            && request.UserId is Guid explicitCalendarUser
+            && TryCalendarDay(NormalizeText(question), request.TimeZone, out var explicitFromUtc, out var explicitToUtc))
+        {
+            var candidates = await store.ListAssistantMeetingCandidatesAsync(explicitCalendarUser, request.Privileged, explicitFromUtc, explicitToUtc).ConfigureAwait(false);
+            if (candidates.Count > 1)
+                return new("MEETING_MEMORY", null, "calendar_multiple_meetings", 0.97, request.ConversationId,
+                    "ASSISTANT_MEETING_SELECTION_REQUIRED", "За эту дату найдено несколько встреч. Выберите нужную встречу.", candidates);
+            if (candidates.Count == 1)
+                scopedMeetingId = candidates[0].MeetingId;
+        }
+
         if (normalizedMode != "AUTO")
             return await ResolveExplicitAsync(normalizedMode, scopedMeetingId, request.ConversationId).ConfigureAwait(false);
 
@@ -113,6 +128,7 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
             request.UserId,
             request.Privileged,
             request.ConversationId,
+            request.TimeZone,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -249,9 +265,9 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         if (requestedMode == "GENERAL_CHAT")
             return new("GENERAL_CHAT", null, "explicit_general_mode", 0.98, conversationId);
         if (requestedMode == "MEETING_HISTORY")
-            return new("MEETING_MEMORY", null, "explicit_history_mode", 0.94, conversationId);
+            return new("MEETING_MEMORY", meetingId, "explicit_history_mode", 0.94, conversationId);
         if (requestedMode == "MEETING_MEMORY")
-            return new("MEETING_MEMORY", null, "explicit_memory_mode", 0.94, conversationId);
+            return new("MEETING_MEMORY", meetingId, "explicit_memory_mode", 0.94, conversationId);
         if (requestedMode == "LIVE_MEETING")
         {
             if (meetingId is not Guid liveMeeting)
@@ -283,6 +299,7 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
         Guid? userId,
         bool privileged,
         Guid? conversationId,
+        string? timeZone,
         CancellationToken cancellationToken)
     {
         var normalizedQuestion = NormalizeText(question);
@@ -304,6 +321,19 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
 
         var historyHint = LooksLikeHistoryQuestion(normalizedQuestion);
         var elliptical = IsEllipticalFollowUp(normalizedQuestion);
+
+        // Calendar wording is a retrieval filter, never a full-text term. If
+        // several usable meetings fall on the requested local day, fail
+        // closed and ask for an explicit selection before Qwen is called.
+        if (meetingId is null && userId is Guid calendarUser && TryCalendarDay(normalizedQuestion, timeZone, out var fromUtc, out var toUtc))
+        {
+            var candidates = await store.ListAssistantMeetingCandidatesAsync(calendarUser, privileged, fromUtc, toUtc).ConfigureAwait(false);
+            if (candidates.Count > 1)
+                return new("MEETING_MEMORY", null, "calendar_multiple_meetings", 0.97, conversationId,
+                    "ASSISTANT_MEETING_SELECTION_REQUIRED", "За эту дату найдено несколько встреч. Выберите нужную встречу.", candidates);
+            if (candidates.Count == 1)
+                return new("MEETING_MEMORY", candidates[0].MeetingId, "calendar_single_meeting", 0.97, conversationId);
+        }
 
         // A short follow-up inherits the existing conversation scope before
         // retrieval. The worker still has to find transcript/live evidence;
@@ -395,6 +425,31 @@ public sealed class AssistantModeResolver(UnifiedProductStore store)
             IsGeneralConversationQuestion(normalizedQuestion) ? "general_conversation_fallback" : "general_fallback",
             IsGeneralConversationQuestion(normalizedQuestion) ? 0.76 : 0.60,
             conversationId);
+    }
+
+    private bool TryCalendarDay(string question, string? requestedTimeZone, out DateTime fromUtc, out DateTime toUtc)
+    {
+        fromUtc = default;
+        toUtc = default;
+        var dayOffset = question.Contains("вчера", StringComparison.Ordinal) ? -1 : question.Contains("сегодня", StringComparison.Ordinal) ? 0 : int.MinValue;
+        if (dayOffset == int.MinValue) return false;
+        var zoneId = string.IsNullOrWhiteSpace(requestedTimeZone) ? configuration["MEETING_TIMEZONE"] : requestedTimeZone;
+        TimeZoneInfo zone;
+        try
+        {
+            zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId ?? "Asia/Yekaterinburg");
+        }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            try { zone = TimeZoneInfo.FindSystemTimeZoneById("Ekaterinburg Standard Time"); }
+            catch (Exception fallback) when (fallback is TimeZoneNotFoundException or InvalidTimeZoneException) { zone = TimeZoneInfo.Utc; }
+        }
+        var localDate = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, zone).Date.AddDays(dayOffset);
+        var localStart = DateTime.SpecifyKind(localDate, DateTimeKind.Unspecified);
+        var localEnd = localStart.AddDays(1);
+        fromUtc = TimeZoneInfo.ConvertTimeToUtc(localStart, zone);
+        toUtc = TimeZoneInfo.ConvertTimeToUtc(localEnd, zone);
+        return true;
     }
 
     private static AssistantModeResolution ResolveStaticPure(string question, string requestedMode, Guid? activeMeetingId)

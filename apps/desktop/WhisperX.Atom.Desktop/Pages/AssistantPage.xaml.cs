@@ -166,6 +166,20 @@ public sealed partial class AssistantPage : Page
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось создать чат.")); }
     }
 
+    private async void RebuildMemoryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || _pageCts is null || !_viewModel.CanRebuildMemory) return;
+        try
+        {
+            var completed = await _viewModel.RebuildMemoryAsync(_pageCts.Token);
+            if (completed) ErrorInfoBar.IsOpen = false;
+            else ShowError("Не удалось обновить индекс памяти.");
+            UpdateState();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex, "Не удалось обновить память Мифодия.")); }
+    }
+
     private async void AskButton_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null || _pageCts is null) return;

@@ -11,7 +11,7 @@ def source(path: str) -> str:
 def test_audio_preview_is_range_enabled_and_scoped_to_meeting_rbac():
     program = source("apps/server/WhisperX.Atom.Api/Program.cs")
     preview = program.split('app.MapGet("/api/media/{id:guid}/preview"', 1)[1].split('app.MapGet("/api/jobs/{id:guid}"', 1)[0]
-    assert "CanAccessMeetingAsync(context, media.MeetingId)" in preview
+    assert "CanReadMeetingAsync(context, media.MeetingId)" in preview
     assert "enableRangeProcessing: true" in preview
 
 

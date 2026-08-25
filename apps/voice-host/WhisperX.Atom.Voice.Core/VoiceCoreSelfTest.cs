@@ -64,6 +64,11 @@ public static class VoiceCoreSelfTest
         Assert(parser.Parse("Мифодий, сколько осталось места").Intent == VoiceIntent.GetStorageStatus, "storage remaining fast path");
         Assert(parser.Parse("Мифодий, сделай саммари").Intent == VoiceIntent.GenerateSummary, "summary command");
         Assert(parser.Parse("Мифодий, статус саммари").Intent == VoiceIntent.GetSummaryStatus, "summary status command");
+        Assert(parser.Parse("Мифодий, саммари готово").Intent == VoiceIntent.GetSummaryStatus, "summary ready status alias");
+        Assert(parser.Parse("Мифодий, готово саммари").Intent == VoiceIntent.GetSummaryStatus, "summary ready alias");
+        Assert(parser.Parse("Мифодий, готовы ли итоги").Intent == VoiceIntent.GetSummaryStatus, "summary results question alias");
+        Assert(parser.Parse("Мифодий, итоги готовы").Intent == VoiceIntent.GetSummaryStatus, "summary results ready alias");
+        Assert(parser.Parse("Мифодий, статус итогов").Intent == VoiceIntent.GetSummaryStatus, "summary results status alias");
         Assert(parser.Parse("Мифодий, как сделать хорошее саммари?").Intent == VoiceIntent.AssistantQuery, "summary question remains conversational");
         Assert(parser.Parse("Мифодий, пожалуйста, начни запись").Intent == VoiceIntent.StartRecording, "natural start with filler");
         Assert(parser.Parse("Мифодий, начинай запись").Intent == VoiceIntent.StartRecording, "natural start variant");
