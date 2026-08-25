@@ -1970,9 +1970,9 @@ public sealed class RecorderHostPipeServer : BackgroundService
         {
             try
             {
-                _logger.LogInformation("Recorder Host IPC listener creating pipe.");
+                _logger.LogDebug("Recorder Host IPC listener creating pipe.");
                 var pipe = RecorderHostPipeSecurity.CreateServer();
-                _logger.LogInformation("Recorder Host IPC listener waiting for client.");
+                _logger.LogDebug("Recorder Host IPC listener waiting for client.");
                 try
                 {
                     await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
