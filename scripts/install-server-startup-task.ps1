@@ -61,7 +61,7 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhen
 # the supervisor or run it as SYSTEM.
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 try {
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
 }
 catch {
     # Task registration changes the machine-wide Task Scheduler database even
@@ -76,12 +76,31 @@ catch {
 }
 $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -eq $registered) { throw "SERVER_STARTUP_TASK_NOT_REGISTERED" }
-# ScheduledTasks returns MultipleInstances as a generated enum rather than a
-# string.  Comparing that enum directly to "IgnoreNew" falsely rejects a
-# correctly registered task on Windows PowerShell 5.1.
+# Task Scheduler canonicalizes a local interactive principal from
+# COMPUTER\\User to User.  Compare the account component case-insensitively,
+# while retaining the stricter checks for logon mode, run level, concurrency
+# policy and exact supervisor command.
+function Get-TaskAccountComponent([string]$UserId) {
+    $value = ([string]$UserId).Trim()
+    if ($value -match '^[^\\]+\\(.+)$') { $value = $Matches[1] }
+    return $value.ToUpperInvariant()
+}
 $registeredUserId = ([string]$registered.Principal.UserId).Trim()
 $registeredMultipleInstances = ([string]$registered.Settings.MultipleInstances).Trim()
-if ($registeredUserId -ne ([string]$principal.UserId).Trim() -or $registeredMultipleInstances -ne "IgnoreNew") { throw "SERVER_STARTUP_TASK_CONFIGURATION_INVALID" }
+$registeredAction = @($registered.Actions | Select-Object -First 1)
+$registeredArguments = if ($registeredAction.Count -eq 1) { [string]$registeredAction[0].Arguments } else { "" }
+$registeredWorkingDirectory = if ($registeredAction.Count -eq 1) { [string]$registeredAction[0].WorkingDirectory } else { "" }
+$expectedAccount = Get-TaskAccountComponent ([string]$principal.UserId)
+$registeredAccount = Get-TaskAccountComponent $registeredUserId
+$expectedArguments = [string]$arguments
+if (
+    $registeredAccount -ne $expectedAccount -or
+    [string]$registered.Principal.LogonType -ne "Interactive" -or
+    [string]$registered.Principal.RunLevel -ne "Limited" -or
+    $registeredMultipleInstances -ne "IgnoreNew" -or
+    $registeredArguments -ne $expectedArguments -or
+    $registeredWorkingDirectory -ne $bundle
+) { throw "SERVER_STARTUP_TASK_CONFIGURATION_INVALID" }
 Start-ScheduledTask -TaskName $TaskName
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
 do {

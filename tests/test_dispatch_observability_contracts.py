@@ -45,5 +45,7 @@ def test_server_task_starts_current_session_immediately():
     assert "Start-ScheduledTask" in startup
     assert "-LogonType Interactive" in startup
     assert "MultipleInstances IgnoreNew" in startup
+    assert "Get-TaskAccountComponent" in startup
+    assert "-ErrorAction Stop" in startup
     assert '$registeredMultipleInstances = ([string]$registered.Settings.MultipleInstances).Trim()' in startup
     assert '$registeredMultipleInstances -ne "IgnoreNew"' in startup
