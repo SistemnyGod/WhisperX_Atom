@@ -31,5 +31,16 @@ with TemporaryDirectory() as directory:
 print("MEDIA_IMAGE_AUDIO_SIGNAL_READY")
 '@
 
-& docker run --rm --entrypoint python $Image -c $probe
-if ($LASTEXITCODE -ne 0) { throw "MEDIA_IMAGE_AUDIO_SIGNAL_FAILED: $Image" }
+# Passing a multiline program through `python -c` is not reliable on Windows:
+# native argument marshalling removes quotes from the payload.  Mount a
+# short-lived source file instead.  It contains no customer data and is
+# removed even when the container probe fails.
+$probePath = Join-Path ([System.IO.Path]::GetTempPath()) ("whisperx-media-probe-" + [guid]::NewGuid().ToString("N") + ".py")
+try {
+    Set-Content -LiteralPath $probePath -Value $probe -Encoding utf8 -NoNewline
+    & docker run --rm --entrypoint python --mount ("type=bind,source=" + $probePath + ",target=/tmp/verify_media.py,readonly") $Image /tmp/verify_media.py
+    if ($LASTEXITCODE -ne 0) { throw "MEDIA_IMAGE_AUDIO_SIGNAL_FAILED: $Image" }
+}
+finally {
+    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+}
