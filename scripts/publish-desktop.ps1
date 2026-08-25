@@ -54,7 +54,7 @@ if ($DevelopmentNoVoiceRefinerAssets) {
     }
 } else {
     & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1') -ExpectedBuildIdentity $buildIdentity
-    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+    if (-not $?) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
 }
 $finalOutput = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
 if ([string]::IsNullOrWhiteSpace($finalOutput) -or $finalOutput -eq $repoRoot -or $finalOutput.Length -lt ($repoRoot.Length + 8)) {
