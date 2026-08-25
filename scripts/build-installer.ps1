@@ -38,6 +38,27 @@ if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
         & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
     }
 }
+$identityPath = Join-Path $repoRoot "artifacts\\desktop\\build-identity.json"
+if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { throw "DESKTOP_IDENTITY_MANIFEST_MISSING" }
+$identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+$buildIdentity = [string]$identity.buildIdentity
+if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
+    throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
+}
+if ($DevelopmentNoVoiceRefinerAssets) {
+    if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
+    }
+} else {
+    & $assetVerifier -ExpectedBuildIdentity $buildIdentity
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
+    & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
+    if ($LASTEXITCODE -ne 0) { throw "VOICE_RELEASE_EVIDENCE_GATE_FAILED" }
+}
+$runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
+if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }
+& $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json")
+if ($LASTEXITCODE -ne 0) { throw "CLEAN_RUNTIME_GATE_FAILED" }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($null -eq $iscc) {
     $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
@@ -69,27 +90,6 @@ try {
 }
 if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw "INSTALLER_ARTIFACT_MISSING" }
 if ($previousSetup -and (Test-Path -LiteralPath $previousSetup)) { Remove-Item -LiteralPath $previousSetup -Force }
-$identityPath = Join-Path $repoRoot "artifacts\\desktop\\build-identity.json"
-if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { throw "DESKTOP_IDENTITY_MANIFEST_MISSING" }
-$identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
-$buildIdentity = [string]$identity.buildIdentity
-if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
-    throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
-}
-if ($DevelopmentNoVoiceRefinerAssets) {
-    if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
-    }
-} else {
-    & $assetVerifier -ExpectedBuildIdentity $buildIdentity
-    if ($LASTEXITCODE -ne 0) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
-    & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
-    if ($LASTEXITCODE -ne 0) { throw "VOICE_RELEASE_EVIDENCE_GATE_FAILED" }
-}
-$runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
-if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }
-& $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json")
-if ($LASTEXITCODE -ne 0) { throw "CLEAN_RUNTIME_GATE_FAILED" }
 $signature = Get-AuthenticodeSignature -LiteralPath $setup
 $signatureStatus = [string]$signature.Status
 $releaseStatus = if ($signatureStatus -eq "Valid") { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_PILOT_BUILD" }
