@@ -162,3 +162,10 @@ def test_native_refiner_build_canonicalizes_duplicate_windows_path_keys():
     assert "MSB6001" in build
     assert "SetEnvironmentVariable('PATH', $null, 'Process')" in build
     assert "SetEnvironmentVariable('Path', $pathValue, 'Process')" in build
+
+
+def test_server_bundle_accepts_an_absolute_external_env_file():
+    bundle = read("scripts/build-server-bundle.ps1")
+    assert "[IO.Path]::IsPathRooted($EnvFile)" in bundle
+    assert "'--env-file',$resolvedEnvFile" in bundle
+    assert "Join-Path $repo $EnvFile" not in bundle.split("$compose =", 1)[1]

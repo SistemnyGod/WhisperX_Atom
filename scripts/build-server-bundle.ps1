@@ -32,20 +32,25 @@ $short = Invoke-Git @('rev-parse','--short=12','HEAD')
 $identity = "1.0.1+$commit"
 $tag = "1.0.1-$short"
 if ($identity -match 'dirty|dev' -or $tag -match 'dirty|dev') { throw "RELEASE_IDENTITY_INVALID: $identity" }
-if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) { throw "ENV_FILE_NOT_FOUND: $EnvFile" }
-$autoSummarySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^AUTO_SUMMARY_ENABLED=' } | Select-Object -First 1
+$resolvedEnvFile = if ([IO.Path]::IsPathRooted($EnvFile)) {
+    [IO.Path]::GetFullPath($EnvFile)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $repo $EnvFile))
+}
+if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) { throw "ENV_FILE_NOT_FOUND: $resolvedEnvFile" }
+$autoSummarySetting = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^AUTO_SUMMARY_ENABLED=' } | Select-Object -First 1
 if ($autoSummarySetting -and ($autoSummarySetting -replace '^AUTO_SUMMARY_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
-$assistantSetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_ENABLED=' } | Select-Object -First 1
+$assistantSetting = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_ENABLED=' } | Select-Object -First 1
 if ($assistantSetting -and ($assistantSetting -replace '^ASSISTANT_ENABLED=','').Trim() -eq 'true') { $IncludeLlm = $true }
-$memorySetting = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^MEETING_MEMORY_ENABLED=' } | Select-Object -First 1
+$memorySetting = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^MEETING_MEMORY_ENABLED=' } | Select-Object -First 1
 $includeMemory = -not ($memorySetting -and ($memorySetting -replace '^MEETING_MEMORY_ENABLED=','').Trim().ToLowerInvariant() -eq 'false')
 $embeddingSnapshotManifest = $null
 if ($IncludeLlm) {
-    $embeddingRequired = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=' } | Select-Object -First 1
-    $embeddingModelHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_ONNX_SHA256=' } | Select-Object -First 1
-    $embeddingTokenizerHash = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=' } | Select-Object -First 1
-    $embeddingRevisionLine = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_MODEL_REVISION=' } | Select-Object -First 1
-    $modelsHostLine = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_ -match '^WHISPERX_MODELS_HOST=' } | Select-Object -First 1
+    $embeddingRequired = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=' } | Select-Object -First 1
+    $embeddingModelHash = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_ONNX_SHA256=' } | Select-Object -First 1
+    $embeddingTokenizerHash = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=' } | Select-Object -First 1
+    $embeddingRevisionLine = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^ASSISTANT_EMBEDDING_MODEL_REVISION=' } | Select-Object -First 1
+    $modelsHostLine = Get-Content -LiteralPath $resolvedEnvFile -Encoding utf8 | Where-Object { $_ -match '^WHISPERX_MODELS_HOST=' } | Select-Object -First 1
     $requiredValue = if ($embeddingRequired) { ($embeddingRequired -replace '^ASSISTANT_EMBEDDING_REQUIRE_VERIFIED=','').Trim() } else { '' }
     $modelHashValue = if ($embeddingModelHash) { ($embeddingModelHash -replace '^ASSISTANT_EMBEDDING_ONNX_SHA256=','').Trim() } else { '' }
     $tokenizerHashValue = if ($embeddingTokenizerHash) { ($embeddingTokenizerHash -replace '^ASSISTANT_EMBEDDING_TOKENIZER_SHA256=','').Trim() } else { '' }
@@ -84,7 +89,7 @@ $env:WHISPERX_RELEASE_VERSION = $identity
 $env:WHISPERX_BUILD_IDENTITY = $identity
 $env:WHISPERX_REVISION = $commit
 $env:APP_VERSION = $identity
-$compose = @('--project-name','whisperx-atom','--env-file',(Join-Path $repo $EnvFile),'-f',(Join-Path $repo 'compose.dev.yml'),'-f',(Join-Path $repo 'compose.lan.yml'))
+$compose = @('--project-name','whisperx-atom','--env-file',$resolvedEnvFile,'-f',(Join-Path $repo 'compose.dev.yml'),'-f',(Join-Path $repo 'compose.lan.yml'))
 $profiles = @('--profile','core','--profile','gpu','--profile','lan')
 if ($IncludeLlm) { $profiles += @('--profile','llm') }
 if ($includeMemory) { $profiles += @('--profile','memory') }
