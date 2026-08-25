@@ -8,6 +8,7 @@ import re
 import socket
 import hashlib
 import time
+import traceback
 from collections import deque
 from difflib import SequenceMatcher
 from typing import Any
@@ -97,7 +98,25 @@ def assistant_failure_code(exc: BaseException) -> str:
         return "GENERATION_FAILED"
     if any(token in text for token in ("timeout", "connection", "refused", "unavailable", "503", "502", "server_exit")):
         return "LLM_UNAVAILABLE"
-    return type(exc).__name__.upper()[:80]
+    return "ASSISTANT_INTERNAL_ERROR"
+
+
+def assistant_failure_fingerprint(exc: BaseException, stage: str) -> str:
+    """Return a stable, privacy-safe fingerprint for an internal failure.
+
+    Exception messages can contain the user's question, evidence text or a
+    local path.  Only the exception type, bounded pipeline stage and the
+    nearest project frame are included in the digest.
+    """
+    frame_name = "unknown"
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    for frame in reversed(frames):
+        normalized = str(frame.filename).replace("\\", "/")
+        if any(marker in normalized for marker in ("/workers/", "/whisperx_atom/", "/apps/")):
+            frame_name = f"{normalized.rsplit('/', 3)[-3:]}:{frame.name}:{frame.lineno}"
+            break
+    material = f"{type(exc).__name__}|{str(stage or 'UNKNOWN').upper()[:64]}|{frame_name}"
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:24]
 # Kept as a compatibility marker for older Desktop/Voice clients. New
 # clients receive the explicit NO_EVIDENCE error code below, while rolling
 # upgrades may still look for the historical empty-context name.
@@ -532,6 +551,36 @@ class AssistantRepository:
             if row and row[1]:
                 connection.execute("UPDATE assistant_messages SET status=%s,error_code=%s WHERE id=%s", (status, error, row[1]))
             return row is not None
+
+    def record_failure_diagnostic(
+        self,
+        query_id: str,
+        exc: BaseException,
+        stage: str,
+        retry_disposition: str,
+    ) -> None:
+        """Persist only bounded, non-content failure diagnostics.
+
+        This deliberately does not store ``str(exc)``: provider messages can
+        contain prompt fragments, evidence text or local paths.  The durable
+        query status/error code remains the user-facing contract.
+        """
+        diagnostic = {
+            "failureStage": str(stage or "UNKNOWN").upper()[:64],
+            "exceptionType": type(exc).__name__[:80],
+            "exceptionFingerprint": assistant_failure_fingerprint(exc, stage),
+            "retryDisposition": str(retry_disposition or "UNKNOWN").upper()[:32],
+        }
+        with self._db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE assistant_queries
+                SET answer_metadata=COALESCE(answer_metadata,'{}'::jsonb) || %s::jsonb,
+                    updated_at=now()
+                WHERE id=%s
+                """,
+                (Jsonb(diagnostic), query_id),
+            )
 
     def set_processing_stage(self, query_id: str, stage: str) -> None:
         """Publish a small durable stage without changing query ownership.
@@ -1392,6 +1441,7 @@ class AssistantWorker:
 
     async def handle(self, payload: dict[str, Any]) -> None:
         total_started = time.perf_counter()
+        failure_stage = "ROUTING"
         query_id = str(payload["query_id"])
         message_id = str(payload.get("message_id", ""))
         if message_id and not self.repository.claim(message_id, query_id):
@@ -1402,6 +1452,7 @@ class AssistantWorker:
         query, meeting_id, _, conversation_id, user_message_id, _, assistant_mode, owner_user_id, role = row
         if not self.repository.set_status(query_id, "RUNNING"):
             return
+        failure_stage = "WAITING_FOR_GPU"
         await asyncio.to_thread(self.repository.set_processing_stage, query_id, "WAITING_FOR_GPU")
         # Keep a deterministic empty result for failure paths.  The finally
         # block persists a terminal diagnostic even when the local LLM cannot
@@ -1420,6 +1471,7 @@ class AssistantWorker:
             queue_wait_ms = max(0.0, float(payload.get("queue_wait_ms") or 0.0))
         timings: dict[str, float] = {"queue_wait_ms": round(queue_wait_ms, 3)}
         try:
+            failure_stage = "ROUTING"
             # A conversational modifier ("повтори", "короче", "подробнее")
             # is not an evidence query by itself. Use only the latest USER
             # turn as a retrieval key; assistant text remains context for the
@@ -1450,6 +1502,7 @@ class AssistantWorker:
                 )
                 user_content = f"Вопрос: {query}\n\nПлан запроса (не является источником фактов): {answer_plan}"
             elif assistant_mode == "LIVE_MEETING":
+                failure_stage = "RETRIEVAL"
                 retrieval_started = time.perf_counter()
                 context, valid, transcript_kind, context_error = await asyncio.to_thread(self.repository.live_context, meeting_id, retrieval_query)
                 timings["retrieval_ms"] = round((time.perf_counter() - retrieval_started) * 1000.0, 3)
@@ -1468,6 +1521,7 @@ class AssistantWorker:
                 )
                 user_content = f"Вопрос: {query}\nПлан запроса (не evidence): {answer_plan}\n\nСвежие live-фрагменты (не V1/V2):\n{context}"
             else:
+                failure_stage = "RETRIEVAL"
                 retrieval_started = time.perf_counter()
                 include_all = role in {"Administrator", "Operator", "ADMIN", "OPERATOR"}
                 comparison_queries = tuple(
@@ -1533,6 +1587,7 @@ class AssistantWorker:
                     # becomes available.
                     raise AssistantGpuBusy("ASSISTANT_WAITING_FOR_GPU")
                 timings["preemption_wait_ms"] = round((time.perf_counter() - preemption_started) * 1000.0, 3)
+                failure_stage = "LOADING_MODEL"
                 await asyncio.to_thread(self.repository.set_processing_stage, query_id, "LOADING_MODEL")
                 model_started = time.perf_counter()
                 server = await asyncio.to_thread(self._llm_runtime.ensure_started)
@@ -1543,6 +1598,7 @@ class AssistantWorker:
                 await asyncio.to_thread(self._gpu_coordination.mark_llm_busy, self._llm_owner, "ASSISTANT", query_id)
                 try:
                     client = self._client_for(server.base_url)
+                    failure_stage = "GENERATION"
                     await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GENERATING")
                     generation_started = time.perf_counter()
                     result = await client.invoke_json(
@@ -1563,8 +1619,9 @@ class AssistantWorker:
                             total_ms=timings["generation_ms"],
                             first_token_ms=client.last_first_token_ms,
                         )
+                    failure_stage = "GROUNDING"
                     await asyncio.to_thread(self.repository.set_processing_stage, query_id, "GROUNDING")
-                    retrieval_anchors = int(self._last_retrieval_metadata.get("anchorCount", 0) or 0)
+                    retrieval_anchors = int(getattr(self.repository, "_last_retrieval_metadata", {}).get("anchorCount", 0) or 0)
                     if assistant_mode != "GENERAL_CHAT" and retrieval_anchors > 0 and not claims_are_semantically_grounded(result, valid, assistant_mode):
                         # One controlled retry is allowed.  The second result
                         # is still validated by persist(), so a malformed or
@@ -1601,6 +1658,7 @@ class AssistantWorker:
                     # failure path must be able to record FAILED/LLM_UNAVAILABLE
                     # and leave the durable query retryable.
                     if synthesis_completed:
+                        failure_stage = "PERSISTENCE"
                         timings["total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 3)
                         await asyncio.to_thread(self.repository.persist, query_id, result, valid, assistant_mode, transcript_kind, expected_meeting_id=meeting_id, timings=timings)
         except AssistantGpuBusy as exc:
@@ -1625,6 +1683,7 @@ class AssistantWorker:
                     ASSISTANT_MAX_RETRIES,
                 )
                 if scheduled_attempt is not None:
+                    await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "SCHEDULED")
                     delay = assistant_retry_delay_seconds(scheduled_attempt)
                     LOGGER.warning(
                         "assistant query=%s retry scheduled attempt=%s delay=%ss",
@@ -1637,11 +1696,13 @@ class AssistantWorker:
                 # let the consumer ACK the current delivery; a terminal
                 # assistant request must not loop forever in JetStream.
                 self.repository.set_status(query_id, "LLM_UNAVAILABLE", error=assistant_failure_code(exc))
+                await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "EXHAUSTED")
                 LOGGER.error("assistant query=%s retry budget exhausted: %s", query_id, detail)
                 return
             # Deterministic validation/scope/model configuration failures are
             # terminal.  They remain visible to Desktop and cannot be retried
             # by a stale NATS delivery.
             self.repository.set_status(query_id, "FAILED", error=assistant_failure_code(exc))
+            await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "TERMINAL")
             LOGGER.error("assistant query=%s entered terminal failure: %s", query_id, detail)
             return
