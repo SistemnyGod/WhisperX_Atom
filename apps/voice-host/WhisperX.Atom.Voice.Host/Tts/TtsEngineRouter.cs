@@ -11,7 +11,11 @@ public sealed record TtsRouterSnapshot(
     int? ProcessId,
     long LastSynthesisMs,
     long LastModelLoadMs,
-    int RestartCount);
+    int RestartCount,
+    string VoiceProfile = TtsVoiceProfiles.MifodiyTech,
+    bool FxEnabled = false,
+    bool FxApplied = false,
+    string? FxFallbackReason = null);
 
 public sealed class TtsEngineRouter : IAsyncDisposable
 {
@@ -25,6 +29,9 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     private DateTimeOffset? _fallbackUntilUtc;
     private int _sileroFailureCount;
     private TtsOptions _options = new();
+    private string _voiceProfile = TtsVoiceProfiles.MifodiyTech;
+    private bool _fxApplied;
+    private string? _fxFallbackReason;
 
     public TtsEngineRouter(SileroTtsEngine silero, WindowsTtsEngine windows, SpeechAudioPlayer player)
     {
@@ -37,7 +44,7 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     // Report the configured/effective Silero speaker instead of the old
     // hard-coded default.  This keeps STATUS/diagnostics truthful when the
     // user selected eugene, baya, kseniya or xenia.
-    public string VoiceName => _useFallback ? _windows.VoiceName : _silero.VoiceName;
+    public string VoiceName => _useFallback ? _windows.VoiceName : TtsVoiceProfiles.IsMifodiyTech(_voiceProfile) ? "eugene" : _silero.VoiceName;
     public string VoiceCulture => _useFallback ? _windows.VoiceCulture : "ru-RU";
     public bool FallbackUsed => _useFallback && !_explicitWindows;
     public string? FallbackReason => _fallbackReason;
@@ -46,24 +53,39 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     public long LastModelLoadMs => _silero.LastModelLoadMs;
     public int RestartCount => _silero.RestartCount;
     public SpeechAudioPlayer Player => _player;
+    public string VoiceProfile => _voiceProfile;
+    public bool FxEnabled => TtsVoiceProfiles.IsMifodiyTech(_voiceProfile) && !_useFallback;
+    public bool FxApplied => _fxApplied;
+    public string? FxFallbackReason => _fxFallbackReason;
+    public void RecordPlaybackFx(bool applied, string? fallbackReason)
+    {
+        _fxApplied = applied;
+        _fxFallbackReason = fallbackReason;
+    }
 
     public async Task<bool> ConfigureAsync(string? requestedWindowsVoice, int? rate, int? volume, bool fallbackEnabled,
         string? requestedSileroVoice = null, int? sampleRate = null, int? cpuThreads = null,
-        CancellationToken cancellationToken = default, string? requestedEngine = null)
+        CancellationToken cancellationToken = default, string? requestedEngine = null, string? requestedVoiceProfile = null)
     {
         _fallbackEnabled = fallbackEnabled;
         _windows.Configure(requestedWindowsVoice, rate, volume);
+        _voiceProfile = TtsVoiceProfiles.Normalize(requestedVoiceProfile);
+        var configuredVoice = string.IsNullOrWhiteSpace(requestedSileroVoice) ? "aidar" : requestedSileroVoice.Trim();
+        if (TtsVoiceProfiles.IsMifodiyTech(_voiceProfile)) configuredVoice = "eugene";
         _options = new TtsOptions(
-            Voice: string.IsNullOrWhiteSpace(requestedSileroVoice) ? "aidar" : requestedSileroVoice.Trim(),
+            Voice: configuredVoice,
             SampleRate: sampleRate ?? 48000,
             Rate: rate ?? 0,
             Volume: volume ?? 90,
-            CpuThreads: cpuThreads ?? 4);
+            CpuThreads: cpuThreads ?? 4,
+            VoiceProfile: _voiceProfile);
         _explicitWindows = string.Equals(requestedEngine, "WINDOWS", StringComparison.OrdinalIgnoreCase);
         _useFallback = _explicitWindows;
         _fallbackReason = null;
         _fallbackUntilUtc = null;
         _sileroFailureCount = 0;
+        _fxApplied = false;
+        _fxFallbackReason = null;
         if (_useFallback) return _windows.IsReady;
         if (await _silero.EnsureReadyAsync(cancellationToken).ConfigureAwait(false)) return true;
         _fallbackReason = _silero.LastErrorCode ?? "TTS_HOST_START_FAILED";
@@ -83,7 +105,7 @@ public sealed class TtsEngineRouter : IAsyncDisposable
         }
         if (!_useFallback)
         {
-            var sileroOptions = options with { Voice = _options.Voice, SampleRate = _options.SampleRate, CpuThreads = _options.CpuThreads };
+            var sileroOptions = options with { Voice = _options.Voice, SampleRate = _options.SampleRate, CpuThreads = _options.CpuThreads, VoiceProfile = _voiceProfile };
             var result = await _silero.SynthesizeAsync(text, sileroOptions, cancellationToken).ConfigureAwait(false);
             if (result.Success) return result;
 
@@ -120,7 +142,7 @@ public sealed class TtsEngineRouter : IAsyncDisposable
         return fallback with { FallbackReason = _fallbackReason };
     }
 
-    public TtsRouterSnapshot Snapshot() => new(EngineName, ModelName, VoiceName, VoiceCulture, IsReady, FallbackUsed, _fallbackReason, ProcessId, LastSynthesisMs, LastModelLoadMs, RestartCount);
+    public TtsRouterSnapshot Snapshot() => new(EngineName, ModelName, VoiceName, VoiceCulture, IsReady, FallbackUsed, _fallbackReason, ProcessId, LastSynthesisMs, LastModelLoadMs, RestartCount, _voiceProfile, FxEnabled, _fxApplied, _fxFallbackReason);
     public IReadOnlyList<string> GetRussianVoiceNames() => _windows.GetRussianVoiceNames();
     public TtsOptions CurrentOptions => _options;
     public IReadOnlyList<object> GetTtsVoices() =>

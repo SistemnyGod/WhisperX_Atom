@@ -37,7 +37,8 @@ public sealed class SpeechResponder : IDisposable
     private int _lastCancelHadPlayback;
     private int _volume = 90;
     private int _rate;
-    private string _requestedSileroVoice = "aidar";
+    private string _requestedSileroVoice = "eugene";
+    private string _voiceProfile = TtsVoiceProfiles.MifodiyTech;
     private string _requestedWindowsVoice = "Microsoft Irina";
     private int _sampleRate = 48000;
     private int _cpuThreads = 4;
@@ -71,6 +72,10 @@ public sealed class SpeechResponder : IDisposable
     public int TtsRestartCount => _router.RestartCount;
     public int TtsSampleRate => _sampleRate;
     public int TtsCpuThreads => _cpuThreads;
+    public string VoiceProfile => _voiceProfile;
+    public bool TtsFxEnabled => _router.FxEnabled;
+    public bool TtsFxApplied => _router.FxApplied;
+    public string? TtsFxFallbackReason => _router.FxFallbackReason;
     public event Action<Exception>? Error;
 
     public bool ConfigureVoice(string? requestedName, int? rate, int? volume)
@@ -80,13 +85,15 @@ public sealed class SpeechResponder : IDisposable
     }
 
     public async Task<bool> ConfigureAsync(string? windowsFallbackVoice, int? rate, int? volume, string? sileroVoice,
-        int? sampleRate, int? cpuThreads, bool fallbackEnabled, CancellationToken cancellationToken = default, string? ttsEngine = null)
+        int? sampleRate, int? cpuThreads, bool fallbackEnabled, CancellationToken cancellationToken = default, string? ttsEngine = null, string? voiceProfile = null)
     {
         _requestedWindowsVoice = string.IsNullOrWhiteSpace(windowsFallbackVoice) ? "Microsoft Irina" : windowsFallbackVoice.Trim();
-        _requestedSileroVoice = string.IsNullOrWhiteSpace(sileroVoice) ? "aidar" : sileroVoice.Trim();
+        _voiceProfile = TtsVoiceProfiles.Normalize(voiceProfile);
+        _requestedSileroVoice = string.IsNullOrWhiteSpace(sileroVoice) ? "eugene" : sileroVoice.Trim();
+        if (TtsVoiceProfiles.IsMifodiyTech(_voiceProfile)) _requestedSileroVoice = "eugene";
         _rate = Math.Clamp(rate ?? 0, -10, 10); _volume = Math.Clamp(volume ?? 90, 0, 100);
         _sampleRate = sampleRate is 24000 or 48000 ? sampleRate.Value : 48000; _cpuThreads = Math.Clamp(cpuThreads ?? 4, 1, 32); _fallbackEnabled = fallbackEnabled;
-        return await _router.ConfigureAsync(_requestedWindowsVoice, _rate, _volume, _fallbackEnabled, _requestedSileroVoice, _sampleRate, _cpuThreads, cancellationToken, ttsEngine).ConfigureAwait(false);
+        return await _router.ConfigureAsync(_requestedWindowsVoice, _rate, _volume, _fallbackEnabled, _requestedSileroVoice, _sampleRate, _cpuThreads, cancellationToken, ttsEngine, _voiceProfile).ConfigureAwait(false);
     }
 
     public IReadOnlyList<string> GetRussianVoiceNames() => _router.GetRussianVoiceNames();
@@ -137,7 +144,8 @@ public sealed class SpeechResponder : IDisposable
                             if (request.PlaybackStarted is null) return;
                             try { await request.PlaybackStarted().ConfigureAwait(false); }
                             catch (Exception callbackError) { Error?.Invoke(callbackError); }
-                        }, _shutdown.Token).ConfigureAwait(false);
+                        }, _shutdown.Token, applyVoiceFx: _router.FxEnabled).ConfigureAwait(false);
+                        _router.RecordPlaybackFx(playback.FxApplied, playback.FxFallbackReason);
                         request.Completion.TrySetResult(new SpeechPlaybackResult(playback.Played ? SpeechPlaybackState.Played : playback.Cancelled ? SpeechPlaybackState.Cancelled : SpeechPlaybackState.Failed, started, playback.ErrorCode, synthesized.Engine, synthesized.Model, synthesized.Voice, _router.FallbackUsed, queueWait, synthesized.SynthesisMs, playback.PlaybackMs));
                     }
                     finally { WindowsTtsEngine.TryDelete(synthesized.AudioPath); }

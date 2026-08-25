@@ -16,6 +16,7 @@ public sealed partial class HomePage : Page
     private FrontendServices? _services;
     private CancellationTokenSource? _pageCts;
     private bool _applyingVoiceGain;
+    private PageLayoutMode? _lastSystemStatusMode;
     public HomeViewModel? ViewModel { get; private set; }
 
     public HomePage()
@@ -133,8 +134,9 @@ public sealed partial class HomePage : Page
     private void HomePage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (HomeContentGrid is null || HomeMainColumn is null || KpiGrid is null) return;
+        var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
         ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement?[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
-        var compact = ResponsiveLayout.GetMode(e.NewSize.Width) == PageLayoutMode.Compact;
+        var compact = mode == PageLayoutMode.Compact;
         HeroIdentityRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
         HeroIdentityRow.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
         HeroCommandRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
@@ -161,6 +163,33 @@ public sealed partial class HomePage : Page
             VoiceGainCard.Margin = new Thickness(0);
         }
         HomeNotices.Width = Math.Min(380, Math.Max(260, e.NewSize.Width - 56));
+        ApplySystemStatusLayout(mode);
+    }
+
+    private void ApplySystemStatusLayout(PageLayoutMode mode)
+    {
+        if (HomeSystemGrid is null) return;
+        if (_lastSystemStatusMode == mode) return;
+        var items = new FrameworkElement[] { RecorderStatusItem, ServerStatusItem, WhisperXStatusItem, QueueStatusItem };
+        var columns = mode switch
+        {
+            PageLayoutMode.Compact => 1,
+            PageLayoutMode.Standard => 2,
+            _ => 4
+        };
+        HomeSystemGrid.ColumnDefinitions.Clear();
+        HomeSystemGrid.RowDefinitions.Clear();
+        for (var index = 0; index < columns; index++)
+            HomeSystemGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var rows = (int)Math.Ceiling(items.Length / (double)columns);
+        for (var index = 0; index < rows; index++)
+            HomeSystemGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        for (var index = 0; index < items.Length; index++)
+        {
+            Grid.SetColumn(items[index], index % columns);
+            Grid.SetRow(items[index], index / columns);
+        }
+        _lastSystemStatusMode = mode;
     }
 
     private async void VoiceGainSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)

@@ -31,6 +31,7 @@ public sealed class SettingsViewModel : ObservableObject
     private int _voiceVolume = 90;
     private string _ttsEngine = "SILERO";
     private string _ttsVoice = "aidar";
+    private string _ttsVoiceProfile = "MIFODIY_TECH";
     private int _ttsSampleRate = 48000;
     private int _ttsCpuThreads = 4;
     private bool _ttsFallbackEnabled = true;
@@ -66,6 +67,7 @@ public sealed class SettingsViewModel : ObservableObject
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
     public ObservableCollection<string> VoiceOptions { get; } = new();
+    public IReadOnlyList<string> TtsVoiceProfileOptions { get; } = new[] { "MIFODIY_TECH", "CLEAN" };
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -86,6 +88,7 @@ public sealed class SettingsViewModel : ObservableObject
         _voiceVolume = settings.VoiceVolume;
         _ttsEngine = settings.TtsEngine;
         _ttsVoice = settings.TtsVoice;
+        _ttsVoiceProfile = settings.TtsVoiceProfile;
         _ttsSampleRate = settings.TtsSampleRate;
         _ttsCpuThreads = settings.TtsCpuThreads;
         _ttsFallbackEnabled = settings.TtsFallbackEnabled;
@@ -128,11 +131,23 @@ public sealed class SettingsViewModel : ObservableObject
     public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsEngine { get => _ttsEngine; set { if (SetProperty(ref _ttsEngine, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsVoice { get => _ttsVoice; set { if (SetProperty(ref _ttsVoice, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public string TtsVoiceProfile { get => _ttsVoiceProfile; set { var normalized = string.Equals(value, "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : "MIFODIY_TECH"; if (SetProperty(ref _ttsVoiceProfile, normalized)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsSampleRate { get => _ttsSampleRate; set { var v = value is 24000 or 48000 ? value : 48000; if (SetProperty(ref _ttsSampleRate, v)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsCpuThreads { get => _ttsCpuThreads; set { var v = Math.Clamp(value, 1, 32); if (SetProperty(ref _ttsCpuThreads, v)) _ = ApplyVoiceSettingsAsync(); } }
     public bool TtsFallbackEnabled { get => _ttsFallbackEnabled; set { if (SetProperty(ref _ttsFallbackEnabled, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string WindowsFallbackVoice { get => _windowsFallbackVoice; set { if (SetProperty(ref _windowsFallbackVoice, value)) _ = ApplyVoiceSettingsAsync(); } }
-    public int VoiceProcessingGainDb { get => _voiceProcessingGainDb; set { var v = Math.Clamp(value, 0, 18); if (SetProperty(ref _voiceProcessingGainDb, v)) _ = ApplyVoiceSettingsAsync(); } }
+    public int VoiceProcessingGainDb
+    {
+        get => _voiceProcessingGainDb;
+        set
+        {
+            var v = Math.Clamp(value, 0, 18);
+            if (!SetProperty(ref _voiceProcessingGainDb, v)) return;
+            OnPropertyChanged(nameof(VoiceProcessingGainText));
+            _ = ApplyVoiceSettingsAsync();
+        }
+    }
+    public string VoiceProcessingGainText => VoiceProcessingGainDb == 0 ? "Без усиления" : $"+{VoiceProcessingGainDb} дБ";
     public string VoiceEffectiveVoice { get => _voiceEffectiveVoice; private set { if (SetProperty(ref _voiceEffectiveVoice, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
     public string VoiceTtsStatus { get => _voiceTtsStatus; private set => SetProperty(ref _voiceTtsStatus, value); }
     public bool VoiceFallbackUsed { get => _voiceFallbackUsed; private set { if (SetProperty(ref _voiceFallbackUsed, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
@@ -142,10 +157,27 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceLiveTracks { get => _voiceLiveTracks; private set => SetProperty(ref _voiceLiveTracks, value); }
     public string VoiceLiveStats { get => _voiceLiveStats; private set => SetProperty(ref _voiceLiveStats, value); }
     public string VoiceVoiceStatus => VoiceFallbackUsed ? $"Используется fallback: {VoiceEffectiveVoice}" : $"Используется: {VoiceEffectiveVoice}";
-    public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public string VoiceStatus
+    {
+        get => _voiceStatus;
+        private set
+        {
+            if (!SetProperty(ref _voiceStatus, value)) return;
+            OnPropertyChanged(nameof(VoiceStatusLabel));
+            OnPropertyChanged(nameof(VoiceStatusDetail));
+        }
+    }
     public string VoiceStatusLabel => ToVoiceStatusLabel(VoiceStatus);
     public string VoiceLastRecognition { get => _voiceLastRecognition; private set => SetProperty(ref _voiceLastRecognition, value); }
-    public string VoiceErrorCode { get => _voiceErrorCode; private set => SetProperty(ref _voiceErrorCode, value); }
+    public string VoiceErrorCode
+    {
+        get => _voiceErrorCode;
+        private set
+        {
+            if (!SetProperty(ref _voiceErrorCode, value)) return;
+            OnPropertyChanged(nameof(VoiceStatusDetail));
+        }
+    }
     public string VoiceMicrophone { get => _voiceMicrophone; private set => SetProperty(ref _voiceMicrophone, value); }
     public string VoiceLevel { get => _voiceLevel; private set => SetProperty(ref _voiceLevel, value); }
     public double VoiceLevelNormalized { get => _voiceLevelNormalized; private set => SetProperty(ref _voiceLevelNormalized, value); }
@@ -164,6 +196,15 @@ public sealed class SettingsViewModel : ObservableObject
     public string VoiceDiagnosticsDetail { get => _voiceDiagnosticsDetail; private set => SetProperty(ref _voiceDiagnosticsDetail, value); }
     public int VoiceRestartCount => _services.VoiceHost.RestartCount;
     public bool IsLoggedIn => _services.Backend.HasSession;
+    public bool IsSessionExpired => _services.Backend.AuthState == DesktopAuthState.LoginRequired;
+    public string ApiStatusShort => _services.Backend.AuthState switch
+    {
+        DesktopAuthState.Authenticated => "Подключено",
+        DesktopAuthState.Offline => "Сервер офлайн",
+        DesktopAuthState.LoginRequired => "Требуется вход",
+        DesktopAuthState.Refreshing => "Проверяется…",
+        _ => "Не проверено"
+    };
     public bool CanLogin => !IsBusy && !IsLoggedIn;
     public bool CanChangeServerOrigin => !IsBusy && !ServerOriginManaged;
     public bool CanChangePassword => !IsBusy && IsLoggedIn;
@@ -174,6 +215,14 @@ public sealed class SettingsViewModel : ObservableObject
     public string SessionExpiryText => _services.Backend.SessionExpiresAtUtc is { } expires
         ? $"Сессия действительна до {expires.ToLocalTime():dd.MM.yyyy HH:mm}."
         : "Срок сессии проверяется автоматически.";
+    public string LoginStatusDetail => _services.Backend.AuthState switch
+    {
+        DesktopAuthState.Authenticated => "API отвечает; локальная запись и доставка доступны.",
+        DesktopAuthState.Offline => "Сервер не отвечает. Локальная запись продолжает работать, доставка возобновится после подключения.",
+        DesktopAuthState.LoginRequired => "Сессия истекла или отсутствует. Выполните вход, чтобы использовать Assistant и серверную доставку.",
+        DesktopAuthState.Refreshing => "Проверяю защищённую сессию и доступность сервера…",
+        _ => "Состояние API ещё не подтверждено."
+    };
     public string LoginStatusText => _services.Backend.AuthState switch
     {
         DesktopAuthState.Authenticated => "Вход в API выполнен",
@@ -181,6 +230,7 @@ public sealed class SettingsViewModel : ObservableObject
         DesktopAuthState.LoginRequired => "Требуется повторный вход в API",
         _ => IsLoggedIn ? "Проверка сессии API…" : "Вход в API не выполнен"
     };
+    public string VoiceStatusDetail => GetVoiceStatusDetail();
 
     public async Task RefreshRecorderDiagnosticsAsync()
     {
@@ -202,6 +252,24 @@ public sealed class SettingsViewModel : ObservableObject
             RecorderRuntimeState = "Ошибка проверки";
             RecorderRuntimeError = UiErrorFormatter.Format(exception, "RECORDER_HOST_UNAVAILABLE");
         }
+        finally
+        {
+            RefreshAuthenticationBindings();
+        }
+    }
+
+    private void RefreshAuthenticationBindings()
+    {
+        OnPropertyChanged(nameof(IsLoggedIn));
+        OnPropertyChanged(nameof(IsSessionExpired));
+        OnPropertyChanged(nameof(ApiStatusShort));
+        OnPropertyChanged(nameof(LoginStatusText));
+        OnPropertyChanged(nameof(LoginStatusDetail));
+        OnPropertyChanged(nameof(SessionExpiryText));
+        OnPropertyChanged(nameof(CanLogin));
+        OnPropertyChanged(nameof(CanChangePassword));
+        OnPropertyChanged(nameof(CanReconnectAgent));
+        OnPropertyChanged(nameof(CanLogout));
     }
 
     public async Task RefreshVoiceDiagnosticsAsync()
@@ -274,7 +342,10 @@ public sealed class SettingsViewModel : ObservableObject
                 ? "—"
                 : $"{response.EffectiveVoiceName} ({response.EffectiveVoiceCulture ?? "ru-RU"})";
             VoiceFallbackUsed = response.VoiceFallbackUsed;
-            VoiceTtsStatus = $"TTS: {response.TtsEngine} · {response.TtsModel} · {(response.TtsReady ? "готов" : "fallback/недоступен")}";
+            var fxState = response.TtsFxEnabled
+                ? (response.TtsFxApplied ? "FX включён" : $"чистый fallback{(string.IsNullOrWhiteSpace(response.TtsFxFallbackReason) ? string.Empty : $" ({response.TtsFxFallbackReason})")}")
+                : "чистый голос";
+            VoiceTtsStatus = $"TTS: {response.TtsEngine} · профиль {response.VoiceProfile} · {response.TtsVoice ?? response.EffectiveVoiceName ?? "—"} · {fxState} · {(response.TtsReady ? "готов" : "fallback/недоступен")}";
             VoiceSpeechQueue = $"Очередь речи: {response.SpeechQueueDepth} · отброшено: {response.SpeechQueueDrops}";
             VoiceLiveMode = response.LiveAudioMode switch
             {
@@ -328,6 +399,10 @@ public sealed class SettingsViewModel : ObservableObject
                 _services.VoiceHost.LastErrorDetail ?? ex.Message));
             RefreshAssistantDeliveryDiagnostics();
         }
+        finally
+        {
+            RefreshAuthenticationBindings();
+        }
     }
 
     private void RefreshAssistantDeliveryDiagnostics()
@@ -350,6 +425,7 @@ public sealed class SettingsViewModel : ObservableObject
         VoiceStatus = "VOICE_TELEMETRY_DISCONNECTED";
         VoiceErrorCode = "VOICE_TELEMETRY_DISCONNECTED";
         OnPropertyChanged(nameof(VoiceStatusLabel));
+        OnPropertyChanged(nameof(VoiceStatusDetail));
     }
 
     private void ApplyVoiceDiagnostics(VoiceDiagnosticsUiState state)
@@ -358,6 +434,7 @@ public sealed class SettingsViewModel : ObservableObject
         OnPropertyChanged(nameof(VoiceStatusLabel));
         VoiceLastRecognition = state.LastRecognition;
         VoiceErrorCode = state.ErrorCode;
+        OnPropertyChanged(nameof(VoiceStatusDetail));
         VoiceMicrophone = state.EffectiveDeviceName;
         VoiceRequestedMicrophone = state.RequestedDeviceId;
         VoiceEffectiveMicrophone = state.EffectiveDeviceId;
@@ -411,6 +488,24 @@ public sealed class SettingsViewModel : ObservableObject
         if (status.Contains("TELEMETRY", StringComparison.OrdinalIgnoreCase)) return "Телеметрия недоступна";
         if (status.Contains("heartbeat", StringComparison.OrdinalIgnoreCase) || status.Contains("недоступ", StringComparison.OrdinalIgnoreCase) || status.Contains("ошиб", StringComparison.OrdinalIgnoreCase)) return "Требуется настройка";
         return "Проверяется";
+    }
+
+    private string GetVoiceStatusDetail()
+    {
+        if (_services.Backend.AuthState == DesktopAuthState.LoginRequired)
+            return "Авторизация Desktop истекла; локальный Voice Host не требует сети для команд записи.";
+        if (string.Equals(VoiceErrorCode, "VOICE_TELEMETRY_DISCONNECTED", StringComparison.OrdinalIgnoreCase))
+            return "Телеметрия отключена. Voice Host проверяется через резервный статусный канал.";
+        if (VoiceErrorCode.Contains("HOST", StringComparison.OrdinalIgnoreCase)
+            || VoiceStatus.Contains("Voice Host", StringComparison.OrdinalIgnoreCase))
+            return "Voice Host недоступен или ещё запускается. Проверьте локальный процесс и микрофон.";
+        if (VoiceStatus.Contains("heartbeat", StringComparison.OrdinalIgnoreCase))
+            return "Heartbeat Voice Host просрочен; команда записи остаётся локальной и безопасной.";
+        if (VoiceStatus.Contains("RESPONDING", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий формирует и озвучивает ответ.";
+        if (VoiceStatus.Contains("LISTENING", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий готов к кодовому слову и локальным командам.";
+        return "Состояние Voice Host и телеметрии обновляется автоматически.";
     }
 
     private static string LiveTrackLabel(string state) => state switch
@@ -476,7 +571,7 @@ public sealed class SettingsViewModel : ObservableObject
     private async Task ApplyVoiceSettingsAsync()
     {
         var current = _services.Settings.Load();
-        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity, VoiceName = VoiceName, VoiceRate = VoiceRate, VoiceVolume = VoiceVolume, TtsEngine = TtsEngine, TtsVoice = TtsVoice, TtsSampleRate = TtsSampleRate, TtsCpuThreads = TtsCpuThreads, TtsFallbackEnabled = TtsFallbackEnabled, WindowsFallbackVoice = WindowsFallbackVoice, VoiceProcessingGainDb = VoiceProcessingGainDb });
+        _services.Settings.Save(current with { VoiceAlwaysListening = VoiceAlwaysListening, VoiceQuietMode = VoiceQuietMode, VoiceSensitivity = VoiceSensitivity, VoiceName = VoiceName, VoiceRate = VoiceRate, VoiceVolume = VoiceVolume, TtsEngine = TtsEngine, TtsVoice = TtsVoice, TtsVoiceProfile = TtsVoiceProfile, TtsSampleRate = TtsSampleRate, TtsCpuThreads = TtsCpuThreads, TtsFallbackEnabled = TtsFallbackEnabled, WindowsFallbackVoice = WindowsFallbackVoice, VoiceProcessingGainDb = VoiceProcessingGainDb });
         try
         {
             var effectiveMicrophone = current.MicrophoneDeviceId;
@@ -488,7 +583,7 @@ public sealed class SettingsViewModel : ObservableObject
                     ?? effectiveMicrophone;
             }
             catch { }
-            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity, voiceName: VoiceName, voiceRate: VoiceRate, voiceVolume: VoiceVolume, ttsEngine: TtsEngine, ttsVoice: TtsVoice, ttsSampleRate: TtsSampleRate, ttsCpuThreads: TtsCpuThreads, ttsFallbackEnabled: TtsFallbackEnabled, windowsFallbackVoice: WindowsFallbackVoice, voiceProcessingGainDb: VoiceProcessingGainDb))
+            if (!await _services.VoiceHost.ConfigureAsync(effectiveMicrophone, VoiceAlwaysListening, VoiceQuietMode, VoiceSensitivity, voiceName: VoiceName, voiceRate: VoiceRate, voiceVolume: VoiceVolume, ttsEngine: TtsEngine, ttsVoice: TtsVoice, ttsVoiceProfile: TtsVoiceProfile, ttsSampleRate: TtsSampleRate, ttsCpuThreads: TtsCpuThreads, ttsFallbackEnabled: TtsFallbackEnabled, windowsFallbackVoice: WindowsFallbackVoice, voiceProcessingGainDb: VoiceProcessingGainDb))
                 VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE";
         }
         catch { if (VoiceAlwaysListening) _ = _services.VoiceHost.StartAsync(); }
@@ -522,6 +617,9 @@ public sealed class SettingsViewModel : ObservableObject
             MustChangePassword = currentUser?.MustChangePassword == true;
             if (MustChangePassword) StatusText = "Вход выполнен. Установите новый пароль.";
             OnPropertyChanged(nameof(LoginStatusText));
+            OnPropertyChanged(nameof(LoginStatusDetail));
+            OnPropertyChanged(nameof(IsSessionExpired));
+            OnPropertyChanged(nameof(ApiStatusShort));
             OnPropertyChanged(nameof(SessionExpiryText));
             return true;
         }
@@ -740,6 +838,9 @@ public sealed class SettingsViewModel : ObservableObject
         OnPropertyChanged(nameof(CanReconnectAgent));
         OnPropertyChanged(nameof(CanLogout));
         OnPropertyChanged(nameof(LoginStatusText));
+        OnPropertyChanged(nameof(LoginStatusDetail));
+        OnPropertyChanged(nameof(IsSessionExpired));
+        OnPropertyChanged(nameof(ApiStatusShort));
         OnPropertyChanged(nameof(SessionExpiryText));
         _services.RaiseLoggedOut();
     }
@@ -829,6 +930,9 @@ public sealed class SettingsViewModel : ObservableObject
             _services.Settings.Save(updated);
             _services.Backend.ApplySettings(updated);
             OnPropertyChanged(nameof(LoginStatusText));
+            OnPropertyChanged(nameof(LoginStatusDetail));
+            OnPropertyChanged(nameof(IsSessionExpired));
+            OnPropertyChanged(nameof(ApiStatusShort));
             OnPropertyChanged(nameof(SessionExpiryText));
 
             if (!await _services.Backend.EnsureAuthenticatedAsync())
@@ -856,7 +960,7 @@ public sealed class SettingsViewModel : ObservableObject
         DesktopSettings.Save(ApiUrl.TrimEnd('/'), Username.Trim(), effectiveCookie, ArchiveRoot,
             current.MicrophoneDeviceId, current.SystemAudioDeviceId, _services.Backend.SessionExpiresAtUtc,
             current.RecordingProfile, current.OwnerUserId, current.AgentBootstrapConfirmed,
-            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel, current.TtsEngine, current.TtsVoice, current.TtsSampleRate, current.TtsCpuThreads, current.TtsFallbackEnabled, current.WindowsFallbackVoice, current.VoiceProcessingGainDb);
+            current.VoiceAlwaysListening, current.VoiceQuietMode, current.VoiceSensitivity, current.AcousticProfile, current.VoiceName, current.VoiceRate, current.VoiceVolume, current.UpdateChannel, current.TtsEngine, current.TtsVoice, current.TtsSampleRate, current.TtsCpuThreads, current.TtsFallbackEnabled, current.WindowsFallbackVoice, current.VoiceProcessingGainDb, current.TtsVoiceProfile);
     }
 
     private static string SafeError(Exception ex, string? fallback = null) => UiErrorFormatter.Format(ex, fallback ?? "Не удалось выполнить операцию с настройками.");

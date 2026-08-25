@@ -22,6 +22,7 @@ public sealed class HomeViewModel : ObservableObject
     private string _whisperXSummary = "Проверка WhisperX…";
     private string _voiceStatus = "Мифодий: проверка состояния";
     private string _recordingStatus = "Проверяется состояние записи…";
+    private string _heroTitle = "Готов к новой записи";
     private string _effectiveMicrophoneText = "Микрофон ещё не подтверждён";
     private string _microphoneSignalText = "Сигнал проверяется перед стартом записи";
     private string _microphoneSignalState = "UNKNOWN";
@@ -66,6 +67,22 @@ public sealed class HomeViewModel : ObservableObject
     public string ServerSummary { get => _serverSummary; private set => SetProperty(ref _serverSummary, value); }
     public string WhisperXSummary { get => _whisperXSummary; private set => SetProperty(ref _whisperXSummary, value); }
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public string HeroTitle { get => _heroTitle; private set => SetProperty(ref _heroTitle, value); }
+    public string RecordingActionText => _recordingState.ToUpperInvariant() switch
+    {
+        "RECORDING" or "PAUSED" or "FINALIZING" => "Открыть запись",
+        "UNAVAILABLE" or "ERROR" => "Проверить запись",
+        _ => "Начать запись"
+    };
+    public string RecordingActionToolTip => _recordingState.ToUpperInvariant() switch
+    {
+        "RECORDING" or "PAUSED" or "FINALIZING" => "Открыть пульт текущей записи",
+        "UNAVAILABLE" or "ERROR" => "Открыть пульт и проверить Recorder Agent",
+        _ => "Открыть пульт и начать локальную запись"
+    };
+    public string RecordingDurationText => _recordingState.ToUpperInvariant() is "RECORDING" or "PAUSED"
+        ? $"Длительность {MediaTimeText}"
+        : string.Empty;
     public string RecordingStatus { get => _recordingStatus; private set => SetProperty(ref _recordingStatus, value); }
     public string EffectiveMicrophoneText { get => _effectiveMicrophoneText; private set => SetProperty(ref _effectiveMicrophoneText, value); }
     public string MicrophoneSignalText { get => _microphoneSignalText; private set => SetProperty(ref _microphoneSignalText, value); }
@@ -183,6 +200,7 @@ public sealed class HomeViewModel : ObservableObject
             var response = await _services.Recorder.GetHealthAsync(cancellationToken);
             _recordingState = response.State;
             _mediaTimeMs = response.MediaTimeMs;
+            UpdateRecordingPresentation();
             ActiveRecordingsText = response.State is "Recording" or "Paused" ? "1" : "0";
             OnPropertyChanged(nameof(RecordingBadgeText));
             OnPropertyChanged(nameof(MediaTimeText));
@@ -253,6 +271,7 @@ public sealed class HomeViewModel : ObservableObject
             AgentAvailable = false;
             _recordingState = "Unavailable";
             _mediaTimeMs = null;
+            UpdateRecordingPresentation();
             OnPropertyChanged(nameof(RecordingBadgeText));
             OnPropertyChanged(nameof(MediaTimeText));
             AgentStatus = "Recorder Agent недоступен";
@@ -455,6 +474,22 @@ public sealed class HomeViewModel : ObservableObject
     private static string FormatStorage(long free, long total) => free <= 0 || total <= 0
         ? "Нет данных"
         : $"{FormatBytes(free)} свободно из {FormatBytes(total)}";
+
+    private void UpdateRecordingPresentation()
+    {
+        HeroTitle = _recordingState.ToUpperInvariant() switch
+        {
+            "RECORDING" => "Запись идёт",
+            "PAUSED" => "Запись на паузе",
+            "FINALIZING" => "Сохраняем запись",
+            "ERROR" => "Запись требует внимания",
+            "UNAVAILABLE" => "Запись недоступна",
+            _ => "Готов к новой записи"
+        };
+        OnPropertyChanged(nameof(RecordingActionText));
+        OnPropertyChanged(nameof(RecordingActionToolTip));
+        OnPropertyChanged(nameof(RecordingDurationText));
+    }
 
     private static string FormatMicrophoneSignal(string? state, double? rmsDb)
     {

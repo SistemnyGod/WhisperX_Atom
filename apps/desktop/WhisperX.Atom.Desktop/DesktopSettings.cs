@@ -29,7 +29,8 @@ public sealed record DesktopSettings(
     int TtsCpuThreads = 4,
     bool TtsFallbackEnabled = true,
     string WindowsFallbackVoice = "Microsoft Irina",
-    int VoiceProcessingGainDb = 0)
+    int VoiceProcessingGainDb = 0,
+    string TtsVoiceProfile = "MIFODIY_TECH")
 {
     private const string UnconfiguredApiUrl = "http://127.0.0.1:0";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -49,6 +50,10 @@ public sealed record DesktopSettings(
             using var document = JsonDocument.Parse(raw);
             if (!document.RootElement.TryGetProperty("windowsFallbackVoice", out _))
                 loaded = loaded with { WindowsFallbackVoice = string.IsNullOrWhiteSpace(loaded.VoiceName) ? "Microsoft Irina" : loaded.VoiceName };
+            if (!document.RootElement.TryGetProperty("ttsVoiceProfile", out _))
+                loaded = loaded with { TtsVoiceProfile = string.Equals(loaded.TtsVoice, "aidar", StringComparison.OrdinalIgnoreCase) ? "MIFODIY_TECH" : "CLEAN" };
+            else
+                loaded = loaded with { TtsVoiceProfile = NormalizeTtsVoiceProfile(loaded.TtsVoiceProfile) };
             return MigrateApiUrl(loaded);
         }
         catch (IOException) { return CreateDefault(); }
@@ -59,7 +64,7 @@ public sealed record DesktopSettings(
         ?? ReadHttpUrlEnvironment("WHISPERX_API_URL")
         ?? UnconfiguredApiUrl;
 
-    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90, string? updateChannel = null, string ttsEngine = "SILERO", string ttsVoice = "aidar", int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string windowsFallbackVoice = "Microsoft Irina", int voiceProcessingGainDb = 0)
+    public static void Save(string apiUrl, string username, string? sessionCookie, string? archiveRoot = null, string? microphoneDeviceId = null, string? systemAudioDeviceId = null, DateTimeOffset? sessionExpiresAtUtc = null, string? recordingProfile = "ROOM", Guid? ownerUserId = null, bool agentBootstrapConfirmed = false, bool voiceAlwaysListening = true, bool voiceQuietMode = false, string voiceSensitivity = "balanced", string acousticProfile = "AUTO", string voiceName = "Microsoft Irina", int voiceRate = 0, int voiceVolume = 90, string? updateChannel = null, string ttsEngine = "SILERO", string ttsVoice = "aidar", int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string windowsFallbackVoice = "Microsoft Irina", int voiceProcessingGainDb = 0, string ttsVoiceProfile = "MIFODIY_TECH")
     {
         var directory = Path.GetDirectoryName(FilePath)!;
         Directory.CreateDirectory(directory);
@@ -86,7 +91,8 @@ public sealed record DesktopSettings(
             Math.Clamp(ttsCpuThreads, 1, 32),
             ttsFallbackEnabled,
             string.IsNullOrWhiteSpace(windowsFallbackVoice) ? "Microsoft Irina" : windowsFallbackVoice.Trim(),
-            Math.Clamp(voiceProcessingGainDb, 0, 18));
+            Math.Clamp(voiceProcessingGainDb, 0, 18),
+            NormalizeTtsVoiceProfile(ttsVoiceProfile));
         var temporary = FilePath + ".part";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings, JsonOptions));
         File.Move(temporary, FilePath, true);
@@ -135,6 +141,9 @@ public sealed record DesktopSettings(
     private static string NormalizeUpdateChannel(string? channel)
         => string.Equals(channel?.Trim(), "pilot", StringComparison.OrdinalIgnoreCase) ? "pilot" : "stable";
 
+    private static string NormalizeTtsVoiceProfile(string? profile)
+        => string.Equals(profile?.Trim(), "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : "MIFODIY_TECH";
+
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 
     private static DesktopSettings MigrateApiUrl(DesktopSettings settings)
@@ -164,7 +173,7 @@ public sealed record DesktopSettings(
             if (string.IsNullOrWhiteSpace(migrated.ProtectedSessionCookie) || !string.IsNullOrWhiteSpace(sessionCookie))
             {
                 Save(migrated.ApiUrl, migrated.Username, sessionCookie, migrated.ArchiveRoot,
-                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity, migrated.AcousticProfile, migrated.VoiceName, migrated.VoiceRate, migrated.VoiceVolume, migrated.UpdateChannel, migrated.TtsEngine, migrated.TtsVoice, migrated.TtsSampleRate, migrated.TtsCpuThreads, migrated.TtsFallbackEnabled, migrated.WindowsFallbackVoice, migrated.VoiceProcessingGainDb);
+                    migrated.MicrophoneDeviceId, migrated.SystemAudioDeviceId, migrated.SessionExpiresAtUtc, migrated.RecordingProfile, migrated.OwnerUserId, migrated.AgentBootstrapConfirmed, migrated.VoiceAlwaysListening, migrated.VoiceQuietMode, migrated.VoiceSensitivity, migrated.AcousticProfile, migrated.VoiceName, migrated.VoiceRate, migrated.VoiceVolume, migrated.UpdateChannel, migrated.TtsEngine, migrated.TtsVoice, migrated.TtsSampleRate, migrated.TtsCpuThreads, migrated.TtsFallbackEnabled, migrated.WindowsFallbackVoice, migrated.VoiceProcessingGainDb, migrated.TtsVoiceProfile);
             }
         }
         catch

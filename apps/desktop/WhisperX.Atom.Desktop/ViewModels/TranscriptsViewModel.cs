@@ -29,6 +29,7 @@ public sealed class TranscriptRegistryItem
     public string MeetingDateText => Meeting.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.CurrentCulture);
     public string StatusText => UiStatusMapper.Text(Transcript?.Status ?? Registry?.Status ?? "UNKNOWN");
     public string SegmentCountText => (Transcript?.Segments.Count ?? Registry?.SegmentCount)?.ToString(CultureInfo.CurrentCulture) ?? "—";
+    public string SpeakerCountText => (Transcript?.Segments.Select(segment => segment.Speaker).Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.CurrentCultureIgnoreCase).Count() ?? Registry?.SpeakerCount)?.ToString(CultureInfo.CurrentCulture) ?? "—";
     public string DurationText => Transcript is { Segments.Count: > 0 }
         ? FormatDuration(Transcript.Segments.Max(segment => segment.EndMs))
         : Registry is not null ? FormatDuration(Registry.DurationMs) : "—";
@@ -56,6 +57,45 @@ public sealed class TranscriptRegistryItem
     };
 }
 
+public sealed class TranscriptSegmentRowViewModel : ObservableObject
+{
+    private string _searchQuery = string.Empty;
+    private bool _isCurrent;
+
+    public TranscriptSegmentRowViewModel(DesktopTranscriptSegment segment, string searchQuery, bool isCurrent)
+    {
+        Segment = segment;
+        _searchQuery = searchQuery;
+        _isCurrent = isCurrent;
+    }
+
+    public DesktopTranscriptSegment Segment { get; }
+    public string TimeLabel => Segment.TimeLabel;
+    public string SpeakerText => string.IsNullOrWhiteSpace(Segment.Speaker) ? "Спикер не определён" : Segment.Speaker.Trim();
+    public string Text => Segment.Text;
+    public string DurationText => TimeSpan.FromMilliseconds(Math.Max(0, Segment.EndMs - Segment.StartMs)).ToString(@"mm\:ss", CultureInfo.InvariantCulture);
+    public string SearchQuery
+    {
+        get => _searchQuery;
+        private set
+        {
+            if (!SetProperty(ref _searchQuery, value)) return;
+            OnPropertyChanged(nameof(IsMatch));
+        }
+    }
+    public bool IsCurrent
+    {
+        get => _isCurrent;
+        private set => SetProperty(ref _isCurrent, value);
+    }
+    public bool IsMatch => !string.IsNullOrWhiteSpace(SearchQuery)
+        && (Text.Contains(SearchQuery, StringComparison.CurrentCultureIgnoreCase)
+            || (Segment.Speaker?.Contains(SearchQuery, StringComparison.CurrentCultureIgnoreCase) ?? false));
+
+    public void UpdateSearch(string query) => SearchQuery = query;
+    public void UpdateCurrent(bool isCurrent) => IsCurrent = isCurrent;
+}
+
 public sealed class TranscriptsViewModel : ObservableObject
 {
     private readonly FrontendServices _services;
@@ -76,6 +116,7 @@ public sealed class TranscriptsViewModel : ObservableObject
 
     public ObservableCollection<TranscriptRegistryItem> FilteredItems { get; } = [];
     public ObservableCollection<DesktopTranscriptSegment> FilteredSegments { get; } = [];
+    public ObservableCollection<TranscriptSegmentRowViewModel> FilteredSegmentRows { get; } = [];
 
     public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
     public string SearchText
@@ -117,6 +158,14 @@ public sealed class TranscriptsViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedQualityWarningText));
             OnPropertyChanged(nameof(SelectedVersionText));
             OnPropertyChanged(nameof(SelectedVersionBadgeText));
+            OnPropertyChanged(nameof(SelectedDateText));
+            OnPropertyChanged(nameof(SelectedDurationText));
+            OnPropertyChanged(nameof(SelectedSegmentCountText));
+            OnPropertyChanged(nameof(SelectedSpeakerCountText));
+             OnPropertyChanged(nameof(SelectedDateText));
+             OnPropertyChanged(nameof(SelectedDurationText));
+             OnPropertyChanged(nameof(SelectedSegmentCountText));
+             OnPropertyChanged(nameof(SelectedSpeakerCountText));
         }
     }
 
@@ -126,6 +175,7 @@ public sealed class TranscriptsViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedSegment, value)) return;
+            foreach (var row in FilteredSegmentRows) row.UpdateCurrent(ReferenceEquals(row.Segment, value));
             OnPropertyChanged(nameof(HasSegmentSelection));
         }
     }
@@ -137,6 +187,10 @@ public sealed class TranscriptsViewModel : ObservableObject
     public bool HasSelection => SelectedItem is not null;
     public bool HasSegments => FilteredSegments.Count > 0;
     public bool HasSegmentSelection => SelectedSegment is not null;
+    public int SearchMatchCount => string.IsNullOrWhiteSpace(SegmentSearchText) ? 0 : FilteredSegmentRows.Count(row => row.IsMatch);
+    public string SegmentSearchStatus => string.IsNullOrWhiteSpace(SegmentSearchText)
+        ? $"Сегментов: {FilteredSegments.Count}"
+        : $"Совпадений: {SearchMatchCount}";
     public string SelectedQualityText => SelectedItem?.QualityText ?? "Качество не рассчитано";
     public string SelectedQualityWarningText
     {
@@ -145,6 +199,11 @@ public sealed class TranscriptsViewModel : ObservableObject
             var warnings = SelectedItem?.Transcript?.Warnings;
             if (ContainsWarning(warnings, "NO_SPEECH_DETECTED"))
                 return "Аудио сохранено корректно, но речь не обнаружена. Проверьте выбранный микрофон и уровень сигнала.";
+            var status = SelectedItem?.Registry?.Status ?? SelectedItem?.Transcript?.Status ?? string.Empty;
+            if (status.Contains("FAIL", StringComparison.OrdinalIgnoreCase)
+                || status.Contains("ERROR", StringComparison.OrdinalIgnoreCase)
+                || status.Contains("INVALID", StringComparison.OrdinalIgnoreCase))
+                return $"Обработка завершилась с ошибкой: {SelectedItem?.StatusText ?? "проверьте детали встречи"}. Текст нельзя считать готовой стенограммой.";
             return SelectedItem?.HasQualityWarning == true
                 ? "Стенограмма получена с предупреждениями. Текст доступен для чтения и экспорта."
                 : string.Empty;
@@ -152,6 +211,10 @@ public sealed class TranscriptsViewModel : ObservableObject
     }
     public string SelectedTitle => SelectedItem?.MeetingTitle ?? "Совещание не выбрано";
     public string SelectedStatus => SelectedItem?.StatusText ?? "—";
+    public string SelectedDateText => SelectedItem?.MeetingDateText ?? "Дата не определена";
+    public string SelectedDurationText => SelectedItem?.DurationText ?? "—";
+    public string SelectedSegmentCountText => SelectedItem?.SegmentCountText ?? "—";
+    public string SelectedSpeakerCountText => SelectedItem?.SpeakerCountText ?? "—";
     public string RegistryCountText => $"Загружено встреч: {_allItems.Count}";
     public string SelectedVersionText => SelectedItem?.VersionText ?? "Версия ещё не определена";
     public string SelectedVersionBadgeText => SelectedItem?.VersionBadgeText ?? "Стенограмма не выбрана";
@@ -165,6 +228,7 @@ public sealed class TranscriptsViewModel : ObservableObject
         _allItems.Clear();
         FilteredItems.Clear();
         FilteredSegments.Clear();
+        FilteredSegmentRows.Clear();
         SelectedItem = null;
         OnPropertyChanged(nameof(HasLoadedItems));
         OnPropertyChanged(nameof(RegistryCountText));
@@ -284,15 +348,23 @@ public sealed class TranscriptsViewModel : ObservableObject
     private void ApplySegmentFilter()
     {
         FilteredSegments.Clear();
+        FilteredSegmentRows.Clear();
         var segments = SelectedItem?.Transcript?.Segments ?? [];
         var query = SegmentSearchText.Trim();
         foreach (var segment in segments.Where(segment =>
                      (!HideTechnicalEvents || !IsTechnical(segment))
-                     && (string.IsNullOrWhiteSpace(query) || segment.Text.Contains(query, StringComparison.OrdinalIgnoreCase))))
+                     && (string.IsNullOrWhiteSpace(query)
+                         || segment.Text.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                         || (segment.Speaker?.Contains(query, StringComparison.CurrentCultureIgnoreCase) ?? false))))
+        {
             FilteredSegments.Add(segment);
+            FilteredSegmentRows.Add(new TranscriptSegmentRowViewModel(segment, query, ReferenceEquals(segment, SelectedSegment)));
+        }
         if (SelectedSegment is not null && !FilteredSegments.Contains(SelectedSegment))
             SelectedSegment = null;
         OnPropertyChanged(nameof(HasSegments));
+        OnPropertyChanged(nameof(SearchMatchCount));
+        OnPropertyChanged(nameof(SegmentSearchStatus));
     }
 
     private static bool IsTechnical(DesktopTranscriptSegment segment) => segment.IsHidden

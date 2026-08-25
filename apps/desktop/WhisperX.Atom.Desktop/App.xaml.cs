@@ -143,6 +143,8 @@ public partial class App : Application
         _loginWindow.Activate();
     }
 
+    internal void RequestLogin(string? message = null) => ShowLoginWindow(message);
+
     private Task OnAuthenticatedAsync(AgentBootstrapStatus status)
     {
         ShowMainWindow();

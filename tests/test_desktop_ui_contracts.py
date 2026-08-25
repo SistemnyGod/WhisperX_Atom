@@ -83,6 +83,21 @@ def test_home_recording_console_reflows_without_fixed_audio_meter_width():
     assert 'HomeNotices.Width = Math.Min(380' in codebehind
 
 
+def test_home_dashboard_keeps_recording_action_truthful_and_reflows_service_statuses():
+    page = (DESKTOP / "Pages" / "HomePage.xaml").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "HomePage.xaml.cs").read_text(encoding="utf-8")
+    view_model = (DESKTOP / "ViewModels" / "HomeViewModel.cs").read_text(encoding="utf-8")
+    assert 'Text="{Binding HeroTitle}"' in page
+    assert 'Content="{Binding RecordingActionText}"' in page
+    assert 'Text="{Binding RecordingDurationText}"' in page
+    assert 'x:Name="HomeSystemGrid"' in page
+    assert 'PageLayoutMode.Standard => 2' in codebehind
+    assert 'ApplySystemStatusLayout(mode);' in codebehind
+    assert '"RECORDING" => "Запись идёт"' in view_model
+    assert '"PAUSED" => "Запись на паузе"' in view_model
+    assert 'OnPropertyChanged(nameof(RecordingActionText));' in view_model
+
+
 def test_assistant_uses_single_pane_compact_navigation_and_sources_view():
     page = (DESKTOP / "Pages" / "AssistantPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "AssistantPage.xaml.cs").read_text(encoding="utf-8")
@@ -114,15 +129,25 @@ def test_transcript_reader_prioritizes_readability_navigation_and_compact_export
     view_model = (DESKTOP / "ViewModels" / "TranscriptsViewModel.cs").read_text(encoding="utf-8")
 
     assert 'ColumnDefinitions="1.25*,520"' in page
+    assert 'MinWidth="0"' in page
+    assert 'x:Name="BackToTranscriptListButton"' in page
     assert 'x:Name="PreviousSegmentButton"' in page
     assert 'x:Name="NextSegmentButton"' in page
     assert '<MenuFlyoutItem Text="Скачать TXT"' in page
     assert '<MenuFlyoutItem Text="Скачать SRT"' in page
-    assert 'ColumnDefinitions="72,*"' in page
+    assert '<MenuFlyoutItem Text="Скачать Word (DOCX)"' in page
+    assert 'controls:HighlightedTextBlock' in page
+    assert 'FilteredSegmentRows' in page
+    assert 'SelectedQualityWarningText' in page
+    assert 'ColumnDefinitions="84,*"' in page
     assert 'SelectAdjacentSegment(-1)' in codebehind
     assert 'SelectAdjacentSegment(1)' in codebehind
     assert 'SegmentsList.ScrollIntoView' in codebehind
+    assert 'ExportTranscriptDocxButton_Click' in codebehind
+    assert 'BackToTranscriptListButton.Visibility' in codebehind
     assert 'SelectedSegment = null;' in view_model
+    assert 'SpeakerCountText' in view_model
+    assert 'SearchMatchCount' in view_model
 
 
 def test_meetings_filter_state_explains_zero_results_and_offers_one_click_reset():
@@ -216,7 +241,9 @@ def test_voice_diagnostics_and_live_telemetry_have_separate_ui_ownership():
     assert 'VoiceRequestedMicrophone = packet.DeviceId' not in vm
     assert 'Task.Delay(TimeSpan.FromSeconds(2)' in codebehind
     assert 'UpdateVoiceStatusVisual();' not in codebehind.split('SubscribeTelemetryAsync', 1)[1].split('return Task.CompletedTask', 1)[0]
-    assert 'Header="Техническая диагностика Мифодия" IsExpanded="False"' in page
+    assert '<TabViewItem Header="Диагностика"' in page
+    assert 'AutomationProperties.Name="Техническая диагностика"' in page
+    assert 'VoiceStatusDetail' in page
 
 
 def test_title_bar_uses_compact_status_pills_for_runtime_states():
@@ -268,12 +295,16 @@ def test_settings_changes_password_context_after_authentication():
     assert 'ChangePasswordButton.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed' in codebehind
 
 
-def test_settings_exposes_repeatable_setup_wizard_and_collapses_technical_details():
+def test_settings_exposes_repeatable_setup_wizard_and_groups_settings_into_tabs():
     page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
     assert 'x:Name="OpenSetupWizardButton"' in page
     assert 'Content="Повторить настройку"' in page
-    assert 'Header="Техническая диагностика Recorder Host"' in page
+    assert '<TabView x:Name="SettingsTabs"' in page
+    assert '<TabViewItem Header="Подключение"' in page
+    assert '<TabViewItem Header="Мифодий"' in page
+    assert '<TabViewItem Header="Запись и архив"' in page
+    assert '<TabViewItem Header="Диагностика"' in page
     assert 'Мифодий' in page and 'MifodiySectionExpander' in page
     assert 'OpenSetupWizardButton_Click' in codebehind
     assert 'Шаг 1 из 7 · Вход' in codebehind
@@ -451,14 +482,24 @@ def test_system_status_registry_filters_connections_and_scopes_identifiers_to_in
 def test_settings_offer_section_navigation_without_changing_runtime_contracts():
     page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
-    assert 'x:Name="SettingsSectionActionsPanel"' in page
-    assert 'Text="Подключение"' in page
-    assert 'Text="Мифодий"' in page
-    assert 'Text="Запись и архив"' in page
-    assert 'x:Name="RecorderDiagnosticsExpander"' in page
-    assert 'x:Name="MifodiyTechnicalDiagnosticsExpander"' in page
-    assert 'StartBringIntoView(new BringIntoViewOptions' in codebehind
-    assert 'SettingsSectionActionsPanel.Orientation' in codebehind
+    assert 'x:Name="SettingsTabs"' in page
+    assert 'SelectionChanged="SettingsTabs_SelectionChanged"' in page
+    assert 'SettingsTabs.SelectedIndex = 0' in codebehind
+    assert 'SettingsTabs.SelectedIndex != 3' in codebehind
+    assert 'SettingsTabs.TabWidthMode' in codebehind
+
+
+def test_settings_exposes_explicit_api_voice_states_and_bounded_gain_control():
+    page = (DESKTOP / "Pages" / "SettingsPage.xaml").read_text(encoding="utf-8")
+    viewmodel = (DESKTOP / "ViewModels" / "SettingsViewModel.cs").read_text(encoding="utf-8")
+    codebehind = (DESKTOP / "Pages" / "SettingsPage.xaml.cs").read_text(encoding="utf-8")
+    assert 'Text="{Binding ApiStatusShort}"' in page
+    assert 'Text="{Binding LoginStatusDetail}"' in page
+    assert 'x:Name="LoginAgainButton"' in page
+    assert 'RequestLogin("Сессия API истекла.' in codebehind
+    assert 'Minimum="0" Maximum="18" StepFrequency="1"' in page
+    assert 'Math.Clamp(value, 0, 18)' in viewmodel
+    assert 'VoiceStatusDetail' in viewmodel
 
 
 def test_sources_prioritize_human_device_names_over_endpoint_identifiers():

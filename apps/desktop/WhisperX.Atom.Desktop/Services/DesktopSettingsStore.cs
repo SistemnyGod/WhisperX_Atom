@@ -33,6 +33,7 @@ public sealed class DesktopSettingsStore : ISettingsStore
             settings.TtsCpuThreads,
             settings.TtsFallbackEnabled,
             settings.WindowsFallbackVoice,
-            settings.VoiceProcessingGainDb);
+            settings.VoiceProcessingGainDb,
+            settings.TtsVoiceProfile);
     }
 }

@@ -6,7 +6,8 @@ public sealed record TtsOptions(
     int Rate = 0,
     int Volume = 90,
     int CpuThreads = 4,
-    bool CacheSafePhrase = true)
+    bool CacheSafePhrase = true,
+    string VoiceProfile = TtsVoiceProfiles.MifodiyTech)
 {
     public int NormalizedSampleRate => SampleRate is 24000 or 48000 ? SampleRate : 48000;
     public int NormalizedVolume => Math.Clamp(Volume, 0, 100);

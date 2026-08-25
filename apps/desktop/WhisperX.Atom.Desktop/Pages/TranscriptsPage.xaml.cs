@@ -1,11 +1,12 @@
 using System.ComponentModel;
-using System.Text;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using Microsoft.UI.Xaml.Media;
 using Windows.Storage;
 using Windows.Storage.Pickers;
+using Windows.System;
 using WinRT.Interop;
 using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
@@ -122,14 +123,15 @@ public sealed partial class TranscriptsPage : Page
 
     private void SelectAdjacentSegment(int direction)
     {
-        if (_viewModel is null || _viewModel.FilteredSegments.Count == 0) return;
+        if (_viewModel is null || _viewModel.FilteredSegmentRows.Count == 0 || _viewModel.SearchMatchCount == 0) return;
+        var matches = _viewModel.FilteredSegmentRows.Where(row => row.IsMatch).ToList();
         var currentIndex = _viewModel.SelectedSegment is null
             ? -1
-            : _viewModel.FilteredSegments.IndexOf(_viewModel.SelectedSegment);
+            : matches.FindIndex(row => ReferenceEquals(row.Segment, _viewModel.SelectedSegment));
         var targetIndex = direction < 0
-            ? currentIndex <= 0 ? _viewModel.FilteredSegments.Count - 1 : currentIndex - 1
-            : currentIndex < 0 || currentIndex >= _viewModel.FilteredSegments.Count - 1 ? 0 : currentIndex + 1;
-        var target = _viewModel.FilteredSegments[targetIndex];
+            ? currentIndex <= 0 ? matches.Count - 1 : currentIndex - 1
+            : currentIndex < 0 || currentIndex >= matches.Count - 1 ? 0 : currentIndex + 1;
+        var target = matches[targetIndex];
         SegmentsList.SelectedItem = target;
         SegmentsList.ScrollIntoView(target, ScrollIntoViewAlignment.Leading);
         SegmentsList.Focus(FocusState.Programmatic);
@@ -158,13 +160,21 @@ public sealed partial class TranscriptsPage : Page
 
     private void SegmentsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_viewModel is not null) _viewModel.SelectedSegment = SegmentsList.SelectedItem as WhisperX.Atom.Desktop.DesktopTranscriptSegment;
+        if (_viewModel is not null)
+            _viewModel.SelectedSegment = (SegmentsList.SelectedItem as TranscriptSegmentRowViewModel)?.Segment;
         UpdateDetails();
     }
 
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
 
     private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
+
+    private void BackToTranscriptListButton_Click(object sender, RoutedEventArgs e)
+    {
+        TranscriptsList.SelectedItem = null;
+        ListCard.StartBringIntoView();
+        TranscriptsList.Focus(FocusState.Programmatic);
+    }
 
     private void OpenSegmentButton_Click(object sender, RoutedEventArgs e)
     {
@@ -176,6 +186,8 @@ public sealed partial class TranscriptsPage : Page
     private async void ExportTranscriptTextButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(srt: false);
 
     private async void ExportTranscriptSrtButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptAsync(srt: true);
+
+    private async void ExportTranscriptDocxButton_Click(object sender, RoutedEventArgs e) => await ExportTranscriptDocxAsync();
 
     private async Task ExportTranscriptAsync(bool srt)
     {
@@ -200,7 +212,9 @@ public sealed partial class TranscriptsPage : Page
             picker.FileTypeChoices.Add(srt ? "Субтитры SubRip" : "Текстовая стенограмма", new List<string> { srt ? ".srt" : ".txt" });
             var file = await picker.PickSaveFileAsync();
             if (file is null) return;
-            var content = srt ? BuildSrt(transcript.Segments) : BuildText(selectedItem?.MeetingTitle, transcript.Segments);
+            var content = srt
+                ? TranscriptExportService.BuildSrt(transcript.Segments)
+                : TranscriptExportService.BuildText(selectedItem?.MeetingTitle, transcript.Segments);
             await FileIO.WriteTextAsync(file, content, Windows.Storage.Streams.UnicodeEncoding.Utf8);
             WarningInfoBar.IsOpen = false;
         }
@@ -211,38 +225,44 @@ public sealed partial class TranscriptsPage : Page
         }
     }
 
-    private static string BuildText(string? title, IEnumerable<DesktopTranscriptSegment> segments)
+    private async Task ExportTranscriptDocxAsync()
     {
-        var builder = new StringBuilder();
-        if (!string.IsNullOrWhiteSpace(title)) builder.AppendLine(title.Trim()).AppendLine();
-        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        var selectedItem = _viewModel?.SelectedItem;
+        var transcript = selectedItem?.Transcript;
+        if (transcript is null || transcript.Segments.Count == 0)
         {
-            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
-            builder.Append('[').Append(segment.TimeLabel).Append("] ").Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
+            WarningInfoBar.Message = "Выберите встречу с готовыми сегментами стенограммы.";
+            WarningInfoBar.IsOpen = true;
+            return;
         }
-        return builder.ToString();
-    }
 
-    private static string BuildSrt(IEnumerable<DesktopTranscriptSegment> segments)
-    {
-        var builder = new StringBuilder();
-        var index = 1;
-        foreach (var segment in segments.OrderBy(item => item.Ordinal))
+        try
         {
-            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Спикер не определён" : segment.Speaker.Trim();
-            builder.AppendLine(index.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            builder.Append(FormatSrtTime(segment.StartMs)).Append(" --> ").AppendLine(FormatSrtTime(segment.EndMs));
-            builder.Append(speaker).Append(": ").AppendLine(segment.Text.Trim());
-            builder.AppendLine();
-            index++;
+            var title = SanitizeFileName(selectedItem?.MeetingTitle ?? "transcript");
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SuggestedFileName = title + ".docx"
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            picker.FileTypeChoices.Add("Документ Word", new List<string> { ".docx" });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+            var bytes = TranscriptExportService.BuildDocx(
+                selectedItem?.MeetingTitle,
+                selectedItem?.MeetingDateText,
+                selectedItem?.StatusText,
+                selectedItem?.VersionText,
+                selectedItem?.QualityText,
+                transcript.Segments);
+            await FileIO.WriteBytesAsync(file, bytes);
+            WarningInfoBar.IsOpen = false;
         }
-        return builder.ToString();
-    }
-
-    private static string FormatSrtTime(long milliseconds)
-    {
-        var time = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        return $"{(int)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00},{time.Milliseconds:000}";
+        catch (Exception ex)
+        {
+            ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось сохранить документ Word.");
+            ErrorInfoBar.IsOpen = true;
+        }
     }
 
     private static string SanitizeFileName(string value)
@@ -315,13 +335,41 @@ public sealed partial class TranscriptsPage : Page
             : string.IsNullOrWhiteSpace(_viewModel.SegmentSearchText)
                 ? "Сегменты стенограммы не найдены."
                 : "Сегментов с таким текстом не найдено.";
-        var canNavigateSegments = hasSelection && _viewModel.FilteredSegments.Count > 0;
+        SegmentSearchStatusText.Text = _viewModel.SegmentSearchStatus;
+        QualityWarningPanel.Visibility = string.IsNullOrWhiteSpace(_viewModel.SelectedQualityWarningText)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        var status = _viewModel.SelectedStatus;
+        var failed = status.Contains("ошиб", StringComparison.CurrentCultureIgnoreCase)
+                     || status.Contains("не удалось", StringComparison.CurrentCultureIgnoreCase)
+                     || status.Contains("заблок", StringComparison.CurrentCultureIgnoreCase)
+                     || status.Contains("некоррект", StringComparison.CurrentCultureIgnoreCase);
+        var processing = status.Contains("обработ", StringComparison.CurrentCultureIgnoreCase)
+                         || status.Contains("ожида", StringComparison.CurrentCultureIgnoreCase)
+                         || status.Contains("загруз", StringComparison.CurrentCultureIgnoreCase);
+        var warning = !string.IsNullOrWhiteSpace(_viewModel.SelectedQualityWarningText);
+        SelectedVersionBadge.Background = ResourceBrush(failed ? "DangerSurfaceBrush" : processing || warning ? "SurfaceOrangeBrush" : "SurfaceGreenBrush");
+        SelectedVersionBadge.BorderBrush = ResourceBrush(failed ? "DangerBorderBrush" : processing || warning ? "WarningBrush" : "SuccessBrush");
+        SelectedVersionBadgeText.Foreground = ResourceBrush(failed ? "DangerBrush" : processing || warning ? "WarningBrush" : "SuccessBrush");
+        SelectedSegmentPanel.Visibility = _viewModel.HasSegmentSelection ? Visibility.Visible : Visibility.Collapsed;
+        var canNavigateSegments = hasSelection && _viewModel.SearchMatchCount > 0;
         PreviousSegmentButton.IsEnabled = canNavigateSegments;
         NextSegmentButton.IsEnabled = canNavigateSegments;
         OpenSegmentButton.IsEnabled = _viewModel.HasSegmentSelection;
         SelectedSegmentText.Text = _viewModel.SelectedSegment is { } segment
-            ? $"{segment.TimeLabel} · {segment.Speaker ?? "Спикер не определён"}\n{segment.Text}"
+            ? $"{segment.TimeLabel} · {segment.Speaker ?? "Спикер не определён"} · {TimeSpan.FromMilliseconds(Math.Max(0, segment.EndMs - segment.StartMs)):mm\\:ss}\n{segment.Text}"
             : string.Empty;
+    }
+
+    private static Brush? ResourceBrush(string key) => Application.Current.Resources[key] as Brush;
+
+    private void TranscriptsPage_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && _viewModel?.HasSegmentSelection == true)
+        {
+            OpenSegmentButton_Click(sender, e);
+            e.Handled = true;
+        }
     }
 
     private void TranscriptsPage_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -335,6 +383,7 @@ public sealed partial class TranscriptsPage : Page
             _lastLayoutMode = mode;
             ActionsPanel.Orientation = mode == PageLayoutMode.Compact ? Orientation.Vertical : Orientation.Horizontal;
             var compact = mode != PageLayoutMode.Wide;
+            BackToTranscriptListButton.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
             WorkspaceGrid.ColumnDefinitions[0].Width = new GridLength(1, GridUnitType.Star);
             WorkspaceGrid.ColumnDefinitions[1].Width = compact ? new GridLength(0) : new GridLength(520);
             WorkspaceGrid.RowDefinitions[0].Height = compact ? new GridLength(430) : new GridLength(1, GridUnitType.Star);

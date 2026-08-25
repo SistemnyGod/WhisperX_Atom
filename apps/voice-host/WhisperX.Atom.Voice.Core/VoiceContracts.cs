@@ -169,7 +169,11 @@ public sealed record VoiceHostSnapshot(
     string? VoiceRefinerWakeVerification = null,
     bool VoiceRefinerRefinedQuestionUsed = false,
     string? VoiceRefinerFallbackReason = null,
-    int? VoiceRefinerThreads = null);
+    int? VoiceRefinerThreads = null,
+    string VoiceProfile = "MIFODIY_TECH",
+    bool TtsFxEnabled = false,
+    bool TtsFxApplied = false,
+    string? TtsFxFallbackReason = null);
 
 public sealed record VoiceResponse(
     string Text,

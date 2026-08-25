@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Shapes;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
+using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
 using WhisperX_Atom_Desktop.ViewModels;
 
@@ -38,10 +39,12 @@ public sealed partial class SettingsPage : Page
         _services = (FrontendServices)e.Parameter;
         ViewModel = new SettingsViewModel(_services);
         DataContext = ViewModel;
+        SettingsTabs.SelectedIndex = 0;
         _services.Updates.StateChanged += Updates_StateChanged;
         UpdateChannelComboBox.SelectedValue = _services.Settings.Load().UpdateChannel;
         CurrentBuildIdentityText.Text = _services.Updates.CurrentBuildIdentity;
         RenderUpdateState();
+        UpdateApiStatusVisual();
         UpdateVoiceStatusVisual();
         UpdateStatus();
         _ = RefreshRuntimeDiagnosticsAsync();
@@ -168,6 +171,24 @@ public sealed partial class SettingsPage : Page
         _services.Settings.Save(_services.Settings.Load() with { UpdateChannel = channel });
     }
 
+    private async void SettingsTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ViewModel is null || SettingsTabs.SelectedIndex != 3) return;
+        await ViewModel.RefreshRecorderDiagnosticsAsync();
+        await ViewModel.RefreshVoiceDiagnosticsAsync();
+        UpdateVoiceStatusVisual();
+        UpdateStatus();
+    }
+
+    private async void RefreshDiagnosticsTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.RefreshRecorderDiagnosticsAsync();
+        await ViewModel.RefreshVoiceDiagnosticsAsync();
+        UpdateVoiceStatusVisual();
+        UpdateStatus();
+    }
+
     private async Task RefreshVoiceLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -175,6 +196,7 @@ public sealed partial class SettingsPage : Page
             try { await RefreshVoiceDiagnosticsAsync(); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch { }
+            UpdateApiStatusVisual();
             try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
         }
@@ -309,6 +331,11 @@ public sealed partial class SettingsPage : Page
     {
         await RefreshVoiceDiagnosticsAsync();
         UpdateStatus();
+    }
+
+    private void LoginAgainButton_Click(object sender, RoutedEventArgs e)
+    {
+        ((App)Application.Current).RequestLogin("Сессия API истекла. Выполните вход повторно.");
     }
 
     private void UpdateVoiceStatusVisual()
@@ -567,9 +594,11 @@ public sealed partial class SettingsPage : Page
     private void UpdateStatus()
     {
         if (ViewModel is null) return;
+        UpdateApiStatusVisual();
         LoginHintText.Visibility = ViewModel.IsLoggedIn ? Visibility.Collapsed : Visibility.Visible;
         PasswordFieldsPanel.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed;
         ChangePasswordButton.Visibility = ViewModel.IsLoggedIn ? Visibility.Visible : Visibility.Collapsed;
+        LoginAgainButton.Visibility = ViewModel.IsSessionExpired ? Visibility.Visible : Visibility.Collapsed;
         if (string.IsNullOrWhiteSpace(ViewModel.StatusText)) return;
         StatusInfoBar.Severity = ViewModel.StatusText.Contains("ошиб", StringComparison.OrdinalIgnoreCase) || ViewModel.StatusText.Contains("не ", StringComparison.OrdinalIgnoreCase)
             ? InfoBarSeverity.Error : InfoBarSeverity.Informational;
@@ -584,34 +613,29 @@ public sealed partial class SettingsPage : Page
         StatusInfoBar.IsOpen = true;
     }
 
+    private void UpdateApiStatusVisual()
+    {
+        if (_services is null) return;
+        var (brushKey, surfaceKey) = _services.Backend.AuthState switch
+        {
+            DesktopAuthState.Authenticated => ("SuccessBrush", "SurfaceGreenBrush"),
+            DesktopAuthState.Offline => ("WarningBrush", "SurfaceOrangeBrush"),
+            DesktopAuthState.LoginRequired => ("DangerBrush", "DangerSurfaceBrush"),
+            _ => ("AccentBrush", "SurfaceBlueBrush")
+        };
+        if (Application.Current.Resources[brushKey] is Brush brush)
+        {
+            ApiStatusBadge.BorderBrush = brush;
+            ApiStatusBadgeText.Foreground = brush;
+        }
+        if (Application.Current.Resources[surfaceKey] is Brush surface)
+            ApiStatusBadge.Background = surface;
+    }
+
     private void SettingsPage_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         ApplyResponsiveLayout(e.NewSize.Width);
     }
-
-    private void ScrollToConnectionButton_Click(object sender, RoutedEventArgs e) => ScrollToSection(ApiSettingsCard);
-
-    private void ScrollToMifodiyButton_Click(object sender, RoutedEventArgs e)
-    {
-        MifodiySectionExpander.IsExpanded = true;
-        ScrollToSection(MifodiySectionExpander);
-    }
-
-    private void ScrollToArchiveButton_Click(object sender, RoutedEventArgs e) => ScrollToSection(ArchiveSectionCard);
-
-    private void ScrollToDiagnosticsButton_Click(object sender, RoutedEventArgs e)
-    {
-        RecorderDiagnosticsExpander.IsExpanded = true;
-        MifodiySectionExpander.IsExpanded = true;
-        MifodiyTechnicalDiagnosticsExpander.IsExpanded = true;
-        ScrollToSection(RecorderDiagnosticsExpander);
-    }
-
-    private static void ScrollToSection(FrameworkElement section) => section.StartBringIntoView(new BringIntoViewOptions
-    {
-        AnimationDesired = false,
-        VerticalAlignmentRatio = 0
-    });
 
     private void ApplyResponsiveLayout(double width)
     {
@@ -620,13 +644,13 @@ public sealed partial class SettingsPage : Page
         _lastLayoutMode = mode;
         ResponsiveLayout.SetTwoColumn(SettingsLayoutGrid, ApiSettingsCard, AgentSettingsCard, 380, width, allowStandard: true);
         ResponsiveLayout.SetCardColumns(MifodiyPrimaryGrid, new FrameworkElement?[] { MifodiySignalCard, MifodiyControlsCard }, width, 2);
+        SettingsTabs.TabWidthMode = mode == PageLayoutMode.Compact
+            ? TabViewWidthMode.SizeToContent
+            : TabViewWidthMode.Equal;
         ApiActionsPanel.Orientation = mode == PageLayoutMode.Compact
             ? Orientation.Vertical
             : Orientation.Horizontal;
         MifodiyTestActionsPanel.Orientation = mode == PageLayoutMode.Compact
-            ? Orientation.Vertical
-            : Orientation.Horizontal;
-        SettingsSectionActionsPanel.Orientation = mode == PageLayoutMode.Compact
             ? Orientation.Vertical
             : Orientation.Horizontal;
         ConfigureArchiveLayout(mode == PageLayoutMode.Compact);

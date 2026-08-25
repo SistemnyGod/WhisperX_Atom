@@ -457,6 +457,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 TtsFallbackUsed = _speech.VoiceFallbackUsed,
                 TtsFallbackReason = _speech.TtsFallbackReason,
                 TtsRestartCount = _speech.TtsRestartCount,
+                VoiceProfile = _speech.VoiceProfile,
+                TtsFxEnabled = _speech.TtsFxEnabled,
+                TtsFxApplied = _speech.TtsFxApplied,
+                TtsFxFallbackReason = _speech.TtsFxFallbackReason,
                 VoiceNoiseFloorDb = _vad.NoiseFloorDb,
                 VoiceVadThresholdDb = _vad.ThresholdDb,
                 LastWakeAtUtc = _lastWakeAtUtc,
@@ -535,10 +539,11 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             var ttsSampleRate = ReadNullableInt(payload, "ttsSampleRate");
             var ttsCpuThreads = ReadNullableInt(payload, "ttsCpuThreads");
             var ttsFallbackEnabled = ReadBool(payload, "ttsFallbackEnabled", true);
+            var ttsVoiceProfile = ReadString(payload, "ttsVoiceProfile");
             if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("voiceProcessingGainDb", out var gain)
                 && gain.TryGetInt32(out var gainDb))
                 _voiceFrontEnd.SetManualGainDb(gainDb);
-            var ttsReady = await _speech.ConfigureAsync(windowsFallbackVoice, voiceRate, voiceVolume, ttsVoice, ttsSampleRate, ttsCpuThreads, ttsFallbackEnabled, cancellationToken, ttsEngine).ConfigureAwait(false);
+            var ttsReady = await _speech.ConfigureAsync(windowsFallbackVoice, voiceRate, voiceVolume, ttsVoice, ttsSampleRate, ttsCpuThreads, ttsFallbackEnabled, cancellationToken, ttsEngine, ttsVoiceProfile).ConfigureAwait(false);
             _logger?.LogInformation(
                 "Voice response engine configured. Engine={Engine}, Model={Model}, Voice={Voice}, Ready={Ready}, Fallback={Fallback}, FallbackReason={FallbackReason}, TtsHostPid={TtsHostPid}",
                 _speech.TtsEngine,

@@ -25,7 +25,7 @@
                     <Border x:Name="HeroCard" Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderStrongBrush}" Padding="24,22">
                         <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="16">
                             <StackPanel Spacing="6">
-                                <TextBlock Text="Готов к новой записи" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+                                <TextBlock x:Name="HeroTitleText" Text="{Binding HeroTitle}" FontSize="{StaticResource HeroTitleSize}" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" AutomationProperties.Name="Состояние записи" />
                                 <StackPanel x:Name="HeroIdentityRow" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                                     <Border x:Name="RecordingBadge" Style="{StaticResource StatusBadgeStyle}" Padding="8,4">
                                         <StackPanel Orientation="Horizontal" Spacing="6">
@@ -46,9 +46,10 @@
                                         <Border Width="68" Height="68" CornerRadius="34" Background="{StaticResource AccentBrush}" BorderBrush="{StaticResource AccentBrush}" BorderThickness="2" Padding="18">
                                             <SymbolIcon Symbol="Microphone" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                                         </Border>
-                                        <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" VerticalAlignment="Center" Click="StartRecordingButton_Click" AutomationProperties.Name="Начать запись" ToolTipService.ToolTip="Открыть пульт и начать локальную запись" />
+                                        <Button x:Name="PrimaryRecordingButton" Content="{Binding RecordingActionText}" Style="{StaticResource PrimaryButtonStyle}" VerticalAlignment="Center" Click="StartRecordingButton_Click" AutomationProperties.Name="{Binding RecordingActionText}" ToolTipService.ToolTip="{Binding RecordingActionToolTip}" />
                                     </StackPanel>
-                                    <TextBlock Text="{Binding RecordingStatus}" HorizontalAlignment="Center" FontSize="{StaticResource BodyStrongTextSize}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding RecordingStatus}" HorizontalAlignment="Center" FontSize="{StaticResource BodyStrongTextSize}" FontWeight="SemiBold" AutomationProperties.Name="Текущее состояние записи" />
+                                    <TextBlock Text="{Binding RecordingDurationText}" HorizontalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                     <TextBlock Text="Форма сигнала в реальном времени" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" AutomationProperties.Name="Форма сигнала в реальном времени" />
                                     <TextBlock Text="Высота волны показывает громкость голоса" Foreground="{StaticResource TextSecondaryBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                     <controls:AudioLevelMeter Label="Уровень сигнала" Level="{Binding MicrophoneLevel}" DbText="{Binding MicrophoneDbLabel}" HorizontalAlignment="Stretch" AutomationProperties.Name="Индикатор уровня сигнала" />
@@ -91,21 +92,21 @@
                         </Grid>
                     </Border>
 
-                    <Border x:Name="HomeSystemStrip" Style="{StaticResource InlineNoticeStyle}" Padding="12,10">
-                        <Grid ColumnDefinitions="*,*,*,Auto" ColumnSpacing="16">
-                            <StackPanel Orientation="Horizontal" Spacing="7">
+                    <Border x:Name="HomeSystemStrip" Style="{StaticResource InlineNoticeStyle}" Padding="12,10" AutomationProperties.Name="Состояние сервисов и очереди">
+                        <Grid x:Name="HomeSystemGrid" ColumnDefinitions="*,*,*,Auto" ColumnSpacing="16" RowSpacing="8">
+                            <StackPanel x:Name="RecorderStatusItem" Orientation="Horizontal" Spacing="7">
                                 <Ellipse x:Name="RecorderSummaryIndicator" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
                                 <StackPanel Spacing="1"><TextBlock Text="Recorder" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding RecorderSummary}" Style="{StaticResource CaptionStyle}" /></StackPanel>
                             </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7">
+                            <StackPanel x:Name="ServerStatusItem" Grid.Column="1" Orientation="Horizontal" Spacing="7">
                                 <Ellipse x:Name="ServerSummaryIndicator" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
                                 <StackPanel Spacing="1"><TextBlock Text="Сервер" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ServerSummary}" Style="{StaticResource CaptionStyle}" /></StackPanel>
                             </StackPanel>
-                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="7">
+                            <StackPanel x:Name="WhisperXStatusItem" Grid.Column="2" Orientation="Horizontal" Spacing="7">
                                 <Ellipse x:Name="WhisperXSummaryIndicator" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
                                 <StackPanel Spacing="1"><TextBlock Text="WhisperX" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding WhisperXSummary}" Style="{StaticResource CaptionStyle}" /></StackPanel>
                             </StackPanel>
-                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                            <StackPanel x:Name="QueueStatusItem" Grid.Column="3" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                                 <TextBlock Text="В очереди:" Style="{StaticResource CaptionStyle}" />
                                 <TextBlock Text="{Binding PendingUploadsText}" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" ToolTipService.ToolTip="Количество сессий, ожидающих доставки" />
                             </StackPanel>
@@ -120,7 +121,7 @@
                             <StackPanel Spacing="4"><TextBlock Text="Свободное место" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding StorageText}" Style="{StaticResource SectionTitleStyle}" TextWrapping="Wrap" /><TextBlock Text="локальный архив" Style="{StaticResource CaptionStyle}" /></StackPanel>
                         </Border>
                         <Border x:Name="KpiQueueCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="14">
-                            <StackPanel Spacing="4"><TextBlock Text="Активная обработка" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ProcessingText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="текущие задания" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                            <StackPanel Spacing="4"><TextBlock Text="Активная обработка" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ProcessingText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="{Binding ActiveProcessingStage}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" ToolTipService.ToolTip="{Binding ActiveProcessingTitle}" /></StackPanel>
                         </Border>
                         <Border x:Name="KpiSummaryCard" Grid.Row="1" Visibility="Collapsed" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="Готовые саммари" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ReadySummariesText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="результаты" Style="{StaticResource CaptionStyle}" /></StackPanel>

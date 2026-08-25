@@ -220,7 +220,15 @@ public sealed class VoiceHostController : IAsyncDisposable
                 sensitivity = settings.VoiceSensitivity,
                 voiceName = settings.VoiceName,
                 voiceRate = settings.VoiceRate,
-                voiceVolume = settings.VoiceVolume
+                voiceVolume = settings.VoiceVolume,
+                ttsEngine = settings.TtsEngine,
+                ttsVoice = settings.TtsVoice,
+                ttsVoiceProfile = settings.TtsVoiceProfile,
+                ttsSampleRate = settings.TtsSampleRate,
+                ttsCpuThreads = settings.TtsCpuThreads,
+                ttsFallbackEnabled = settings.TtsFallbackEnabled,
+                windowsFallbackVoice = settings.WindowsFallbackVoice,
+                voiceProcessingGainDb = Math.Clamp(settings.VoiceProcessingGainDb, 0, 18)
             }, cancellationToken).ConfigureAwait(false);
             if (!configured.Ok)
             {
@@ -283,7 +291,7 @@ public sealed class VoiceHostController : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
     }
 
-    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90, string? ttsEngine = null, string? ttsVoice = null, int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string? windowsFallbackVoice = null, int voiceProcessingGainDb = 0)
+    public async Task<bool> ConfigureAsync(string? microphoneDeviceId, bool enabled, bool quietMode, string sensitivity, CancellationToken cancellationToken = default, string? voiceName = null, int voiceRate = 0, int voiceVolume = 90, string? ttsEngine = null, string? ttsVoice = null, int ttsSampleRate = 48000, int ttsCpuThreads = 4, bool ttsFallbackEnabled = true, string? windowsFallbackVoice = null, int voiceProcessingGainDb = 0, string? ttsVoiceProfile = null)
     {
         if (!enabled && (_process is null || _process.HasExited))
         {
@@ -313,7 +321,8 @@ public sealed class VoiceHostController : IAsyncDisposable
                 ttsCpuThreads,
                 ttsFallbackEnabled,
                 windowsFallbackVoice,
-                voiceProcessingGainDb = Math.Clamp(voiceProcessingGainDb, 0, 18)
+                voiceProcessingGainDb = Math.Clamp(voiceProcessingGainDb, 0, 18),
+                ttsVoiceProfile
             }, cancellationToken).ConfigureAwait(false);
             if (!response.Ok)
             {

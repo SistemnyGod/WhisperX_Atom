@@ -3,7 +3,7 @@ using NAudio.Wave;
 
 namespace WhisperX.Atom.Voice.Host.Tts;
 
-public sealed record AudioPlaybackResult(bool Played, bool Cancelled, long PlaybackMs, string? ErrorCode = null);
+public sealed record AudioPlaybackResult(bool Played, bool Cancelled, long PlaybackMs, string? ErrorCode = null, bool FxApplied = false, string? FxFallbackReason = null);
 
 public sealed class SpeechAudioPlayer : IAsyncDisposable
 {
@@ -13,32 +13,47 @@ public sealed class SpeechAudioPlayer : IAsyncDisposable
 
     public bool IsPlaying { get { lock (_gate) return _output is not null; } }
 
-    public async Task<AudioPlaybackResult> PlayAsync(string audioPath, int volume, Func<Task>? playbackStarted, CancellationToken cancellationToken)
+    public async Task<AudioPlaybackResult> PlayAsync(string audioPath, int volume, Func<Task>? playbackStarted, CancellationToken cancellationToken, bool applyVoiceFx = false)
     {
         if (!File.Exists(audioPath)) return new(false, false, 0, "TTS_AUDIO_PLAYBACK_FAILED");
         var started = Stopwatch.GetTimestamp();
         try
         {
             using var stopRegistration = cancellationToken.Register(Stop);
+            var fxApplied = false;
+            string? fxFallbackReason = null;
             lock (_gate)
             {
                 _reader = new AudioFileReader(audioPath) { Volume = Math.Clamp(volume, 0, 100) / 100f };
                 _output = new WaveOutEvent { DesiredLatency = 80 };
-                _output.Init(_reader);
+                NAudio.Wave.ISampleProvider source = _reader;
+                if (applyVoiceFx)
+                {
+                    try
+                    {
+                        source = new MifodiyVoiceFxSampleProvider(source);
+                        fxApplied = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        fxFallbackReason = $"{ex.GetType().Name}:VOICE_FX_UNAVAILABLE";
+                    }
+                }
+                _output.Init(source);
             }
             if (playbackStarted is not null) await playbackStarted().ConfigureAwait(false);
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             WaveOutEvent? output;
             lock (_gate) output = _output;
-            if (output is null) return new(false, true, ElapsedMs(started), "TTS_AUDIO_CANCELLED");
+            if (output is null) return new(false, true, ElapsedMs(started), "TTS_AUDIO_CANCELLED", fxApplied, fxFallbackReason);
             void OnStopped(object? _, StoppedEventArgs args) => completion.TrySetResult(args.Exception is null);
             output.PlaybackStopped += OnStopped;
             output.Play();
             var completed = await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             output.PlaybackStopped -= OnStopped;
             return completed
-                ? new(true, false, ElapsedMs(started))
-                : new(false, false, ElapsedMs(started), "TTS_AUDIO_PLAYBACK_FAILED");
+                ? new(true, false, ElapsedMs(started), null, fxApplied, fxFallbackReason)
+                : new(false, false, ElapsedMs(started), "TTS_AUDIO_PLAYBACK_FAILED", fxApplied, fxFallbackReason);
         }
         catch (OperationCanceledException)
         {
