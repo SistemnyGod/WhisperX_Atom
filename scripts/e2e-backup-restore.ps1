@@ -63,10 +63,14 @@ $archive = [IO.Path]::GetFullPath($BackupArchive)
 $hashRequired = $RequireArchiveSha256 -or $Mode -eq 'Apply'
 
 if ($Mode -eq 'Verify') {
+    # restore.ps1 invokes native tools while verifying the archive. Their
+    # historical LASTEXITCODE may remain non-zero even when the PowerShell
+    # verification completed successfully, so accept only the explicit
+    # verified contract instead of a stale process-global value.
     $verification = @(& $restoreScript -BackupArchive $archive -ComposeFile $ComposeFile -RequireArchiveSha256:$hashRequired)
-    if ($LASTEXITCODE -ne 0) { throw 'BACKUP_VERIFY_FAILED' }
     $verified = $verification | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith('{') } | Select-Object -Last 1
     $payload = if ($verified) { $verified | ConvertFrom-Json } else { $null }
+    if ($null -eq $payload -or $payload.verified -ne $true) { throw 'BACKUP_VERIFY_FAILED' }
     Write-Evidence ([ordered]@{
         status = 'VERIFIED'
         backupVerified = ($null -ne $payload -and $payload.verified -eq $true)
