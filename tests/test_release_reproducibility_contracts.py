@@ -53,6 +53,8 @@ def test_core_release_images_do_not_use_latest_or_major_only_tags():
 
 def test_container_gpu_receives_pinned_model_contract_and_read_only_model_mount():
     compose = read("compose.dev.yml")
+    assert 'HF_HUB_OFFLINE: "1"' in compose
+    assert 'TRANSFORMERS_OFFLINE: "1"' in compose
     for field in (
         "WHISPERX_MODEL_REPOSITORY",
         "WHISPERX_MODEL_REVISION",

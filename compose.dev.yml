@@ -233,6 +233,11 @@ services:
       NATS_URL: nats://nats:4222
       DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
       HF_TOKEN: ${HF_TOKEN:-}
+      # Release/runtime must never resolve an absent diarization snapshot from
+      # Hugging Face. The immutable /models mount is the only model source;
+      # readiness reports the missing asset instead of downloading it.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
       WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
       WHISPERX_MODEL_REPOSITORY: ${WHISPERX_MODEL_REPOSITORY:-Systran/faster-whisper-large-v3}
       WHISPERX_MODEL_REVISION: ${WHISPERX_MODEL_REVISION:-}
