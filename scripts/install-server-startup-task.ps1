@@ -74,8 +74,11 @@ catch {
     # alone turns the same 0x80070005 failure into different public errors on
     # Russian Windows. Prefer the HRESULT and keep localized text only as a
     # compatibility fallback for wrappers that discard the COM error code.
-    $hresult = if ($exception) { [uint32]([int64]$exception.HResult -band 0xffffffffL) } else { [uint32]0 }
-    if ($hresult -eq [uint32]0x80070005 -or $message -match '(?i)access is denied|0x80070005|unauthorized|отказано в доступе') {
+    # HResult is exposed as a signed Int32 by PowerShell.  Converting
+    # 0x80070005 directly to UInt32 throws before the stable diagnostic can
+    # be emitted, so compare the signed HRESULT value instead.
+    $hresult = if ($exception) { [int64]$exception.HResult } else { [int64]0 }
+    if ($hresult -eq -2147024891 -or $message -match '(?i)access is denied|0x80070005|unauthorized|отказано в доступе') {
         throw "SERVER_STARTUP_TASK_REGISTRATION_DENIED: run this installer from an elevated Administrator PowerShell; task owner remains $($principal.UserId)"
     }
     throw "SERVER_STARTUP_TASK_REGISTRATION_FAILED: $message"
