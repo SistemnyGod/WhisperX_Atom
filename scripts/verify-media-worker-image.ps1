@@ -11,9 +11,11 @@ $ErrorActionPreference = 'Stop'
 # customer audio, host paths, or diagnostic artifacts cross the boundary.
 $probe = @'
 import wave
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import numpy
+sys.path.insert(0, "/srv")
 from whisperx_atom.audio_signal import analyze_wav
 
 with TemporaryDirectory() as directory:
