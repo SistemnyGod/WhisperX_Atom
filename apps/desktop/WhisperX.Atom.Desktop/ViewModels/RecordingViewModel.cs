@@ -653,7 +653,7 @@ public sealed class RecordingViewModel : ObservableObject
                 VoiceStatus = FormatVoiceStatus(voice, _microphoneSignalState);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch { VoiceStatus = "Мифодий недоступен"; }
+            catch { VoiceStatus = "Voice Host недоступен"; }
             OnPropertyChanged(nameof(AgentReady));
             OnPropertyChanged(nameof(CanStart));
             OnPropertyChanged(nameof(StartReadinessMessage));
@@ -670,7 +670,6 @@ public sealed class RecordingViewModel : ObservableObject
         catch (Exception)
         {
             State = RecordingState.Unavailable;
-            VoiceStatus = "Мифодий недоступен";
             StatusMessage = "Подключите Recorder Agent и повторите проверку устройств.";
             // Background health polling updates the persistent state text but
             // must not flash and then erase an InfoBar every two seconds.
@@ -683,7 +682,11 @@ public sealed class RecordingViewModel : ObservableObject
 
     private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState)
     {
-        if (snapshot is null) return "Мифодий недоступен";
+        if (snapshot is null) return "Voice Host недоступен";
+        if (string.Equals(snapshot.LastErrorCode, "VOICE_ASSISTANT_AUTH_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий: требуется повторный вход";
+        if (snapshot.LastErrorCode?.StartsWith("VOICE_HOST_", StringComparison.OrdinalIgnoreCase) == true)
+            return "Voice Host недоступен";
         if (snapshot.IsSpeaking || snapshot.State.Equals("RESPONDING", StringComparison.OrdinalIgnoreCase))
             return "Мифодий озвучивает ответ";
         if (string.Equals(microphoneSignalState, "NO_PACKETS", StringComparison.OrdinalIgnoreCase)

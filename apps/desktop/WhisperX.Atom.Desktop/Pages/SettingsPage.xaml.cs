@@ -219,6 +219,7 @@ public sealed partial class SettingsPage : Page
             {
                 // Status polling remains the compatibility fallback while
                 // the next connection attempt waits for Voice Host startup.
+                ViewModel?.MarkVoiceTelemetryDisconnected();
             }
             if (!cancellationToken.IsCancellationRequested)
             {

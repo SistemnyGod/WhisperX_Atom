@@ -49,6 +49,7 @@ public static class UiStatusMapper
             ["VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT"] = new("VOICE_ASSISTANT_ACCEPTANCE_TIMEOUT", "Сервер принимает запрос дольше обычного", UiStatusKind.Warning),
             ["VOICE_ASSISTANT_SERVER_ERROR"] = new("VOICE_ASSISTANT_SERVER_ERROR", "Сервер не смог обработать вопрос", UiStatusKind.Error),
             ["VOICE_ASSISTANT_AUTH_REQUIRED"] = new("VOICE_ASSISTANT_AUTH_REQUIRED", "Требуется повторный вход", UiStatusKind.Warning),
+            ["VOICE_TELEMETRY_DISCONNECTED"] = new("VOICE_TELEMETRY_DISCONNECTED", "Телеметрия Мифодия недоступна; голосовой контур продолжает работать", UiStatusKind.Warning),
             ["PROCESSING_STAGE_WAITING_FOR_GPU"] = new("PROCESSING_STAGE_WAITING_FOR_GPU", "Мифодий ждёт освобождения GPU", UiStatusKind.Warning),
             ["PROCESSING_STAGE_LOADING_MODEL"] = new("PROCESSING_STAGE_LOADING_MODEL", "Загрузка языковой модели", UiStatusKind.Processing),
             ["PROCESSING_STAGE_GENERATING"] = new("PROCESSING_STAGE_GENERATING", "Мифодий формирует ответ", UiStatusKind.Processing),

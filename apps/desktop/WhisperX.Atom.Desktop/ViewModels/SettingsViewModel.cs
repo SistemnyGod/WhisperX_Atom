@@ -345,6 +345,13 @@ public sealed class SettingsViewModel : ObservableObject
         ApplyVoiceTelemetry(new VoiceTelemetryUiState(packet.Sequence, packet.AtUtc, packet.Rms, packet.Peak, packet.Clipping, packet.SignalState ?? "WAITING"));
     }
 
+    public void MarkVoiceTelemetryDisconnected()
+    {
+        VoiceStatus = "VOICE_TELEMETRY_DISCONNECTED";
+        VoiceErrorCode = "VOICE_TELEMETRY_DISCONNECTED";
+        OnPropertyChanged(nameof(VoiceStatusLabel));
+    }
+
     private void ApplyVoiceDiagnostics(VoiceDiagnosticsUiState state)
     {
         VoiceStatus = state.Status;
@@ -401,6 +408,7 @@ public sealed class SettingsViewModel : ObservableObject
         if (status.Contains("RESPONDING", StringComparison.OrdinalIgnoreCase)) return "Говорит";
         if (status.Contains("DISABLED", StringComparison.OrdinalIgnoreCase) || status.Contains("выключен", StringComparison.OrdinalIgnoreCase)) return "Выключен";
         if (status.Contains("STARTING", StringComparison.OrdinalIgnoreCase)) return "Запускается";
+        if (status.Contains("TELEMETRY", StringComparison.OrdinalIgnoreCase)) return "Телеметрия недоступна";
         if (status.Contains("heartbeat", StringComparison.OrdinalIgnoreCase) || status.Contains("недоступ", StringComparison.OrdinalIgnoreCase) || status.Contains("ошиб", StringComparison.OrdinalIgnoreCase)) return "Требуется настройка";
         return "Проверяется";
     }
