@@ -6,7 +6,9 @@ param(
     [string]$WheelhouseRoot = '',
     [switch]$NoInstall,
     [switch]$AllowGeneratedStagingDirty,
-    [switch]$PreserveDirtyIdentity
+    [switch]$PreserveDirtyIdentity,
+    [ValidateRange(1, 168)]
+    [int]$StagingRetentionHours = 24
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -33,7 +35,18 @@ if (-not (Test-Path -LiteralPath $modelManifest -PathType Leaf)) { throw 'TTS_MO
 $stagedManifest = Get-Content -LiteralPath $modelManifest -Raw | ConvertFrom-Json
 $modelHash = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash.ToLowerInvariant()
 if ([string]::IsNullOrWhiteSpace([string]$stagedManifest.sha256) -or $modelHash -ne ([string]$stagedManifest.sha256).ToLowerInvariant()) { throw 'TTS_MODEL_HASH_MISMATCH' }
-$staging = Join-Path ([IO.Path]::GetTempPath()) ("whisperx-tts-" + [Guid]::NewGuid().ToString('N'))
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stagingCutoff = (Get-Date).ToUniversalTime().AddHours(-$StagingRetentionHours)
+Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'whisperx-tts-*' -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -match '^whisperx-tts-[0-9a-f]{32}$' -and $_.LastWriteTimeUtc -lt $stagingCutoff
+    } |
+    ForEach-Object {
+        try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop }
+        catch { Write-Warning "TTS_STAGING_CLEANUP_FAILED: $($_.Name)" }
+    }
+$staging = Join-Path $tempRoot ("whisperx-tts-" + [Guid]::NewGuid().ToString('N'))
+try {
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 $venv = Join-Path $staging '.venv'
 & $python -m venv $venv
@@ -117,4 +130,10 @@ $forbidden = @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object {
 })
 if ($forbidden.Count) { throw "TTS_PRODUCTION_PAYLOAD_CONTAINS_PYTHON: $($forbidden.FullName -join ', ')" }
 @{ schemaVersion=1; component='TtsHost'; buildIdentity=$identity; modelSha256=(Get-FileHash (Join-Path $out 'Models\silero-v5_5_ru\v5_5_ru.pt') -Algorithm SHA256).Hash.ToLowerInvariant(); generatedAtUtc=[DateTimeOffset]::UtcNow.ToString('O') } | ConvertTo-Json | Set-Content (Join-Path $out 'build-identity.json') -Encoding utf8
+} finally {
+    if (Test-Path -LiteralPath $staging) {
+        try { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction Stop }
+        catch { Write-Warning "TTS_STAGING_CLEANUP_FAILED: $staging" }
+    }
+}
 Write-Host "TTS_HOST_PUBLISHED=$out"
