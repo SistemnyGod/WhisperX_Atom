@@ -196,20 +196,39 @@ public sealed partial class SettingsPage : Page
     private async Task RefreshVoiceTelemetryAsync(CancellationToken cancellationToken)
     {
         if (_services is null) return;
-        try
+        var client = new WhisperX.Atom.Desktop.VoiceHostClient();
+        while (!cancellationToken.IsCancellationRequested)
         {
-            await new WhisperX.Atom.Desktop.VoiceHostClient().SubscribeTelemetryAsync(packet =>
+            try
             {
-                if (ViewModel is not null)
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        ViewModel.ApplyVoiceTelemetry(packet);
-                    });
-                return Task.CompletedTask;
-            }, cancellationToken);
+                // The telemetry pipe is disposable: Voice Host may restart,
+                // or Settings may open before it is ready. Reconnect after
+                // both failures and a clean disconnect.
+                await client.SubscribeTelemetryAsync(packet =>
+                {
+                    if (ViewModel is not null)
+                        DispatcherQueue.TryEnqueue(() =>
+                        {
+                            ViewModel.ApplyVoiceTelemetry(packet);
+                        });
+                    return Task.CompletedTask;
+                }, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+            catch
+            {
+                // Status polling remains the compatibility fallback while
+                // the next connection attempt waits for Voice Host startup.
+            }
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch { /* polling status remains the compatibility fallback */ }
     }
 
     private void InitializeVoiceBars()

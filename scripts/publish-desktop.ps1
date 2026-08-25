@@ -108,6 +108,23 @@ Invoke-Publish $voiceRefinerHostPublishArgs
 Invoke-Publish $updaterPublishArgs
 Copy-Item -LiteralPath (Join-Path $updaterOut "WhisperX.Atom.Updater.exe") -Destination (Join-Path $desktopOut "WhisperX.Atom.Updater.exe") -Force
 
+# The VoiceHost project is published as a single-file executable. Some SDK/RID
+# combinations omit a native DLL from linked content, leaving a manifest that
+# points at an asset absent from the installer. Copy the already verified
+# refiner assets explicitly into the published VoiceHost payload.
+$voiceRefinerSource = Join-Path $repoRoot "apps\voice-host\Models\Voice\whisper-shadow"
+$voiceRefinerTarget = Join-Path $voiceHostOut "Models\Voice\whisper-shadow"
+$voiceRefinerManifestPath = Join-Path $voiceRefinerSource "voice-refiner.manifest.json"
+if (-not (Test-Path -LiteralPath $voiceRefinerManifestPath -PathType Leaf)) { throw "VOICE_REFINER_MANIFEST_MISSING_AFTER_PUBLISH" }
+$voiceRefinerManifestData = Get-Content -LiteralPath $voiceRefinerManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
+foreach ($assetName in @([string]$voiceRefinerManifestData.model.file, [string]$voiceRefinerManifestData.native.file, "voice-refiner.manifest.json")) {
+    if ([string]::IsNullOrWhiteSpace($assetName) -or $assetName -match '[\\/]') { throw "VOICE_REFINER_ASSET_NAME_INVALID" }
+    $assetSource = Join-Path $voiceRefinerSource $assetName
+    if (-not (Test-Path -LiteralPath $assetSource -PathType Leaf)) { throw "VOICE_REFINER_ASSET_MISSING_AFTER_PUBLISH: $assetName" }
+    New-Item -ItemType Directory -Force -Path $voiceRefinerTarget | Out-Null
+    Copy-Item -LiteralPath $assetSource -Destination (Join-Path $voiceRefinerTarget $assetName) -Force
+}
+
 # Silero is a build-time dependency. It is staged outside Git and frozen into
 # an onedir host; a release must fail closed when the model/runtime is absent.
 $ttsPublisher = Join-Path $repoRoot "scripts\publish-tts-host.ps1"
