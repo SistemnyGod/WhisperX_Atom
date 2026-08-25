@@ -124,6 +124,38 @@ def _measure_pcm_quality(path: Path) -> dict:
     }
 
 
+def analyze_asr_signal(path: Path) -> dict:
+    """Return bounded diagnostics without promoting an analyzer outage to audio loss.
+
+    The ASR derivative was decoded successfully before this function is called.
+    Acoustic diagnostics are useful guidance, but an optional analyzer outage
+    cannot invalidate a durable, decodable ASR input.
+    """
+    try:
+        metrics = analyze_wav(path).to_dict()
+        metrics["analysis_state"] = "READY"
+        metrics["analysis_error"] = None
+        return metrics
+    except RuntimeError as exc:
+        if str(exc) == "NUMPY_UNAVAILABLE":
+            return {
+                "analysis_state": "UNAVAILABLE",
+                "signal_state": "UNKNOWN",
+                "analysis_error": "NUMPY_UNAVAILABLE",
+            }
+        return {
+            "analysis_state": "FAILED",
+            "signal_state": "UNKNOWN",
+            "analysis_error": "AUDIO_SIGNAL_ANALYSIS_FAILED",
+        }
+    except Exception:
+        return {
+            "analysis_state": "FAILED",
+            "signal_state": "UNKNOWN",
+            "analysis_error": "AUDIO_SIGNAL_ANALYSIS_FAILED",
+        }
+
+
 def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     probe = probe_audio(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -157,11 +189,7 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     except (OSError, json.JSONDecodeError):
         assembly_result = {}
     drift_values = [float(item.get("driftMs", item.get("drift_ms", 0))) for item in assembly_result.get("tracks", []) if isinstance(item, dict)]
-    try:
-        signal_metrics = analyze_wav(asr)
-        signal_metadata = signal_metrics.to_dict()
-    except Exception:
-        signal_metadata = {"signal_state": "UNUSABLE", "analysis_error": "AUDIO_SIGNAL_ANALYSIS_FAILED"}
+    signal_metadata = analyze_asr_signal(asr)
     quality_report = {
         "duration_ms": int(probe["duration_ms"]),
         "sample_rate": int(audio_stream.get("sample_rate") or 0),
@@ -191,6 +219,12 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         "asr_input": assembly_result.get("asr_input"),
         "tracks_are_independent": bool(assembly_result.get("tracks_are_independent", False)),
         "assembly": assembly_result,
+        # Keep the diagnostic state at the document root for old consumers
+        # that do not inspect the nested metric object. The detailed metrics
+        # remain additive below.
+        "analysis_state": signal_metadata["analysis_state"],
+        "signal_state": signal_metadata["signal_state"],
+        "analysis_error": signal_metadata["analysis_error"],
         "audio_signal_metrics": signal_metadata,
         **_measure_pcm_quality(asr),
     }

@@ -114,6 +114,13 @@ if (-not $SkipBuild) {
     }
 }
 
+# A missing NumPy dependency previously downgraded healthy recordings to a
+# false AUDIO_SIGNAL_UNUSABLE state. Verify the exact image that is about to be
+# attested, rather than only the developer Python environment.
+$mediaImage = "whisperx-atom-media-worker:$tag"
+& (Join-Path $repo 'scripts\verify-media-worker-image.ps1') -Image $mediaImage
+if ($LASTEXITCODE -ne 0) { throw "RELEASE_MEDIA_IMAGE_AUDIO_SIGNAL_FAILED" }
+
 $imageRecords = [ordered]@{}
 function Get-DockerImageMetadata([string]$image) {
     # Do not use a Go-template map lookup here.  Windows PowerShell's native
