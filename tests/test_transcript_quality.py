@@ -31,7 +31,32 @@ def test_good_transcript_is_ready():
     assert gate["valid"] is True
     assert gate["ready"] is True
     assert report.word_count == 4
+    assert report.text_word_count == 4
+    assert report.aligned_word_count == 4
     assert report.quality_score >= 85
+
+
+def test_long_v1_text_without_alignment_is_not_marked_too_short():
+    report = build_transcript_quality_report(
+        {"segments": [{"start": 0, "end": 12, "text": "Это достаточно длинная стенограмма без word timestamps"}]},
+        20,
+    )
+    gate = quality_gate(report)
+    assert report.text_word_count >= 3
+    assert report.aligned_word_count == 0
+    assert "TRANSCRIPT_TOO_SHORT" not in report.reasons
+    assert "WORD_TIMESTAMPS_MISSING" in report.reasons
+    assert gate["retryable"] is False
+
+
+def test_short_segment_text_remains_retryable_without_alignment():
+    report = build_transcript_quality_report(
+        {"segments": [{"start": 0, "end": 1, "text": "да"}]},
+        2,
+    )
+    gate = quality_gate(report)
+    assert "TRANSCRIPT_TOO_SHORT" in report.reasons
+    assert gate["retryable"] is True
 
 
 def test_early_transcript_is_retryable_and_warned():

@@ -59,6 +59,8 @@ class TranscriptQualityReport:
     duration_ms: int
     segment_count: int
     word_count: int
+    text_word_count: int
+    aligned_word_count: int
     first_speech_ms: int | None
     last_speech_ms: int | None
     leading_gap_ms: int
@@ -83,6 +85,11 @@ class TranscriptQualityReport:
 
 def _text(segment: dict[str, Any]) -> str:
     return " ".join(str(segment.get("text", "") or "").split()).strip()
+
+
+def _text_word_count(texts: list[str]) -> int:
+    """Count words present in segment text, independent of alignment output."""
+    return sum(len(re.findall(r"[\wА-Яа-яЁё-]+", text, flags=re.UNICODE)) for text in texts)
 
 
 def _words(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -184,6 +191,8 @@ def build_transcript_quality_report(
     repetition = _repetition_score(texts)
     has_text = bool(texts)
     has_words = bool(words)
+    text_word_count = _text_word_count(texts)
+    aligned_word_count = len(words)
 
     coverage_component = min(1.0, max(speech_ratio, span_ratio) / max(thresholds.min_coverage, 0.01))
     if trailing > thresholds.max_trailing_gap_seconds:
@@ -199,7 +208,7 @@ def build_transcript_quality_report(
     reasons: list[str] = []
     if not has_text:
         reasons.append("TRANSCRIPT_EMPTY")
-    if len(words) < thresholds.min_words:
+    if text_word_count < thresholds.min_words:
         reasons.append("TRANSCRIPT_TOO_SHORT")
     if speech_ratio < thresholds.min_coverage and span_ratio < thresholds.min_coverage:
         reasons.append("TRANSCRIPT_LOW_COVERAGE")
@@ -223,7 +232,11 @@ def build_transcript_quality_report(
     return TranscriptQualityReport(
         duration_ms=duration_ms,
         segment_count=len(raw_segments),
-        word_count=len(words),
+        # ``word_count`` predates the split counters and is intentionally kept
+        # as the aligned-word count for consumers that already persist it.
+        word_count=aligned_word_count,
+        text_word_count=text_word_count,
+        aligned_word_count=aligned_word_count,
         first_speech_ms=int(round(first * 1000)) if first is not None else None,
         last_speech_ms=int(round(last * 1000)) if last is not None else None,
         leading_gap_ms=int(round(leading * 1000)),
@@ -254,7 +267,7 @@ def quality_gate(report: TranscriptQualityReport, thresholds: TranscriptQualityT
     retryable = bool(set(report.reasons) & retryable_reasons)
     warning_reasons = list(report.reasons)
     valid = not fatal and report.has_text and report.segment_count > 0
-    ready = valid and not warning_reasons and report.has_words and report.word_count >= thresholds.min_words
+    ready = valid and not warning_reasons and report.has_words and report.aligned_word_count >= thresholds.min_words
     return {"valid": valid, "ready": ready, "retryable": retryable, "fatal": fatal, "warnings": warning_reasons, "report": report.to_dict()}
 
 
