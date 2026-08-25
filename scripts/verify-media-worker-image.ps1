@@ -22,7 +22,10 @@ with TemporaryDirectory() as directory:
         target.setnchannels(1)
         target.setsampwidth(2)
         target.setframerate(16000)
-        target.writeframes((b"\x01\x00" * 1600))
+        # Keep the probe free of nested quotes: PowerShell's native argument
+        # marshalling can strip them when passing a Python -c payload on
+        # Windows.  The bytes() form is equivalent and remains portable.
+        target.writeframes(bytes([1, 0]) * 1600)
     result = analyze_wav(path)
     assert result.sample_rate == 16000
 print("MEDIA_IMAGE_AUDIO_SIGNAL_READY")
