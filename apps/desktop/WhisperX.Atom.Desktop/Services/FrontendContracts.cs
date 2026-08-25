@@ -165,10 +165,23 @@ public sealed record DesktopMemoryCoverage(
     string? LastErrorCode,
     string ReadScope,
     int IndexVersion = 1,
-    int NormalizerVersion = 1)
+    int NormalizerVersion = 1,
+    long IndexedTranscriptCount = 0,
+    long FactBackedTranscriptCount = 0,
+    long EmptyTranscriptCount = 0,
+    long MissingProjectionCount = 0,
+    long EntityCount = 0,
+    long ThreadCount = 0,
+    string WorkerState = "UNKNOWN")
 {
-    public string CoverageText => $"{UsableTranscriptCount} из {MeetingCount} встреч · {ActiveFactCount} фактов · {CanonicalSegmentCount} сегментов";
-    public string StatusText => FailedJobCount > 0 ? $"Память требует внимания: ошибок индексации {FailedJobCount}." : ReadyJobCount > 0 ? "Память Мифодия готова." : "Индекс памяти ещё формируется.";
+    public string CoverageText => $"{IndexedTranscriptCount} из {UsableTranscriptCount} пригодных стенограмм · {ActiveFactCount} фактов · {CanonicalSegmentCount} сегментов";
+    public string StatusText => FailedJobCount > 0
+        ? $"Память требует внимания: ошибок индексации {FailedJobCount}."
+        : MissingProjectionCount > 0
+            ? $"Нужно проиндексировать стенограмм: {MissingProjectionCount}."
+            : WorkerState.Equals("READY", StringComparison.OrdinalIgnoreCase)
+                ? "Память Мифодия готова."
+                : "Индекс памяти ещё формируется.";
 }
 public sealed record DesktopMemoryRebuildCandidate(string MeetingId, string TranscriptId, int TranscriptVersion, string State, string? Reason, string? JobId = null);
 public sealed record DesktopMemoryRebuildResult(string Mode, int CandidateCount, int CreatedJobs, int ReusedJobs, IReadOnlyList<DesktopMemoryRebuildCandidate> Candidates, string? NextCursor = null);

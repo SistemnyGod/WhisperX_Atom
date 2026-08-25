@@ -10,9 +10,31 @@ from workers.summary_worker.fact_extraction import extract_transcript_facts
 from .models import MemoryFact
 
 
+FACT_MARKERS = (
+    "решил", "решили", "решение", "поручил", "поручили", "задача",
+    "ответствен", "срок", "до ", "причин", "статус", "риск",
+    "вопрос", "назначен", "назначили", "выполнен", "завершен",
+)
+
+
 def normalize_value(value: str) -> str:
     value = re.sub(r"\s+", " ", str(value or "").strip().lower().replace("ё", "е"))
     return value[:1000]
+
+
+def has_explicit_fact_candidates(segments: Iterable[Mapping[str, Any] | tuple[Any, ...]]) -> bool:
+    """Return only a coarse, privacy-safe candidate signal.
+
+    This does not create a fact. It distinguishes a legitimately empty
+    meeting from a transcript that contains fact-shaped language but could
+    not be projected and therefore requires review.
+    """
+    for item in segments:
+        text = str(item.get("text") or "") if isinstance(item, Mapping) else str(item[-1] or "")
+        normalized = re.sub(r"\s+", " ", text.strip().lower().replace("ё", "е"))
+        if normalized and any(marker in normalized for marker in FACT_MARKERS):
+            return True
+    return False
 
 
 def extract_memory_facts(

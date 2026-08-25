@@ -490,6 +490,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     IReadOnlyList<WorkerRuntimeRow> workers = Array.Empty<WorkerRuntimeRow>();
     OperationsSnapshot? operations = null;
     LlmRuntimeSnapshot? llmRuntime = null;
+    MemoryCoverageSnapshot? memoryCoverage = null;
     if (postgres)
     {
         try
@@ -497,6 +498,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             workers = await store.ListWorkerRuntimeAsync();
             operations = await store.GetOperationsSnapshotAsync();
             llmRuntime = await store.GetLlmRuntimeSnapshotAsync();
+            memoryCoverage = await store.GetMemoryCoverageAsync(Guid.Empty, includeAll: true, readScope: "DEPLOYMENT");
         }
         catch (Exception ex)
         {
@@ -627,6 +629,17 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
                 : string.Equals(memoryWorkerItem!.Status, "READY", StringComparison.OrdinalIgnoreCase)
                     ? new { status = "READY", reason = "memory_worker_ready" }
                     : new { status = "DEGRADED", reason = memoryWorkerItem.LastErrorCode ?? "memory_worker_not_ready" };
+    var qwenProductReady = !qwenEnabled || (
+        fresh.TryGetValue("summary-worker", out var productSummaryWorker)
+        && IsFreshWorker(productSummaryWorker, checkedAt)
+        && IsIdentityMatch(productSummaryWorker, expectedBuildIdentity)
+        && IsActiveWorker(productSummaryWorker)
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("modelAvailable", out var productModel)
+        && productModel.ValueKind == JsonValueKind.True
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("modelManifestValid", out var productManifest)
+        && productManifest.ValueKind == JsonValueKind.True
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("llamaRuntimeAvailable", out var productLlama)
+        && productLlama.ValueKind == JsonValueKind.True);
     var gpuWorkerFailed = gpuWorker is null
         || string.Equals(gpuWorker.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
         || string.Equals(gpuWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
@@ -644,10 +657,20 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
     if (operations is not null && operations.OrphanedGpuJobs > 0) readinessReasons.Add("gpu_job_orphaned");
     if (operations is not null && operations.HealthyGpuJobs > 0) readinessReasons.Add("gpu_asr_active");
     if (operations is not null && operations.QueuedAssistantQueries > 0 && (operations.HealthyGpuJobs > 0 || operations.QueuedAsrJobs > 0)) readinessReasons.Add("assistant_waiting_for_gpu");
+    var productBlockers = new List<string>();
+    if (!ready) productBlockers.Add("core_runtime_not_ready");
+    if (!string.Equals(hf, "READY", StringComparison.OrdinalIgnoreCase)) productBlockers.Add("diarization_not_ready");
+    if (qwenEnabled && !qwenProductReady) productBlockers.Add("qwen_not_ready");
+    if (memoryEnabled && (!memoryWorker || memoryCoverage is null)) productBlockers.Add("memory_worker_not_ready");
+    else if (memoryEnabled && memoryCoverage!.MissingProjectionCount > 0) productBlockers.Add("memory_projection_incomplete");
+    else if (memoryEnabled && memoryCoverage!.FailedJobCount > 0) productBlockers.Add("memory_jobs_failed");
+    var productReady = productBlockers.Count == 0;
 
     return Results.Ok(new
     {
         ready,
+        productReady,
+        productBlockers,
         buildIdentity = expectedBuildIdentity,
         releaseIdentityValid,
         identityMismatch,
@@ -671,6 +694,7 @@ app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfigura
             },
             hfDiarization = new { status = hf },
             memory,
+            memoryCoverage,
             recorder = new { status = "OPTIONAL" },
             qwen,
             // Optional diagnostics are sourced from the same summary-worker

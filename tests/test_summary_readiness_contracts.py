@@ -64,8 +64,21 @@ def test_qwen_and_diarization_readiness_use_actual_runtime_probe_state():
     assert "llamaRuntimeState" in api
     assert "llama_runtime_failed" in api
     assert "DiarizationPipeline" in worker
+    assert "diarization_model = local_model_path" in worker
+    pipeline = read("app/transcription_pipeline.py")
+    assert "pipeline_model: str | Path = Path(resolved_model) if explicit_path else resolved_model" in pipeline
     assert "pyannote_model_loaded" in worker
     assert "LLAMA_RUNTIME_FAILED" in summary
+
+
+def test_system_readiness_separates_core_health_from_product_acceptance():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    readiness = api.split('app.MapGet("/api/system/readiness"', 1)[1].split('app.MapGet("/api/system/status"', 1)[0]
+    assert "productReady" in readiness
+    assert "productBlockers" in readiness
+    assert '"diarization_not_ready"' in readiness
+    assert '"memory_projection_incomplete"' in readiness
+    assert '"qwen_not_ready"' in readiness
 
 
 def test_general_chat_nullable_meeting_parameter_is_explicitly_typed():

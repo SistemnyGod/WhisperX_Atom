@@ -103,6 +103,9 @@ public sealed record MemoryCoverageSnapshot(
     int IndexVersion = 1,
     int NormalizerVersion = 1,
     long IndexedTranscriptCount = 0,
+    long FactBackedTranscriptCount = 0,
+    long EmptyTranscriptCount = 0,
+    long MissingProjectionCount = 0,
     long EntityCount = 0,
     long ThreadCount = 0,
     string WorkerState = "UNKNOWN",
@@ -2209,10 +2212,34 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             "f.state='ACTIVE' AND f.transcript_version=(SELECT max(t.version) FROM transcripts t WHERE t.meeting_id=f.meeting_id)");
         var readyJobCount = await CountAsync(
             "memory_jobs j JOIN meetings m ON m.id=j.meeting_id",
-            "j.status='READY'");
+            "j.status='READY' AND j.transcript_version=(SELECT max(t.version) FROM transcripts t WHERE t.meeting_id=j.meeting_id)");
         var failedJobCount = await CountAsync(
             "memory_jobs j JOIN meetings m ON m.id=j.meeting_id",
-            "j.status='FAILED'");
+            "j.status='FAILED' AND j.transcript_version=(SELECT max(t.version) FROM transcripts t WHERE t.meeting_id=j.meeting_id)");
+
+        async Task<long> ProjectionCountAsync(string predicate)
+        {
+            await using var command = new NpgsqlCommand($"""
+                SELECT COUNT(DISTINCT t.id)
+                  FROM transcripts t
+                  JOIN meetings m ON m.id=t.meeting_id
+                 WHERE {scope}
+                   AND t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
+                   AND t.status IN ('READY','PARTIAL_READY')
+                   AND EXISTS (SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'')
+                   AND NOT (COALESCE(t.warnings,'[]'::jsonb) @> '["NO_SPEECH_DETECTED"]'::jsonb)
+                   AND ({predicate})
+                """, connection);
+            command.Parameters.AddWithValue("owner", userId);
+            command.Parameters.AddWithValue("include_all", includeAll);
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+        var factBackedTranscriptCount = await ProjectionCountAsync(
+            "EXISTS (SELECT 1 FROM transcript_facts f WHERE f.transcript_id=t.id AND f.transcript_version=t.version AND f.state='ACTIVE') AND EXISTS (SELECT 1 FROM memory_jobs j WHERE j.transcript_id=t.id AND j.transcript_version=t.version AND j.status='READY' AND j.stage='READY')");
+        var emptyTranscriptCount = await ProjectionCountAsync(
+            "EXISTS (SELECT 1 FROM memory_jobs j WHERE j.transcript_id=t.id AND j.transcript_version=t.version AND j.status='READY' AND j.stage='READY_EMPTY')");
+        var indexedTranscriptCount = Math.Min(usableTranscriptCount, factBackedTranscriptCount + emptyTranscriptCount);
+        var missingProjectionCount = Math.Max(0, usableTranscriptCount - indexedTranscriptCount);
 
         async Task<long> OwnerScopedCountAsync(string table)
         {
@@ -2260,7 +2287,11 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             if (!reader.IsDBNull(1)) errorCode = reader.GetString(1);
         }
 
-        var workerState = failedJobCount > 0 ? "DEGRADED" : readyJobCount >= usableTranscriptCount && usableTranscriptCount > 0 ? "READY" : "PENDING";
+        var workerState = failedJobCount > 0
+            ? "DEGRADED"
+            : missingProjectionCount == 0 && usableTranscriptCount > 0
+                ? "READY"
+                : "PENDING";
         return new MemoryCoverageSnapshot(
             meetingCount,
             usableTranscriptCount,
@@ -2271,7 +2302,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             indexedAt,
             errorCode,
             includeAll ? (string.IsNullOrWhiteSpace(readScope) ? "DEPLOYMENT" : readScope.Trim().ToUpperInvariant()) : "OWNER",
-            IndexedTranscriptCount: usableTranscriptCount,
+            IndexedTranscriptCount: indexedTranscriptCount,
+            FactBackedTranscriptCount: factBackedTranscriptCount,
+            EmptyTranscriptCount: emptyTranscriptCount,
+            MissingProjectionCount: missingProjectionCount,
             EntityCount: entityCount,
             ThreadCount: threadCount,
             WorkerState: workerState,
@@ -2290,7 +2324,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var connection = await OpenAsync();
         var derivedFilter = rebuildExisting
             ? "true"
-            : "(j.id IS NULL OR NOT EXISTS (SELECT 1 FROM transcript_facts f WHERE f.transcript_id=l.transcript_id AND f.transcript_version=l.version AND f.state='ACTIVE') OR j.status='FAILED')";
+            : "(j.id IS NULL OR (NOT EXISTS (SELECT 1 FROM transcript_facts f WHERE f.transcript_id=l.transcript_id AND f.transcript_version=l.version AND f.state='ACTIVE') AND COALESCE(j.stage,'')<>'READY_EMPTY') OR j.status='FAILED')";
         var candidateSql = $"""
             WITH latest AS (
                 SELECT DISTINCT ON (t.meeting_id)
@@ -2842,12 +2876,16 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
 
         var blockingWarnings = new HashSet<string>(warnings.Select(value => value.ToUpperInvariant()), StringComparer.Ordinal);
-        var v1Usable = !blockingWarnings.Overlaps(["NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"]);
+        // Any non-empty canonical V1 remains useful for a deterministic,
+        // explicitly non-authoritative draft. Language mismatch blocks V2/Qwen
+        // enrichment, but must not leave a meeting without any summary.
+        var v1Usable = !blockingWarnings.Contains("NO_SPEECH_DETECTED");
         await using (var segmentCheck = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE transcript_id=@transcript AND COALESCE(is_hidden,false)=false AND btrim(COALESCE(text,''))<>'')", connection, tx))
         {
             segmentCheck.Parameters.AddWithValue("transcript", v1Id.Value);
             v1Usable &= (bool)(await segmentCheck.ExecuteScalarAsync() ?? false);
         }
+        var v1Enrichable = v1Usable && !blockingWarnings.Contains("ASR_LANGUAGE_MISMATCH");
         actions.Add(new PipelineRepairAction("ASR", "PRESERVED", v1Usable ? "V1_USABLE" : "V1_NOT_SUMMARIZABLE", TranscriptId: v1Id));
 
         string sourceHash = string.Empty;
@@ -2888,9 +2926,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 }
             }
 
-            if (!v1Usable)
+            if (!v1Enrichable)
             {
-                actions.Add(new PipelineRepairAction("V2", "BLOCKED", "V1_NOT_USABLE", enrichmentJobId, v1Id));
+                actions.Add(new PipelineRepairAction("V2", "BLOCKED", v1Usable ? "ASR_LANGUAGE_MISMATCH" : "V1_NOT_USABLE", enrichmentJobId, v1Id));
             }
             else
             {
@@ -2960,9 +2998,27 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         // A usable V1 always receives exactly one deterministic draft. A V2
         // summary, when it later exists, is keyed to the V2 transcript and is
         // therefore a separate, idempotent enriched version.
-        var summaryTranscriptId = v2Id ?? v1Id;
-        var summaryMode = v2Id is null ? "DETERMINISTIC_ONLY" : "FULL";
-        var sourceQuality = v2Id is null ? "V1_FALLBACK" : "V2";
+        Guid? qualifiedV2Id = null;
+        if (v2Id is Guid candidateV2)
+        {
+            await using var qualityCheck = new NpgsqlCommand("SELECT status,COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE id=@transcript", connection, tx);
+            qualityCheck.Parameters.AddWithValue("transcript", candidateV2);
+            await using var qualityReader = await qualityCheck.ExecuteReaderAsync();
+            if (await qualityReader.ReadAsync())
+            {
+                var v2Status = qualityReader.GetString(0).ToUpperInvariant();
+                var hasV2Segments = qualityReader.GetBoolean(2);
+                string[] v2Warnings;
+                try { v2Warnings = JsonSerializer.Deserialize<string[]>(qualityReader.GetString(1)) ?? []; }
+                catch (JsonException) { v2Warnings = ["QUALITY_METADATA_INVALID"]; }
+                var v2Blocking = new HashSet<string>(v2Warnings.Select(value => value.ToUpperInvariant()), StringComparer.Ordinal);
+                if (v2Status == "READY" && hasV2Segments && !v2Blocking.Overlaps(["NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"]))
+                    qualifiedV2Id = candidateV2;
+            }
+        }
+        var summaryTranscriptId = qualifiedV2Id ?? v1Id;
+        var summaryMode = qualifiedV2Id is null ? "DETERMINISTIC_ONLY" : "FULL";
+        var sourceQuality = qualifiedV2Id is null ? "V1_FALLBACK" : "V2";
         Guid? summaryJobId = null;
         string? summaryStatus = null;
         string? summaryErrorCode = null;
@@ -3054,17 +3110,13 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         catch (JsonException) { return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY"); }
 
         var warningSet = new HashSet<string>(warnings.Select(item => item.ToUpperInvariant()), StringComparer.Ordinal);
-        var blockingWarnings = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"
-        };
         if (!hasSegments)
             return new SummaryEligibility(true, false, "SUMMARY_REQUIRES_CANONICAL_SEGMENTS");
-        if (warningSet.Overlaps(blockingWarnings))
+        if (warningSet.Contains("NO_SPEECH_DETECTED"))
             return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY");
         if (versionKind != "ENRICHED")
             return new SummaryEligibility(true, true, "DETERMINISTIC_ONLY", "DETERMINISTIC_ONLY");
-        if (status is not "READY")
+        if (status is not "READY" || warningSet.Contains("ASR_LANGUAGE_MISMATCH"))
             return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY");
         return new SummaryEligibility(true, true, null, "FULL");
     }

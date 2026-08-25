@@ -147,3 +147,11 @@ def test_runtime_doctor_publishes_fields_consumed_by_release_gate():
     assert "gpuWorker = if ($mode -eq \"container\")" in doctor
     assert "Get-JsonProperty $runtimeReport 'gpuWorkerMode'" in gate
     assert "Get-JsonProperty $runtimeReport $component" in gate
+
+
+def test_llm_doctor_runs_independent_contract_probes():
+    runtime_doctor = read("workers/summary_worker/runtime_doctor.py")
+    assert '_contract_probe(base_url, model_alias, "ASSISTANT_JSON")' in runtime_doctor
+    assert '_contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING")' in runtime_doctor
+    assert '_contract_probe(base_url, model_alias, "SUMMARY_JSON")' in runtime_doctor
+    assert '_contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU")' in runtime_doctor

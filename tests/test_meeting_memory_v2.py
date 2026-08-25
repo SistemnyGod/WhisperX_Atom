@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from workers.memory_worker.entity_resolver import canonical_topic_name, normalize_entity_name, resolve_entities
-from workers.memory_worker.fact_extractor import extract_memory_facts
+from workers.memory_worker.fact_extractor import extract_memory_facts, has_explicit_fact_candidates
 from workers.memory_worker.indexer import build_memory_index
 from workers.memory_worker.memory_retrieval import build_memory_query_plan, rehydrate_evidence
 from workers.memory_worker.models import MemoryFact
@@ -41,6 +41,15 @@ def test_memory_facts_are_explicit_and_keep_canonical_evidence():
     assert facts[0].fact_type == "RESPONSIBLE"
     assert facts[0].derivation_type == "EXPLICIT"
     assert facts[0].evidence_segment_ids == ("seg-1",)
+
+
+def test_fact_candidate_signal_distinguishes_empty_from_unprojected_transcript():
+    assert not has_explicit_fact_candidates(
+        [{"id": "seg-1", "text": "Участники обменялись приветствиями."}]
+    )
+    assert has_explicit_fact_candidates(
+        [{"id": "seg-2", "text": "Решили вернуться к вопросу позже."}]
+    )
 
 
 def test_fact_extractor_keeps_explicit_subject_for_relations():

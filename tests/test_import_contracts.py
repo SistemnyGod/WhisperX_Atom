@@ -54,7 +54,13 @@ def test_manual_summary_uses_deterministic_mode_for_a_usable_v1_and_full_mode_fo
     assert 'return new SummaryEligibility(true, true, "DETERMINISTIC_ONLY", "DETERMINISTIC_ONLY")' in store
     assert 'summaryMode = transcriptKind == "ENRICHED" ? "FULL" : "DETERMINISTIC_ONLY"' in store
     assert 'AUDIO_SIGNAL_UNUSABLE' not in store[store.index('public async Task<SummaryEligibility> GetSummaryEligibilityAsync'):]
-    assert 'warningSet.Overlaps(blockingWarnings)' in store
+    eligibility = store[store.index('public async Task<SummaryEligibility> GetSummaryEligibilityAsync'):]
+    assert 'warningSet.Contains("NO_SPEECH_DETECTED")' in eligibility
+    assert 'versionKind != "ENRICHED"' in eligibility
+    assert 'status is not "READY" || warningSet.Contains("ASR_LANGUAGE_MISMATCH")' in eligibility
+    repair = store[store.index('RepairMeetingPipelineAsync'):store.index('public async Task<SummaryEligibility>')]
+    assert 'var v1Enrichable = v1Usable && !blockingWarnings.Contains("ASR_LANGUAGE_MISMATCH")' in repair
+    assert 'var summaryMode = qualifiedV2Id is null ? "DETERMINISTIC_ONLY" : "FULL"' in repair
 
 
 def test_pipeline_repair_is_privileged_preview_apply_and_does_not_replay_asr():

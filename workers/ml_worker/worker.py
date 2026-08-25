@@ -568,10 +568,20 @@ async def run() -> None:
                     device = os.getenv("DEVICE", "cuda").strip().lower() or "cuda"
                     if device == "cuda" and not capabilities.get("cudaAvailable"):
                         device = "cpu"
-                diarization_model = (
-                    os.getenv("DIARIZATION_MODEL_PATH", "").strip()
-                    or os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip()
-                )
+                configured_model_path = os.getenv("DIARIZATION_MODEL_PATH", "").strip()
+                diarization_model: str | Path
+                if configured_model_path:
+                    local_model_path = Path(configured_model_path)
+                    if not local_model_path.exists():
+                        raise FileNotFoundError("diarization_model_path_missing")
+                    # pyannote distinguishes a local pipeline from a Hub repo by
+                    # type. Passing an absolute path as ``str`` makes the Hub
+                    # validator reject it as an invalid repository id.
+                    diarization_model = local_model_path
+                else:
+                    diarization_model = os.getenv(
+                        "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"
+                    ).strip()
                 probe = await asyncio.wait_for(
                     asyncio.to_thread(
                         DiarizationPipeline,

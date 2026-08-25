@@ -373,7 +373,11 @@ class ModelCacheManager:
         key = (device, hf_token, resolved_model)
         if key not in self._diarizer:
             started = time.perf_counter()
-            self._diarizer[key] = WhisperXDiarizationPipeline(model_name=resolved_model, use_auth_token=hf_token, device=device)
+            # pyannote uses ``Path`` to select local pipeline loading. An
+            # absolute path passed as ``str`` is interpreted as a Hub repo id
+            # and rejected by huggingface_hub validation.
+            pipeline_model: str | Path = Path(resolved_model) if explicit_path else resolved_model
+            self._diarizer[key] = WhisperXDiarizationPipeline(model_name=pipeline_model, use_auth_token=hf_token, device=device)
             self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
 

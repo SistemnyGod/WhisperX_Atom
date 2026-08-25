@@ -129,7 +129,14 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
     Response text is consumed only in memory and is intentionally omitted from
     the returned doctor artifact.
     """
-    if kind == "ASSISTANT_GROUNDING":
+    if kind == "ASSISTANT_JSON":
+        prompt = (
+            "Верни только JSON по заданной схеме. Кратко ответь на приветствие по-русски. "
+            "Это GENERAL_CHAT: claims и evidence_segment_ids должны быть пустыми."
+        )
+        required = {"answer", "voice_answer", "evidence_segment_ids", "claims"}
+        expected_ids: set[str] = set()
+    elif kind == "ASSISTANT_GROUNDING":
         prompt = (
             "Верни только JSON с answer, voice_answer, evidence_segment_ids и claims. "
             "Ответь кто отвечает за ремонт. Единственный evidence: SEG-1: "
@@ -137,7 +144,14 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
         )
         required = {"answer", "voice_answer", "evidence_segment_ids", "claims"}
         expected_ids = {"SEG-1"}
-    else:
+    elif kind == "SUMMARY_JSON":
+        prompt = (
+            "Верни только JSON по схеме MEETING_PROTOCOL_RU. Используй только SEG-1: "
+            "Решили провести диагностику второй печи. Не добавляй имена, даты или числа."
+        )
+        required = {"questions_and_decisions", "tasks"}
+        expected_ids = {"SEG-1"}
+    elif kind == "MEETING_PROTOCOL_RU":
         prompt = (
             "Верни только JSON профиля MEETING_PROTOCOL_RU с questions_and_decisions и tasks. "
             "Используй только SEG-1..SEG-4. SEG-1: Обсудили ремонт второй печи. "
@@ -147,10 +161,12 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
         )
         required = {"questions_and_decisions", "tasks"}
         expected_ids = {"SEG-1", "SEG-2", "SEG-3", "SEG-4"}
+    else:
+        raise ValueError("unknown_contract_probe")
     # Use the exact additive schemas consumed by the production Assistant and
     # MEETING_PROTOCOL_RU paths.  A shallow ``required`` list made the probe
     # green for malformed protocol rows that could never pass content gates.
-    if kind == "ASSISTANT_GROUNDING":
+    if kind in {"ASSISTANT_JSON", "ASSISTANT_GROUNDING"}:
         from .assistant import ASSISTANT_SCHEMA
 
         schema = ASSISTANT_SCHEMA
@@ -207,10 +223,21 @@ def _contract_probe(base_url: str, model: str, kind: str) -> dict[str, Any]:
                             for value in item.get("evidence_segment_ids", item.get("evidenceIds", []))
                             if value
                         )
-        if kind == "ASSISTANT_GROUNDING":
-            valid = valid and ids and ids == {_canonical_segment_id(item) for item in expected_ids}
-        else:
-            valid = valid and ids and ids == {_canonical_segment_id(item) for item in expected_ids}
+        expected_canonical_ids = {_canonical_segment_id(item) for item in expected_ids}
+        valid = valid and ids == expected_canonical_ids
+        protected_document = json.dumps(decoded, ensure_ascii=False).lower() if isinstance(decoded, dict) else ""
+        if kind == "ASSISTANT_JSON":
+            valid = valid and not ids
+        elif kind == "ASSISTANT_GROUNDING":
+            valid = valid and "иванов" in protected_document and "петров" not in protected_document
+        elif kind == "MEETING_PROTOCOL_RU":
+            valid = (
+                valid
+                and "иванов" in protected_document
+                and "30 августа" in protected_document
+                and "28 августа" in protected_document
+                and "петров" not in protected_document
+            )
         return {"status": "READY" if valid and chunks else "FAILED", "firstTokenMs": round(first_token_ms, 3) if first_token_ms is not None else None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks}
     except Exception as exc:
         return {"status": "FAILED", "firstTokenMs": None, "totalMs": round((time.perf_counter() - started) * 1000, 3), "chunks": chunks, "error": type(exc).__name__}
@@ -267,9 +294,9 @@ def main() -> int:
         result["probe"] = _probe(base_url, model_alias)
         result["probes"] = {
             "LLM_RUNTIME": {"status": result["probe"].get("status"), "timings": {"firstTokenMs": result["probe"].get("firstTokenMs"), "totalMs": result["probe"].get("totalMs")}},
-            "ASSISTANT_JSON": _contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING"),
+            "ASSISTANT_JSON": _contract_probe(base_url, model_alias, "ASSISTANT_JSON"),
             "ASSISTANT_GROUNDING": _contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING"),
-            "SUMMARY_JSON": _contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU"),
+            "SUMMARY_JSON": _contract_probe(base_url, model_alias, "SUMMARY_JSON"),
             "MEETING_PROTOCOL_RU": _contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU"),
         }
         result["status"] = "READY" if all(item.get("status") == "READY" for item in result["probes"].values()) else "GENERATION_FAILED"

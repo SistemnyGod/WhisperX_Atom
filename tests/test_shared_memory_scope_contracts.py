@@ -58,6 +58,9 @@ def test_memory_status_and_rebuild_are_diagnostic_and_idempotent_endpoints():
     assert "ON CONFLICT(transcript_id,transcript_version) DO NOTHING" in store
     assert "ownerUserId = candidate.OwnerUserId" in store
     assert "never touches" in store
+    assert "READY_EMPTY" in store
+    assert "MissingProjectionCount" in store
+    assert "FactBackedTranscriptCount" in store
 
 
 def test_assistant_broad_retrieval_is_bounded_and_uses_deployment_scope():

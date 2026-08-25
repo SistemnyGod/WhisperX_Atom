@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - worker image installs psycopg
 
 from .indexer import MemoryIndex, build_memory_index
 from .models import MemoryFact
-from .fact_extractor import extract_memory_facts
+from .fact_extractor import extract_memory_facts, has_explicit_fact_candidates
 from .entity_resolver import SUBJECT_NORMALIZER_VERSION, canonical_topic_name, normalize_entity_name
 from workers.nats_utils import ensure_stream, fetch_available, maintain_message
 from workers.runtime_heartbeat import AsyncHeartbeat
@@ -42,6 +42,7 @@ MEMORY_STAGES = (
     "LINKING_FACTS",
     "REBUILDING_THREADS",
     "READY",
+    "READY_EMPTY",
     "NEEDS_REVIEW",
     "FAILED",
 )
@@ -53,6 +54,14 @@ class MemoryIndexResult:
     stage: str
     index: MemoryIndex | None
     error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class FactExtractionResult:
+    fact_count: int
+    segment_count: int
+    has_candidates: bool
+    already_populated: bool = False
 
 
 class MemoryIndexWorker:
@@ -237,7 +246,7 @@ class MemoryProjectionRepository:
     def _scope_key(fact: MemoryFact) -> str | None:
         return canonical_topic_name(fact.subject) if fact.subject else None
 
-    def _ensure_facts_from_canonical_segments(self, payload: Mapping[str, object]) -> int:
+    def _ensure_facts_from_canonical_segments(self, payload: Mapping[str, object]) -> FactExtractionResult:
         """Populate missing deterministic facts before projecting the index.
 
         Historical imports and older V1/V2 paths may enqueue a memory job
@@ -260,7 +269,7 @@ class MemoryProjectionRepository:
                     (transcript_id, transcript_version),
                 ).fetchone()
                 if existing and bool(existing[0]):
-                    return 0
+                    return FactExtractionResult(0, 0, True, already_populated=True)
                 rows = connection.execute(
                     """SELECT id,start_ms,end_ms,speaker_label,text
                          FROM transcript_segments
@@ -270,7 +279,7 @@ class MemoryProjectionRepository:
                     (transcript_id,),
                 ).fetchall()
                 if not rows:
-                    return 0
+                    return FactExtractionResult(0, 0, False)
                 segments = [
                     {"id": str(row[0]), "startMs": int(row[1] or 0), "endMs": int(row[2] or 0), "speaker": row[3], "text": str(row[4] or "")}
                     for row in rows if str(row[4] or "").strip()
@@ -282,6 +291,7 @@ class MemoryProjectionRepository:
                     transcript_id=transcript_id,
                     transcript_version=transcript_version,
                 )[:MEMORY_MAX_FACTS_PER_JOB]
+                has_candidates = has_explicit_fact_candidates(segments)
                 for fact in facts:
                     connection.execute(
                         """INSERT INTO transcript_facts(
@@ -294,7 +304,7 @@ class MemoryProjectionRepository:
                             json.dumps(list(fact.evidence_segment_ids)), fact.state, fact.source_text[:4000], owner_id, fact.derivation_type,
                         ),
                     )
-                return len(facts)
+                return FactExtractionResult(len(facts), len(segments), has_candidates)
 
     def _load_facts(self, payload: Mapping[str, object]) -> tuple[list[MemoryFact], set[str]]:
         job_id = str(payload["jobId"])
@@ -372,8 +382,12 @@ class MemoryProjectionRepository:
     def process(self, payload: Mapping[str, object]) -> MemoryIndexResult:
         job_id = str(payload["jobId"])
         self._set_stage(job_id, "EXTRACTING_FACTS", 15)
-        self._ensure_facts_from_canonical_segments(payload)
-        _current_facts, subject_keys = self._load_facts(payload)
+        extraction = self._ensure_facts_from_canonical_segments(payload)
+        current_facts, subject_keys = self._load_facts(payload)
+        if not current_facts:
+            if extraction.has_candidates:
+                return self._complete_scope_review(job_id, "MEMORY_FACTS_EMPTY")
+            return self._complete_empty(job_id)
         if len(subject_keys) > MEMORY_MAX_SUBJECTS_PER_JOB:
             return self._complete_scope_review(job_id, "MEMORY_SCOPE_LIMIT_EXCEEDED")
         self._set_stage(job_id, "LINKING_FACTS", 35)
@@ -478,6 +492,21 @@ class MemoryProjectionRepository:
                     (status, result.stage, result.error_code, result.error_code, status, job_id, self.worker_id),
                 )
                 connection.execute("DELETE FROM inbox_messages WHERE message_id=%s AND worker_id=%s", (job_id, self.worker_id))
+        return result
+
+    def _complete_empty(self, job_id: str) -> MemoryIndexResult:
+        """Complete a genuinely fact-free transcript without claiming indexing coverage."""
+        result = MemoryIndexResult("READY", "READY_EMPTY", MemoryIndex((), (), (), ()))
+        with self._connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    """UPDATE memory_jobs
+                          SET status='READY',stage='READY_EMPTY',progress=100,error_code=NULL,error_message=NULL,
+                              completed_at=now(),worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now()
+                        WHERE id=%s""",
+                    (job_id,),
+                )
+                connection.execute("DELETE FROM inbox_messages WHERE message_id=%s", (job_id,))
         return result
 
     def _complete_scope_review(self, job_id: str, error_code: str) -> MemoryIndexResult:
