@@ -1670,7 +1670,8 @@ class AssistantWorker:
             # consumer; never turn this bounded wait into NATS redelivery.
             return
         except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"
+            safe_error = assistant_failure_code(exc)
+            safe_fingerprint = assistant_failure_fingerprint(exc, failure_stage)
             record_probe = getattr(self._llm_runtime, "record_probe", None)
             if callable(record_probe):
                 await asyncio.to_thread(record_probe, "FAILED", error=type(exc).__name__)
@@ -1678,7 +1679,7 @@ class AssistantWorker:
                 scheduled_attempt = await asyncio.to_thread(
                     self.repository.schedule_retry,
                     query_id,
-                    detail,
+                    safe_error,
                     message_id or None,
                     ASSISTANT_MAX_RETRIES,
                 )
@@ -1686,10 +1687,12 @@ class AssistantWorker:
                     await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "SCHEDULED")
                     delay = assistant_retry_delay_seconds(scheduled_attempt)
                     LOGGER.warning(
-                        "assistant query=%s retry scheduled attempt=%s delay=%ss",
+                        "assistant query=%s retry scheduled attempt=%s delay=%ss stage=%s fingerprint=%s",
                         query_id,
                         scheduled_attempt,
                         delay,
+                        failure_stage,
+                        safe_fingerprint,
                     )
                     raise AssistantRetryScheduled(delay, scheduled_attempt) from exc
                 # The retry budget is exhausted.  Persist a terminal state and
@@ -1697,12 +1700,12 @@ class AssistantWorker:
                 # assistant request must not loop forever in JetStream.
                 self.repository.set_status(query_id, "LLM_UNAVAILABLE", error=assistant_failure_code(exc))
                 await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "EXHAUSTED")
-                LOGGER.error("assistant query=%s retry budget exhausted: %s", query_id, detail)
+                LOGGER.error("assistant query=%s retry budget exhausted code=%s stage=%s fingerprint=%s", query_id, safe_error, failure_stage, safe_fingerprint)
                 return
             # Deterministic validation/scope/model configuration failures are
             # terminal.  They remain visible to Desktop and cannot be retried
             # by a stale NATS delivery.
-            self.repository.set_status(query_id, "FAILED", error=assistant_failure_code(exc))
+            self.repository.set_status(query_id, "FAILED", error=safe_error)
             await asyncio.to_thread(self.repository.record_failure_diagnostic, query_id, exc, failure_stage, "TERMINAL")
-            LOGGER.error("assistant query=%s entered terminal failure: %s", query_id, detail)
+            LOGGER.error("assistant query=%s entered terminal failure code=%s stage=%s fingerprint=%s", query_id, safe_error, failure_stage, safe_fingerprint)
             return

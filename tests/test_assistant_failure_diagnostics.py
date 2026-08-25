@@ -15,3 +15,5 @@ def test_failure_fingerprint_excludes_exception_message():
 def test_general_chat_grounding_reads_repository_metadata():
     source = open("workers/summary_worker/assistant.py", encoding="utf-8").read()
     assert "getattr(self.repository, \"_last_retrieval_metadata\", {})" in source
+    assert "safe_error = assistant_failure_code(exc)" in source
+    assert "detail = f\"{type(exc).__name__}: {exc}\"" not in source
