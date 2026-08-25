@@ -7,6 +7,10 @@ ENV PYTHONUNBUFFERED=1 PYTHONPATH=/srv WORKER_NAME=memory-worker
 COPY workers/memory_worker/requirements.txt /srv/memory-requirements.txt
 RUN pip install --no-cache-dir -r /srv/memory-requirements.txt
 COPY workers/memory_worker /srv/workers/memory_worker
+# Memory rebuild reuses the conservative canonical fact extractor.  Keep the
+# dependency explicit in the image instead of relying on the monorepo being
+# present in the build context.
+COPY workers/summary_worker /srv/workers/summary_worker
 COPY workers/__init__.py /srv/workers/__init__.py
 COPY workers/nats_utils.py /srv/workers/nats_utils.py
 COPY workers/runtime_heartbeat.py /srv/workers/runtime_heartbeat.py
