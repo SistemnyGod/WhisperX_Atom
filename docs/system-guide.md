@@ -259,10 +259,14 @@ TTS-контур:
 
 1. `SpeechResponder` выбирает локальный `TtsEngineRouter`.
 2. `SileroTtsEngine` запускает соседний `TtsHost` и модель `v5_5_ru`.
-3. Голос по умолчанию — `aidar`, sample rate — 48 kHz.
-4. Windows TTS используется только как явно разрешённый fallback при ошибке
+3. Профиль по умолчанию — `MIFODIY_TECH` со speaker `eugene`; `CLEAN`
+   воспроизводит чистый `eugene`, sample rate — 48 kHz.
+4. FX профиля применяется только к playback-потоку: исходный WAV, Recorder,
+   Voice ASR и WhisperX audio не изменяются. При ошибке FX используется чистый
+   `eugene`.
+5. Windows TTS используется только как русский fallback при ошибке
    Silero/модели/целостности.
-5. Playback получает один `responseId`; отменённый ответ не воспроизводится
+6. Playback получает один `responseId`; отменённый ответ не воспроизводится
    повторно.
 
 ### Mifodiy Intelligence v2

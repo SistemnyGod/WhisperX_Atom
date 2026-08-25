@@ -1,6 +1,6 @@
 # «Мифодий»: фактическое состояние и план завершения
 
-Дата последнего обновления: 24 августа 2026 года.
+Дата последнего обновления: 25 августа 2026 года.
 
 Этот документ отделяет реализованный код от установленного runtime и от
 запланированных функций. Для release identity, Voice assets, hardware gates и
@@ -8,18 +8,17 @@
 
 ## Важное обновление RC
 
-На clean source `894966a` завершены bounded natural command normalization,
-fail-closed Voice release gate, deterministic summary v2, LLM Doctor v2,
-structured grounding/history isolation и privacy-safe Mifodiy QA runners.
-Автоматические source checks зелёные: Python `827 passed, 62 skipped`, Voice
-`33/33`, API `20/20`, Voice Host Release build/self-test. Это не является
-установленной Voice/Assistant приёмкой.
+Последний clean source — `4b5937d847fd830172fa7eaf9821fed738760720`.
+На его основе собран клиентский pilot installer с единой identity
+`1.0.1+4b5937d847fd830172fa7eaf9821fed738760720`. Пакет содержит Desktop,
+Recorder Host, Voice Host, Resident Voice Refiner Host и TtsHost; verified
+Voice model/bridge и manifest v2 прошли локальную проверку.
 
-Текущий Docker runtime остаётся на старом image identity
-`1.0.1-21a28029a49b`; исходники в контейнеры не монтируются. Verified Voice
-assets, live 700-case corpus, far-field matrix, thread benchmark и
-authenticated 700-case Assistant QA пока отсутствуют. Поэтому состояние RC —
-`SOURCE_TESTS_GREEN / RELEASE_BLOCKED`, а не `PRODUCTION_READY`.
+Pilot не включает Server Bundle и не переключает Docker runtime. Поэтому
+серверная identity, authenticated Assistant/Qwen smoke, thread benchmark,
+live 700-case corpus и far-field matrix по-прежнему требуют отдельного
+приёма. Текущий статус — `UNSIGNED_PILOT_BUILD / BLOCKED_BY_HARDWARE`, а не
+`PRODUCTION_READY`. Docker volumes, записи, модели и Patrol360 не изменялись.
 
 ## Обозначения готовности
 
@@ -39,7 +38,7 @@ authenticated 700-case Assistant QA пока отсутствуют. Поэто�
       ├─ RecordingCommandService → Recorder Host
       └─ пользовательская API-сессия → Assistant API
           → Russian FTS → Qwen3-8B → grounding
-          → Desktop → Voice Host → Microsoft Irina
+          → Desktop → Voice Host → TtsHost/Silero `eugene`
 ```
 
 Voice Host не получает пользовательский API token, не управляет Recorder
@@ -66,6 +65,9 @@ Broker и текущую пользовательскую сессию.
 
 - `IMPLEMENTED`: основное имя — «Мифодий»; поддерживаются «Мефодий» и временный
   alias «Атом».
+- `IMPLEMENTED`: wake-word «Мифодий» активирует существующий Vosk-контур и не
+  зависит от профиля TTS. `MIFODIY_TECH` и `CLEAN` — это два варианта голоса
+  ответа одного Мифодия, а не два ассистента и не два независимых контура.
 - `IMPLEMENTED`: bundled Vosk small RU использует фонетический режим
   `Мефодий`; exact-режим разрешён только для модели с соответствующим токеном.
 - `IMPLEMENTED`: START, STOP, PAUSE, RESUME, STATUS, marker, decision и action
@@ -96,11 +98,20 @@ Broker и текущую пользовательскую сессию.
 
 ### TTS и технические интервалы
 
-- `IMPLEMENTED`: ответы создаются живым Windows TTS. Приоритет голосов:
-  `Microsoft Irina` → `Microsoft Irina Desktop` → любой установленный `ru-RU`.
-- `IMPLEMENTED`: английский голос не используется как fallback.
-- `IMPLEMENTED`: имя голоса, скорость и громкость передаются командой
-  `CONFIGURE`; значения по умолчанию — Irina, rate `0`, volume `90`.
+- `IMPLEMENTED`: основной путь — локальный Silero `v5_5_ru`, speaker `eugene`,
+  профиль `MIFODIY_TECH`; `CLEAN` оставляет чистый `eugene`.
+- `IMPLEMENTED`: `MIFODIY_TECH` применяет только на playback high-pass около
+  70 Гц, presence около 2,8 кГц, мягкую компрессию, лёгкую saturation и
+  limiter `-1 dBFS`. TTS WAV, Recorder archive, Voice ASR и WhisperX input не
+  изменяются.
+- `IMPLEMENTED`: при ошибке FX используется чистый `eugene`, при отказе
+  Silero — русский Windows fallback. Отдельный `JARVIS_EN` подключает
+  локальный Piper `jarvis-medium` только явным выбором и остаётся
+  экспериментальным английским профилем; `JARVIS_RU` — русский
+  playback-профиль на базе `eugene`, без имитации голоса актёра.
+- `IMPLEMENTED`: snapshot дополнен additive-полями `voiceProfile`,
+  `fxEnabled`, `fxApplied`, `fxFallbackReason`; cancellation, ducking и ровно
+  одно terminal-воспроизведение сохраняются.
 - `IMPLEMENTED`: legacy WAV-ответы не читаются runtime и исключены из новой
   публикации Voice Host.
 - `IMPLEMENTED`: `SYSTEM_RESPONSE_STARTED/FINISHED` создают sample-based
@@ -216,11 +227,11 @@ voice-to-answer gate.
 
 | Контур | Текущее состояние |
 | --- | --- |
-| Исходники | baseline `894966a`; документационные изменения требуют новой release identity |
-| Docker Server Node | healthy, но image `1.0.1-21a28029a49b` старше исходников |
-| Desktop/Voice Host | новая установка из текущего source не подтверждена |
+| Исходники | clean `4b5937d847fd830172fa7eaf9821fed738760720` |
+| Desktop/Voice Host | pilot identity `1.0.1+4b5937d847fd830172fa7eaf9821fed738760720` |
+| Docker Server Node | отдельный runtime; этим client pilot не обновлялся |
 | Voice-to-answer | `RUNTIME_REQUIRED`; нужен authenticated smoke с микрофоном |
-| `VOICE_ASSISTANT_READY` | не выставлять до clean installer, совпадающей identity и hardware evidence |
+| `VOICE_ASSISTANT_READY` | не выставлять до server/client identity, authenticated smoke и hardware evidence |
 
 Исходники не монтируются в контейнеры. Поэтому healthy Docker не доказывает,
 что в нём уже работают изменения текущей ветки.
@@ -239,10 +250,11 @@ voice-to-answer gate.
    Поддержаны one-shot и двухфазный режимы. Recorder-команды после
    распознавания по-прежнему проходят строгий deterministic allowlist.
 
-2. **Текущий код не установлен.**
+2. **Клиентский pilot собран, но установленный smoke не завершён.**
 
-   Необходимо собрать Desktop, Recorder Host и Voice Host из одного чистого
-   commit, установить пакет и подтвердить совпадение build identity.
+   Desktop, Recorder Host, Voice Host, Refiner Host и TtsHost собраны из
+   `4b5937d...` одной identity. Требуется подтвердить установку на целевом ПК,
+   повторный вход и согласование с Server Bundle перед production rollout.
 
 ### P1 — надёжность и защита ответа
 
@@ -281,9 +293,9 @@ voice-to-answer gate.
 3. Большая часть текущих contract tests проверяет наличие строк в исходниках.
    Нужны поведенческие тесты unrestricted question recognizer, voice memory,
    delayed Assistant result, logout isolation и строгого claims grounding.
-4. Поле выбора голоса в Desktop является свободным TextBox. Следует получать
-   список реально установленных русских голосов от Voice Host и показывать
-   ComboBox с тестовым прослушиванием.
+4. Профиль голоса в Desktop выбирается из bounded списка `MIFODIY_TECH` и
+   `CLEAN`; русский Windows fallback остаётся расширенной диагностической
+   настройкой. Свободного выбора английского голоса нет.
 
 ## Порядок завершения
 
@@ -292,8 +304,10 @@ voice-to-answer gate.
 2. Ввести scoped voice conversation memory и очистку при logout/смене встречи.
 3. Сделать claims обязательными и сохранять retrieval evidence до Qwen.
 4. Передать ожидание результата Desktop и сделать durable TTS completion.
-5. Исправить отмену TTS и выбор только из установленных русских голосов.
-6. Собрать чистый installer и установить его поверх текущей версии.
+5. Исправить отмену TTS и подтвердить A/B для `MIFODIY_TECH`, `CLEAN` и
+   русского Windows fallback.
+6. Собрать чистый installer и установить его поверх текущей версии после
+   согласования Server Bundle identity.
 7. Выполнить установленный gate:
 
 ```text
@@ -302,7 +316,7 @@ voice-to-answer gate.
 → CURRENT_MEETING retrieval
 → Qwen → strict grounding
 → полный ответ и таймкоды в Desktop
-→ короткий ответ Microsoft Irina
+→ короткий ответ TtsHost/Silero `eugene`
 ```
 
 ## Критерий `VOICE_ASSISTANT_READY`

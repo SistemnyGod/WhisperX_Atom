@@ -4,9 +4,10 @@ The local speech path is intentionally split into four responsibilities:
 
 1. `SpeechResponder` owns the bounded queue (8 items), cancellation
    generation, `IsBusy/IsSpeaking`, and response lifecycle callbacks.
-2. `TtsEngineRouter` selects Silero as the primary engine and the installed
-   Russian Windows voice as a fallback. It tracks model readiness, fallback
-   reason, restart count and synthesis timing.
+2. `TtsEngineRouter` selects Silero as the primary Russian engine, an optional
+   local Piper JARVIS-style English engine when explicitly selected, and the
+   installed Russian Windows voice as a fallback. It tracks model readiness,
+   fallback reason, restart count and synthesis timing.
 3. `TtsHost` (`apps/tts-host`) is a persistent frozen CPU process. It loads
    `v5_5_ru` once and communicates with Voice Host through UTF-8 JSON Lines.
    Requests cannot provide model paths, output paths, commands or Python code.
@@ -20,3 +21,33 @@ live under `%LocalAppData%\WhisperXAtom\TTS\Temp` and are removed after
 playback, cancellation or failure; stale files older than 24 hours are cleaned
 on startup. The model is staged at build time, never downloaded by the target
 machine and is currently restricted to an internal non-commercial pilot.
+
+## Голосовые профили Мифодия
+
+Продуктовая локаль — `ru-RU`. Голосовое слово «Мифодий» обрабатывается
+отдельным Vosk-контуром и не зависит от выбранного профиля синтеза. Профили
+определяют только голос ответа: это один ассистент, а не два разных помощника.
+
+| Профиль | Engine / speaker | Назначение |
+| --- | --- | --- |
+| `MIFODIY_TECH` | Silero `v5_5_ru` / `eugene` | основной русский голос с лёгкой технологичной обработкой |
+| `CLEAN` | Silero `v5_5_ru` / `eugene` | чистый русский `eugene` без FX |
+| `JARVIS_EN` | Piper `jarvis-medium` / `jarvis` (`en-GB`) | отдельный экспериментальный английский голос; русская кириллица уходит в fallback |
+
+`MIFODIY_TECH` применяет bounded playback-only DSP: high-pass около 70 Гц,
+небольшой presence boost около 2,8 кГц, мягкую компрессию, едва заметную
+saturation и limiter `-1 dBFS`. Обработка выполняется над потоком
+воспроизведения и не изменяет исходный TTS WAV, архив Recorder, Voice ASR или
+аудио WhisperX. Chorus, flanger и заметный reverb не используются.
+
+Если FX не удалось применить, ответ воспроизводится чистым `eugene`. Если
+Silero недоступен, используется существующий русский Windows fallback. Очередь,
+cancellation, ducking и гарантия одного terminal-воспроизведения сохраняются.
+
+В Voice/TTS snapshot additive-поля `voiceProfile`, `fxEnabled`, `fxApplied` и
+`fxFallbackReason` описывают фактически выбранный путь. Текст ответа и временные
+WAV в telemetry и diagnostic bundle не публикуются. `JARVIS_EN` включается
+только явным выбором движка/профиля, проверяет локальный manifest/SHA и не меняет
+русский Vosk, WhisperX или язык интерфейса. Для русскоязычного ответа Piper не
+используется: маршрутизатор безопасно выбирает Silero/Windows fallback. Профиль `JARVIS_RU` по-прежнему использует русский `eugene` и
+playback-only обработку, а не голосовой клон.

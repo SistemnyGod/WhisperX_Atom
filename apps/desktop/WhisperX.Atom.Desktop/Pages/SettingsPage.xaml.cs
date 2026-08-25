@@ -319,6 +319,14 @@ public sealed partial class SettingsPage : Page
         UpdateStatus();
     }
 
+    private async void EnableVoicePlaybackButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.EnableVoicePlaybackAsync();
+        UpdateVoiceStatusVisual();
+        UpdateStatus();
+    }
+
     private async void CalibrateVoiceButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;

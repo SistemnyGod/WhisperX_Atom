@@ -106,13 +106,35 @@ installed Russian Windows voice.
 - To stage verified Shadow assets locally, check out whisper.cpp at `f049fff95a089aa9969deb009cdd4892b3e74916` and pass that directory as `-WhisperCppSource` (or `WHISPER_CPP_SOURCE_DIR`) to both native build/staging scripts. Staging also requires the model/native paths, full model and bridge provenance, and the clean build identity. The required multilingual `ggml-small.bin` revision is `c521a4b02f422512d734391fdf08bb08c0862f68` with SHA256 `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`. The resulting manifest is schema v2 and is verified by `scripts\verify-voice-refiner-assets.ps1`. Release packaging fails closed unless the manifest, ABI and both SHA256 values verify. Development builds may run only with `VOICE_ASR_REFINER_MODE=OFF` when assets are unavailable.
 - Managed startup validates the installed path, build identity, PID and parent process. `STATUS` remains available while startup is in progress; commands return `VOICE_HOST_NOT_INITIALIZED` until the runtime is ready.
 - `TEST_SPEECH` is parse-only and never calls Recorder. The latest microphone telemetry contains RMS, peak, clipping, signal state and effective endpoint; pre-wake audio is discarded.
-- Responses use `SpeechResponder` → `TtsEngineRouter` → local Silero
-  `v5_5_ru` on CPU by default. The host returns a temporary WAV to the
-  `SpeechAudioPlayer`; it never receives model/output paths from the caller.
-  After repeated Silero failures the router uses Microsoft Irina, then
-  Microsoft Irina Desktop, then another installed `ru-RU` voice. English
+- Responses use `SpeechResponder` → `TtsEngineRouter` → local Silero by default;
+  explicit `JARVIS_EN` uses the optional local Piper bridge and falls back
+  safely to the Russian path when its assets are unavailable.
+  `v5_5_ru` on CPU by default. The default speaker is `eugene` with the
+  `MIFODIY_TECH` playback profile; `CLEAN` keeps the unprocessed voice. The
+  host returns a temporary WAV to the `SpeechAudioPlayer`; it never receives
+  model/output paths from the caller. After Silero/FX failures the router uses
+  clean `eugene`, then the installed Russian `ru-RU` Windows fallback. English
   voices and the legacy WAV bundle are not fallbacks. See
   [`apps/tts-host/README.md`](../tts-host/README.md) for the JSONL protocol,
   model staging and non-commercial pilot licensing.
 - Voice audio is not persisted by the fixed-command path.
 - Missing model, microphone, native runtime, or Recorder IPC places SessionHost in `DEGRADED` instead of crashing.
+
+## Навигация и эксплуатация
+
+`WhisperX.Atom.Voice.Core/` содержит контракты, нормализацию и intent gate;
+`WhisperX.Atom.Voice.Host/` — процесс микрофона, wake/Vosk, Desktop Broker и
+TTS orchestration; `WhisperX.Atom.Voice.Refiner.Host/` — необязательный resident
+Whisper Shadow. Модель Vosk и manifest находятся в `Models/`, а сценарии
+приёмки — в `scripts/voice-shadow-corpus.ps1`, `scripts/e2e-far-field-voice.ps1`
+и live-run вариантах.
+
+Обычный маршрут: wake-word «Мифодий» → constrained/unrestricted Vosk →
+`VoiceCommandArbiter` → локальный Recorder command или Desktop Assistant
+Broker. Voice Host не имеет доступа к архиву и не вызывает Qwen напрямую.
+Падение Refiner отключает только Shadow/уточнение и оставляет Vosk.
+
+Для локальной эксплуатации используйте `--self-test` и `--doctor`. Команды
+`START/PAUSE/RESUME/STOP` проверяются только через deterministic allowlist;
+fixture replay запускайте с `--dry-run`, чтобы не менять запись. Production
+evidence создаётся live-run и содержит только IDs и метрики.

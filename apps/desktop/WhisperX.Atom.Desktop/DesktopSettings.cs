@@ -85,7 +85,7 @@ public sealed record DesktopSettings(
             Math.Clamp(voiceRate, -10, 10),
             Math.Clamp(voiceVolume, 0, 100),
             NormalizeUpdateChannel(updateChannel),
-            string.Equals(ttsEngine?.Trim(), "WINDOWS", StringComparison.OrdinalIgnoreCase) ? "WINDOWS" : "SILERO",
+            NormalizeTtsEngine(ttsEngine),
             string.IsNullOrWhiteSpace(ttsVoice) ? "aidar" : ttsVoice.Trim().ToLowerInvariant(),
             ttsSampleRate is 24000 or 48000 ? ttsSampleRate : 48000,
             Math.Clamp(ttsCpuThreads, 1, 32),
@@ -142,7 +142,20 @@ public sealed record DesktopSettings(
         => string.Equals(channel?.Trim(), "pilot", StringComparison.OrdinalIgnoreCase) ? "pilot" : "stable";
 
     private static string NormalizeTtsVoiceProfile(string? profile)
-        => string.Equals(profile?.Trim(), "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : "MIFODIY_TECH";
+    {
+        if (string.Equals(profile?.Trim(), "AIDAR_CLEAN", StringComparison.OrdinalIgnoreCase)) return "AIDAR_CLEAN";
+        if (string.Equals(profile?.Trim(), "CLEAN", StringComparison.OrdinalIgnoreCase)) return "CLEAN";
+        if (string.Equals(profile?.Trim(), "JARVIS_RU", StringComparison.OrdinalIgnoreCase)) return "JARVIS_RU";
+        if (string.Equals(profile?.Trim(), "JARVIS_EN", StringComparison.OrdinalIgnoreCase)) return "JARVIS_EN";
+        return "MIFODIY_TECH";
+    }
+
+    private static string NormalizeTtsEngine(string? engine)
+    {
+        if (string.Equals(engine?.Trim(), "WINDOWS", StringComparison.OrdinalIgnoreCase)) return "WINDOWS";
+        if (string.Equals(engine?.Trim(), "PIPER_JARVIS", StringComparison.OrdinalIgnoreCase)) return "PIPER_JARVIS";
+        return "SILERO";
+    }
 
     private static DesktopSettings CreateDefault() => new(DefaultApiUrl(), "admin", null, DefaultArchiveRoot());
 

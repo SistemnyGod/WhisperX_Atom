@@ -25,7 +25,7 @@ public sealed class VoiceCommandArbiter(VoiceIntentParser parser)
         var unrestricted = _parser.Parse(text, confidence, minimumConfidence);
         if (!string.IsNullOrWhiteSpace(grammarText))
         {
-            var input = _parser.HasWakeWord(grammarText) ? grammarText : $"Мифодий {grammarText}";
+            var input = _parser.HasWakeWordAtBoundary(grammarText) ? grammarText : $"Мифодий {grammarText}";
             var grammar = _parser.Parse(input, grammarConfidence, minimumConfidence);
             if (grammar.Intent is not (VoiceIntent.Unknown or VoiceIntent.AssistantQuery)
                 && _parser.IsSafeRecorderCommand(text)

@@ -173,7 +173,10 @@ public sealed record VoiceHostSnapshot(
     string VoiceProfile = "MIFODIY_TECH",
     bool TtsFxEnabled = false,
     bool TtsFxApplied = false,
-    string? TtsFxFallbackReason = null);
+    string? TtsFxFallbackReason = null,
+    // Additive status field.  Older Desktop clients simply ignore it; newer
+    // clients can distinguish an intentional silent mode from a broken TTS.
+    bool QuietMode = false);
 
 public sealed record VoiceResponse(
     string Text,

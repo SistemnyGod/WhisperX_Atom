@@ -207,6 +207,7 @@
                                             <TextBlock Text="Движок" Style="{StaticResource CaptionStyle}" />
                                             <ComboBox SelectedValue="{Binding TtsEngine, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Движок синтеза речи">
                                                 <ComboBoxItem Content="Локальный Silero" Tag="SILERO" />
+                                                <ComboBoxItem Content="Piper J.A.R.V.I.S. (English, experimental)" Tag="PIPER_JARVIS" />
                                                 <ComboBoxItem Content="Windows fallback" Tag="WINDOWS" />
                                             </ComboBox>
                                         </StackPanel>
@@ -214,8 +215,12 @@
                                             <TextBlock Text="Профиль голоса" Style="{StaticResource CaptionStyle}" />
                                             <ComboBox SelectedValue="{Binding TtsVoiceProfile, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Профиль голоса Мифодия">
                                                 <ComboBoxItem Content="Мифодий — технологичный" Tag="MIFODIY_TECH" />
+                                                <ComboBoxItem Content="Русский технологичный — Jarvis-style (не клон)" Tag="JARVIS_RU" />
+                                                <ComboBoxItem Content="J.A.R.V.I.S. — English Piper (experimental)" Tag="JARVIS_EN" />
                                                 <ComboBoxItem Content="Евгений — чистый" Tag="CLEAN" />
+                                                <ComboBoxItem Content="Айдар — чистый" Tag="AIDAR_CLEAN" />
                                             </ComboBox>
+                                            <TextBlock Text="Английский J.A.R.V.I.S. работает только при наличии локальных Piper assets; при их отсутствии используется русский fallback." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
                                         </StackPanel>
                                     </Grid>
                                     <CheckBox Content="Разрешить Windows fallback при недоступности Silero" IsChecked="{Binding TtsFallbackEnabled, Mode=TwoWay}" />
@@ -230,6 +235,8 @@
                                         <TextBlock Grid.Column="1" Text="{Binding VoiceSpeechQueue}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSpeechQueue}" />
                                     </Grid>
                                     <TextBlock Text="{Binding VoiceTtsStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceTtsStatus}" />
+                                    <TextBlock Text="{Binding VoicePlaybackStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" AutomationProperties.Name="Состояние озвучки Мифодия" />
+                                    <Button Content="Включить озвучку" Style="{StaticResource SecondaryButtonStyle}" Click="EnableVoicePlaybackButton_Click" IsEnabled="{Binding CanEnableVoicePlayback}" HorizontalAlignment="Left" AutomationProperties.Name="Включить озвучку Мифодия" ToolTipService.ToolTip="Выключить тихий режим и применить настройки TTS" />
                                     <TextBlock Text="{Binding VoiceLiveMode}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveMode}" />
                                     <TextBlock Text="{Binding VoiceLiveTracks}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveTracks}" />
                                     <TextBlock Text="{Binding VoiceLiveStats}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveStats}" />

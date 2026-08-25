@@ -8,12 +8,16 @@
     # and far-field evidence exists, but carries that restriction explicitly
     # in its release manifest and must not be promoted by a release gate.
     [switch]$Pilot,
+    # Explicit opt-in for packaging the current dirty workspace as a pilot.
+    # This is never accepted as a production candidate.
+    [switch]$AllowDirtyPilot,
     [string]$ServerOrigin = "http://192.168.2.194:8080",
     [string]$TtsWheelhouse = '',
     [string]$ServerBundleRoot = 'artifacts/server-bundle',
     [string]$ServerArchive = 'artifacts/WhisperXAtom-Server.zip'
 )
 $ErrorActionPreference = "Stop"
+if ($AllowDirtyPilot -and -not $Pilot) { throw "ALLOW_DIRTY_PILOT_REQUIRES_PILOT" }
 $originUri = $null
 $validOrigin = (
     [Uri]::TryCreate($ServerOrigin.TrimEnd('/'), [UriKind]::Absolute, [ref]$originUri) -and
@@ -33,21 +37,37 @@ if (-not $SkipPublish -or -not (Test-Path -LiteralPath $artifact)) {
     # payload stale while the installer is being created.
     if ($TtsWheelhouse) {
         if ($NoRestore) {
-            & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            if ($AllowDirtyPilot) {
+                & $publish -NoRestore -AllowDirty -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            } else {
+                & $publish -NoRestore -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            }
         } else {
-            & $publish -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            if ($AllowDirtyPilot) {
+                & $publish -AllowDirty -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            } else {
+                & $publish -TtsWheelhouse $TtsWheelhouse -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+            }
         }
     } elseif ($NoRestore) {
-        & $publish -NoRestore -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        if ($AllowDirtyPilot) {
+            & $publish -NoRestore -AllowDirty -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        } else {
+            & $publish -NoRestore -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        }
     } else {
-        & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        if ($AllowDirtyPilot) {
+            & $publish -AllowDirty -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        } else {
+            & $publish -RequireVoiceRefinerAssets:$RequireVoiceRefinerAssets -DevelopmentNoVoiceRefinerAssets:$DevelopmentNoVoiceRefinerAssets
+        }
     }
 }
 $identityPath = Join-Path $repoRoot "artifacts\\desktop\\build-identity.json"
 if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { throw "DESKTOP_IDENTITY_MANIFEST_MISSING" }
 $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
 $buildIdentity = [string]$identity.buildIdentity
-if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev|dirty' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}$' -or [bool]$identity.dirty) {
+if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)dev' -or $buildIdentity -notmatch '\+[0-9a-fA-F]{40}(-dirty)?$' -or ([bool]$identity.dirty -and -not ($Pilot -and $AllowDirtyPilot))) {
     throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
 }
 if ($DevelopmentNoVoiceRefinerAssets) {

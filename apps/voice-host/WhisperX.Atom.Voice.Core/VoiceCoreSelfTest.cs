@@ -14,6 +14,8 @@ public static class VoiceCoreSelfTest
         Assert(parser.HasWakeWord("Атом, начни запись"), "wake word");
         Assert(parser.HasWakeWord("Мифодий, начни запись"), "primary wake word");
         Assert(parser.HasWakeWord("Мефодий, начни запись"), "wake alias");
+        Assert(parser.HasWakeWordAtBoundary("Мифодий, начни запись"), "wake word at utterance boundary");
+        Assert(!parser.HasWakeWordAtBoundary("Он сказал Мифодий, начни запись"), "embedded wake word must not activate");
         Assert(parser.Parse("Мифодий, начни запись").Intent == VoiceIntent.StartRecording, "primary start intent");
         Assert(parser.Parse("Мифодий, запусти запись").Intent == VoiceIntent.StartRecording, "start alias intent");
         Assert(parser.Parse("Мифодий, запусти запись после звонка").Intent == VoiceIntent.AssistantQuery, "start alias with trailing text is conversational");

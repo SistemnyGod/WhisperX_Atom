@@ -87,7 +87,12 @@
                     <Border x:Name="HomeVoiceStrip" Style="{StaticResource InlineNoticeStyle}" Padding="12,10">
                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
                             <Ellipse x:Name="VoiceSummaryIndicator" Width="9" Height="9" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
-                            <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="Мифодий" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding VoiceStatus}" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock Text="Мифодий" Style="{StaticResource WorkspaceLabelStyle}" />
+                                <TextBlock Text="{Binding VoiceStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding VoiceStatusDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding VoicePlaybackStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" AutomationProperties.Name="Состояние озвучки Мифодия" />
+                            </StackPanel>
                             <Button Grid.Column="2" Content="Настроить голос" Style="{StaticResource GhostButtonStyle}" Click="SettingsButton_Click" AutomationProperties.Name="Настроить голосовой помощник" />
                         </Grid>
                     </Border>

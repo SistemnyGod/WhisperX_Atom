@@ -58,6 +58,8 @@ public sealed partial class HomePage : Page
             or nameof(HomeViewModel.ServerSummary)
             or nameof(HomeViewModel.WhisperXSummary)
             or nameof(HomeViewModel.VoiceStatus)
+            or nameof(HomeViewModel.VoiceStatusDetail)
+            or nameof(HomeViewModel.VoicePlaybackStatus)
             or nameof(HomeViewModel.VoiceProcessingGainDb)
             or nameof(HomeViewModel.RecentMeetingRows)
             or nameof(HomeViewModel.MicrophoneSignalState)

@@ -58,6 +58,7 @@ public sealed class SettingsViewModel : ObservableObject
     private string _voiceDiagnosticsDetail = "—";
     private string _voiceEffectiveVoice = "—";
     private string _voiceTtsStatus = "Движок TTS: —";
+    private string _voicePlaybackStatus = "Озвучка: проверяется";
     private bool _voiceFallbackUsed;
     private string _voiceSpeechQueue = "Очередь речи: 0";
     private string _voiceAssistantDelivery = "Доставка ответов: —";
@@ -67,7 +68,7 @@ public sealed class SettingsViewModel : ObservableObject
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
     public ObservableCollection<string> VoiceOptions { get; } = new();
-    public IReadOnlyList<string> TtsVoiceProfileOptions { get; } = new[] { "MIFODIY_TECH", "CLEAN" };
+    public IReadOnlyList<string> TtsVoiceProfileOptions { get; } = new[] { "MIFODIY_TECH", "JARVIS_RU", "JARVIS_EN", "CLEAN", "AIDAR_CLEAN" };
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -124,14 +125,25 @@ public sealed class SettingsViewModel : ObservableObject
     public string RecorderRuntimeError { get => _recorderRuntimeError; private set => SetProperty(ref _recorderRuntimeError, value); }
     public string RecorderRuntimeProcess { get => _recorderRuntimeProcess; private set => SetProperty(ref _recorderRuntimeProcess, value); }
     public bool VoiceAlwaysListening { get => _voiceAlwaysListening; set { if (SetProperty(ref _voiceAlwaysListening, value)) _ = ApplyVoiceSettingsAsync(); } }
-    public bool VoiceQuietMode { get => _voiceQuietMode; set { if (SetProperty(ref _voiceQuietMode, value)) _ = ApplyVoiceSettingsAsync(); } }
+    public bool VoiceQuietMode
+    {
+        get => _voiceQuietMode;
+        set
+        {
+            if (!SetProperty(ref _voiceQuietMode, value)) return;
+            OnPropertyChanged(nameof(CanEnableVoicePlayback));
+            OnPropertyChanged(nameof(VoicePlaybackStatus));
+            OnPropertyChanged(nameof(VoiceStatusDetail));
+            _ = ApplyVoiceSettingsAsync();
+        }
+    }
     public string VoiceSensitivity { get => _voiceSensitivity; set { if (SetProperty(ref _voiceSensitivity, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string VoiceName { get => _voiceName; set { if (SetProperty(ref _voiceName, value)) _ = ApplyVoiceSettingsAsync(); } }
     public int VoiceRate { get => _voiceRate; set { var valueToSet = Math.Clamp(value, -10, 10); if (SetProperty(ref _voiceRate, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsEngine { get => _ttsEngine; set { if (SetProperty(ref _ttsEngine, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsVoice { get => _ttsVoice; set { if (SetProperty(ref _ttsVoice, value)) _ = ApplyVoiceSettingsAsync(); } }
-    public string TtsVoiceProfile { get => _ttsVoiceProfile; set { var normalized = string.Equals(value, "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : "MIFODIY_TECH"; if (SetProperty(ref _ttsVoiceProfile, normalized)) _ = ApplyVoiceSettingsAsync(); } }
+    public string TtsVoiceProfile { get => _ttsVoiceProfile; set { var normalized = string.Equals(value, "AIDAR_CLEAN", StringComparison.OrdinalIgnoreCase) ? "AIDAR_CLEAN" : string.Equals(value, "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : string.Equals(value, "JARVIS_RU", StringComparison.OrdinalIgnoreCase) ? "JARVIS_RU" : string.Equals(value, "JARVIS_EN", StringComparison.OrdinalIgnoreCase) ? "JARVIS_EN" : "MIFODIY_TECH"; if (SetProperty(ref _ttsVoiceProfile, normalized)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsSampleRate { get => _ttsSampleRate; set { var v = value is 24000 or 48000 ? value : 48000; if (SetProperty(ref _ttsSampleRate, v)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsCpuThreads { get => _ttsCpuThreads; set { var v = Math.Clamp(value, 1, 32); if (SetProperty(ref _ttsCpuThreads, v)) _ = ApplyVoiceSettingsAsync(); } }
     public bool TtsFallbackEnabled { get => _ttsFallbackEnabled; set { if (SetProperty(ref _ttsFallbackEnabled, value)) _ = ApplyVoiceSettingsAsync(); } }
@@ -149,7 +161,18 @@ public sealed class SettingsViewModel : ObservableObject
     }
     public string VoiceProcessingGainText => VoiceProcessingGainDb == 0 ? "Без усиления" : $"+{VoiceProcessingGainDb} дБ";
     public string VoiceEffectiveVoice { get => _voiceEffectiveVoice; private set { if (SetProperty(ref _voiceEffectiveVoice, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
-    public string VoiceTtsStatus { get => _voiceTtsStatus; private set => SetProperty(ref _voiceTtsStatus, value); }
+    public string VoiceTtsStatus
+    {
+        get => _voiceTtsStatus;
+        private set
+        {
+            if (!SetProperty(ref _voiceTtsStatus, value)) return;
+            OnPropertyChanged(nameof(VoicePlaybackStatus));
+            OnPropertyChanged(nameof(VoiceStatusDetail));
+        }
+    }
+    public string VoicePlaybackStatus { get => _voicePlaybackStatus; private set => SetProperty(ref _voicePlaybackStatus, value); }
+    public bool CanEnableVoicePlayback => VoiceQuietMode;
     public bool VoiceFallbackUsed { get => _voiceFallbackUsed; private set { if (SetProperty(ref _voiceFallbackUsed, value)) OnPropertyChanged(nameof(VoiceVoiceStatus)); } }
     public string VoiceSpeechQueue { get => _voiceSpeechQueue; private set => SetProperty(ref _voiceSpeechQueue, value); }
     public string VoiceAssistantDelivery { get => _voiceAssistantDelivery; private set => SetProperty(ref _voiceAssistantDelivery, value); }
@@ -298,6 +321,9 @@ public sealed class SettingsViewModel : ObservableObject
                 VoiceLiveTracks = "Дорожки: —";
                 VoiceLiveStats = "Live ASR: —";
                 VoiceAcousticDiagnostics = "Автокалибровка: нет данных";
+                VoicePlaybackStatus = VoiceQuietMode
+                    ? "Озвучка отключена: тихий режим"
+                    : "Озвучка не проверена: Voice Host не запущен";
                 var controllerError = _services.VoiceHost.LastErrorCode;
                 ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                     controllerError is null ? "Voice Host не запущен" : $"Voice Host: {controllerError}",
@@ -320,6 +346,14 @@ public sealed class SettingsViewModel : ObservableObject
             }
             var heartbeat = response.HeartbeatAtUtc ?? response.UpdatedAt;
             var heartbeatStale = DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() > TimeSpan.FromSeconds(10);
+            // QuietMode is additive in the status contract. Keep the local
+            // setting when talking to an older host that does not send it.
+            if (response.QuietMode && !VoiceQuietMode)
+            {
+                _voiceQuietMode = true;
+                OnPropertyChanged(nameof(VoiceQuietMode));
+                OnPropertyChanged(nameof(CanEnableVoicePlayback));
+            }
             ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                 heartbeatStale
                     ? "Нет heartbeat от Voice Host"
@@ -346,6 +380,7 @@ public sealed class SettingsViewModel : ObservableObject
                 ? (response.TtsFxApplied ? "FX включён" : $"чистый fallback{(string.IsNullOrWhiteSpace(response.TtsFxFallbackReason) ? string.Empty : $" ({response.TtsFxFallbackReason})")}")
                 : "чистый голос";
             VoiceTtsStatus = $"TTS: {response.TtsEngine} · профиль {response.VoiceProfile} · {response.TtsVoice ?? response.EffectiveVoiceName ?? "—"} · {fxState} · {(response.TtsReady ? "готов" : "fallback/недоступен")}";
+            VoicePlaybackStatus = FormatPlaybackStatus(response);
             VoiceSpeechQueue = $"Очередь речи: {response.SpeechQueueDepth} · отброшено: {response.SpeechQueueDrops}";
             VoiceLiveMode = response.LiveAudioMode switch
             {
@@ -380,6 +415,9 @@ public sealed class SettingsViewModel : ObservableObject
             VoiceLiveTracks = "Дорожки: —";
             VoiceLiveStats = "Live ASR: —";
             VoiceAcousticDiagnostics = "Автокалибровка: ошибка чтения telemetry";
+            VoicePlaybackStatus = VoiceQuietMode
+                ? "Озвучка отключена: тихий режим"
+                : "Озвучка недоступна: Voice Host не отвечает";
             var errorCode = _services.VoiceHost.LastErrorCode ?? UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
             ApplyVoiceDiagnostics(new VoiceDiagnosticsUiState(
                 $"Voice Host: {errorCode}",
@@ -492,6 +530,12 @@ public sealed class SettingsViewModel : ObservableObject
 
     private string GetVoiceStatusDetail()
     {
+        if (VoiceQuietMode || string.Equals(VoiceErrorCode, "VOICE_QUIET_MODE", StringComparison.OrdinalIgnoreCase))
+            return "Тихий режим включён. Ответы не воспроизводятся; выключите его, чтобы вернуть озвучку.";
+        if (VoicePlaybackStatus.Contains("недоступна", StringComparison.OrdinalIgnoreCase))
+            return "Voice Host работает, но локальный TTS не готов. Нажмите «Проверить голос» или включите русский Windows fallback.";
+        if (VoicePlaybackStatus.Contains("не проверена", StringComparison.OrdinalIgnoreCase))
+            return "Voice Host ещё не запущен. Откройте Desktop заново или нажмите «Обновить статус».";
         if (_services.Backend.AuthState == DesktopAuthState.LoginRequired)
             return "Авторизация Desktop истекла; локальный Voice Host не требует сети для команд записи.";
         if (string.Equals(VoiceErrorCode, "VOICE_TELEMETRY_DISCONNECTED", StringComparison.OrdinalIgnoreCase))
@@ -506,6 +550,17 @@ public sealed class SettingsViewModel : ObservableObject
         if (VoiceStatus.Contains("LISTENING", StringComparison.OrdinalIgnoreCase))
             return "Мифодий готов к кодовому слову и локальным командам.";
         return "Состояние Voice Host и телеметрии обновляется автоматически.";
+    }
+
+    private static string FormatPlaybackStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot response)
+    {
+        if (response.QuietMode)
+            return "Озвучка отключена: тихий режим";
+        if (response.TtsReady && response.TtsFallbackUsed)
+            return "Озвучка готова: русский Windows fallback";
+        if (response.TtsReady)
+            return $"Озвучка готова: {response.TtsEngine} · {response.TtsVoice ?? response.EffectiveVoiceName ?? "русский голос"}";
+        return $"Озвучка недоступна: {response.TtsFallbackReason ?? response.LastErrorCode ?? "TTS не готов"}";
     }
 
     private static string LiveTrackLabel(string state) => state switch
@@ -533,8 +588,51 @@ public sealed class SettingsViewModel : ObservableObject
 
     public async Task TestVoiceTtsAsync()
     {
-        try { _ = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("TEST_TTS"); }
-        catch (Exception ex) { VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE"); }
+        try
+        {
+            if (VoiceQuietMode)
+            {
+                VoiceErrorCode = "VOICE_QUIET_MODE";
+                VoicePlaybackStatus = "Озвучка отключена: тихий режим";
+                VoiceStatus = "Тихий режим включён";
+                return;
+            }
+            // A stale Desktop session or a delayed startup may leave the
+            // hidden Host stopped.  A local TTS test is allowed to recover
+            // that process and does not require the Assistant API.
+            if (!await _services.VoiceHost.StartAsync().ConfigureAwait(true))
+            {
+                VoiceErrorCode = _services.VoiceHost.LastErrorCode ?? "VOICE_HOST_UNAVAILABLE";
+                VoicePlaybackStatus = "Озвучка недоступна: Voice Host не запущен";
+                return;
+            }
+            var response = await new WhisperX.Atom.Desktop.VoiceHostClient().SendAsync("TEST_TTS");
+            if (!response.Ok)
+            {
+                VoiceErrorCode = response.Error ?? "VOICE_TTS_UNAVAILABLE";
+                VoicePlaybackStatus = $"Озвучка недоступна: {VoiceErrorCode}";
+                return;
+            }
+            VoiceErrorCode = response.Data is JsonElement data && data.TryGetProperty("errorCode", out var error)
+                ? error.GetString() ?? "—"
+                : "—";
+            VoicePlaybackStatus = response.Data is JsonElement result && result.TryGetProperty("engine", out var engine)
+                ? $"Озвучка проверена: {engine.GetString() ?? "русский голос"}"
+                : "Озвучка проверена";
+            VoiceStatus = "Мифодий готов";
+        }
+        catch (Exception ex)
+        {
+            VoiceErrorCode = UiErrorFormatter.Format(ex, "VOICE_HOST_UNAVAILABLE");
+            VoicePlaybackStatus = "Озвучка недоступна: Voice Host не отвечает";
+        }
+    }
+
+    public async Task EnableVoicePlaybackAsync()
+    {
+        if (!VoiceQuietMode) return;
+        VoiceQuietMode = false;
+        await RefreshVoiceDiagnosticsAsync().ConfigureAwait(true);
     }
 
     public async Task CalibrateVoiceNoiseAsync()

@@ -16,8 +16,10 @@
 | [Технологический стек](technology-stack.md) | Языки, фреймворки, ML и инфраструктура |
 | [Потоки данных](data-flow.md) | Файл, запись, чанки, media pipeline, WhisperX и transcript |
 | [Настройка](configuration.md) | `.env`, порты, каталоги и режимы обработки |
+| [TTS architecture](tts-architecture.md) | Русские профили голоса Мифодия, playback-only FX и fallback |
 | [Эксплуатация host-runtime](operations-host-runtime.md) | Запуск, остановка, doctor, watchdog и восстановление |
 | [API и IPC](api-and-ipc.md) | Основные REST, SSE, TUS и Named Pipe контракты |
+| [Исторический импорт](historical-import.md) | PREVIEW/APPLY TXT/DOCX, privacy-safe dedupe и индексация Meeting Memory |
 | [Тестирование](testing.md) | Сборка, targeted tests, doctor и E2E |
 | [«Мифодий»: текущее состояние](mifodiy-current-state.md) | Реализованные функции, подтверждённые gates и оставшиеся дефекты Voice/Assistant |
 | [Production readiness](production-readiness.md) | Актуальная identity, safety-инварианты, Voice/LLM/QA gates и текущие блокеры выпуска |

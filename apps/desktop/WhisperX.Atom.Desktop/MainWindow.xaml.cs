@@ -393,6 +393,18 @@ public sealed partial class MainWindow : Window
             SetStatusPill(VoiceStatusPill, VoiceStatusText, controllerError is not null || _services.VoiceHost.State == "NEEDS_SETUP" ? "warning" : "neutral");
             return;
         }
+        if (snapshot.QuietMode)
+        {
+            VoiceStatusText.Text = "Мифодий · тихий режим";
+            SetStatusPill(VoiceStatusPill, VoiceStatusText, "warning");
+            return;
+        }
+        if (!snapshot.TtsReady && !snapshot.TtsFallbackUsed)
+        {
+            VoiceStatusText.Text = "Мифодий · озвучка недоступна";
+            SetStatusPill(VoiceStatusPill, VoiceStatusText, "warning");
+            return;
+        }
         var heartbeat = snapshot.HeartbeatAtUtc ?? snapshot.UpdatedAt;
         var stale = DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() > TimeSpan.FromSeconds(10);
         var voiceState = stale ? "Мифодий · нет heartbeat" : snapshot.State.ToUpperInvariant() switch
@@ -416,6 +428,8 @@ public sealed partial class MainWindow : Window
         "VOICE_HOST_PROCESS_UNINSPECTABLE" => "Мифодий · проверка процесса недоступна",
         "VOICE_HOST_OWNER_MISMATCH" => "Мифодий · процесс другого пользователя",
         "VOICE_HOST_BUSY" => "Мифодий · занят",
+        "VOICE_QUIET_MODE" => "Мифодий · тихий режим",
+        "VOICE_TTS_UNAVAILABLE" => "Мифодий · озвучка недоступна",
         _ => "Мифодий · требуется проверка"
     };
 

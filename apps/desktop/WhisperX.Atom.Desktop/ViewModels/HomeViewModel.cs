@@ -21,6 +21,8 @@ public sealed class HomeViewModel : ObservableObject
     private string _serverSummary = "Проверка сервера…";
     private string _whisperXSummary = "Проверка WhisperX…";
     private string _voiceStatus = "Мифодий: проверка состояния";
+    private string _voiceStatusDetail = "Состояние Voice Host проверяется автоматически";
+    private string _voicePlaybackStatus = "Озвучка: проверяется";
     private string _recordingStatus = "Проверяется состояние записи…";
     private string _heroTitle = "Готов к новой записи";
     private string _effectiveMicrophoneText = "Микрофон ещё не подтверждён";
@@ -67,6 +69,8 @@ public sealed class HomeViewModel : ObservableObject
     public string ServerSummary { get => _serverSummary; private set => SetProperty(ref _serverSummary, value); }
     public string WhisperXSummary { get => _whisperXSummary; private set => SetProperty(ref _whisperXSummary, value); }
     public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public string VoiceStatusDetail { get => _voiceStatusDetail; private set => SetProperty(ref _voiceStatusDetail, value); }
+    public string VoicePlaybackStatus { get => _voicePlaybackStatus; private set => SetProperty(ref _voicePlaybackStatus, value); }
     public string HeroTitle { get => _heroTitle; private set => SetProperty(ref _heroTitle, value); }
     public string RecordingActionText => _recordingState.ToUpperInvariant() switch
     {
@@ -260,10 +264,23 @@ public sealed class HomeViewModel : ObservableObject
             try
             {
                 var voice = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken);
-                VoiceStatus = FormatVoiceStatus(voice, MicrophoneSignalState);
+                var localVoiceSettings = _services.Settings.Load();
+                VoiceStatus = FormatVoiceStatus(voice, MicrophoneSignalState, localVoiceSettings.VoiceQuietMode);
+                VoiceStatusDetail = FormatVoiceStatusDetail(voice, localVoiceSettings.VoiceQuietMode, _services.Backend.AuthState);
+                VoicePlaybackStatus = FormatPlaybackStatus(voice, localVoiceSettings.VoiceQuietMode);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch { VoiceStatus = "Мифодий недоступен"; }
+            catch
+            {
+                var localVoiceSettings = _services.Settings.Load();
+                VoiceStatus = localVoiceSettings.VoiceQuietMode ? "Тихий режим включён" : "Voice Host недоступен";
+                VoiceStatusDetail = localVoiceSettings.VoiceQuietMode
+                    ? "Озвучка ответов отключена настройкой «Тихий режим»."
+                    : "Voice Host не отвечает; локальная запись и её команды не зависят от сервера.";
+                VoicePlaybackStatus = localVoiceSettings.VoiceQuietMode
+                    ? "Озвучка отключена"
+                    : "Озвучка недоступна: Voice Host не отвечает";
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
@@ -276,7 +293,9 @@ public sealed class HomeViewModel : ObservableObject
             OnPropertyChanged(nameof(MediaTimeText));
             AgentStatus = "Recorder Agent недоступен";
             RecorderSummary = "Recorder недоступен";
-            VoiceStatus = "Мифодий недоступен";
+            VoiceStatus = "Voice Host недоступен";
+            VoiceStatusDetail = "Не удалось получить локальное состояние помощника. Проверьте Desktop и Voice Host.";
+            VoicePlaybackStatus = "Озвучка недоступна";
             RecordingStatus = "Запись недоступна";
             StorageText = "Ожидание проверки";
             PendingUploadsText = "—";
@@ -540,10 +559,12 @@ public sealed class HomeViewModel : ObservableObject
         _ => string.IsNullOrWhiteSpace(stage) ? "Обработка" : stage
     };
 
-    private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState)
+    private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState, bool configuredQuietMode)
     {
-        if (snapshot is null) return "Мифодий недоступен";
+        if (snapshot is null) return configuredQuietMode ? "Тихий режим включён" : "Voice Host недоступен";
+        if (snapshot.QuietMode) return "Тихий режим включён";
         if (snapshot.IsSpeaking || snapshot.State.Equals("RESPONDING", StringComparison.OrdinalIgnoreCase)) return "Мифодий озвучивает ответ";
+        if (!snapshot.TtsReady && !snapshot.TtsFallbackUsed) return "Озвучка недоступна";
         if (microphoneSignalState is "NO_PACKETS" or "READY_NO_SIGNAL") return "Мифодий ждёт аудиосигнал";
         return snapshot.State.ToUpperInvariant() switch
         {
@@ -553,6 +574,29 @@ public sealed class HomeViewModel : ObservableObject
             "DEGRADED" or "ERROR" => "Мифодий требует проверки",
             _ => "Мифодий готов"
         };
+    }
+
+    private static string FormatVoiceStatusDetail(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, bool configuredQuietMode, DesktopAuthState authState)
+    {
+        if (configuredQuietMode || snapshot?.QuietMode == true)
+            return "Тихий режим включён. Чтобы слышать ответы, выключите его в Настройки → Мифодий.";
+        if (snapshot is null)
+            return "Voice Host не запущен или недоступен. Откройте Desktop заново и проверьте голос.";
+        if (!snapshot.TtsReady && !snapshot.TtsFallbackUsed)
+            return $"Локальный TTS не готов ({snapshot.TtsFallbackReason ?? snapshot.LastErrorCode ?? "причина не указана"}). Запись остаётся доступной.";
+        if (authState == DesktopAuthState.LoginRequired)
+            return "Сессия сервера истекла. Локальная озвучка работает отдельно, Assistant и Qwen требуют повторного входа.";
+        if (snapshot.TtsFallbackUsed)
+            return "Silero недоступен, используется русский Windows fallback.";
+        return "Локальная озвучка готова; сервер для неё не требуется.";
+    }
+
+    private static string FormatPlaybackStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, bool configuredQuietMode)
+    {
+        if (configuredQuietMode || snapshot?.QuietMode == true) return "Озвучка отключена";
+        if (snapshot is null) return "Озвучка не проверена";
+        if (snapshot.TtsFallbackUsed) return "Озвучка готова · Windows fallback";
+        return snapshot.TtsReady ? $"Озвучка готова · {snapshot.TtsEngine}" : "Озвучка недоступна";
     }
 
     public sealed record MeetingMetrics(string MeetingId, string Title, bool IsProcessing, bool HasSummary, int OpenTasks, string Stage, int Progress, IReadOnlyList<DesktopPipelineRun> Pipeline, DesktopJob? RetryableJob, string? ErrorCode)

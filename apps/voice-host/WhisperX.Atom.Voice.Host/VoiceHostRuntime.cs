@@ -42,6 +42,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private static readonly (int Threads, string? Error) VoiceRefinerThreadsConfiguration = ParseVoiceRefinerThreads(
         Environment.GetEnvironmentVariable("VOICE_REFINER_THREADS"));
     private const int AssistantRefinementBudgetMs = 5_000;
+    private const double WakeMinimumConfidence = 0.70;
 
     private static readonly string[] WakeGrammar = CreateWakeGrammar();
     private static readonly string[] CommandGrammar = CreateCommandGrammar();
@@ -278,6 +279,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
     private long _audioQueueDrops;
     private int _audioQueueDepth;
     private int _wakePartialHits;
+    private string? _lastWakePartial;
     private int _bargeHits;
     private DateTimeOffset _lastBargeHitAtUtc;
     private bool _bargeDucked;
@@ -461,6 +463,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 TtsFxEnabled = _speech.TtsFxEnabled,
                 TtsFxApplied = _speech.TtsFxApplied,
                 TtsFxFallbackReason = _speech.TtsFxFallbackReason,
+                QuietMode = _speech.QuietMode,
                 VoiceNoiseFloorDb = _vad.NoiseFloorDb,
                 VoiceVadThresholdDb = _vad.ThresholdDb,
                 LastWakeAtUtc = _lastWakeAtUtc,
@@ -709,8 +712,8 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         if (!_state.Snapshot.Enabled) return new VoiceResponse("Голосовой помощник выключен", false, false);
         if (_state.Snapshot.State == VoiceHostState.Degraded)
             return new VoiceResponse("\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u043c\u043e\u0449\u043d\u0438\u043a \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0432 \u0440\u0435\u0436\u0438\u043c\u0435 DEGRADED: \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043c\u043e\u0434\u0435\u043b\u044c \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043c\u0438\u043a\u0440\u043e\u0444\u043e\u043d.", true, false);
-        var normalized = pushToTalk && !_parser.HasWakeWord(text) ? "Мифодий " + text : text;
-        if (!_parser.HasWakeWord(normalized)) return new VoiceResponse("Нужна кодовая фраза «Мифодий»", true, false);
+        var normalized = pushToTalk && !_parser.HasWakeWordAtBoundary(text) ? "Мифодий " + text : text;
+        if (!_parser.HasWakeWordAtBoundary(normalized)) return new VoiceResponse("Нужна кодовая фраза «Мифодий»", true, false);
         var command = _parser.Parse(normalized, confidence, MinimumConfidence());
         _lastRecognizer = pushToTalk ? "VOSK_PUSH_TO_TALK" : "IPC_TEXT";
         _lastRecognitionRoute = command.Intent == VoiceIntent.AssistantQuery ? "ASSISTANT_QUERY" : "LOCAL_COMMAND";
@@ -1159,9 +1162,17 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _pendingCommandConfidence = oneShotCommandResult.Confidence;
         }
         var partial = wakeResult.Partial;
-        if (!string.IsNullOrWhiteSpace(partial) && _parser.HasWakeWord(partial) && _state.Snapshot.State == VoiceHostState.Listening)
+        var normalizedPartial = VoiceCommandText.Normalize(partial);
+        if (!string.IsNullOrWhiteSpace(partial) && _parser.HasWakeWordAtBoundary(partial) && _state.Snapshot.State == VoiceHostState.Listening)
         {
-            _wakePartialHits++;
+            // Vosk repeats the same partial result for many audio frames. Do
+            // not treat those repeats as independent wake confirmations: that
+            // made ordinary speech activate the command session too eagerly.
+            if (!string.Equals(normalizedPartial, _lastWakePartial, StringComparison.Ordinal))
+            {
+                _lastWakePartial = normalizedPartial;
+                _wakePartialHits++;
+            }
             if (_wakePartialHits >= 2 && _state.TryWake())
             {
                 _wakeStartedAt = now;
@@ -1177,11 +1188,22 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 });
             }
         }
-        else if (string.IsNullOrWhiteSpace(partial)) _wakePartialHits = 0;
+        else
+        {
+            _wakePartialHits = 0;
+            _lastWakePartial = null;
+        }
 
         if (wakeResult.IsEndpoint && !string.IsNullOrWhiteSpace(wakeResult.Text))
         {
             var wakeText = wakeResult.Text!;
+            if (wakeResult.Confidence < WakeMinimumConfidence)
+            {
+                ResetRecognitionSessions();
+                _state.ReturnToListening("wake-low-confidence");
+                _lastErrorCode = "VOICE_WAKE_NOT_CONFIRMED";
+                return;
+            }
             VoiceRecognitionResult utterance;
             VoiceRecognitionResult commandUtterance;
             lock (_recognitionGate)
@@ -1193,7 +1215,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 // stream. Replay the in-memory pre-roll only when it failed to
                 // retain a wake word or returned no usable text; otherwise a
                 // two-second replay would truncate long one-shot questions.
-                if (string.IsNullOrWhiteSpace(utterance.Text) || !_parser.HasWakeWord(utterance.Text))
+                if (string.IsNullOrWhiteSpace(utterance.Text) || !_parser.HasWakeWordAtBoundary(utterance.Text))
                 {
                     var preRoll = _preRoll.Snapshot();
                     _utteranceRecognizer.ResetSession();
@@ -1202,10 +1224,10 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
                 }
                 _wakeRecognizer.ResetSession();
             }
-            var text = _parser.HasWakeWord(utterance.Text ?? string.Empty)
+            var text = _parser.HasWakeWordAtBoundary(utterance.Text ?? string.Empty)
                 ? utterance.Text!
                 : string.IsNullOrWhiteSpace(utterance.Text) ? wakeText : $"{wakeText} {utterance.Text}";
-            if (!_parser.HasWakeWord(text) || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase))
+            if (!_parser.HasWakeWordAtBoundary(text) || text.Contains("[unk]", StringComparison.OrdinalIgnoreCase))
             {
                 ResetRecognitionSessions();
                 _state.ReturnToListening("wake-unknown");
@@ -1308,7 +1330,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         }
         if (!barge.IsEndpoint || string.IsNullOrWhiteSpace(barge.Text)) return;
         lock (_recognitionGate) _bargeRecognizer?.ResetSession();
-        if (!_parser.HasWakeWord(barge.Text) || barge.Confidence < 0.75)
+        if (!_parser.HasWakeWordAtBoundary(barge.Text) || barge.Confidence < 0.75)
         {
             _bargeHits = 0;
             _lastBargeHitAtUtc = default;
@@ -1597,7 +1619,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             await RespondAsync(VoiceErrorText(_lastErrorCode), cancellationToken, false);
             return;
         }
-        var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
+        var normalized = _parser.HasWakeWordAtBoundary(text) ? text : "Мифодий " + text;
         var arbitration = _arbiter.Resolve(
             normalized,
             confidence,
@@ -1667,7 +1689,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
             _state.ReturnToListening("push-to-talk-unrecognized");
             return await RespondAsync("Не удалось распознать команду", cancellationToken, false);
         }
-        var normalized = _parser.HasWakeWord(text) ? text : "Мифодий " + text;
+        var normalized = _parser.HasWakeWordAtBoundary(text) ? text : "Мифодий " + text;
         if (_state.Snapshot.State != VoiceHostState.Confirming) EnsureRecognitionState(normalized);
         return await SubmitTextAsync(normalized, true, cancellationToken, recognition.Confidence);
     }
@@ -2032,6 +2054,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         "VOICE_NATIVE_RUNTIME_UNAVAILABLE" => "Не доступен native runtime Vosk.",
         "VOICE_RUSSIAN_VOICE_UNAVAILABLE" => "Не найден установленный русский голос Windows (например, Microsoft Irina).",
         "VOICE_TTS_UNAVAILABLE" => "Локальный голосовой движок недоступен; запись и команды продолжают работать без озвучки.",
+        "VOICE_QUIET_MODE" => "Тихий режим включён; озвучка ответов отключена. Выключите его в настройках Мифодия.",
         "TTS_MODEL_MISSING" => "Локальная модель Silero не установлена; используется голос Windows.",
         "TTS_MODEL_HASH_MISSING" => "Для локальной модели Silero отсутствует обязательный SHA256; используется голос Windows.",
         "TTS_MODEL_INTEGRITY_FAILED" => "Проверка локальной модели Silero не пройдена; используется голос Windows.",
@@ -2282,6 +2305,7 @@ public sealed class VoiceHostRuntime : IAsyncDisposable
         _pendingConfidenceSegments = 0;
         _speechSeen = false;
         _wakePartialHits = 0;
+        _lastWakePartial = null;
         _bargeHits = 0;
         _lastBargeHitAtUtc = default;
         if (_bargeDucked) _speech.RestorePlaybackVolume();

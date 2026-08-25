@@ -1,6 +1,6 @@
 # Production Readiness — WhisperX Atom / Мифодий
 
-> Актуально для исходного кода на 24 августа 2026 года. Документ описывает
+> Актуально для исходного кода на 25 августа 2026 года. Документ описывает
 > рабочую ветку и release-gates, а не обещает готовность установленного runtime.
 
 ## Идентичность и границы
@@ -8,7 +8,7 @@
 | Объект | Значение | Статус |
 | --- | --- | --- |
 | Ветка | `codex/server-first-platform` | текущая разработка |
-| Implementation baseline | `894966a` (`llm: make doctor v2 probes fail closed`) | подтверждён локально; после docs-коммита identity нужно пересчитать |
+| Implementation baseline | `4b5937d847fd830172fa7eaf9821fed738760720` | clean source и client pilot |
 | Docker runtime | `1.0.1-21a28029a49b` | старое поколение, не совпадает с source |
 | Миграции | без новых миграций в текущем проходе | не изменялись |
 
@@ -16,6 +16,24 @@
 дереве не обновляет Server Node: для обновления нужны новый immutable bundle,
 образы и штатное переключение runtime. Docker volumes, пользовательские записи,
 модели и Patrol360 в этом проходе не изменяются.
+
+## Текущий клиентский pilot
+
+Из clean source собран installer:
+
+| Поле | Значение |
+| --- | --- |
+| Build identity | `1.0.1+4b5937d847fd830172fa7eaf9821fed738760720` |
+| Installer | `artifacts/installer/WhisperXAtom-Setup.exe` |
+| Installer SHA256 | `abd80a71959c7343c3179c44fd0aeb6bd5aefc9799c26fa0843f4a309760784b` |
+| Signature/status | `NotSigned / UNSIGNED_PILOT_BUILD` |
+| Release scope | `PILOT` |
+| Server Bundle | не включён (`serverBundle=null`) |
+
+В payload присутствуют Desktop, Recorder Host, Voice Host, Resident Voice
+Refiner Host и TtsHost одной identity. Установка этого пакета не обновляет
+Docker и не заменяет серверный rollback. Production release остаётся
+заблокирован hardware evidence и установленным server/client smoke.
 
 ## Архитектурные инварианты
 
@@ -167,15 +185,15 @@ offline preflight не считаются `PASSED`.
 
 | Gate | Статус | Причина |
 | --- | --- | --- |
-| Python/.NET source tests | `PASSED` | локальные suites зелёные |
-| Voice parser/refiner contracts | `PASSED` | 33/33 и self-test |
-| Voice verified assets | `BLOCKED` | финальные DLL/model/manifest v2 для identity не staged |
+| Python/.NET targeted checks | `PASSED` | Voice `33/33`, API `20/20`, targeted Python contracts зелёные; полный Desktop suite требует отдельного прогона |
+| Voice parser/refiner contracts | `PASSED` | self-test и packaged identity |
+| Voice verified assets | `PASSED` | model/bridge ABI 1 и manifest v2 проверены для client pilot |
 | Thread benchmark | `BLOCKED` | нет release-attested 1/2/4 evidence |
 | 700-case Voice corpus | `BLOCKED_BY_HARDWARE` | нужен live microphone run |
 | Far-field matrix | `BLOCKED_BY_HARDWARE` | fixture replay не может пройти release gate |
 | Authenticated 700-case Mifodiy QA | `BLOCKED` | offline preflight не заменяет Assistant API |
 | LLM Doctor on current runtime | `BLOCKED` | runtime/model probe не подтверждён |
-| Docker/source identity | `BLOCKED` | Docker работает на старом image tag |
+| Docker/source identity | `BLOCKED` | client pilot не содержит Server Bundle; Docker остаётся старой identity |
 
 Пока любой из этих блоков не закрыт, production-ready и новый production
 installer не объявляются. `artifacts/acceptance` не должен содержать аудио,

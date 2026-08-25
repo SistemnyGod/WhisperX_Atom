@@ -5,7 +5,8 @@ param(
     [string]$PythonExe = '',
     [string]$WheelhouseRoot = '',
     [switch]$NoInstall,
-    [switch]$AllowGeneratedStagingDirty
+    [switch]$AllowGeneratedStagingDirty,
+    [switch]$PreserveDirtyIdentity
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -20,7 +21,7 @@ $dirtyAllowed = $env:WHISPERX_ALLOW_DIRTY_RELEASE -in @('1','true','yes')
 if ($dirty.Count -gt 0 -and -not $dirtyAllowed -and -not $AllowGeneratedStagingDirty) { throw 'TTS_BUILD_DIRTY_WORKTREE' }
 $python = if ($PythonExe) { (Resolve-Path $PythonExe).Path } else { Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe' }
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "TTS_BUILD_PYTHON_MISSING: $python" }
-$dirtySuffix = if ($dirty.Count -gt 0 -and -not $AllowGeneratedStagingDirty) { '-dirty' } else { '' }
+$dirtySuffix = if ($dirty.Count -gt 0 -and ($PreserveDirtyIdentity -or -not $AllowGeneratedStagingDirty)) { '-dirty' } else { '' }
 $identity = "1.0.1+" + (& git -C $repoRoot rev-parse HEAD).Trim() + $dirtySuffix
 if ($identity -match '(?i)dev' -or $identity -notmatch '^1\.0\.1\+[0-9a-f]{40}(-dirty)?$') { throw 'TTS_BUILD_IDENTITY_INVALID' }
 $source = Join-Path $repoRoot 'apps\tts-host'
@@ -75,6 +76,38 @@ New-Item -ItemType Directory -Force -Path (Join-Path $built 'Models\silero-v5_5_
 Copy-Item -LiteralPath $model -Destination (Join-Path $built 'Models\silero-v5_5_ru\v5_5_ru.pt') -Force
 Copy-Item -LiteralPath $modelManifest -Destination (Join-Path $built 'Models\silero-v5_5_ru\model-manifest.json') -Force
 Copy-Item -LiteralPath (Join-Path $source 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $built 'THIRD_PARTY_NOTICES.txt') -Force
+
+# Piper J.A.R.V.I.S. is an optional English experimental voice.  It is staged
+# outside Git by prepare-piper-jarvis.ps1 and copied only when all immutable
+# assets and their manifest are present.  Silero remains the safe default when
+# this optional payload is absent.
+$piperStagedRoot = Join-Path $repoRoot 'artifacts\tts-host'
+$piperStagedExe = Join-Path $piperStagedRoot 'Piper\piper.exe'
+$piperStagedModel = Join-Path $piperStagedRoot 'Models\piper\jarvis\jarvis-medium.onnx'
+$piperStagedConfig = Join-Path $piperStagedRoot 'Models\piper\jarvis\jarvis-medium.onnx.json'
+$piperStagedManifest = Join-Path $piperStagedRoot 'Piper\piper-jarvis.manifest.json'
+$piperFiles = @($piperStagedExe, $piperStagedModel, $piperStagedConfig, $piperStagedManifest)
+$piperFilesPresent = @($piperFiles | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count -eq 4
+if ($piperFilesPresent) {
+    $piperManifest = Get-Content -LiteralPath $piperStagedManifest -Raw | ConvertFrom-Json
+    if ($piperManifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$piperManifest.model.sha256) -or [string]::IsNullOrWhiteSpace([string]$piperManifest.runtime.sha256) -or @($piperManifest.runtime.files).Count -lt 1) { throw 'PIPER_JARVIS_MANIFEST_INVALID' }
+    if ((Get-FileHash -LiteralPath $piperStagedModel -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$piperManifest.model.sha256).ToLowerInvariant()) { throw 'PIPER_JARVIS_MODEL_HASH_MISMATCH' }
+    if ((Get-FileHash -LiteralPath $piperStagedConfig -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$piperManifest.model.configSha256).ToLowerInvariant()) { throw 'PIPER_JARVIS_CONFIG_HASH_MISMATCH' }
+    if ((Get-FileHash -LiteralPath $piperStagedExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$piperManifest.runtime.sha256).ToLowerInvariant()) { throw 'PIPER_JARVIS_RUNTIME_HASH_MISMATCH' }
+    if (-not (Test-Path -LiteralPath (Join-Path $piperStagedRoot (Join-Path 'Piper' 'espeak-ng-data')) -PathType Container)) { throw 'PIPER_JARVIS_ESPEAK_DATA_MISSING' }
+    foreach ($runtimeEntry in @($piperManifest.runtime.files)) {
+        $runtimeName = [string]$runtimeEntry.file
+        if ([string]::IsNullOrWhiteSpace($runtimeName) -or $runtimeName -match '[\\/]') { throw 'PIPER_JARVIS_RUNTIME_FILE_INVALID' }
+        $runtimePath = Join-Path $piperStagedRoot (Join-Path 'Piper' $runtimeName)
+        if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) { throw "PIPER_JARVIS_RUNTIME_ASSET_MISSING: $runtimeName" }
+        $runtimeActual = (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($runtimeActual -ne ([string]$runtimeEntry.sha256).ToLowerInvariant()) { throw "PIPER_JARVIS_RUNTIME_HASH_MISMATCH: $runtimeName" }
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $built 'Piper'), (Join-Path $built 'Models\piper\jarvis') | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $piperStagedRoot 'Piper') -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path (Join-Path $built 'Piper') $_.Name) -Recurse -Force }
+    Copy-Item -LiteralPath $piperStagedModel -Destination (Join-Path $built 'Models\piper\jarvis\jarvis-medium.onnx') -Force
+    Copy-Item -LiteralPath $piperStagedConfig -Destination (Join-Path $built 'Models\piper\jarvis\jarvis-medium.onnx.json') -Force
+}
 $env:WHISPERX_BUILD_IDENTITY = $identity
 $smokeRequest = [ordered]@{ schemaVersion=1; id='publish-smoke'; op='ping'; buildIdentity=$identity } | ConvertTo-Json -Compress
 $smokeStart = [Diagnostics.ProcessStartInfo]::new()

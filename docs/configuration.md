@@ -78,6 +78,21 @@ Copy-Item .env.example .env
 Пути модели, bridge и Host должны соответствовать одному manifest schema v2 и
 одной `buildIdentity`. Не заполняйте их плавающими версиями или URL загрузки.
 
+### Локальные настройки TTS
+
+| Настройка | Значения | Политика |
+| --- | --- | --- |
+| `TtsVoiceProfile` | `MIFODIY_TECH`, `CLEAN`, `JARVIS_RU`, `JARVIS_EN`, `AIDAR_CLEAN` | по умолчанию `MIFODIY_TECH`; `JARVIS_EN` требует локальные Piper assets и влияет только на воспроизведение ответа |
+| `TtsEngine` | `SILERO`, `PIPER_JARVIS`, `WINDOWS` | `SILERO` — русский default; `PIPER_JARVIS` — явный экспериментальный English fallback-safe engine |
+| `speaker` | существующие Silero IDs | новые установки используют `eugene`; значение сохраняется для IPC-совместимости |
+| Windows fallback | русский `ru-RU` | используется только при недоступности Silero |
+
+Для старых настроек отсутствующий профиль вместе с `aidar` мигрирует в
+`MIFODIY_TECH`. Явно выбранный другой голос сохраняется в профиле `CLEAN`.
+Профиль не меняет Recorder archive, Voice ASR, WhisperX input или готовый WAV.
+Wake-word «Мифодий» и распознавание команд остаются русскими и не являются
+настройкой TTS-профиля.
+
 ### Summary и Assistant fallback
 
 | Переменная | Назначение | Значение |

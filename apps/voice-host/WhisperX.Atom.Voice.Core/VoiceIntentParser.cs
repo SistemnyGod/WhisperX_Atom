@@ -60,6 +60,20 @@ public sealed class VoiceIntentParser
             .Any(word => WakeWords.Contains(word, StringComparer.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Production wake gate.  A wake token is accepted only as the first
+    /// spoken token of an utterance.  Matching a token in the middle of a
+    /// meeting sentence (for example, «он сказал: Мифодий, ...») must never
+    /// activate the assistant.  The broader HasWakeWord method is retained
+    /// for diagnostics and compatibility tests.
+    /// </summary>
+    public bool HasWakeWordAtBoundary(string? text)
+    {
+        var normalized = VoiceCommandText.Normalize(text);
+        var first = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        return first is not null && WakeWords.Contains(first, StringComparer.OrdinalIgnoreCase);
+    }
+
     public VoiceCommand Parse(
         string text,
         double confidence = 1.0,

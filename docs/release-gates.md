@@ -4,6 +4,19 @@ The ordinary CI checks are required before merge: `dotnet-build`, `python-target
 
 `optional-package-installer` runs only from workflow dispatch and is not a required pull-request check.
 
+## Client pilot versus production release
+
+The current client pilot is built from clean identity
+`1.0.1+4b5937d847fd830172fa7eaf9821fed738760720` and includes the Desktop,
+Recorder Host, Voice Host, Resident Voice Refiner Host and TtsHost payload. It
+does not contain a Server Bundle and does not upgrade Docker. The pilot installer
+is therefore useful for client smoke and Russian TTS profile checks, but it must
+not be treated as a production release until server/client identity, authenticated
+Assistant/Qwen smoke and the hardware gates below match the same evidence.
+
+The wake-word «Мифодий» is a Vosk activation path. `MIFODIY_TECH` and `CLEAN`
+are response-voice profiles for that same assistant, not separate assistants.
+
 The following evidence is deliberately outside commit CI and must be recorded as READY before merging an MVP release branch or creating a tag:
 
 - 5-minute end-to-end recording;

@@ -36,6 +36,34 @@ The Windows host must have FFmpeg on PATH. The Recorder Service uses it to encod
 
 Set `AGENT_ENROLLMENT_SECRET` in `.env` before starting the local Compose profile; the stack has no built-in enrollment fallback.
 
+## Навигация и эксплуатация
+
+Основной вход — `WhisperX.Atom.Desktop/`. Навигация пользователя проходит по
+вкладкам: «Главная» → состояние записи и pipeline, «Запись» → параметры
+микрофона и локальный захват, «Совещания» → история и рабочее пространство,
+«Стенограммы»/«Саммари»/«Задачи» → результаты, «ИИ-помощник» → текстовый и
+голосовой Assistant, «Настройки» → API, Recorder Agent, Мифодий и диагностика.
+Модель данных и серверные контракты находятся в `Models/`, ViewModel — в
+`ViewModels/`, страницы — в `Views/`, а API/IPC адаптеры — в `Services/` и
+`Infrastructure/`.
+
+Для локального запуска используйте `run_app.bat` или
+`scripts/launch-desktop.ps1`; приложение не запускает Docker второй раз.
+Перед проверкой записи убедитесь, что выбран микрофон, доступен Recorder Host
+и задан каталог архива. Для диагностики откройте «Настройки → Диагностика» и
+сохраните безопасный diagnostic bundle; токены, PCM и тексты Assistant туда не
+попадают.
+
+Проверки:
+
+```powershell
+dotnet build apps/desktop/WhisperX.Atom.Desktop/WhisperX.Atom.Desktop.csproj -c Release
+pwsh -NoProfile -File scripts/acceptance-desktop.ps1 -SkipDocker -SkipGpu
+```
+
+Запись сначала сохраняется локально. Ошибка API не должна останавливать capture;
+после восстановления соединения доставка возобновляется через outbox.
+
 ## Local acceptance and backup
 
 Run the Desktop-only acceptance checks before a pilot:

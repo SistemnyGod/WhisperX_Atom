@@ -25,6 +25,19 @@ durability и безопасные точки рефакторинга опис�
 | Automation | `scripts/` | Runtime launch/stop/doctor, E2E, watchdog, build и acceptance |
 | Tests | `tests/` | Contract, unit, media, recording, assistant и runtime checks |
 
+## Локальная документация модулей
+
+В каждом runtime-каталоге есть короткий `README.md` с навигацией по entrypoint,
+операциями запуска/остановки, диагностикой и границами безопасности:
+
+- [Desktop](../apps/desktop/README.md), [Desktop module](../apps/desktop/WhisperX.Atom.Desktop/README.md)
+- [Recorder Agent](../apps/recorder-agent/README.md) и [Recorder Host](../apps/recorder-host/README.md)
+- [Server](../apps/server/README.md) и [Control API](../apps/server/WhisperX.Atom.Api/README.md)
+- [Voice Host](../apps/voice-host/README.md), [Voice Core](../apps/voice-host/WhisperX.Atom.Voice.Core/README.md), [Refiner Host](../apps/voice-host/WhisperX.Atom.Voice.Refiner.Host/README.md)
+- [TtsHost](../apps/tts-host/README.md) и [Web diagnostics](../apps/web/README.md)
+- [Import](../workers/import_worker/README.md), [Media](../workers/media_worker/README.md), [GPU](../workers/ml_worker/README.md), [Memory](../workers/memory_worker/README.md), [Outbox](../workers/outbox_relay/README.md), [Summary/Assistant](../workers/summary_worker/README.md)
+- [Shared Python core](../whisperx_atom/README.md), [legacy local API](../app/README.md), [scripts](../scripts/README.md), [tests](../tests/README.md)
+
 ## Worker subjects и связь
 
 Сервер создаёт durable задания в PostgreSQL/outbox. Outbox Relay публикует их в NATS. Media Worker завершает подготовку media и передаёт транскрипцию GPU Worker. GPU Worker обновляет jobs, transcript и meeting statuses в PostgreSQL. Для долгих задач используются `message.in_progress()`, `jobs.last_heartbeat` и lease renewal.

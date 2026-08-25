@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Threading.Channels;
+using System.Text.Json;
 using WhisperX.Atom.Voice.Host.Tts;
 
 namespace WhisperX.Atom.Voice.Host;
@@ -57,7 +58,7 @@ public sealed class SpeechResponder : IDisposable
     public int QueueDepth => Volatile.Read(ref _queueDepth);
     public long QueueDrops => Interlocked.Read(ref _queueDrops);
     public bool LastCancelHadPlayback => Volatile.Read(ref _lastCancelHadPlayback) != 0;
-    public string? RequestedVoiceName => _router.FallbackUsed ? _requestedWindowsVoice : _requestedSileroVoice;
+    public string? RequestedVoiceName => _router.UsesPiper ? "jarvis" : _router.FallbackUsed ? _requestedWindowsVoice : _requestedSileroVoice;
     public string VoiceName => _router.VoiceName;
     public string VoiceCulture => _router.VoiceCulture;
     public bool VoiceFallbackUsed => _router.FallbackUsed;
@@ -90,7 +91,13 @@ public sealed class SpeechResponder : IDisposable
         _requestedWindowsVoice = string.IsNullOrWhiteSpace(windowsFallbackVoice) ? "Microsoft Irina" : windowsFallbackVoice.Trim();
         _voiceProfile = TtsVoiceProfiles.Normalize(voiceProfile);
         _requestedSileroVoice = string.IsNullOrWhiteSpace(sileroVoice) ? "eugene" : sileroVoice.Trim();
-        if (TtsVoiceProfiles.IsMifodiyTech(_voiceProfile)) _requestedSileroVoice = "eugene";
+        if (TtsVoiceProfiles.IsTechnologyProfile(_voiceProfile)) _requestedSileroVoice = "eugene";
+        // Piper owns the English J.A.R.V.I.S. voice.  If its optional local
+        // assets are unavailable, the router must fall back to a real Russian
+        // Silero speaker rather than passing the synthetic "jarvis" id to
+        // Silero.
+        else if (TtsVoiceProfiles.IsPiperJarvis(_voiceProfile)) _requestedSileroVoice = "eugene";
+        else if (TtsVoiceProfiles.IsAidarClean(_voiceProfile)) _requestedSileroVoice = "aidar";
         _rate = Math.Clamp(rate ?? 0, -10, 10); _volume = Math.Clamp(volume ?? 90, 0, 100);
         _sampleRate = sampleRate is 24000 or 48000 ? sampleRate.Value : 48000; _cpuThreads = Math.Clamp(cpuThreads ?? 4, 1, 32); _fallbackEnabled = fallbackEnabled;
         return await _router.ConfigureAsync(_requestedWindowsVoice, _rate, _volume, _fallbackEnabled, _requestedSileroVoice, _sampleRate, _cpuThreads, cancellationToken, ttsEngine, _voiceProfile).ConfigureAwait(false);
@@ -144,7 +151,7 @@ public sealed class SpeechResponder : IDisposable
                             if (request.PlaybackStarted is null) return;
                             try { await request.PlaybackStarted().ConfigureAwait(false); }
                             catch (Exception callbackError) { Error?.Invoke(callbackError); }
-                        }, _shutdown.Token, applyVoiceFx: _router.FxEnabled).ConfigureAwait(false);
+                        }, _shutdown.Token, applyVoiceFx: _router.FxEnabled, voiceProfile: _router.VoiceProfile).ConfigureAwait(false);
                         _router.RecordPlaybackFx(playback.FxApplied, playback.FxFallbackReason);
                         request.Completion.TrySetResult(new SpeechPlaybackResult(playback.Played ? SpeechPlaybackState.Played : playback.Cancelled ? SpeechPlaybackState.Cancelled : SpeechPlaybackState.Failed, started, playback.ErrorCode, synthesized.Engine, synthesized.Model, synthesized.Voice, _router.FallbackUsed, queueWait, synthesized.SynthesisMs, playback.PlaybackMs));
                     }
@@ -211,7 +218,45 @@ public sealed class SpeechResponder : IDisposable
         var modelRoot = Path.Combine(ttsHostRoot, "Models", "silero-v5_5_ru");
         var identity = string.IsNullOrWhiteSpace(expectedBuildIdentity) ? Environment.GetEnvironmentVariable("WHISPERX_BUILD_IDENTITY") ?? string.Empty : expectedBuildIdentity;
         var silero = new SileroTtsEngine(executable, modelRoot, Environment.GetEnvironmentVariable("ATOM_TTS_MODEL_SHA256") ?? string.Empty, identity);
-        return new TtsEngineRouter(silero, new WindowsTtsEngine(), new SpeechAudioPlayer());
+        var piperRoot = Environment.GetEnvironmentVariable("ATOM_PIPER_ROOT");
+        if (string.IsNullOrWhiteSpace(piperRoot)) piperRoot = Path.Combine(ttsHostRoot, "Piper");
+        var piperModelRoot = Environment.GetEnvironmentVariable("ATOM_PIPER_MODEL_ROOT");
+        if (string.IsNullOrWhiteSpace(piperModelRoot)) piperModelRoot = Path.Combine(ttsHostRoot, "Models", "piper", "jarvis");
+        var piperExecutable = Environment.GetEnvironmentVariable("ATOM_PIPER_EXE") ?? Path.Combine(piperRoot, OperatingSystem.IsWindows() ? "piper.exe" : "piper");
+        var piperModel = Environment.GetEnvironmentVariable("ATOM_PIPER_JARVIS_MODEL") ?? Path.Combine(piperModelRoot, "jarvis-medium.onnx");
+        var piperConfig = Environment.GetEnvironmentVariable("ATOM_PIPER_JARVIS_CONFIG") ?? Path.Combine(piperModelRoot, "jarvis-medium.onnx.json");
+        var (manifestModelSha, manifestConfigSha) = ReadPiperAttestation(Path.Combine(piperRoot, "piper-jarvis.manifest.json"));
+        var piperModelSha = Environment.GetEnvironmentVariable("ATOM_PIPER_JARVIS_MODEL_SHA256") ?? manifestModelSha;
+        var piperConfigSha = Environment.GetEnvironmentVariable("ATOM_PIPER_JARVIS_CONFIG_SHA256") ?? manifestConfigSha;
+        // A packaged Piper voice is optional, but if it is present it must be
+        // attested. Never silently run an unverified model/config pair.
+        if ((File.Exists(piperExecutable) || File.Exists(piperModel) || File.Exists(piperConfig)) &&
+            (string.IsNullOrWhiteSpace(piperModelSha) || string.IsNullOrWhiteSpace(piperConfigSha)))
+        {
+            piperModelSha = "__PIPER_MANIFEST_REQUIRED__";
+            piperConfigSha = "__PIPER_MANIFEST_REQUIRED__";
+        }
+        var piper = new PiperTtsEngine(
+            piperExecutable, piperModel, piperConfig, piperModelSha, piperConfigSha);
+        return new TtsEngineRouter(silero, new WindowsTtsEngine(), new SpeechAudioPlayer(), piper);
+    }
+
+    private static (string ModelSha256, string ConfigSha256) ReadPiperAttestation(string manifestPath)
+    {
+        try
+        {
+            if (!File.Exists(manifestPath)) return (string.Empty, string.Empty);
+            using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            var root = document.RootElement;
+            if (root.GetProperty("schemaVersion").GetInt32() != 1) return (string.Empty, string.Empty);
+            var model = root.GetProperty("model");
+            return (model.GetProperty("sha256").GetString()?.Trim() ?? string.Empty,
+                model.GetProperty("configSha256").GetString()?.Trim() ?? string.Empty);
+        }
+        catch
+        {
+            return (string.Empty, string.Empty);
+        }
     }
 
     internal static string ResolveTtsHostRoot(string voiceHostBaseDirectory)

@@ -1664,6 +1664,16 @@ app.MapPost("/api/meetings/{id:guid}/pipeline/repair", async (Guid id, PipelineR
     var result = await store.RepairMeetingPipelineAsync(id, CurrentUserId(context), mode == "APPLY");
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
+app.MapPost("/api/admin/historical-imports", async (HistoricalImportRequest? request, HttpContext context, Database database) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    if (CurrentUserId(context) is not Guid ownerId) return Results.Unauthorized();
+    if (request is null) return Results.BadRequest(new { error = "historical_import_request_required" });
+    var mode = string.IsNullOrWhiteSpace(request.Mode) ? "PREVIEW" : request.Mode.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "historical_import_mode_invalid" });
+    var result = await database.ImportHistoricalTranscriptAsync(ownerId, request with { Mode = mode }, mode == "APPLY");
+    return result.ErrorCode is not null ? Results.BadRequest(result) : Results.Ok(result);
+});
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
@@ -2287,6 +2297,31 @@ public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
 public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
 public record PipelineRepairRequest(string? Mode);
+public sealed record HistoricalImportSegmentRequest(int Ordinal, long StartMs, long EndMs, string Text, string? Speaker = null);
+public sealed record HistoricalImportRequest(
+    string Mode,
+    string SourceName,
+    string SourceFormat,
+    string SourceSha256,
+    string CanonicalContentSha256,
+    string? Title,
+    string? MeetingDate,
+    string DatePrecision,
+    string ParserVersion,
+    string TimingQuality,
+    int WordCount,
+    IReadOnlyList<HistoricalImportSegmentRequest> Segments);
+public sealed record HistoricalImportResult(
+    string Mode,
+    string Decision,
+    Guid? ImportId = null,
+    Guid? MeetingId = null,
+    Guid? TranscriptId = null,
+    Guid? MemoryJobId = null,
+    bool Created = false,
+    bool Duplicate = false,
+    string? ErrorCode = null,
+    IReadOnlyList<string>? Warnings = null);
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
 
@@ -3057,6 +3092,185 @@ public sealed class Database(IConfiguration configuration)
         command.Parameters.AddWithValue("description", (object?)description ?? DBNull.Value);
         var created = (DateTime)(await command.ExecuteScalarAsync())!;
         return new MeetingRow(id, title, description, "CREATED", created);
+    }
+
+    /// <summary>
+    /// Imports one already-reviewed historical transcript.  The source file
+    /// remains on the operator workstation; only hashes, metrics and segment
+    /// payloads are accepted here.  PREVIEW is read-only and APPLY is guarded
+    /// by an owner/content advisory lock plus the unique receipt constraint.
+    /// </summary>
+    public async Task<HistoricalImportResult> ImportHistoricalTranscriptAsync(Guid ownerId, HistoricalImportRequest request, bool apply)
+    {
+        var validationError = ValidateHistoricalImport(request);
+        if (validationError is not null)
+            return new HistoricalImportResult(request.Mode, "INVALID", ErrorCode: validationError);
+
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var lockCommand = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))", connection, transaction))
+        {
+            lockCommand.Parameters.AddWithValue("lock_key", $"historical-import:{ownerId:N}:{request.CanonicalContentSha256.ToLowerInvariant()}");
+            await lockCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var existing = new NpgsqlCommand("""
+            SELECT id,decision,meeting_id,transcript_id,memory_job_id
+              FROM historical_transcript_imports
+             WHERE owner_user_id=@owner AND canonical_content_sha256=@canonical
+             FOR UPDATE
+            """, connection, transaction))
+        {
+            existing.Parameters.AddWithValue("owner", ownerId);
+            existing.Parameters.AddWithValue("canonical", request.CanonicalContentSha256.ToLowerInvariant());
+            await using var reader = await existing.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var result = new HistoricalImportResult(
+                    request.Mode,
+                    reader.GetString(1),
+                    reader.GetGuid(0),
+                    reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                    reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                    reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                    Created: false,
+                    Duplicate: true,
+                    Warnings: new[] { "HISTORICAL_IMPORT_ALREADY_REGISTERED" });
+                await transaction.CommitAsync();
+                return result;
+            }
+        }
+
+        if (!apply)
+        {
+            await transaction.CommitAsync();
+            return new HistoricalImportResult("PREVIEW", "READY_FOR_APPLY", Warnings: new[] { "HISTORICAL_IMPORT_UNVERIFIED" });
+        }
+
+        var importId = Guid.NewGuid();
+        var meetingId = Guid.NewGuid();
+        var transcriptId = Guid.NewGuid();
+        var memoryJobId = Guid.NewGuid();
+        var title = string.IsNullOrWhiteSpace(request.Title) ? request.SourceName : request.Title.Trim();
+        var metadata = JsonSerializer.Serialize(new
+        {
+            source = "HISTORICAL_IMPORT",
+            sourceName = request.SourceName,
+            sourceFormat = request.SourceFormat.ToLowerInvariant(),
+            sourceSha256 = request.SourceSha256.ToLowerInvariant(),
+            canonicalContentSha256 = request.CanonicalContentSha256.ToLowerInvariant(),
+            parserVersion = request.ParserVersion,
+            meetingDate = request.MeetingDate,
+            datePrecision = request.DatePrecision.ToUpperInvariant(),
+            timingQuality = request.TimingQuality.ToUpperInvariant(),
+            wordCount = request.WordCount,
+            segmentCount = request.Segments.Count,
+            warning = "HISTORICAL_IMPORT_UNVERIFIED"
+        });
+        const string warnings = "[\"HISTORICAL_IMPORT_UNVERIFIED\"]";
+
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,description,status) VALUES(@id,@owner,@title,@description,'TRANSCRIBED')", connection, transaction))
+        {
+            meeting.Parameters.AddWithValue("id", meetingId);
+            meeting.Parameters.AddWithValue("owner", ownerId);
+            meeting.Parameters.AddWithValue("title", title);
+            meeting.Parameters.AddWithValue("description", $"Исторический импорт; дата: {request.MeetingDate ?? "не указана"}");
+            await meeting.ExecuteNonQueryAsync();
+        }
+        await using (var transcript = new NpgsqlCommand("""
+            INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,version_kind)
+            VALUES(@id,@meeting,1,'PARTIAL_READY','ru','historical-import-v1',@warnings::jsonb,@metadata::jsonb,NULL,'HISTORICAL_IMPORT','HISTORICAL_IMPORT','HISTORICAL_IMPORT')
+            """, connection, transaction))
+        {
+            transcript.Parameters.AddWithValue("id", transcriptId);
+            transcript.Parameters.AddWithValue("meeting", meetingId);
+            transcript.Parameters.AddWithValue("warnings", warnings);
+            transcript.Parameters.AddWithValue("metadata", metadata);
+            await transcript.ExecuteNonQueryAsync();
+        }
+        foreach (var segment in request.Segments.OrderBy(item => item.Ordinal))
+        {
+            await using var insertSegment = new NpgsqlCommand("""
+                INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_label,text,confidence,words)
+                VALUES(@id,@transcript,@ordinal,@start,@end,@speaker,@text,NULL,NULL)
+                """, connection, transaction);
+            insertSegment.Parameters.AddWithValue("id", Guid.NewGuid());
+            insertSegment.Parameters.AddWithValue("transcript", transcriptId);
+            insertSegment.Parameters.AddWithValue("ordinal", segment.Ordinal);
+            insertSegment.Parameters.AddWithValue("start", segment.StartMs);
+            insertSegment.Parameters.AddWithValue("end", segment.EndMs);
+            insertSegment.Parameters.AddWithValue("speaker", (object?)segment.Speaker?.Trim() ?? DBNull.Value);
+            insertSegment.Parameters.AddWithValue("text", segment.Text.Trim());
+            await insertSegment.ExecuteNonQueryAsync();
+        }
+        await using (var memory = new NpgsqlCommand("""
+            INSERT INTO memory_jobs(id,owner_user_id,meeting_id,transcript_id,transcript_version,status,stage,progress,attempt)
+            VALUES(@id,@owner,@meeting,@transcript,1,'QUEUED','QUEUED',0,0)
+            ON CONFLICT(transcript_id,transcript_version) DO NOTHING
+            """, connection, transaction))
+        {
+            memory.Parameters.AddWithValue("id", memoryJobId);
+            memory.Parameters.AddWithValue("owner", ownerId);
+            memory.Parameters.AddWithValue("meeting", meetingId);
+            memory.Parameters.AddWithValue("transcript", transcriptId);
+            await memory.ExecuteNonQueryAsync();
+        }
+        var payload = JsonSerializer.Serialize(new
+        {
+            jobId = memoryJobId,
+            meetingId,
+            transcriptId,
+            transcriptVersion = 1,
+            ownerUserId = ownerId,
+            pipelineCorrelationId = (Guid?)null
+        });
+        await using (var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'memory.index',@payload::jsonb)", connection, transaction))
+        {
+            outbox.Parameters.AddWithValue("id", Guid.NewGuid());
+            outbox.Parameters.AddWithValue("payload", payload);
+            await outbox.ExecuteNonQueryAsync();
+        }
+        var receipt = JsonSerializer.Serialize(new { importId, meetingId, transcriptId, memoryJobId, decision = "IMPORTED" });
+        await using (var receiptCommand = new NpgsqlCommand("""
+            INSERT INTO historical_transcript_imports(id,owner_user_id,source_name,source_format,source_sha256,canonical_content_sha256,parser_version,decision,meeting_id,transcript_id,memory_job_id,receipt)
+            VALUES(@id,@owner,@name,@format,@source,@canonical,@parser,'IMPORTED',@meeting,@transcript,@memory,@receipt::jsonb)
+            """, connection, transaction))
+        {
+            receiptCommand.Parameters.AddWithValue("id", importId);
+            receiptCommand.Parameters.AddWithValue("owner", ownerId);
+            receiptCommand.Parameters.AddWithValue("name", request.SourceName);
+            receiptCommand.Parameters.AddWithValue("format", request.SourceFormat.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("source", request.SourceSha256.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("canonical", request.CanonicalContentSha256.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("parser", request.ParserVersion);
+            receiptCommand.Parameters.AddWithValue("meeting", meetingId);
+            receiptCommand.Parameters.AddWithValue("transcript", transcriptId);
+            receiptCommand.Parameters.AddWithValue("memory", memoryJobId);
+            receiptCommand.Parameters.AddWithValue("receipt", receipt);
+            await receiptCommand.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        return new HistoricalImportResult("APPLY", "IMPORTED", importId, meetingId, transcriptId, memoryJobId, Created: true, Warnings: new[] { "HISTORICAL_IMPORT_UNVERIFIED" });
+    }
+
+    private static string? ValidateHistoricalImport(HistoricalImportRequest request)
+    {
+        if (request.Mode is not ("PREVIEW" or "APPLY")) return "historical_import_mode_invalid";
+        if (string.IsNullOrWhiteSpace(request.SourceName) || request.SourceName.Length > 255 || request.SourceName.Contains('/') || request.SourceName.Contains('\\')) return "historical_import_source_name_invalid";
+        if (request.SourceFormat.ToLowerInvariant() is not ("txt" or "docx")) return "historical_import_format_invalid";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(request.SourceSha256 ?? string.Empty, "^[0-9a-fA-F]{64}$") || !System.Text.RegularExpressions.Regex.IsMatch(request.CanonicalContentSha256 ?? string.Empty, "^[0-9a-fA-F]{64}$")) return "historical_import_hash_invalid";
+        if (request.MeetingDate is null || request.DatePrecision.ToUpperInvariant() is not ("DAY" or "SECOND")) return "historical_import_date_required";
+        var datePrecision = request.DatePrecision.ToUpperInvariant();
+        var dateValid = datePrecision == "DAY"
+            ? DateOnly.TryParseExact(request.MeetingDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _)
+            : DateTimeOffset.TryParse(request.MeetingDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AllowWhiteSpaces, out _);
+        if (!dateValid) return "historical_import_date_invalid";
+        if (request.WordCount < 0 || request.WordCount > 2_000_000 || request.Segments is null || request.Segments.Count is < 1 or > 200_000) return "historical_import_segments_invalid";
+        var ordinals = request.Segments.Select(item => item.Ordinal).OrderBy(item => item).ToArray();
+        if (ordinals.Length == 0 || ordinals[0] != 0 || ordinals.Select((value, index) => value == index).Any(valid => !valid)) return "historical_import_ordinals_invalid";
+        if (request.Segments.Any(item => item.StartMs < 0 || item.EndMs < item.StartMs || string.IsNullOrWhiteSpace(item.Text) || item.Text.Length > 20_000)) return "historical_import_segment_invalid";
+        return null;
     }
 
     public async Task<bool> UserOwnsMeetingAsync(Guid meetingId, Guid userId)

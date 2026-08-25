@@ -53,7 +53,11 @@ if ($DevelopmentNoVoiceRefinerAssets) {
         throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
     }
 } else {
-    & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1') -ExpectedBuildIdentity $buildIdentity
+    # A dirty pilot may reuse the verified refiner binary from its clean base
+    # commit. The overall pilot identity remains dirty and cannot pass the
+    # production evidence gate.
+    $voiceAssetIdentity = if ($AllowDirty) { $buildIdentity -replace '-dirty$', '' } else { $buildIdentity }
+    & (Join-Path $PSScriptRoot 'verify-voice-refiner-assets.ps1') -ExpectedBuildIdentity $voiceAssetIdentity
     if (-not $?) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
 }
 $finalOutput = if ([System.IO.Path]::IsPathRooted($OutputRoot)) { [System.IO.Path]::GetFullPath($OutputRoot) } else { [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot)) }
@@ -133,9 +137,17 @@ $ttsPublisher = Join-Path $repoRoot "scripts\publish-tts-host.ps1"
 # can make built-in hash verification unavailable halfway through packaging.
 # Named parameters also keep the wheelhouse from being mistaken for OutputRoot.
 if ($TtsWheelhouse) {
-    & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty -WheelhouseRoot $TtsWheelhouse
+    if ($AllowDirty) {
+        & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty -PreserveDirtyIdentity -WheelhouseRoot $TtsWheelhouse
+    } else {
+        & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty -WheelhouseRoot $TtsWheelhouse
+    }
 } else {
-    & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty
+    if ($AllowDirty) {
+        & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty -PreserveDirtyIdentity
+    } else {
+        & $ttsPublisher -OutputRoot (Join-Path $output 'TtsHost') -AllowGeneratedStagingDirty
+    }
 }
 
 # The supported Windows runtime is .NET Desktop + AudioGraph Host + Voice

@@ -13,7 +13,7 @@ public sealed class SpeechAudioPlayer : IAsyncDisposable
 
     public bool IsPlaying { get { lock (_gate) return _output is not null; } }
 
-    public async Task<AudioPlaybackResult> PlayAsync(string audioPath, int volume, Func<Task>? playbackStarted, CancellationToken cancellationToken, bool applyVoiceFx = false)
+    public async Task<AudioPlaybackResult> PlayAsync(string audioPath, int volume, Func<Task>? playbackStarted, CancellationToken cancellationToken, bool applyVoiceFx = false, string voiceProfile = TtsVoiceProfiles.MifodiyTech)
     {
         if (!File.Exists(audioPath)) return new(false, false, 0, "TTS_AUDIO_PLAYBACK_FAILED");
         var started = Stopwatch.GetTimestamp();
@@ -31,7 +31,7 @@ public sealed class SpeechAudioPlayer : IAsyncDisposable
                 {
                     try
                     {
-                        source = new MifodiyVoiceFxSampleProvider(source);
+                        source = new MifodiyVoiceFxSampleProvider(source, voiceProfile);
                         fxApplied = true;
                     }
                     catch (Exception ex)

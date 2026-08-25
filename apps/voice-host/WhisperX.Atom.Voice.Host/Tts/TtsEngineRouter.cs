@@ -20,10 +20,13 @@ public sealed record TtsRouterSnapshot(
 public sealed class TtsEngineRouter : IAsyncDisposable
 {
     private readonly SileroTtsEngine _silero;
+    private readonly PiperTtsEngine _piper;
     private readonly WindowsTtsEngine _windows;
     private readonly SpeechAudioPlayer _player;
     private bool _fallbackEnabled = true;
     private bool _useFallback;
+    private bool _usePiper;
+    private bool _piperFallback;
     private bool _explicitWindows;
     private string? _fallbackReason;
     private DateTimeOffset? _fallbackUntilUtc;
@@ -33,28 +36,30 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     private bool _fxApplied;
     private string? _fxFallbackReason;
 
-    public TtsEngineRouter(SileroTtsEngine silero, WindowsTtsEngine windows, SpeechAudioPlayer player)
+    public TtsEngineRouter(SileroTtsEngine silero, WindowsTtsEngine windows, SpeechAudioPlayer player, PiperTtsEngine? piper = null)
     {
         _silero = silero; _windows = windows; _player = player;
+        _piper = piper ?? new PiperTtsEngine(Path.Combine(Path.GetTempPath(), "missing-piper.exe"), Path.Combine(Path.GetTempPath(), "missing-jarvis.onnx"), Path.Combine(Path.GetTempPath(), "missing-jarvis.onnx.json"));
     }
 
-    public bool IsReady => _useFallback ? _windows.IsReady : _silero.IsReady;
-    public string EngineName => _useFallback ? _windows.EngineName : _silero.EngineName;
-    public string ModelName => _useFallback ? _windows.ModelName : _silero.ModelName;
+    public bool IsReady => _usePiper ? _piper.IsReady : _useFallback ? _windows.IsReady : _silero.IsReady;
+    public string EngineName => _usePiper ? _piper.EngineName : _useFallback ? _windows.EngineName : _silero.EngineName;
+    public string ModelName => _usePiper ? _piper.ModelName : _useFallback ? _windows.ModelName : _silero.ModelName;
     // Report the configured/effective Silero speaker instead of the old
     // hard-coded default.  This keeps STATUS/diagnostics truthful when the
     // user selected eugene, baya, kseniya or xenia.
-    public string VoiceName => _useFallback ? _windows.VoiceName : TtsVoiceProfiles.IsMifodiyTech(_voiceProfile) ? "eugene" : _silero.VoiceName;
-    public string VoiceCulture => _useFallback ? _windows.VoiceCulture : "ru-RU";
-    public bool FallbackUsed => _useFallback && !_explicitWindows;
+    public string VoiceName => _usePiper ? _piper.VoiceName : _useFallback ? _windows.VoiceName : TtsVoiceProfiles.IsTechnologyProfile(_voiceProfile) ? "eugene" : TtsVoiceProfiles.IsAidarClean(_voiceProfile) ? "aidar" : _silero.VoiceName;
+    public string VoiceCulture => _usePiper ? _piper.VoiceCulture : _useFallback ? _windows.VoiceCulture : "ru-RU";
+    public bool FallbackUsed => (_useFallback && !_explicitWindows) || _piperFallback;
     public string? FallbackReason => _fallbackReason;
-    public int? ProcessId => _useFallback ? null : _silero.ProcessId;
-    public long LastSynthesisMs => _silero.LastSynthesisMs;
-    public long LastModelLoadMs => _silero.LastModelLoadMs;
-    public int RestartCount => _silero.RestartCount;
+    public int? ProcessId => _usePiper ? _piper.ProcessId : _useFallback ? null : _silero.ProcessId;
+    public long LastSynthesisMs => _usePiper ? _piper.LastSynthesisMs : _silero.LastSynthesisMs;
+    public long LastModelLoadMs => _usePiper ? _piper.LastModelLoadMs : _silero.LastModelLoadMs;
+    public int RestartCount => _usePiper ? _piper.RestartCount : _silero.RestartCount;
+    public bool UsesPiper => _usePiper;
     public SpeechAudioPlayer Player => _player;
     public string VoiceProfile => _voiceProfile;
-    public bool FxEnabled => TtsVoiceProfiles.IsMifodiyTech(_voiceProfile) && !_useFallback;
+    public bool FxEnabled => TtsVoiceProfiles.IsTechnologyProfile(_voiceProfile) && !_useFallback && !_usePiper;
     public bool FxApplied => _fxApplied;
     public string? FxFallbackReason => _fxFallbackReason;
     public void RecordPlaybackFx(bool applied, string? fallbackReason)
@@ -69,9 +74,17 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     {
         _fallbackEnabled = fallbackEnabled;
         _windows.Configure(requestedWindowsVoice, rate, volume);
-        _voiceProfile = TtsVoiceProfiles.Normalize(requestedVoiceProfile);
+        var normalizedProfile = TtsVoiceProfiles.Normalize(requestedVoiceProfile);
+        var requestedPiperEngine = string.Equals(requestedEngine, "PIPER_JARVIS", StringComparison.OrdinalIgnoreCase);
+        // Keep the effective snapshot truthful when the engine is selected
+        // directly without also selecting the profile in the UI.
+        _voiceProfile = requestedPiperEngine || TtsVoiceProfiles.IsPiperJarvis(normalizedProfile)
+            ? TtsVoiceProfiles.JarvisEn
+            : normalizedProfile;
         var configuredVoice = string.IsNullOrWhiteSpace(requestedSileroVoice) ? "aidar" : requestedSileroVoice.Trim();
-        if (TtsVoiceProfiles.IsMifodiyTech(_voiceProfile)) configuredVoice = "eugene";
+        if (TtsVoiceProfiles.IsTechnologyProfile(_voiceProfile)) configuredVoice = "eugene";
+        else if (TtsVoiceProfiles.IsAidarClean(_voiceProfile)) configuredVoice = "aidar";
+        else if (TtsVoiceProfiles.IsPiperJarvis(_voiceProfile)) configuredVoice = "eugene";
         _options = new TtsOptions(
             Voice: configuredVoice,
             SampleRate: sampleRate ?? 48000,
@@ -80,6 +93,9 @@ public sealed class TtsEngineRouter : IAsyncDisposable
             CpuThreads: cpuThreads ?? 4,
             VoiceProfile: _voiceProfile);
         _explicitWindows = string.Equals(requestedEngine, "WINDOWS", StringComparison.OrdinalIgnoreCase);
+        var requestedPiper = requestedPiperEngine || TtsVoiceProfiles.IsPiperJarvis(_voiceProfile);
+        _usePiper = requestedPiper;
+        _piperFallback = false;
         _useFallback = _explicitWindows;
         _fallbackReason = null;
         _fallbackUntilUtc = null;
@@ -87,6 +103,13 @@ public sealed class TtsEngineRouter : IAsyncDisposable
         _fxApplied = false;
         _fxFallbackReason = null;
         if (_useFallback) return _windows.IsReady;
+        if (_usePiper)
+        {
+            if (await _piper.EnsureReadyAsync(cancellationToken).ConfigureAwait(false)) return true;
+            _fallbackReason = _piper.LastErrorCode ?? "PIPER_MODEL_MISSING";
+            _usePiper = false;
+            _piperFallback = true;
+        }
         if (await _silero.EnsureReadyAsync(cancellationToken).ConfigureAwait(false)) return true;
         _fallbackReason = _silero.LastErrorCode ?? "TTS_HOST_START_FAILED";
         if (_fallbackEnabled && _windows.IsReady) { _useFallback = true; return true; }
@@ -95,6 +118,22 @@ public sealed class TtsEngineRouter : IAsyncDisposable
 
     public async Task<TtsSynthesisResult> SynthesizeAsync(string text, TtsOptions options, CancellationToken cancellationToken)
     {
+        if (_usePiper)
+        {
+            var piperResult = await _piper.SynthesizeAsync(text, options, cancellationToken).ConfigureAwait(false);
+            if (piperResult.Success) return piperResult;
+            _piperFallback = true;
+            _fallbackReason = piperResult.ErrorCode ?? "PIPER_SYNTHESIS_FAILED";
+            _usePiper = false;
+            if (await _silero.EnsureReadyAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var fallbackSilero = await _silero.SynthesizeAsync(text, options with { Voice = _options.Voice, SampleRate = _options.SampleRate, CpuThreads = _options.CpuThreads, VoiceProfile = TtsVoiceProfiles.MifodiyTech }, cancellationToken).ConfigureAwait(false);
+                if (fallbackSilero.Success) return fallbackSilero with { FallbackReason = _fallbackReason };
+            }
+            if (_fallbackEnabled && _windows.IsReady)
+                return (await _windows.SynthesizeAsync(text, options with { Rate = _options.Rate, Volume = _options.Volume }, cancellationToken).ConfigureAwait(false)) with { FallbackReason = _fallbackReason };
+            return piperResult with { ErrorCode = "VOICE_TTS_UNAVAILABLE" };
+        }
         if (_useFallback && _fallbackEnabled && _fallbackUntilUtc is not null && DateTimeOffset.UtcNow >= _fallbackUntilUtc &&
             await _silero.EnsureReadyAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -146,8 +185,8 @@ public sealed class TtsEngineRouter : IAsyncDisposable
     public IReadOnlyList<string> GetRussianVoiceNames() => _windows.GetRussianVoiceNames();
     public TtsOptions CurrentOptions => _options;
     public IReadOnlyList<object> GetTtsVoices() =>
-        new object[] { new { id = "aidar", displayName = "Айдар", engine = "SILERO" }, new { id = "eugene", displayName = "Евгений", engine = "SILERO" }, new { id = "baya", displayName = "Байя", engine = "SILERO" }, new { id = "kseniya", displayName = "Ксения", engine = "SILERO" }, new { id = "xenia", displayName = "Ксения (Xenia)", engine = "SILERO" } }
+        new object[] { new { id = "aidar", displayName = "Айдар", engine = "SILERO", culture = "ru-RU", available = _silero.IsReady }, new { id = "eugene", displayName = "Евгений", engine = "SILERO", culture = "ru-RU", available = _silero.IsReady }, new { id = "baya", displayName = "Байя", engine = "SILERO", culture = "ru-RU", available = _silero.IsReady }, new { id = "kseniya", displayName = "Ксения", engine = "SILERO", culture = "ru-RU", available = _silero.IsReady }, new { id = "xenia", displayName = "Ксения (Xenia)", engine = "SILERO", culture = "ru-RU", available = _silero.IsReady }, new { id = "jarvis", displayName = "J.A.R.V.I.S. — English (experimental)", engine = "PIPER_JARVIS", culture = "en-GB", available = _piper.IsReady, experimental = true } }
             .Concat(_windows.GetRussianVoiceNames().Select(name => (object)new { id = name, displayName = name, engine = "WINDOWS" })).ToArray();
     public ValueTask DisposeAsync() { return DisposeCoreAsync(); }
-    private async ValueTask DisposeCoreAsync() { await _player.DisposeAsync().ConfigureAwait(false); await _silero.DisposeAsync().ConfigureAwait(false); await _windows.DisposeAsync().ConfigureAwait(false); }
+    private async ValueTask DisposeCoreAsync() { await _player.DisposeAsync().ConfigureAwait(false); await _silero.DisposeAsync().ConfigureAwait(false); await _piper.DisposeAsync().ConfigureAwait(false); await _windows.DisposeAsync().ConfigureAwait(false); }
 }
