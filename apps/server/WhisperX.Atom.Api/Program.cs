@@ -67,6 +67,7 @@ builder.Services.AddRateLimiter(options =>
             path.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase) ? "refresh" :
             path.StartsWith("/api/v1/agents/enroll", StringComparison.OrdinalIgnoreCase) ? "enrollment" :
             path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) ? "summary-rebuild" :
+            path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/pipeline/repair", StringComparison.OrdinalIgnoreCase) ? "pipeline-repair" :
             path.StartsWith("/api/assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" :
             path.StartsWith("/api/client-updates", StringComparison.OrdinalIgnoreCase) ? "client-updates" : null;
         if (route is null) return RateLimitPartition.GetNoLimiter("unlimited");
@@ -1652,6 +1653,17 @@ app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRe
         ? Results.Conflict(new { error = "summary_job_not_found" })
         : Results.Accepted($"/api/jobs/{job.Id}", job);
 });
+app.MapPost("/api/meetings/{id:guid}/pipeline/repair", async (Guid id, PipelineRepairRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    // Repair can enqueue durable work and is intentionally reserved for an
+    // operator/administrator. Preview is subject to the same restriction: it
+    // exposes pipeline diagnostics that normal meeting readers do not need.
+    if (!IsPrivileged(context)) return Results.Forbid();
+    var mode = string.IsNullOrWhiteSpace(request?.Mode) ? "PREVIEW" : request!.Mode!.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "pipeline_repair_mode_invalid" });
+    var result = await store.RepairMeetingPipelineAsync(id, CurrentUserId(context), mode == "APPLY");
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
 app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
 {
     if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
@@ -2274,6 +2286,7 @@ public record AssistantConversationCreateRequest(string? Title, string? ScopeTyp
 public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
 public record AssistantMessageCreateRequest(string? Content, Guid? RetryOf);
 public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
+public record PipelineRepairRequest(string? Mode);
 public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
 public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
 

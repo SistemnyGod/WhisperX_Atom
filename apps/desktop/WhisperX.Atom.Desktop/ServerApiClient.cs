@@ -37,6 +37,8 @@ public sealed record DesktopCurrentUser(Guid Id, string Username, string Role, b
     public bool IsPrivileged => string.Equals(Role, "Administrator", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Role, "Operator", StringComparison.OrdinalIgnoreCase);
 }
+public sealed record DesktopPipelineRepairAction(string Stage, string State, string? Reason, Guid? JobId, Guid? TranscriptId);
+public sealed record DesktopPipelineRepairResult(string Mode, IReadOnlyList<DesktopPipelineRepairAction> Actions);
 public sealed record DesktopTranscript(string Id, string MeetingId, string Status, IReadOnlyList<DesktopTranscriptSegment> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
 public sealed record DesktopTranscriptVersion(string Id, string MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
 public sealed record DesktopTranscriptRegistry(string TranscriptId, string MeetingId, string MeetingTitle, DateTimeOffset MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTimeOffset CreatedAt);
@@ -1128,6 +1130,13 @@ public sealed class ServerApiClient : IDisposable
     public async Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default)
     {
         return await QueueSummaryRebuildAsync(meetingId, cancellationToken) is not null;
+    }
+
+    public async Task<DesktopPipelineRepairResult?> RepairMeetingPipelineAsync(Guid meetingId, string mode, CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAuthorizedAsync(HttpMethod.Post, $"api/meetings/{meetingId}/pipeline/repair", new { mode }, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<DesktopPipelineRepairResult>(_json, cancellationToken);
     }
 
     public async Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default)

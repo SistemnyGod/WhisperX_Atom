@@ -46,10 +46,26 @@ def test_meetings_page_shows_upload_progress_and_preserves_background_processing
     assert 'DownloadOriginalButton_Click' in codebehind
 
 
-def test_manual_summary_requires_a_quality_approved_enriched_transcript():
+def test_manual_summary_uses_deterministic_mode_for_a_usable_v1_and_full_mode_for_v2():
     api = read(API)
     store = read(ROOT / "apps" / "server" / "WhisperX.Atom.Api" / "UnifiedProductStore.cs")
     assert 'GetSummaryEligibilityAsync' in api
     assert 'SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY' in api
-    assert 'versionKind != "ENRICHED"' in store
+    assert 'return new SummaryEligibility(true, true, "DETERMINISTIC_ONLY", "DETERMINISTIC_ONLY")' in store
+    assert 'summaryMode = transcriptKind == "ENRICHED" ? "FULL" : "DETERMINISTIC_ONLY"' in store
+    assert 'AUDIO_SIGNAL_UNUSABLE' not in store[store.index('public async Task<SummaryEligibility> GetSummaryEligibilityAsync'):]
     assert 'warningSet.Overlaps(blockingWarnings)' in store
+
+
+def test_pipeline_repair_is_privileged_preview_apply_and_does_not_replay_asr():
+    api = read(API)
+    store = read(ROOT / "apps" / "server" / "WhisperX.Atom.Api" / "UnifiedProductStore.cs")
+    desktop = read(DESKTOP / "Pages" / "MeetingsPage.xaml.cs")
+    assert 'MapPost("/api/meetings/{id:guid}/pipeline/repair"' in api
+    assert 'if (!IsPrivileged(context)) return Results.Forbid();' in api
+    assert 'mode is not ("PREVIEW" or "APPLY")' in api
+    assert 'RepairMeetingPipelineAsync' in store
+    assert 'A usable V1 always receives exactly one deterministic draft' in store
+    assert "TRANSCRIBE_ASR','QUEUED" not in store[store.index('RepairMeetingPipelineAsync'):store.index('public async Task<SummaryEligibility>')]
+    assert 'RepairMeetingPipelineAsync(meetingId, "PREVIEW"' in desktop
+    assert 'RepairMeetingPipelineAsync(meetingId, "APPLY"' in desktop

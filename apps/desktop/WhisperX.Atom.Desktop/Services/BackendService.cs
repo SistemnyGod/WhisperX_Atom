@@ -95,6 +95,7 @@ public sealed class BackendService : IBackendService
     public Task<DesktopRegistryPage<DesktopActionItemRegistryRow>> GetActionItemRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default) => _client.GetActionItemRegistryPageAsync(page, pageSize, search, status, meetingId, sort, cancellationToken);
     public Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.QueueSummaryRebuildAsync(meetingId, cancellationToken);
     public Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.RebuildSummaryAsync(meetingId, cancellationToken);
+    public Task<DesktopPipelineRepairResult?> RepairMeetingPipelineAsync(Guid meetingId, string mode, CancellationToken cancellationToken = default) => _client.RepairMeetingPipelineAsync(meetingId, mode, cancellationToken);
     public Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetDecisionsAsync(meetingId, cancellationToken);
     public Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default) => _client.GetTasksAsync(meetingId, cancellationToken);
     public Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default) => _client.UpdateTaskAsync(task, cancellationToken);

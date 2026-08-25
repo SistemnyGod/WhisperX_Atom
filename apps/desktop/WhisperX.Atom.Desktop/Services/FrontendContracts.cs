@@ -113,6 +113,7 @@ public interface IBackendService : IDisposable
     Task<DesktopRegistryPage<DesktopActionItemRegistryRow>> GetActionItemRegistryPageAsync(int page = 1, int pageSize = 50, string? search = null, string? status = null, Guid? meetingId = null, string? sort = null, CancellationToken cancellationToken = default);
     Task<DesktopJob?> QueueSummaryRebuildAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> RebuildSummaryAsync(Guid meetingId, CancellationToken cancellationToken = default);
+    Task<DesktopPipelineRepairResult?> RepairMeetingPipelineAsync(Guid meetingId, string mode, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopDecision>> GetDecisionsAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DesktopTask>> GetTasksAsync(Guid meetingId, CancellationToken cancellationToken = default);
     Task<bool> UpdateTaskAsync(DesktopTask task, CancellationToken cancellationToken = default);

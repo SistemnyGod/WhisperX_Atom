@@ -73,6 +73,15 @@ public sealed partial class MeetingsPage : Page
         _workspace.PropertyChanged += Workspace_PropertyChanged;
         try
         {
+            try
+            {
+                var currentUser = await _services.Backend.GetCurrentUserAsync(_pageCts.Token);
+                RepairPipelineButton.Visibility = currentUser?.IsPrivileged == true ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch (Exception)
+            {
+                RepairPipelineButton.Visibility = Visibility.Collapsed;
+            }
             await _viewModel.RefreshAsync(_pageCts.Token);
             UpdateListState();
             UpdateWorkspaceState();
@@ -473,6 +482,32 @@ public sealed partial class MeetingsPage : Page
         {
             if (!await _workspace.RebuildSummaryAsync(_pageCts.Token)) ShowError("API не принял запрос на пересборку саммари.");
             UpdateWorkspaceText();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }
+    }
+
+    private async void RepairPipelineButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_workspace?.Meeting is not { } meeting || _services is null || _pageCts is null || !Guid.TryParse(meeting.Id, out var meetingId)) return;
+        try
+        {
+            var preview = await _services.Backend.RepairMeetingPipelineAsync(meetingId, "PREVIEW", _pageCts.Token);
+            if (preview is null) { ShowError("Не удалось получить план восстановления. Требуются права администратора."); return; }
+            var plan = string.Join(Environment.NewLine, preview.Actions.Select(item => $"{item.Stage}: {item.State}" + (string.IsNullOrWhiteSpace(item.Reason) ? string.Empty : $" — {item.Reason}")));
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Восстановить обработку?",
+                Content = string.IsNullOrWhiteSpace(plan) ? "Изменения не требуются." : plan,
+                PrimaryButtonText = "Применить",
+                CloseButtonText = "Отмена",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            var applied = await _services.Backend.RepairMeetingPipelineAsync(meetingId, "APPLY", _pageCts.Token);
+            if (applied is null) { ShowError("API не применил план восстановления."); return; }
+            await ReloadMeetingAfterChangeAsync(meetingId);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { ShowError(UiErrorFormatter.Format(ex)); }

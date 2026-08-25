@@ -294,12 +294,13 @@
                                 <TabViewItem Header="Протокол" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
                                         <StackPanel Spacing="12">
-                                            <Grid ColumnDefinitions="*,Auto">
+                                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" />
                                                     <TextBlock x:Name="SummaryMetaText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
                                                 </StackPanel>
                                                 <Button Grid.Column="1" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildSummaryButton_Click" />
+                                                <Button x:Name="RepairPipelineButton" Grid.Column="2" Content="Восстановить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="RepairPipelineButton_Click" ToolTipService.ToolTip="Только для администратора: проверяет и восстанавливает отсутствующие V2 и саммари без повторной записи." Visibility="Collapsed" />
                                             </Grid>
                                             <TextBlock x:Name="SummaryText" Text="Саммари пока не готово." TextWrapping="Wrap" LineHeight="22" />
                                             <Grid x:Name="ProtocolCardsGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="12" RowSpacing="12" Margin="0,8,0,0">

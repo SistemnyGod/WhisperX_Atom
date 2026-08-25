@@ -83,7 +83,9 @@ public sealed record RecordingPipelineChain(
 public sealed record RecordingTrackRow(Guid Id, Guid SessionId, string TrackType, int SampleRate, int Channels, string Codec, string? DeviceId = null, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null);
 public sealed record SummaryRow(Guid Id, Guid MeetingId, Guid? TranscriptId, int Version, string Status, string ModelName, string PromptVersion, string SourceHash, JsonDocument Content, DateTime CreatedAt,
     string? ContentValidity = null, string? GenerationState = null, string? ErrorCode = null);
-public sealed record SummaryEligibility(bool HasTranscript, bool Allowed, string? Reason = null);
+public sealed record SummaryEligibility(bool HasTranscript, bool Allowed, string? Reason = null, string? SummaryMode = null);
+public sealed record PipelineRepairAction(string Stage, string State, string? Reason = null, Guid? JobId = null, Guid? TranscriptId = null);
+public sealed record PipelineRepairResult(string Mode, IReadOnlyList<PipelineRepairAction> Actions);
 public sealed record DecisionRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Text, string Status, DateTime CreatedAt);
 public sealed record ActionItemRow(Guid Id, Guid MeetingId, Guid? SummaryId, string Task, string? Responsible, DateTime? Deadline, string Status, Guid? EvidenceSegmentId, DateTime CreatedAt);
 public sealed record RegistryPage<T>(IReadOnlyList<T> Items, int TotalCount, bool HasMore);
@@ -1406,7 +1408,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                   AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                   AND t.status IN ('READY','PARTIAL_READY')
                   AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY[
-                      'ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED',
+                      'ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED',
                       'SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY'])
                   AND COALESCE(s.is_hidden,false)=false
                   AND to_tsvector('russian', COALESCE(s.text,''))
@@ -1452,7 +1454,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                   AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                   AND t.status IN ('READY','PARTIAL_READY')
                   AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY[
-                      'ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED',
+                      'ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED',
                       'SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY'])
                   AND COALESCE(s.is_hidden,false)=false
                   AND to_tsvector('russian', COALESCE(s.text,''))
@@ -2398,24 +2400,29 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             if (await meetingLock.ExecuteScalarAsync() is not Guid)
                 return null;
         }
-        await using (var active = new NpgsqlCommand("SELECT id FROM jobs WHERE meeting_id=@meeting AND type='SUMMARIZE' AND status NOT IN ('READY','FAILED','CANCELLED') ORDER BY created_at DESC LIMIT 1", connection, tx))
+        var transcriptSql = options?.TranscriptVersion is int
+            ? "SELECT id,COALESCE(version_kind,'GENERATED') FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
+            : "SELECT id,COALESCE(version_kind,'GENERATED') FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+        await using var transcript = new NpgsqlCommand(transcriptSql, connection, tx);
+        transcript.Parameters.AddWithValue("meeting", meetingId);
+        if (options?.TranscriptVersion is int transcriptVersion)
+            transcript.Parameters.AddWithValue("version", transcriptVersion);
+        await using var transcriptReader = await transcript.ExecuteReaderAsync();
+        if (!await transcriptReader.ReadAsync()) return null;
+        var transcriptGuid = transcriptReader.GetGuid(0);
+        var transcriptKind = transcriptReader.GetString(1).ToUpperInvariant();
+        await transcriptReader.CloseAsync();
+        var summaryMode = transcriptKind == "ENRICHED" ? "FULL" : "DETERMINISTIC_ONLY";
+        var sourceQuality = transcriptKind == "ENRICHED" ? "V2" : "V1_FALLBACK";
+        await using (var active = new NpgsqlCommand("SELECT id FROM jobs WHERE input_transcript_id=@transcript AND type='SUMMARIZE' AND status NOT IN ('READY','FAILED','CANCELLED') ORDER BY created_at DESC LIMIT 1", connection, tx))
         {
-            active.Parameters.AddWithValue("meeting", meetingId);
+            active.Parameters.AddWithValue("transcript", transcriptGuid);
             if (await active.ExecuteScalarAsync() is Guid activeJobId)
             {
                 await tx.CommitAsync();
                 return activeJobId;
             }
         }
-        var transcriptSql = options?.TranscriptVersion is int
-            ? "SELECT id FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
-            : "SELECT id FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
-        await using var transcript = new NpgsqlCommand(transcriptSql, connection, tx);
-        transcript.Parameters.AddWithValue("meeting", meetingId);
-        if (options?.TranscriptVersion is int transcriptVersion)
-            transcript.Parameters.AddWithValue("version", transcriptVersion);
-        var transcriptId = await transcript.ExecuteScalarAsync();
-        if (transcriptId is not Guid transcriptGuid) return null;
         var jobId = Guid.NewGuid();
         var pipelineCorrelationId = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId);
         await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,@transcript,@correlation) ON CONFLICT DO NOTHING RETURNING id", connection, tx);
@@ -2438,6 +2445,9 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             transcript_id = transcriptGuid,
             summary_profile = string.IsNullOrWhiteSpace(options?.Profile) ? (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant() : options.Profile.Trim().ToUpperInvariant(),
             prompt_version = string.IsNullOrWhiteSpace(options?.PromptVersion) ? "meeting-protocol-ru-v2" : options.PromptVersion.Trim(),
+            summaryMode,
+            sourceQuality,
+            enhancementPending = summaryMode == "DETERMINISTIC_ONLY",
             reason = options?.Reason?.Trim(),
             meeting_context = options?.MeetingContext?.RootElement ?? JsonSerializer.SerializeToElement(new { }),
             source_hash = (string?)null,
@@ -2452,6 +2462,236 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     }
 
     /// <summary>
+    /// Reconcile a partially completed recording pipeline without deleting
+    /// results or replaying ASR.  The repair is deliberately limited to the
+    /// V1→V2 and transcript→summary handoffs so an operator cannot accidentally
+    /// reprocess a long recording while recovering an optional stage.
+    /// </summary>
+    public async Task<PipelineRepairResult?> RepairMeetingPipelineAsync(Guid meetingId, Guid? actorUserId, bool apply)
+    {
+        const string v1Sql = "SELECT t.id,COALESCE(t.language,'ru'),COALESCE(t.quality_metadata,'{}'::jsonb)::text,COALESCE(t.warnings,'[]'::jsonb)::text FROM transcripts t WHERE t.meeting_id=@meeting AND COALESCE(t.version_kind,'')='ASR_DRAFT' ORDER BY t.version DESC LIMIT 1";
+        var actions = new List<PipelineRepairAction>();
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using (var meetingLock = new NpgsqlCommand("SELECT id FROM meetings WHERE id=@meeting FOR UPDATE", connection, tx))
+        {
+            meetingLock.Parameters.AddWithValue("meeting", meetingId);
+            if (await meetingLock.ExecuteScalarAsync() is not Guid) return null;
+        }
+
+        Guid? v1Id = null;
+        string language = "ru";
+        string qualityJson = "{}";
+        string[] warnings = [];
+        await using (var v1 = new NpgsqlCommand(v1Sql, connection, tx))
+        {
+            v1.Parameters.AddWithValue("meeting", meetingId);
+            await using var reader = await v1.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                v1Id = reader.GetGuid(0);
+                language = reader.GetString(1);
+                qualityJson = reader.GetString(2);
+                try { warnings = JsonSerializer.Deserialize<string[]>(reader.GetString(3)) ?? []; }
+                catch (JsonException) { warnings = ["INVALID_TRANSCRIPT_WARNINGS"]; }
+            }
+        }
+        if (v1Id is null)
+        {
+            actions.Add(new PipelineRepairAction("V1", "MISSING", "V1_TRANSCRIPT_REQUIRED"));
+            await tx.CommitAsync();
+            return new PipelineRepairResult(apply ? "APPLY" : "PREVIEW", actions);
+        }
+
+        var blockingWarnings = new HashSet<string>(warnings.Select(value => value.ToUpperInvariant()), StringComparer.Ordinal);
+        var v1Usable = !blockingWarnings.Overlaps(["NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"]);
+        await using (var segmentCheck = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM transcript_segments WHERE transcript_id=@transcript AND COALESCE(is_hidden,false)=false AND btrim(COALESCE(text,''))<>'')", connection, tx))
+        {
+            segmentCheck.Parameters.AddWithValue("transcript", v1Id.Value);
+            v1Usable &= (bool)(await segmentCheck.ExecuteScalarAsync() ?? false);
+        }
+        actions.Add(new PipelineRepairAction("ASR", "PRESERVED", v1Usable ? "V1_USABLE" : "V1_NOT_SUMMARIZABLE", TranscriptId: v1Id));
+
+        string sourceHash = string.Empty;
+        string acousticProfile = "AUTO";
+        try
+        {
+            using var quality = JsonDocument.Parse(qualityJson);
+            if (quality.RootElement.TryGetProperty("asr_audio_hash", out var hash) && hash.ValueKind == JsonValueKind.String)
+                sourceHash = hash.GetString() ?? string.Empty;
+            if (quality.RootElement.TryGetProperty("acoustic_profile", out var profile) && profile.ValueKind == JsonValueKind.String)
+                acousticProfile = profile.GetString() ?? "AUTO";
+        }
+        catch (JsonException) { }
+
+        var correlationId = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId);
+        Guid? v2Id = null;
+        await using (var v2 = new NpgsqlCommand("SELECT id FROM transcripts WHERE meeting_id=@meeting AND COALESCE(version_kind,'')='ENRICHED' AND source_transcript_id=@v1 ORDER BY version DESC LIMIT 1", connection, tx))
+        {
+            v2.Parameters.AddWithValue("meeting", meetingId);
+            v2.Parameters.AddWithValue("v1", v1Id.Value);
+            v2Id = await v2.ExecuteScalarAsync() as Guid?;
+        }
+
+        if (v2Id is null)
+        {
+            Guid? enrichmentJobId = null;
+            string? enrichmentStatus = null;
+            string? enrichmentErrorCode = null;
+            await using (var existing = new NpgsqlCommand("SELECT id,status,error_code FROM jobs WHERE input_transcript_id=@transcript AND type='TRANSCRIPT_ENRICH' ORDER BY created_at DESC LIMIT 1 FOR UPDATE", connection, tx))
+            {
+                existing.Parameters.AddWithValue("transcript", v1Id.Value);
+                await using var reader = await existing.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    enrichmentJobId = reader.GetGuid(0);
+                    enrichmentStatus = reader.GetString(1).ToUpperInvariant();
+                    enrichmentErrorCode = reader.IsDBNull(2) ? null : reader.GetString(2);
+                }
+            }
+
+            if (!v1Usable)
+            {
+                actions.Add(new PipelineRepairAction("V2", "BLOCKED", "V1_NOT_USABLE", enrichmentJobId, v1Id));
+            }
+            else
+            {
+                string? storageKey = null;
+                long? durationMs = null;
+                await using (var media = new NpgsqlCommand("SELECT a.asr_storage_key,a.duration_ms FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.meeting_id=@meeting AND j.type='TRANSCRIBE_ASR' ORDER BY j.created_at DESC LIMIT 1", connection, tx))
+                {
+                    media.Parameters.AddWithValue("meeting", meetingId);
+                    await using var reader = await media.ExecuteReaderAsync();
+                    if (await reader.ReadAsync())
+                    {
+                        storageKey = reader.IsDBNull(0) ? null : reader.GetString(0);
+                        durationMs = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(storageKey))
+                {
+                    actions.Add(new PipelineRepairAction("V2", "BLOCKED", "ASR_DERIVATIVE_REQUIRED", enrichmentJobId, v1Id));
+                }
+                else if (enrichmentJobId is null)
+                {
+                    var created = Guid.NewGuid();
+                    actions.Add(new PipelineRepairAction("V2", apply ? "QUEUED" : "MISSING", "V1_ENRICHMENT_REQUIRED", created, v1Id));
+                    if (apply)
+                    {
+                        await using var insert = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(@id,@meeting,'TRANSCRIPT_ENRICH','QUEUED','ASR_READY',0,@transcript,@correlation)", connection, tx);
+                        insert.Parameters.AddWithValue("id", created); insert.Parameters.AddWithValue("meeting", meetingId); insert.Parameters.AddWithValue("transcript", v1Id.Value); insert.Parameters.Add("correlation", NpgsqlDbType.Text).Value = (object?)correlationId ?? DBNull.Value;
+                        await insert.ExecuteNonQueryAsync();
+                        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = created, meeting_id = meetingId, transcript_id = v1Id, stage = "ASR_READY", storage_key = storageKey, language, acousticProfile, correlation_id = correlationId, duration_ms = durationMs });
+                        await InsertOutboxAsync(connection, tx, "ml.transcribe", payload);
+                        await using var lineage = new NpgsqlCommand("UPDATE recording_pipeline_runs SET enrichment_job_id=@job,updated_at=now() WHERE meeting_id=@meeting AND transcript_v1_id=@transcript", connection, tx);
+                        lineage.Parameters.AddWithValue("job", created); lineage.Parameters.AddWithValue("meeting", meetingId); lineage.Parameters.AddWithValue("transcript", v1Id.Value); await lineage.ExecuteNonQueryAsync();
+                    }
+                }
+                else if (enrichmentStatus is "QUEUED" or "RUNNING")
+                {
+                    actions.Add(new PipelineRepairAction("V2", "ACTIVE", "EXISTING_JOB_REUSED", enrichmentJobId, v1Id));
+                    if (apply)
+                    {
+                        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = enrichmentJobId, meeting_id = meetingId, transcript_id = v1Id, stage = "ASR_READY", storage_key = storageKey, language, acousticProfile, correlation_id = correlationId, duration_ms = durationMs });
+                        await EnsurePendingOutboxAsync(connection, tx, "ml.transcribe", enrichmentJobId.Value, payload);
+                    }
+                }
+                else if (enrichmentStatus == "FAILED" && IsRetryableRepairFailure(enrichmentErrorCode))
+                {
+                    actions.Add(new PipelineRepairAction("V2", "REQUIRES_RETRY", "RETRYABLE_ENRICHMENT_FAILURE", enrichmentJobId, v1Id));
+                    if (apply)
+                    {
+                        await using var retry = new NpgsqlCommand("UPDATE jobs SET status='QUEUED',stage='RETRY_PENDING',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=@job AND status='FAILED'", connection, tx);
+                        retry.Parameters.AddWithValue("job", enrichmentJobId!.Value);
+                        await retry.ExecuteNonQueryAsync();
+                        var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = enrichmentJobId, meeting_id = meetingId, transcript_id = v1Id, stage = "ASR_READY", storage_key = storageKey, language, acousticProfile, correlation_id = correlationId, duration_ms = durationMs });
+                        await EnsurePendingOutboxAsync(connection, tx, "ml.transcribe", enrichmentJobId.Value, payload);
+                    }
+                }
+                else
+                {
+                    actions.Add(new PipelineRepairAction("V2", "BLOCKED", $"JOB_{enrichmentStatus}_{enrichmentErrorCode ?? "UNKNOWN"}", enrichmentJobId, v1Id));
+                }
+            }
+        }
+        else
+        {
+            actions.Add(new PipelineRepairAction("V2", "READY", "EXISTING_TRANSCRIPT_REUSED", TranscriptId: v2Id));
+        }
+
+        // A usable V1 always receives exactly one deterministic draft. A V2
+        // summary, when it later exists, is keyed to the V2 transcript and is
+        // therefore a separate, idempotent enriched version.
+        var summaryTranscriptId = v2Id ?? v1Id;
+        var summaryMode = v2Id is null ? "DETERMINISTIC_ONLY" : "FULL";
+        var sourceQuality = v2Id is null ? "V1_FALLBACK" : "V2";
+        Guid? summaryJobId = null;
+        string? summaryStatus = null;
+        string? summaryErrorCode = null;
+        await using (var summary = new NpgsqlCommand("SELECT id,status,error_code FROM jobs WHERE input_transcript_id=@transcript AND type='SUMMARIZE' ORDER BY created_at DESC LIMIT 1 FOR UPDATE", connection, tx))
+        {
+            summary.Parameters.AddWithValue("transcript", summaryTranscriptId.Value);
+            await using var reader = await summary.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                summaryJobId = reader.GetGuid(0);
+                summaryStatus = reader.GetString(1).ToUpperInvariant();
+                summaryErrorCode = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+        }
+        var summaryPayload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = summaryJobId, meeting_id = meetingId, transcript_id = summaryTranscriptId, source_hash = sourceHash, summary_profile = (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant(), prompt_version = configuration["AUTO_SUMMARY_PROMPT_VERSION"] ?? "meeting-protocol-ru-v2", summaryMode, sourceQuality, enhancementPending = summaryMode == "DETERMINISTIC_ONLY", meeting_context = new { }, correlation_id = correlationId });
+        if (!v1Usable)
+        {
+            actions.Add(new PipelineRepairAction("SUMMARY", "BLOCKED", "V1_NOT_USABLE", summaryJobId, summaryTranscriptId));
+        }
+        else if (summaryJobId is null)
+        {
+            var created = Guid.NewGuid();
+            actions.Add(new PipelineRepairAction("SUMMARY", apply ? "QUEUED" : "MISSING", summaryMode, created, summaryTranscriptId));
+            if (apply)
+            {
+                await using var insert = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,type,status,stage,progress,input_transcript_id,pipeline_correlation_id) VALUES(@id,@meeting,'SUMMARIZE','QUEUED','TRANSCRIPT_READY',0,@transcript,@correlation)", connection, tx);
+                insert.Parameters.AddWithValue("id", created); insert.Parameters.AddWithValue("meeting", meetingId); insert.Parameters.AddWithValue("transcript", summaryTranscriptId.Value); insert.Parameters.Add("correlation", NpgsqlDbType.Text).Value = (object?)correlationId ?? DBNull.Value;
+                await insert.ExecuteNonQueryAsync();
+                var payload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = created, meeting_id = meetingId, transcript_id = summaryTranscriptId, source_hash = sourceHash, summary_profile = (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant(), prompt_version = configuration["AUTO_SUMMARY_PROMPT_VERSION"] ?? "meeting-protocol-ru-v2", summaryMode, sourceQuality, enhancementPending = summaryMode == "DETERMINISTIC_ONLY", meeting_context = new { }, correlation_id = correlationId });
+                await InsertOutboxAsync(connection, tx, "llm.summarize", payload);
+                await using var lineage = new NpgsqlCommand("UPDATE recording_pipeline_runs SET summary_job_id=@job,updated_at=now() WHERE meeting_id=@meeting AND (@v2 IS NULL OR transcript_v2_id=@v2)", connection, tx);
+                lineage.Parameters.AddWithValue("job", created); lineage.Parameters.AddWithValue("meeting", meetingId); lineage.Parameters.Add("v2", NpgsqlDbType.Uuid).Value = (object?)v2Id ?? DBNull.Value; await lineage.ExecuteNonQueryAsync();
+                await using var meeting = new NpgsqlCommand("UPDATE meetings SET status='SUMMARIZING' WHERE id=@meeting AND status NOT IN ('CANCELLED','FAILED')", connection, tx); meeting.Parameters.AddWithValue("meeting", meetingId); await meeting.ExecuteNonQueryAsync();
+            }
+        }
+        else if (summaryStatus is "QUEUED" or "RUNNING")
+        {
+            actions.Add(new PipelineRepairAction("SUMMARY", "ACTIVE", "EXISTING_JOB_REUSED", summaryJobId, summaryTranscriptId));
+            if (apply)
+                await EnsurePendingOutboxAsync(connection, tx, "llm.summarize", summaryJobId!.Value, summaryPayload);
+        }
+        else if (summaryStatus == "FAILED" && IsRetryableRepairFailure(summaryErrorCode))
+        {
+            actions.Add(new PipelineRepairAction("SUMMARY", "REQUIRES_RETRY", "RETRYABLE_SUMMARY_FAILURE", summaryJobId, summaryTranscriptId));
+            if (apply)
+            {
+                await using var retry = new NpgsqlCommand("UPDATE jobs SET status='QUEUED',stage='RETRY_PENDING',progress=0,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=@job AND status='FAILED'", connection, tx);
+                retry.Parameters.AddWithValue("job", summaryJobId.Value); await retry.ExecuteNonQueryAsync();
+                await EnsurePendingOutboxAsync(connection, tx, "llm.summarize", summaryJobId.Value, summaryPayload);
+            }
+        }
+        else if (summaryStatus == "FAILED")
+        {
+            actions.Add(new PipelineRepairAction("SUMMARY", "BLOCKED", $"JOB_FAILED_{summaryErrorCode ?? "UNKNOWN"}", summaryJobId, summaryTranscriptId));
+        }
+        else
+        {
+            actions.Add(new PipelineRepairAction("SUMMARY", "READY", "EXISTING_SUMMARY_REUSED", summaryJobId, summaryTranscriptId));
+        }
+
+        if (apply)
+            await AppendAuditEventAsync(connection, tx, actorUserId, meetingId, "PIPELINE", null, "PIPELINE_REPAIR_APPLIED", null, JsonSerializer.Serialize(new { actions = actions.Select(action => new { action.Stage, action.State, action.Reason, action.JobId, action.TranscriptId }) }));
+        await tx.CommitAsync();
+        return new PipelineRepairResult(apply ? "APPLY" : "PREVIEW", actions);
+    }
+
+    /// <summary>
     /// Manual summary requests obey the same quality boundary as automatic
     /// summaries.  A draft V1 is useful to a person but must not become an
     /// authoritative Qwen protocol before enrichment and quality checks pass.
@@ -2460,8 +2700,8 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     {
         await using var connection = await OpenAsync();
         var sql = transcriptVersion is int
-            ? "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
-            : "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+            ? "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE meeting_id=@meeting AND version=@version LIMIT 1"
+            : "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         if (transcriptVersion is int version) command.Parameters.AddWithValue("version", version);
@@ -2470,6 +2710,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
 
         var status = reader.GetString(0).ToUpperInvariant();
         var versionKind = reader.GetString(1).ToUpperInvariant();
+        var hasSegments = reader.GetBoolean(3);
         string[] warnings;
         try { warnings = JsonSerializer.Deserialize<string[]>(reader.GetString(2)) ?? []; }
         catch (JsonException) { return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY"); }
@@ -2477,12 +2718,17 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         var warningSet = new HashSet<string>(warnings.Select(item => item.ToUpperInvariant()), StringComparer.Ordinal);
         var blockingWarnings = new HashSet<string>(StringComparer.Ordinal)
         {
-            "NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE", "NEEDS_REVIEW", "REQUIRES_REVIEW", "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY"
+            "NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"
         };
-        if (versionKind != "ENRICHED") return new SummaryEligibility(true, false, "SUMMARY_REQUIRES_ENRICHED_V2");
-        if (status is not "READY" || warningSet.Overlaps(blockingWarnings))
+        if (!hasSegments)
+            return new SummaryEligibility(true, false, "SUMMARY_REQUIRES_CANONICAL_SEGMENTS");
+        if (warningSet.Overlaps(blockingWarnings))
             return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY");
-        return new SummaryEligibility(true, true);
+        if (versionKind != "ENRICHED")
+            return new SummaryEligibility(true, true, "DETERMINISTIC_ONLY", "DETERMINISTIC_ONLY");
+        if (status is not "READY")
+            return new SummaryEligibility(true, false, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY");
+        return new SummaryEligibility(true, true, null, "FULL");
     }
     private static string FormatTimecode(long milliseconds)
     {
@@ -2513,6 +2759,28 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         audit.Parameters.AddWithValue("after", (object?)afterState ?? DBNull.Value);
         await audit.ExecuteNonQueryAsync();
     }
+
+    private static async Task InsertOutboxAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string topic, string payload)
+    {
+        await using var command = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,@topic,@payload::jsonb)", connection, transaction);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("topic", topic);
+        command.Parameters.AddWithValue("payload", payload);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task EnsurePendingOutboxAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string topic, Guid jobId, string payload)
+    {
+        await using var exists = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM outbox_messages WHERE topic=@topic AND payload->>'job_id'=@job AND published_at IS NULL)", connection, transaction);
+        exists.Parameters.AddWithValue("topic", topic); exists.Parameters.AddWithValue("job", jobId.ToString());
+        if ((bool)(await exists.ExecuteScalarAsync() ?? false)) return;
+        await InsertOutboxAsync(connection, transaction, topic, payload);
+    }
+
+    private static bool IsRetryableRepairFailure(string? errorCode) => !string.Equals(errorCode, "NO_SPEECH_DETECTED", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(errorCode, "ASR_LANGUAGE_MISMATCH", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(errorCode, "SUMMARY_PROTOCOL_QUALITY_FAILED", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(errorCode, "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY", StringComparison.OrdinalIgnoreCase);
 
     private async Task<NpgsqlConnection> OpenAsync() { var connection = new NpgsqlConnection(_connectionString); await connection.OpenAsync(); return connection; }
     private static string Hash(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
