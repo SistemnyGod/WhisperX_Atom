@@ -155,3 +155,10 @@ def test_llm_doctor_runs_independent_contract_probes():
     assert '_contract_probe(base_url, model_alias, "ASSISTANT_GROUNDING")' in runtime_doctor
     assert '_contract_probe(base_url, model_alias, "SUMMARY_JSON")' in runtime_doctor
     assert '_contract_probe(base_url, model_alias, "MEETING_PROTOCOL_RU")' in runtime_doctor
+
+
+def test_native_refiner_build_canonicalizes_duplicate_windows_path_keys():
+    build = read("scripts/build-whisper-refiner-native.ps1")
+    assert "MSB6001" in build
+    assert "SetEnvironmentVariable('PATH', $null, 'Process')" in build
+    assert "SetEnvironmentVariable('Path', $pathValue, 'Process')" in build
