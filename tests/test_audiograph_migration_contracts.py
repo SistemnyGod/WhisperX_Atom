@@ -278,7 +278,8 @@ def test_audiograph_waveform_uses_linear_peak_derived_from_normalized_pcm16():
     runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
     assert "PeakLinear" in contracts
     assert "Math.Pow(10d, peakDb / 20d)" in contracts
-    assert "liveTelemetry.IsStale ? telemetry.PeakLinear : liveTelemetry.PeakLinear" in runtime
+    assert "RecorderTelemetrySelector.Select(telemetry, liveTelemetry)" in runtime
+    assert "microphoneSnapshot.PeakLinear" in runtime
     assert "LiveTelemetryAsync" in runtime
 
 
