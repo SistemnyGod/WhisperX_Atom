@@ -132,6 +132,8 @@ def test_doctor_and_hardware_runner_are_fail_closed():
     assert "Add-VerifiedModelCheck 'whisperx'" in doctor
     assert "Add-VerifiedModelCheck 'diarization'" in doctor
     assert "WHISPERX_MODEL_SHA256" in doctor and "DIARIZATION_MODEL_SHA256" in doctor
+    assert "DIARIZATION_SEGMENTATION_SHA256" in doctor
+    assert "DIARIZATION_EMBEDDING_SHA256" in doctor
     assert "qwen3-8b\\Qwen3-8B-Q5_K_M.gguf" in doctor
     assert "[ValidateSet('Server','Client','Aggregate')]" in runner
     assert "schemaVersion = 1" in runner

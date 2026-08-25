@@ -124,6 +124,8 @@ if ($Mode -eq 'Release') {
         Add-VerifiedModelCheck 'whisperx' 'WHISPERX_MODEL_PATH' 'WHISPERX_MODEL_SHA256' 'whisperx'
         Add-VerifiedModelCheck 'diarization' 'DIARIZATION_MODEL_PATH' 'DIARIZATION_MODEL_SHA256' 'diarization'
         $modelFiles = @(
+            @{ env = 'DIARIZATION_SEGMENTATION_PATH'; hash = 'DIARIZATION_SEGMENTATION_SHA256'; default = 'diarization\segmentation-3.0\pytorch_model.bin' },
+            @{ env = 'DIARIZATION_EMBEDDING_PATH'; hash = 'DIARIZATION_EMBEDDING_SHA256'; default = 'diarization\pyannote-wespeaker-voxceleb-resnet34-LM\pytorch_model.bin' },
             @{ env = 'LLM_MODEL_FILE'; hash = 'LLM_MODEL_SHA256'; default = 'qwen3-8b\Qwen3-8B-Q5_K_M.gguf' },
             @{ env = 'ASSISTANT_EMBEDDING_ONNX_PATH'; hash = 'ASSISTANT_EMBEDDING_ONNX_SHA256'; default = 'embeddings\paraphrase-multilingual-MiniLM-L12-v2.onnx' },
             @{ env = 'ASSISTANT_EMBEDDING_TOKENIZER_PATH'; hash = 'ASSISTANT_EMBEDDING_TOKENIZER_SHA256'; default = 'embeddings\tokenizer.json' }
