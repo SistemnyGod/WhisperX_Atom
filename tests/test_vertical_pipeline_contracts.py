@@ -55,6 +55,20 @@ def test_summary_handoff_reuses_job_and_repairs_missing_outbox_after_restart():
     assert "_ensure_summary_job_and_outbox" in ml
     assert "type='SUMMARIZE'" in ml
     assert "topic='llm.summarize'" in ml
+    assert 'summary_mode: str = "FULL"' in ml
+    assert '"summaryMode": summary_mode' in ml
+
+
+def test_usable_v1_creates_deterministic_draft_without_qwen_and_v2_remains_separate():
+    ml = read("workers/ml_worker/persistence.py")
+    summary = read("workers/summary_worker/worker.py")
+    assert '_v1_summary_allowed' in ml
+    assert 'summary_mode="DETERMINISTIC_ONLY"' in ml
+    assert 'source_quality="V1_FALLBACK"' in ml
+    deterministic = summary[summary.index('if summary_mode == "DETERMINISTIC_ONLY":'):summary.index('self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 10)')]
+    assert 'build_deterministic_summary' in deterministic
+    assert 'self._gpu_lease' not in deterministic
+    assert 'DETERMINISTIC_SUMMARY_MODEL' in deterministic
 
 
 def test_enrichment_failure_keeps_usable_v1_and_summary_worker_is_optional():

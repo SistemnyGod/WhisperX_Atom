@@ -581,6 +581,43 @@ class SummaryWorker:
             segments = await asyncio.to_thread(self.repository.load_segments, meeting_id, transcript_id)
             if not segments:
                 raise RuntimeError("transcript_has_no_segments")
+            summary_mode = str(payload.get("summaryMode", "FULL")).strip().upper()
+            if summary_mode == "DETERMINISTIC_ONLY":
+                # V1 is useful enough for a visible, evidence-bound draft but
+                # never for a Qwen protocol. Persist it as a terminal summary
+                # job: V2 later receives its own input transcript/job and can
+                # create a newer enriched protocol without retrying this one.
+                self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 35)
+                result = build_deterministic_summary(
+                    segments,
+                    profile=str(payload.get("summary_profile", payload.get("profile")) or ""),
+                )
+                result.update({
+                    "summaryMode": "DETERMINISTIC_ONLY",
+                    "sourceQuality": str(payload.get("sourceQuality") or "V1_FALLBACK"),
+                    "enhancementPending": bool(payload.get("enhancementPending", True)),
+                    "fallbackReason": "V2_ENRICHMENT_PENDING",
+                })
+                if correlation_id:
+                    result["correlation_id"] = correlation_id
+                self.repository.update_job(job_id, "RUNNING", "PERSISTING", 95)
+                persisted = await asyncio.to_thread(
+                    self.repository.persist,
+                    job_id,
+                    meeting_id,
+                    transcript_id,
+                    result,
+                    DETERMINISTIC_SUMMARY_MODEL,
+                )
+                await asyncio.to_thread(
+                    self.repository.record_pipeline_metrics,
+                    job_id,
+                    meeting_id,
+                    {"summary_total_ms": max(0.0, (time.perf_counter() - started_at) * 1000.0)},
+                )
+                if not persisted:
+                    await asyncio.to_thread(self.repository.release_message, message_id)
+                return
             self.repository.update_job(job_id, "RUNNING", "EXTRACTING_FACTS", 10)
             LOGGER.info("job=%s waiting for GPU lease", job_id)
             llm_started_at = time.perf_counter()
@@ -637,6 +674,9 @@ class SummaryWorker:
                         result["errorCode"] = None
                     if correlation_id:
                         result["correlation_id"] = correlation_id
+                    result["summaryMode"] = "FULL"
+                    result["sourceQuality"] = str(payload.get("sourceQuality") or "V2")
+                    result["enhancementPending"] = False
                 finally:
                     await asyncio.to_thread(self._llm_runtime.release_after_job)
                     if self._llm_runtime.enabled:

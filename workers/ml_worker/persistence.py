@@ -468,9 +468,12 @@ class JobRepository:
             with connection.transaction():
                 error_row = connection.execute("SELECT error_code,pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
                 no_speech = error_row is not None and str(error_row[0] or "").upper() == "NO_SPEECH_DETECTED"
-                partial_quality = error_row is not None and str(error_row[0] or "").upper() in {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE"}
+                # Acoustic diagnostics are advisory. A failed analyzer or a
+                # weak/clipped signal must not hide a successful V1 from the
+                # user, V2 or the deterministic summary fallback.
+                partial_quality = error_row is not None and str(error_row[0] or "").upper() in {"ASR_LANGUAGE_MISMATCH"}
                 connection.execute(
-                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code IN ('NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','ASR_ENHANCEMENT_FAILED') THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
+                    "UPDATE jobs SET status='READY',stage='ASR_READY',progress=100,error_code=CASE WHEN error_code IN ('NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH','ASR_ENHANCEMENT_FAILED') THEN error_code ELSE NULL END,lease_expires_at=NULL,last_heartbeat=now(),not_before=NULL,updated_at=now() WHERE id=%s AND status <> 'CANCELLED'",
                     (job_id,),
                 )
                 connection.execute(
@@ -500,6 +503,20 @@ class JobRepository:
             row = connection.execute("SELECT meeting_id,pipeline_correlation_id FROM jobs WHERE id=%s", (job_id,)).fetchone()
             if row and row[0]:
                 self._record_pipeline_event(connection, str(row[0]), event, str(row[1]) if row[1] else None)
+
+    @staticmethod
+    def _v1_summary_allowed(warnings: list[Any] | tuple[Any, ...] | set[Any], error_code: str | None, segments: list[Any] | tuple[Any, ...] | None = None) -> bool:
+        """A usable V1 may produce only the deterministic, reviewable draft.
+
+        V2 is still the sole source for a Qwen protocol.  This boundary keeps
+        a missing optional diagnostic or an enrichment outage from suppressing
+        a safe, evidence-bound draft, while an actually empty/no-speech V1 is
+        never summarized.
+        """
+        if segments is not None and not any(str((item or {}).get("text", "")).strip() for item in segments if isinstance(item, dict)):
+            return False
+        values = {str(item).upper() for item in warnings}
+        return str(error_code or "").upper() not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"} and not values.intersection({"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"})
 
     def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
         """Persist the ASR-only Transcript V1 before alignment/diarization.
@@ -532,7 +549,7 @@ class JobRepository:
                         ).fetchone()
                         warning_values = {str(item).upper() for item in (existing_meta[0] or [])} if existing_meta else set()
                         quality_meta = existing_meta[1] if existing_meta and isinstance(existing_meta[1], dict) else {}
-                        blocked = warning_values & {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}
+                        blocked = warning_values & {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"}
                         if not blocked:
                             media = connection.execute(
                                 "SELECT a.asr_storage_key,a.duration_ms FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
@@ -548,6 +565,27 @@ class JobRepository:
                                 str(quality_meta.get("acoustic_profile") or "AUTO"),
                                 str(job[2]) if job[2] else None,
                                 int(media[1]) if media and media[1] else None,
+                            )
+                        segment_count = connection.execute(
+                            "SELECT COUNT(*) FROM transcript_segments WHERE transcript_id=%s AND COALESCE(is_hidden,false)=false AND btrim(COALESCE(text,''))<>''",
+                            (existing[0],),
+                        ).fetchone()[0]
+                        if (
+                            os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"}
+                            and segment_count
+                            and self._v1_summary_allowed(list(warning_values), None)
+                        ):
+                            self._ensure_summary_job_and_outbox(
+                                connection,
+                                meeting_id,
+                                str(existing[0]),
+                                str(quality_meta.get("asr_audio_hash") or ""),
+                                os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper(),
+                                os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v2"),
+                                str(job[2]) if job[2] else None,
+                                summary_mode="DETERMINISTIC_ONLY",
+                                source_quality="V1_FALLBACK",
+                                enhancement_pending=True,
                             )
                     connection.execute("UPDATE recording_pipeline_runs SET transcript_v1_id=%s,updated_at=now() WHERE asr_job_id=%s", (existing[0], job_id))
                     self._record_pipeline_event(connection, meeting_id, "V1_READY", str(job[2]) if job[2] else None)
@@ -583,7 +621,7 @@ class JobRepository:
                 )
                 # ASR-only jobs expose V1 immediately and enqueue enrichment
                 # separately. The partial transcript is never mutated by V2.
-                if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_UNUSABLE"}:
+                if str(job[1]) == "TRANSCRIBE_ASR" and result_error_code not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"}:
                     media = connection.execute(
                         "SELECT a.asr_storage_key,a.duration_ms FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=%s",
                         (job_id,),
@@ -603,6 +641,22 @@ class JobRepository:
                     connection.execute(
                         "UPDATE meetings SET status=%s WHERE id=%s AND status NOT IN ('CANCELLED','FAILED')",
                         ("PARTIAL_READY" if "AUDIO_SIGNAL_WEAK" in {str(item).upper() for item in warnings} else "TRANSCRIPT_READY", meeting_id),
+                    )
+                if (
+                    os.getenv("AUTO_SUMMARY_ENABLED", "false").lower() in {"1", "true", "yes"}
+                    and self._v1_summary_allowed(warnings, result_error_code, list(draft.get("segments") or []))
+                ):
+                    self._ensure_summary_job_and_outbox(
+                        connection,
+                        meeting_id,
+                        str(transcript_id),
+                        str(draft.get("source_hash") or quality.get("asr_audio_hash") or ""),
+                        os.getenv("AUTO_SUMMARY_PROFILE", "MEETING_PROTOCOL_RU").strip().upper(),
+                        os.getenv("AUTO_SUMMARY_PROMPT_VERSION", "meeting-protocol-ru-v2"),
+                        str(job[2]) if job[2] else None,
+                        summary_mode="DETERMINISTIC_ONLY",
+                        source_quality="V1_FALLBACK",
+                        enhancement_pending=True,
                     )
                 return str(transcript_id)
 
@@ -712,7 +766,10 @@ class JobRepository:
             no_speech_detected = result_error_code == "NO_SPEECH_DETECTED" or "NO_SPEECH_DETECTED" in {str(item).upper() for item in warnings}
             if no_speech_detected and result_error_code is None:
                 result_error_code = "NO_SPEECH_DETECTED"
-            quality_codes = {"ASR_LANGUAGE_MISMATCH", "AUDIO_SIGNAL_WEAK", "AUDIO_SIGNAL_UNUSABLE", "ASR_ENHANCEMENT_FAILED"}
+            # Only a proved transcript defect is blocking. Signal analysis is
+            # a diagnostic of a derivative that has already decoded; its
+            # availability, weak and clipping states remain warnings.
+            quality_codes = {"ASR_LANGUAGE_MISMATCH"}
             quality_values = {str(item).upper() for item in warnings}
             quality_values.update(str(item).upper() for item in (quality.get("reasons") or []))
             quality_values.add(str(result_error_code or "").upper())
@@ -952,6 +1009,10 @@ class JobRepository:
         summary_profile: str,
         prompt_version: str,
         correlation_id: str | None,
+        *,
+        summary_mode: str = "FULL",
+        source_quality: str = "V2",
+        enhancement_pending: bool = False,
     ) -> str | None:
         """Reconcile the V2→Summary handoff after a worker restart.
 
@@ -976,10 +1037,16 @@ class JobRepository:
                     (transcript_id,),
                 ).fetchone()
         summary_job_id, status = str(summary_job[0]), str(summary_job[1])
-        connection.execute(
-            "UPDATE recording_pipeline_runs SET summary_job_id=%s,updated_at=now() WHERE transcript_v2_id=%s",
-            (summary_job_id, transcript_id),
-        )
+        if source_quality == "V1_FALLBACK":
+            connection.execute(
+                "UPDATE recording_pipeline_runs SET summary_job_id=%s,updated_at=now() WHERE transcript_v1_id=%s AND transcript_v2_id IS NULL",
+                (summary_job_id, transcript_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE recording_pipeline_runs SET summary_job_id=%s,updated_at=now() WHERE transcript_v2_id=%s",
+                (summary_job_id, transcript_id),
+            )
         if status in {"READY", "FAILED", "CANCELLED"}:
             return None if status in {"FAILED", "CANCELLED"} else summary_job_id
         exists = connection.execute(
@@ -996,6 +1063,9 @@ class JobRepository:
                 "source_hash": source_hash,
                 "summary_profile": summary_profile,
                 "prompt_version": prompt_version,
+                "summaryMode": summary_mode,
+                "sourceQuality": source_quality,
+                "enhancementPending": bool(enhancement_pending),
                 "meeting_context": {},
                 "correlation_id": correlation_id,
             })

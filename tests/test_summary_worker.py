@@ -43,9 +43,72 @@ from workers.summary_worker.protocol import (
     validate_protocol_candidates,
     validate_protocol_result,
 )
+from workers.summary_worker.worker import SummaryWorker
+from workers.summary_worker.deterministic_summary import DETERMINISTIC_SUMMARY_MODEL
 
 
 class SummaryWorkerTests(unittest.TestCase):
+    def test_v1_deterministic_job_never_starts_qwen(self):
+        class Repository:
+            def __init__(self):
+                self.persisted = None
+                self.updated = []
+
+            def pipeline_correlation(self, job_id, meeting_id):
+                return "corr-1"
+
+            def claim(self, message_id, job_id):
+                return True
+
+            def job_state(self, job_id):
+                return "QUEUED"
+
+            def update_job(self, *values):
+                self.updated.append(values)
+
+            def load_segments(self, meeting_id, transcript_id):
+                return [TranscriptSegment("seg-1", 0, 1200, "UNKNOWN", "Решили проверить насос.")]
+
+            def persist(self, *values):
+                self.persisted = values
+                return True
+
+            def record_pipeline_metrics(self, *values):
+                return None
+
+            def release_message(self, message_id):
+                raise AssertionError("terminal deterministic job must retain the normal persistence path")
+
+        worker = SummaryWorker.__new__(SummaryWorker)
+        worker.repository = repository = Repository()
+        worker._gpu_lease = object()
+        worker._gpu_coordination = object()
+        worker._llm_runtime = object()
+        worker._llm_client = None
+        worker.model_alias = "qwen3-8b"
+        worker._llm_owner = "test"
+
+        asyncio.run(worker.handle({
+            "job_id": "job-1",
+            "meeting_id": "00000000-0000-0000-0000-000000000001",
+            "transcript_id": "00000000-0000-0000-0000-000000000002",
+            "message_id": "message-1",
+            "summaryMode": "DETERMINISTIC_ONLY",
+            "sourceQuality": "V1_FALLBACK",
+            "enhancementPending": True,
+            "summary_profile": "MEETING_PROTOCOL_RU",
+        }))
+
+        self.assertIsNotNone(repository.persisted)
+        self.assertEqual(DETERMINISTIC_SUMMARY_MODEL, repository.persisted[4])
+        payload = repository.persisted[3]
+        self.assertEqual("DETERMINISTIC_ONLY", payload["summaryMode"])
+        self.assertEqual("V1_FALLBACK", payload["sourceQuality"])
+        self.assertTrue(payload["enhancementPending"])
+        self.assertEqual("READY_WITH_WARNINGS", payload["generationState"])
+        self.assertEqual("NEEDS_REVIEW", payload["contentValidity"])
+        self.assertFalse(hasattr(worker._llm_runtime, "ensure_started"))
+
     def test_llama_schema_drops_large_decoder_string_bounds_but_keeps_structure(self):
         schema = {
             "type": "object",

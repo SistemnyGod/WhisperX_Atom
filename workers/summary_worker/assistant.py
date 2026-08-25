@@ -730,7 +730,7 @@ class AssistantRepository:
                       AND (%s OR m.owner_id=%s::uuid)
                       AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                       AND t.status IN ('READY','PARTIAL_READY')
-                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
+                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
                       AND (%s::uuid IS NOT NULL OR m.created_at >= now()-make_interval(days => %s))
                 ), fts_anchors AS (
@@ -810,7 +810,7 @@ class AssistantRepository:
                         WHERE t.meeting_id=%s
                           AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                           AND (t.status IN ('PARTIAL_READY','READY') AND (
-                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
+                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
                                OR COALESCE(t.quality_score,0) < 0.45)))
                     """,
                     (meeting_id,),
@@ -1039,7 +1039,7 @@ class AssistantRepository:
                       AND (%s OR m.owner_id=%s::uuid)
                       AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                       AND t.status IN ('READY','PARTIAL_READY')
-                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED'])
+                      AND NOT (COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED'])
                       AND COALESCE(s.is_hidden,false)=false
                       AND (%s::uuid IS NOT NULL OR m.created_at >= now()-make_interval(days => %s))
                 ), hits AS (
@@ -1069,7 +1069,7 @@ class AssistantRepository:
                         WHERE t.meeting_id=%s
                           AND t.version=(SELECT MAX(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                           AND (t.status IN ('PARTIAL_READY','READY') AND (
-                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','AUDIO_SIGNAL_UNUSABLE','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
+                               COALESCE(t.warnings,'[]'::jsonb) ?| ARRAY['ASR_LANGUAGE_MISMATCH','NO_SPEECH_DETECTED','SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY']
                                OR COALESCE(t.quality_score,0) < 0.45)))
                     """,
                     (meeting_id,),
