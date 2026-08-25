@@ -3,6 +3,11 @@
     [switch]$NoRestore,
     [switch]$RequireVoiceRefinerAssets,
     [switch]$DevelopmentNoVoiceRefinerAssets,
+    # A pilot must still contain verified Refiner assets.  Unlike a
+    # production candidate it may be built before the real hardware corpus
+    # and far-field evidence exists, but carries that restriction explicitly
+    # in its release manifest and must not be promoted by a release gate.
+    [switch]$Pilot,
     [string]$ServerOrigin = "http://192.168.2.194:8080",
     [string]$TtsWheelhouse = '',
     [string]$ServerBundleRoot = 'artifacts/server-bundle',
@@ -46,14 +51,17 @@ if ([string]::IsNullOrWhiteSpace($buildIdentity) -or $buildIdentity -match '(?i)
     throw "INSTALLER_RELEASE_IDENTITY_INVALID: $buildIdentity"
 }
 if ($DevelopmentNoVoiceRefinerAssets) {
+    if ($Pilot) { throw "PILOT_AND_DEVELOPMENT_REFINER_MODES_CONFLICT" }
     if (-not [string]::Equals($env:VOICE_ASR_REFINER_MODE, 'OFF', [StringComparison]::OrdinalIgnoreCase)) {
         throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
     }
 } else {
     & $assetVerifier -ExpectedBuildIdentity $buildIdentity
     if (-not $?) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
-    & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
-    if (-not $?) { throw "VOICE_RELEASE_EVIDENCE_GATE_FAILED" }
+    if (-not $Pilot) {
+        & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
+        if (-not $?) { throw "VOICE_RELEASE_EVIDENCE_GATE_FAILED" }
+    }
 }
 $runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
 if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }
@@ -93,6 +101,14 @@ if ($previousSetup -and (Test-Path -LiteralPath $previousSetup)) { Remove-Item -
 $signature = Get-AuthenticodeSignature -LiteralPath $setup
 $signatureStatus = [string]$signature.Status
 $releaseStatus = if ($signatureStatus -eq "Valid") { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_PILOT_BUILD" }
+$releaseScope = if ($Pilot) { "PILOT" } else { "PRODUCTION_CANDIDATE" }
+$voiceAcceptance = if ($DevelopmentNoVoiceRefinerAssets) {
+    "DEVELOPMENT_REFINER_OFF"
+} elseif ($Pilot) {
+    "BLOCKED_BY_HARDWARE"
+} else {
+    "PASSED"
+}
 $releaseDir = Join-Path $repoRoot "artifacts\\release"
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 $serverArchivePath = if ([IO.Path]::IsPathRooted($ServerArchive)) { [IO.Path]::GetFullPath($ServerArchive) } else { [IO.Path]::GetFullPath((Join-Path $repoRoot $ServerArchive)) }
@@ -119,6 +135,8 @@ $serverBundle = if (Test-Path -LiteralPath $serverBundleManifestPath -PathType L
     buildIdentity = $buildIdentity
     commit = [string]$identity.commit
     status = $releaseStatus
+    releaseScope = $releaseScope
+    voiceAcceptance = $voiceAcceptance
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     installer = [ordered]@{ path = "artifacts/installer/WhisperXAtom-Setup.exe"; sha256 = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant(); signature = $signatureStatus }
     desktopPackage = "artifacts/desktop"

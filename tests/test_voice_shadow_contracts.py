@@ -69,6 +69,15 @@ def test_release_packaging_cannot_skip_asset_gate():
     assert 'VoiceRefinerHost' in publish
 
 
+def test_pilot_installer_keeps_asset_gate_and_declares_missing_hardware_evidence():
+    installer = (ROOT / "scripts/build-installer.ps1").read_text(encoding="utf-8-sig")
+    assert '[switch]$Pilot' in installer
+    assert 'if (-not $Pilot)' in installer
+    assert 'VOICE_REFINER_ASSET_GATE_FAILED' in installer
+    assert 'voiceAcceptance = $voiceAcceptance' in installer
+    assert '"BLOCKED_BY_HARDWARE"' in installer
+
+
 def test_shadow_rc_uses_resident_attestation_and_host_watchdog():
     client = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Host/ResidentVoiceRefinerClient.cs").read_text(encoding="utf-8")
     host = (ROOT / "apps/voice-host/WhisperX.Atom.Voice.Refiner.Host/Program.cs").read_text(encoding="utf-8")
