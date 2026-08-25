@@ -971,7 +971,10 @@ public sealed class AudioGraphCaptureEngine : IAudioCaptureEngine, IHostCaptureS
                 Math.Clamp(_livePeak, 0d, 1d),
                 _liveClipping,
                 now,
-                false);
+                false,
+                _silenceStartedAtUtc is null
+                    ? null
+                    : Math.Max(0L, (long)(now - _silenceStartedAtUtc.Value).TotalMilliseconds));
             _liveRmsSum = 0;
             _livePeak = 0;
             _liveClipping = false;

@@ -105,15 +105,23 @@ public sealed class WasapiRawDiagnosticCaptureEngine
             var quality = AudioQualityAnalyzer.AnalyzePcm16(
                 samples.AsSpan(speechStart, speechCount),
                 samples.AsSpan(0, silenceCount));
+            var actualSilenceSeconds = silenceCount / 48000d;
+            var actualSpeechSeconds = speechCount / 48000d;
+            var phase = AudioPhaseQualityGate.Evaluate(
+                quality,
+                actualSilenceSeconds,
+                actualSpeechSeconds,
+                silenceSeconds,
+                speechSeconds);
             if (!keepAudio) TryDeleteDirectory(diagnosticDirectory);
             return new AudioCaptureAbResult(true, endpoint.ID, durationSeconds, true, null,
                 RawSha256: hash, RawQuality: quality,
                 DiagnosticDirectory: keepAudio ? diagnosticDirectory : null,
                 AudioDeletedByDefault: !keepAudio,
                 SilenceSeconds: silenceSeconds,
-                SpeechSeconds: speechCount / 48000d,
-                NoiseWindowConfirmed: silenceCount > 0 && speechCount > 0,
-                PhaseMetadata: "SILENCE_THEN_SPEECH");
+                SpeechSeconds: actualSpeechSeconds,
+                NoiseWindowConfirmed: phase.Confirmed,
+                PhaseMetadata: phase.Reason);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

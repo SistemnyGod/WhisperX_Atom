@@ -231,6 +231,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
         var drive = TryGetDrive(spoolRoot);
         var telemetry = _engine.Telemetry;
         var liveTelemetry = _engine.LiveTelemetry;
+        var microphoneTelemetry = RecorderTelemetrySelector.Select(telemetry, liveTelemetry);
+        var microphoneSnapshot = microphoneTelemetry.Snapshot;
         var effectiveDevice = _engine.SelectedDevice;
         var systemTelemetry = _systemEngine.Telemetry;
         var effectiveSystemDevice = _systemEngine.SelectedDevice;
@@ -252,11 +254,11 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             ? "UNAVAILABLE"
             : attempt.FormatMismatch
                 ? "FORMAT_MISMATCH"
-                : (!liveTelemetry.IsStale && liveTelemetry.Clipping || liveTelemetry.IsStale && telemetry.Clipping)
+                : microphoneSnapshot.Clipping
                     ? "CLIPPING"
-                    : (!liveTelemetry.IsStale ? liveTelemetry.RmsDb : telemetry.RmsDb) is null
+                    : microphoneSnapshot.RmsDb is null
                         ? "NO_PACKETS"
-                        : (!liveTelemetry.IsStale ? liveTelemetry.RmsDb : telemetry.RmsDb) <= -50
+                        : microphoneSnapshot.RmsDb <= -50
                             ? "READY_NO_SIGNAL"
                             : "READY";
         var systemAudioUnavailable = systemRequired && !systemReady;
@@ -281,21 +283,23 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             // must not persist the transient endpoint id as a FIXED choice.
             SelectedMicrophoneDeviceId: _storage.MicrophoneDeviceId,
             SelectedSystemAudioDeviceId: _storage.SystemAudioDeviceId,
-            MicrophonePeak: liveTelemetry.IsStale ? telemetry.PeakLinear : liveTelemetry.PeakLinear,
+            MicrophonePeak: microphoneSnapshot.PeakLinear,
             SystemAudioPeak: systemTelemetry.PeakDb is null ? null : Math.Pow(10, systemTelemetry.PeakDb.Value / 20),
-            MicrophoneDb: liveTelemetry.IsStale ? telemetry.RmsDb : liveTelemetry.PeakDb,
+            // Legacy MicrophoneDb is the peak dB value. RMS is exposed by the
+            // additive MicrophoneRmsDb field below.
+            MicrophoneDb: microphoneSnapshot.PeakDb,
             SystemAudioDb: systemTelemetry.RmsDb,
-            MicrophoneRms: liveTelemetry.IsStale ? telemetry.RmsDb : liveTelemetry.RmsDb,
+            MicrophoneRms: microphoneSnapshot.RmsDb,
             SystemAudioRms: systemTelemetry.RmsDb,
-            MicrophoneRmsDb: liveTelemetry.IsStale ? telemetry.RmsDb : telemetry.RmsDb,
+            MicrophoneRmsDb: microphoneSnapshot.RmsDb,
             SystemAudioRmsDb: systemTelemetry.RmsDb,
-            MicrophoneClipping: liveTelemetry.IsStale ? telemetry.Clipping : liveTelemetry.Clipping,
+            MicrophoneClipping: microphoneSnapshot.Clipping,
             SystemAudioClipping: systemTelemetry.Clipping,
-            MicrophoneLastAudioAtUtc: telemetry.LastAudioAtUtc,
+            MicrophoneLastAudioAtUtc: microphoneSnapshot.LastAudioAtUtc,
             SystemAudioLastAudioAtUtc: systemTelemetry.LastAudioAtUtc,
-            MicrophoneSilenceDurationMs: telemetry.SilenceDurationMs,
+            MicrophoneSilenceDurationMs: microphoneSnapshot.SilenceDurationMs,
             SystemAudioSilenceDurationMs: systemTelemetry.SilenceDurationMs,
-            MicrophoneTelemetryStale: liveTelemetry.IsStale,
+            MicrophoneTelemetryStale: !microphoneTelemetry.UsesFreshLiveTelemetry,
             SystemAudioTelemetryStale: systemTelemetry.LastAudioAtUtc is null
                 || DateTimeOffset.UtcNow - systemTelemetry.LastAudioAtUtc.Value > TimeSpan.FromMilliseconds(750),
             ActiveSessionId: _sessionId,
@@ -911,7 +915,26 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                     graphSamples.AsSpan(0, graphSilenceCount));
         }
         var raw = await _rawDiagnostic.CaptureAsync(deviceId, durationSeconds, keepAudio, diagnosticDirectory, silenceSeconds, speechSeconds, cancellationToken).ConfigureAwait(false);
-        var report = raw with { AudioGraphSha256 = graphHash, AudioGraphQuality = graphQuality, SilenceSeconds = silenceSeconds, SpeechSeconds = speechSeconds, NoiseWindowConfirmed = graphQuality is not null && raw.NoiseWindowConfirmed, PhaseMetadata = "SILENCE_THEN_SPEECH" };
+        var graphDurationSeconds = graphPcm.Length / 2d / SampleRate;
+        var graphSilenceCaptured = Math.Min(graphDurationSeconds, silenceSeconds);
+        var graphSpeechCaptured = Math.Max(0d, Math.Min(graphDurationSeconds - silenceSeconds, speechSeconds));
+        var graphPhase = AudioPhaseQualityGate.Evaluate(
+            graphQuality,
+            graphSilenceCaptured,
+            graphSpeechCaptured,
+            silenceSeconds,
+            speechSeconds);
+        var phaseConfirmed = raw.NoiseWindowConfirmed && graphPhase.Confirmed;
+        var phaseMetadata = phaseConfirmed
+            ? "SILENCE_THEN_SPEECH_CONFIRMED"
+            : (!raw.NoiseWindowConfirmed ? raw.PhaseMetadata : graphPhase.Reason);
+        var report = raw with
+        {
+            AudioGraphSha256 = graphHash,
+            AudioGraphQuality = graphQuality,
+            NoiseWindowConfirmed = phaseConfirmed,
+            PhaseMetadata = phaseMetadata
+        };
         return new AgentIpcResponse(
             report.Success,
             report.Success ? "AUDIO_AB_READY" : "AUDIO_AB_FAILED",

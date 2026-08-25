@@ -366,7 +366,8 @@ public sealed record LiveAudioTelemetrySnapshot(
     double PeakLinear,
     bool Clipping,
     DateTimeOffset CapturedAtUtc,
-    bool IsStale = false)
+    bool IsStale = false,
+    long? SilenceDurationMs = null)
 {
     public double RmsDb => ToDb(RmsLinear);
     public double PeakDb => ToDb(PeakLinear);
