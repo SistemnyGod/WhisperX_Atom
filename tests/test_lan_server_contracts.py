@@ -325,6 +325,8 @@ def test_server_runtime_supervisor_is_user_session_owned_and_bounded():
     assert "RestartCount 20" in startup and "RestartInterval" in startup
     assert "AtLogOn" in startup and "-LogonType Interactive" in startup
     assert "Start-ScheduledTask" in startup
+    assert "0x80070005" in startup and "отказано в доступе" in startup
+    assert "SERVER_STARTUP_TASK_REGISTRATION_DENIED" in startup
     assert "release-manifest.json" in startup and "DOCKER_DESKTOP_NOT_FOUND" in startup
     assert "supervise-server-runtime.ps1" in bundle
     assert "ensure-supervisor-health-token.ps1" in bundle
