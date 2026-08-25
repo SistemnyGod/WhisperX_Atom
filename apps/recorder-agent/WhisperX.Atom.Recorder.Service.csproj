@@ -15,7 +15,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioContracts.cs;AudioQualityAnalyzer.cs;AudioConfigurationV2.cs;MachineServerConfig.cs;RecorderRuntimeLease.cs;RecorderRuntimeResolver.cs;RecorderRuntimeActivity.cs;RawFinalizerQueueMetrics.cs;AudioFrameContinuityValidator.cs;DeliveryWakeSignal.cs;LocalMeetingDirectoryResolver.cs;LocalPlayableAudioWriter.cs;LegacyWasapiCaptureEngine.cs;LegacyWasapiDeviceProbe.cs;AudioRuntimeProbe\**" />
+    <Compile Remove="AgentStateMachine.cs;SpoolStore.cs;RecordingContract.cs;AgentIpcProtocol.cs;AgentStorageSettings.cs;RecordingSessionClock.cs;StorageWatermark.cs;AudioDeviceProbe.cs;AudioRuntimeProbe.cs;AudioSampleFormat.cs;AudioContracts.cs;AudioQualityAnalyzer.cs;AudioConfigurationV2.cs;MachineServerConfig.cs;RecorderRuntimeLease.cs;RecorderRuntimeResolver.cs;RecorderRuntimeActivity.cs;RawFinalizerQueueMetrics.cs;AudioFrameContinuityValidator.cs;DeliveryWakeSignal.cs;LocalMeetingDirectoryResolver.cs;LocalPlayableAudioWriter.cs;LegacyWasapiCaptureEngine.cs;LegacyWasapiDeviceProbe.cs;AudioRuntimeProbe\**;RecorderTelemetrySelector.cs;AudioPhaseQualityGate.cs" />
     <ProjectReference Include="WhisperX.Atom.Recorder.Core.csproj" />
     <!-- NAudio is isolated to the legacy Windows adapter and probe. It is not
          part of Recorder.Core or the AudioGraph Host. -->
