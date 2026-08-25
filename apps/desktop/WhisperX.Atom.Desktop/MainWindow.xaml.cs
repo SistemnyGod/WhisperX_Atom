@@ -114,7 +114,9 @@ public sealed partial class MainWindow : Window
         };
         object parameter = normalizedRoute == "meetings" && payload is MeetingNavigationTarget target
             ? new MeetingNavigationRequest(_services, target)
-            : normalizedRoute switch
+            : normalizedRoute == "summaries" && payload is MeetingNavigationTarget summaryTarget
+                ? new SummaryNavigationRequest(_services, summaryTarget)
+                : normalizedRoute switch
             {
                 "series" => new ComingSoonNavigationRequest(_services, "Серии оперативок", "Группируйте повторяющиеся оперативки и отслеживайте их историю."),
                 "search" => new ComingSoonNavigationRequest(_services, "Поиск", "Единый поиск по совещаниям, стенограммам, спикерам и задачам."),

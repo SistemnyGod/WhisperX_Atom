@@ -10,8 +10,8 @@ def test_russian_technology_profile_is_bounded_and_uses_eugene():
     router = (HOST / "Tts/TtsEngineRouter.cs").read_text(encoding="utf-8")
     profile = (HOST / "Tts/TtsVoiceProfile.cs").read_text(encoding="utf-8")
     assert 'MifodiyTech = "MIFODIY_TECH"' in profile
-    assert 'JarvisRu = "JARVIS_RU"' in profile
     assert 'Clean = "CLEAN"' in profile
+    assert 'AidarClean = "AIDAR_CLEAN"' in profile
     assert 'configuredVoice = "eugene"' in router
     assert 'FxEnabled => TtsVoiceProfiles.IsTechnologyProfile' in router
 
@@ -26,24 +26,21 @@ def test_fx_is_playback_only_and_snapshot_is_additive():
     assert "VoiceProfile" in contracts and "TtsFxApplied" in contracts
 
 
-def test_main_ui_keeps_russian_profiles_and_exposes_jarvis_as_explicit_experimental_option():
+def test_main_ui_exposes_russian_profiles_and_all_silero_voices():
     xaml = (DESKTOP / "Pages/SettingsPage.xaml").read_text(encoding="utf-8")
     assert "Мифодий — технологичный" in xaml
-    assert "Jarvis-style" in xaml
     assert "Евгений — чистый" in xaml
     assert "Русский Windows fallback" in xaml
-    assert "J.A.R.V.I.S. — English Piper (experimental)" in xaml
-    assert 'Tag="PIPER_JARVIS"' in xaml
+    for voice in ('Tag="aidar"', 'Tag="eugene"', 'Tag="baya"', 'Tag="kseniya"', 'Tag="xenia"'):
+        assert voice in xaml
+    assert "JARVIS" not in xaml.upper()
+    assert "PIPER" not in xaml.upper()
 
 
-def test_piper_jarvis_is_optional_and_fails_back_without_touching_silero():
-    profile = (HOST / "Tts/TtsVoiceProfile.cs").read_text(encoding="utf-8")
-    engine = (HOST / "Tts/PiperTtsEngine.cs").read_text(encoding="utf-8")
+def test_tts_keeps_all_russian_silero_voices_and_no_piper_runtime():
     router = (HOST / "Tts/TtsEngineRouter.cs").read_text(encoding="utf-8")
-    assert 'JarvisEn = "JARVIS_EN"' in profile
-    assert 'EngineName => "PIPER_JARVIS"' in engine
-    assert 'PIPER_MODEL_MISSING' in engine
-    assert 'PIPER_LANGUAGE_UNSUPPORTED' in engine
-    assert 'ContainsCyrillic' in engine
-    assert 'PIPER_JARVIS' in router
+    for voice in ('id = "aidar"', 'id = "eugene"', 'id = "baya"', 'id = "kseniya"', 'id = "xenia"'):
+        assert voice in router
+    assert "PIPER" not in router.upper()
+    assert "JARVIS" not in router.upper()
     assert 'await _silero.EnsureReadyAsync' in router

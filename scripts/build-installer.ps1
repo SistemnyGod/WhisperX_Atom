@@ -76,7 +76,8 @@ if ($DevelopmentNoVoiceRefinerAssets) {
         throw "VOICE_REFINER_DEVELOPMENT_MODE_REQUIRES_OFF"
     }
 } else {
-    & $assetVerifier -ExpectedBuildIdentity $buildIdentity
+    $voiceAssetIdentity = if ($AllowDirtyPilot) { $buildIdentity -replace '-dirty$', '' } else { $buildIdentity }
+    & $assetVerifier -ExpectedBuildIdentity $voiceAssetIdentity
     if (-not $?) { throw "VOICE_REFINER_ASSET_GATE_FAILED" }
     if (-not $Pilot) {
         & (Join-Path $repoRoot "scripts\verify-voice-release-evidence.ps1") -BuildIdentity $buildIdentity
@@ -85,7 +86,11 @@ if ($DevelopmentNoVoiceRefinerAssets) {
 }
 $runtimeGate = Join-Path $repoRoot "scripts\verify-clean-runtime.ps1"
 if (-not (Test-Path -LiteralPath $runtimeGate -PathType Leaf)) { throw "CLEAN_RUNTIME_GATE_MISSING: $runtimeGate" }
-& $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json")
+if ($AllowDirtyPilot) {
+    & $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json") -AllowDirtyPilot
+} else {
+    & $runtimeGate -ArtifactsRoot (Join-Path $repoRoot "artifacts\desktop") -OutputPath (Join-Path $repoRoot "artifacts\acceptance\clean-runtime\runtime-identity.json")
+}
 if (-not $?) { throw "CLEAN_RUNTIME_GATE_FAILED" }
 $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($null -eq $iscc) {

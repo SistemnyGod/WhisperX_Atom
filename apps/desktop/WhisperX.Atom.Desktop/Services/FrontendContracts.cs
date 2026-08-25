@@ -175,6 +175,7 @@ public sealed record DesktopAssistantMessageCreateResult(DesktopAssistantMessage
 
 public sealed record MeetingNavigationTarget(string MeetingId, string? SegmentId = null, long? StartMs = null);
 public sealed record MeetingNavigationRequest(FrontendServices Services, MeetingNavigationTarget Target);
+public sealed record SummaryNavigationRequest(FrontendServices Services, MeetingNavigationTarget Target);
 
 public sealed class ActiveMeetingContext
 {

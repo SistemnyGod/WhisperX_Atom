@@ -13,6 +13,7 @@
                 <StackPanel x:Name="MeetingsActionsPanel" Orientation="Horizontal" Spacing="8">
                     <Button Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить список совещаний" ToolTipService.ToolTip="Загрузить актуальный список совещаний" />
                     <Button Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудиофайл" ToolTipService.ToolTip="Загрузить аудио или видео для обработки" />
+                    <Button Content="Все саммари" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSummariesButton_Click" AutomationProperties.Name="Открыть все саммари" ToolTipService.ToolTip="Открыть отдельный раздел с итогами встреч" />
                 </StackPanel>
             </controls:PageHeader.Actions>
         </controls:PageHeader>
@@ -272,7 +273,7 @@
                                                             <TextBlock Text="Саммари" Style="{StaticResource SectionTitleStyle}" />
                                                             <TextBlock Text="{Binding SummaryMetaText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
                                                             <TextBlock Text="{Binding SummaryText}" TextWrapping="Wrap" MaxLines="6" TextTrimming="CharacterEllipsis" />
-                                                            <Button Content="Открыть саммари" Style="{StaticResource CardButtonStyle}" Click="OpenSummaryTabButton_Click" />
+                                                            <Button Content="Открыть саммари" Style="{StaticResource CardButtonStyle}" Click="OpenSummaryTabButton_Click" AutomationProperties.Name="Открыть саммари выбранной встречи" ToolTipService.ToolTip="Перейти в отдельный раздел саммари" />
                                                         </StackPanel>
                                                     </Border>
                                                     <TextBlock Text="Спикеры" Style="{StaticResource SectionTitleStyle}" Margin="0,4,0,0" />
@@ -291,7 +292,7 @@
                                     </Grid>
                                 </TabViewItem>
 
-                                <TabViewItem Header="Протокол" Style="{StaticResource WorkspaceTabItemStyle}">
+                                <TabViewItem Header="Саммари" Style="{StaticResource WorkspaceTabItemStyle}">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
                                         <StackPanel Spacing="12">
                                             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">

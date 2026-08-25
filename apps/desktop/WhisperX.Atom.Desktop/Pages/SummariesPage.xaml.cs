@@ -11,6 +11,7 @@ public sealed partial class SummariesPage : Page
 {
     private SummariesViewModel? _viewModel;
     private CancellationTokenSource? _pageCts;
+    private string? _pendingMeetingId;
     private bool _updatingLayout;
     private PageLayoutMode _layoutMode = PageLayoutMode.Wide;
     private bool _layoutInitialized;
@@ -24,7 +25,16 @@ public sealed partial class SummariesPage : Page
     protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
-        if (e.Parameter is not FrontendServices services) return;
+        FrontendServices? services = e.Parameter switch
+        {
+            SummaryNavigationRequest request => request.Services,
+            FrontendServices directServices => directServices,
+            _ => null
+        };
+        if (services is null) return;
+        _pendingMeetingId = e.Parameter is SummaryNavigationRequest summaryRequest
+            ? summaryRequest.Target.MeetingId
+            : null;
         _pageCts = new CancellationTokenSource();
         _viewModel = new SummariesViewModel(services);
         DataContext = _viewModel;
@@ -32,6 +42,8 @@ public sealed partial class SummariesPage : Page
         try
         {
             await _viewModel.LoadAsync(_pageCts.Token);
+            if (!string.IsNullOrWhiteSpace(_pendingMeetingId))
+                _viewModel.SelectMeeting(_pendingMeetingId);
             UpdateState();
         }
         catch (OperationCanceledException) { }
@@ -47,13 +59,19 @@ public sealed partial class SummariesPage : Page
         _pageCts?.Cancel();
         _pageCts?.Dispose();
         _pageCts = null;
+        _pendingMeetingId = null;
         if (_viewModel is not null) _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
         base.OnNavigatedFrom(e);
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(SummariesViewModel.SelectedItem) or nameof(SummariesViewModel.IsRebuilding))
+        if (e.PropertyName == nameof(SummariesViewModel.SelectedItem))
+        {
+            UpdateDetails();
+            ApplySummaryLayout(ActualWidth, force: true);
+        }
+        else if (e.PropertyName == nameof(SummariesViewModel.IsRebuilding))
             UpdateDetails();
         UpdateState();
     }

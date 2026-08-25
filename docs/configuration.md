@@ -82,8 +82,8 @@ Copy-Item .env.example .env
 
 | Настройка | Значения | Политика |
 | --- | --- | --- |
-| `TtsVoiceProfile` | `MIFODIY_TECH`, `CLEAN`, `JARVIS_RU`, `JARVIS_EN`, `AIDAR_CLEAN` | по умолчанию `MIFODIY_TECH`; `JARVIS_EN` требует локальные Piper assets и влияет только на воспроизведение ответа |
-| `TtsEngine` | `SILERO`, `PIPER_JARVIS`, `WINDOWS` | `SILERO` — русский default; `PIPER_JARVIS` — явный экспериментальный English fallback-safe engine |
+| `TtsVoiceProfile` | `MIFODIY_TECH`, `CLEAN`, `AIDAR_CLEAN` | по умолчанию `MIFODIY_TECH`; профили влияют только на локальное воспроизведение |
+| `TtsEngine` | `SILERO`, `WINDOWS` | `SILERO` — русский основной движок; Windows — русский fallback или явный выбор |
 | `speaker` | существующие Silero IDs | новые установки используют `eugene`; значение сохраняется для IPC-совместимости |
 | Windows fallback | русский `ru-RU` | используется только при недоступности Silero |
 

@@ -95,6 +95,16 @@ public sealed class SummariesViewModel : ObservableObject
     public bool HasSelection => SelectedItem is not null;
     public bool CanRebuild => SelectedItem is not null && !IsRebuilding;
 
+    public bool SelectMeeting(string? meetingId)
+    {
+        if (string.IsNullOrWhiteSpace(meetingId)) return false;
+        var item = FilteredItems.FirstOrDefault(candidate =>
+            string.Equals(candidate.Meeting.Id, meetingId, StringComparison.OrdinalIgnoreCase));
+        if (item is null) return false;
+        SelectedItem = item;
+        return true;
+    }
+
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
         IsLoading = true;

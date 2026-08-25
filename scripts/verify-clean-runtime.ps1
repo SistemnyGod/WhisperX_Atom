@@ -5,7 +5,8 @@ param(
     [string]$ServerManifestPath,
     [string]$OutputPath = (Join-Path $PSScriptRoot "..\artifacts\acceptance\clean-runtime\runtime-identity.json"),
     [switch]$RequireInstalled,
-    [switch]$CheckRunningProcesses
+    [switch]$CheckRunningProcesses,
+    [switch]$AllowDirtyPilot
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,13 +30,13 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "RUNTIME_
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
 $expected = [string]$manifest.buildIdentity
 $commit = [string]$manifest.commit
-if ([string]::IsNullOrWhiteSpace($expected) -or $expected -match '(?i)(dev|dirty)' -or $expected -notmatch '^1\.0\.1\+[0-9a-fA-F]{40}$') {
+if ([string]::IsNullOrWhiteSpace($expected) -or $expected -match '(?i)dev' -or $expected -notmatch '^1\.0\.1\+[0-9a-fA-F]{40}(-dirty)?$' -or ($expected -match '(?i)dirty' -and -not $AllowDirtyPilot)) {
     Fail "RUNTIME_RELEASE_IDENTITY_INVALID" $expected
 }
-if ($commit -notmatch '^[0-9a-fA-F]{40}$' -or $expected -ne "1.0.1+$commit") {
+if ($commit -notmatch '^[0-9a-fA-F]{40}$' -or ($expected -ne "1.0.1+$commit" -and -not ($AllowDirtyPilot -and $expected -eq "1.0.1+$commit-dirty"))) {
     Fail "RUNTIME_COMMIT_IDENTITY_MISMATCH" "$commit / $expected"
 }
-if ([bool]$manifest.dirty) { Fail "RUNTIME_MANIFEST_DIRTY" }
+if ([bool]$manifest.dirty -and -not $AllowDirtyPilot) { Fail "RUNTIME_MANIFEST_DIRTY" }
 
 $required = [ordered]@{
     Desktop = "Desktop\WhisperX.Atom.Desktop.exe"

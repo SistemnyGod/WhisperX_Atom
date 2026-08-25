@@ -68,7 +68,7 @@ public sealed class SettingsViewModel : ObservableObject
     private VoiceTelemetryUiState _voiceTelemetry = VoiceTelemetryUiState.Empty;
     private int _voiceRestartCountCache = -1;
     public ObservableCollection<string> VoiceOptions { get; } = new();
-    public IReadOnlyList<string> TtsVoiceProfileOptions { get; } = new[] { "MIFODIY_TECH", "JARVIS_RU", "JARVIS_EN", "CLEAN", "AIDAR_CLEAN" };
+    public IReadOnlyList<string> TtsVoiceProfileOptions { get; } = new[] { "MIFODIY_TECH", "CLEAN", "AIDAR_CLEAN" };
     public bool ServerOriginManaged { get; }
     private bool _mustChangePassword;
 
@@ -143,7 +143,7 @@ public sealed class SettingsViewModel : ObservableObject
     public int VoiceVolume { get => _voiceVolume; set { var valueToSet = Math.Clamp(value, 0, 100); if (SetProperty(ref _voiceVolume, valueToSet)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsEngine { get => _ttsEngine; set { if (SetProperty(ref _ttsEngine, value)) _ = ApplyVoiceSettingsAsync(); } }
     public string TtsVoice { get => _ttsVoice; set { if (SetProperty(ref _ttsVoice, value)) _ = ApplyVoiceSettingsAsync(); } }
-    public string TtsVoiceProfile { get => _ttsVoiceProfile; set { var normalized = string.Equals(value, "AIDAR_CLEAN", StringComparison.OrdinalIgnoreCase) ? "AIDAR_CLEAN" : string.Equals(value, "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : string.Equals(value, "JARVIS_RU", StringComparison.OrdinalIgnoreCase) ? "JARVIS_RU" : string.Equals(value, "JARVIS_EN", StringComparison.OrdinalIgnoreCase) ? "JARVIS_EN" : "MIFODIY_TECH"; if (SetProperty(ref _ttsVoiceProfile, normalized)) _ = ApplyVoiceSettingsAsync(); } }
+    public string TtsVoiceProfile { get => _ttsVoiceProfile; set { var normalized = string.Equals(value, "AIDAR_CLEAN", StringComparison.OrdinalIgnoreCase) ? "AIDAR_CLEAN" : string.Equals(value, "CLEAN", StringComparison.OrdinalIgnoreCase) ? "CLEAN" : "MIFODIY_TECH"; if (SetProperty(ref _ttsVoiceProfile, normalized)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsSampleRate { get => _ttsSampleRate; set { var v = value is 24000 or 48000 ? value : 48000; if (SetProperty(ref _ttsSampleRate, v)) _ = ApplyVoiceSettingsAsync(); } }
     public int TtsCpuThreads { get => _ttsCpuThreads; set { var v = Math.Clamp(value, 1, 32); if (SetProperty(ref _ttsCpuThreads, v)) _ = ApplyVoiceSettingsAsync(); } }
     public bool TtsFallbackEnabled { get => _ttsFallbackEnabled; set { if (SetProperty(ref _ttsFallbackEnabled, value)) _ = ApplyVoiceSettingsAsync(); } }

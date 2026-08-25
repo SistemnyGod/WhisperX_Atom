@@ -105,10 +105,8 @@ Broker и текущую пользовательскую сессию.
   limiter `-1 dBFS`. TTS WAV, Recorder archive, Voice ASR и WhisperX input не
   изменяются.
 - `IMPLEMENTED`: при ошибке FX используется чистый `eugene`, при отказе
-  Silero — русский Windows fallback. Отдельный `JARVIS_EN` подключает
-  локальный Piper `jarvis-medium` только явным выбором и остаётся
-  экспериментальным английским профилем; `JARVIS_RU` — русский
-  playback-профиль на базе `eugene`, без имитации голоса актёра.
+  Silero — русский Windows fallback. Все TTS-профили остаются русскими и
+  не используют имитацию голоса актёра.
 - `IMPLEMENTED`: snapshot дополнен additive-полями `voiceProfile`,
   `fxEnabled`, `fxApplied`, `fxFallbackReason`; cancellation, ducking и ровно
   одно terminal-воспроизведение сохраняются.

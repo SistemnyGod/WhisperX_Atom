@@ -4,8 +4,7 @@ The local speech path is intentionally split into four responsibilities:
 
 1. `SpeechResponder` owns the bounded queue (8 items), cancellation
    generation, `IsBusy/IsSpeaking`, and response lifecycle callbacks.
-2. `TtsEngineRouter` selects Silero as the primary Russian engine, an optional
-   local Piper JARVIS-style English engine when explicitly selected, and the
+2. `TtsEngineRouter` selects Silero as the primary Russian engine and the
    installed Russian Windows voice as a fallback. It tracks model readiness,
    fallback reason, restart count and synthesis timing.
 3. `TtsHost` (`apps/tts-host`) is a persistent frozen CPU process. It loads
@@ -32,7 +31,6 @@ machine and is currently restricted to an internal non-commercial pilot.
 | --- | --- | --- |
 | `MIFODIY_TECH` | Silero `v5_5_ru` / `eugene` | основной русский голос с лёгкой технологичной обработкой |
 | `CLEAN` | Silero `v5_5_ru` / `eugene` | чистый русский `eugene` без FX |
-| `JARVIS_EN` | Piper `jarvis-medium` / `jarvis` (`en-GB`) | отдельный экспериментальный английский голос; русская кириллица уходит в fallback |
 
 `MIFODIY_TECH` применяет bounded playback-only DSP: high-pass около 70 Гц,
 небольшой presence boost около 2,8 кГц, мягкую компрессию, едва заметную
@@ -46,8 +44,5 @@ cancellation, ducking и гарантия одного terminal-воспроиз
 
 В Voice/TTS snapshot additive-поля `voiceProfile`, `fxEnabled`, `fxApplied` и
 `fxFallbackReason` описывают фактически выбранный путь. Текст ответа и временные
-WAV в telemetry и diagnostic bundle не публикуются. `JARVIS_EN` включается
-только явным выбором движка/профиля, проверяет локальный manifest/SHA и не меняет
-русский Vosk, WhisperX или язык интерфейса. Для русскоязычного ответа Piper не
-используется: маршрутизатор безопасно выбирает Silero/Windows fallback. Профиль `JARVIS_RU` по-прежнему использует русский `eugene` и
-playback-only обработку, а не голосовой клон.
+WAV в telemetry и diagnostic bundle не публикуются. Все профили используют
+русские Silero-голоса; сторонние экспериментальные голоса в продукт не входят.

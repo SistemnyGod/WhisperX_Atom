@@ -139,6 +139,7 @@ public sealed partial class HomePage : Page
         var mode = ResponsiveLayout.GetMode(e.NewSize.Width);
         ResponsiveLayout.SetCardColumns(KpiGrid, new FrameworkElement?[] { KpiApiCard, KpiStorageCard, KpiQueueCard, KpiSummaryCard, KpiTasksCard, KpiGpuCard }, e.NewSize.Width, 3);
         var compact = mode == PageLayoutMode.Compact;
+        HomeActionsPanel.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
         HeroIdentityRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
         HeroIdentityRow.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
         HeroCommandRow.Orientation = compact ? Orientation.Vertical : Orientation.Horizontal;
@@ -215,6 +216,7 @@ public sealed partial class HomePage : Page
     private void StartRecordingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("recording");
     private void NewMeetingButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
     private void OpenMeetingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("meetings");
+    private void OpenSummariesButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("summaries");
     private void OpenMeetingButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string meetingId } && Guid.TryParse(meetingId, out _))

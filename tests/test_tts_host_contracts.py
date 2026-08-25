@@ -71,14 +71,11 @@ class TtsHostContractTests(unittest.TestCase):
         self.assertIn("non-commercial", manifest["license"])
         self.assertFalse((ROOT / "apps" / "tts-host" / "v5_5_ru.pt").exists())
 
-    def test_optional_piper_jarvis_is_pinned_and_not_downloaded_by_runtime(self):
-        prep = (ROOT / "scripts" / "prepare-piper-jarvis.ps1").read_text(encoding="utf-8")
+    def test_tts_host_uses_only_russian_local_assets(self):
         publisher = (ROOT / "scripts" / "publish-tts-host.ps1").read_text(encoding="utf-8")
-        self.assertIn("78090a64e35bfab40db7db02ce562967e1161c78", prep)
-        self.assertIn("PIPER_JARVIS", prep)
-        self.assertIn("piper-jarvis.manifest.json", publisher)
-        self.assertIn("PIPER_JARVIS_MODEL_HASH_MISMATCH", publisher)
-        self.assertIn("piper.exe", publisher)
+        self.assertIn("silero-v5_5_ru", publisher)
+        self.assertNotIn("PIPER_JARVIS", publisher)
+        self.assertNotIn("piper.exe", publisher)
 
 
 if __name__ == "__main__":

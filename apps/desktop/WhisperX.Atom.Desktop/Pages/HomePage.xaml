@@ -12,9 +12,10 @@
             <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
             <controls:PageHeader Title="Главная" Subtitle="Состояние записи и последние совещания">
                 <controls:PageHeader.Actions>
-                    <StackPanel Orientation="Horizontal" Spacing="8">
+                    <StackPanel x:Name="HomeActionsPanel" Orientation="Horizontal" Spacing="8">
                         <Button Content="Импортировать файл" Style="{StaticResource ToolbarButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудио или видеофайл" />
                         <Button Content="Открыть совещания" Style="{StaticResource ToolbarButtonStyle}" Click="OpenMeetingsButton_Click" AutomationProperties.Name="Открыть совещания" />
+                        <Button Content="Саммари" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSummariesButton_Click" AutomationProperties.Name="Открыть раздел саммари" ToolTipService.ToolTip="Просмотреть итоги обработанных совещаний" />
                         <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить состояние" />
                     </StackPanel>
                 </controls:PageHeader.Actions>
@@ -128,8 +129,12 @@
                         <Border x:Name="KpiQueueCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="Активная обработка" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ProcessingText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="{Binding ActiveProcessingStage}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" ToolTipService.ToolTip="{Binding ActiveProcessingTitle}" /></StackPanel>
                         </Border>
-                        <Border x:Name="KpiSummaryCard" Grid.Row="1" Visibility="Collapsed" Style="{StaticResource CardStyle}" Padding="14">
-                            <StackPanel Spacing="4"><TextBlock Text="Готовые саммари" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding ReadySummariesText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="результаты" Style="{StaticResource CaptionStyle}" /></StackPanel>
+                        <Border x:Name="KpiSummaryCard" Grid.Row="1" Style="{StaticResource CardStyle}" Padding="14">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Готовые саммари" Style="{StaticResource WorkspaceLabelStyle}" />
+                                <TextBlock Text="{Binding ReadySummariesText}" Style="{StaticResource SectionTitleStyle}" />
+                                <Button Content="Открыть итоги" Style="{StaticResource GhostButtonStyle}" Click="OpenSummariesButton_Click" HorizontalAlignment="Left" AutomationProperties.Name="Открыть готовые саммари" />
+                            </StackPanel>
                         </Border>
                         <Border x:Name="KpiTasksCard" Grid.Row="1" Grid.Column="1" Visibility="Collapsed" Style="{StaticResource CardStyle}" Padding="14">
                             <StackPanel Spacing="4"><TextBlock Text="Открытые задачи" Style="{StaticResource WorkspaceLabelStyle}" /><TextBlock Text="{Binding OpenTasksText}" Style="{StaticResource SectionTitleStyle}" /><TextBlock Text="из совещаний" Style="{StaticResource CaptionStyle}" /></StackPanel>

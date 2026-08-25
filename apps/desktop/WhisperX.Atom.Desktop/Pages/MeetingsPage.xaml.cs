@@ -750,11 +750,15 @@ public sealed partial class MeetingsPage : Page
         UpdateEmptyStates();
     }
 
+    private void OpenSummariesButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("summaries");
+
     private void OpenSummaryTabButton_Click(object sender, RoutedEventArgs e)
     {
-        // The summary/protocol tab follows the transcript tab. Keep this
-        // explicit so the compact inspector does not accidentally open the
-        // transcript when the user asks for the meeting summary.
+        if (_workspace?.Meeting is { Id: var meetingId } && !string.IsNullOrWhiteSpace(meetingId))
+        {
+            App.MainWindow.NavigateTo("summaries", new MeetingNavigationTarget(meetingId));
+            return;
+        }
         WorkspaceTabs.SelectedIndex = 3;
     }
 

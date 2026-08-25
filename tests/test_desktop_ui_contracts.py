@@ -351,13 +351,29 @@ def test_home_activity_card_explains_independent_background_pipeline():
     assert 'Аудио сохраняется локально и отправится после подключения сервера' in page
 
 
-def test_meeting_workspace_uses_overflow_actions_and_protocol_tab():
+def test_summary_view_is_reachable_from_shell_home_and_meeting_workspace():
+    shell = (DESKTOP / "MainWindow.xaml").read_text(encoding="utf-8")
+    main_window = (DESKTOP / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+    home = (DESKTOP / "Pages" / "HomePage.xaml").read_text(encoding="utf-8")
+    home_codebehind = (DESKTOP / "Pages" / "HomePage.xaml.cs").read_text(encoding="utf-8")
+    meetings = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
+    meetings_codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
+    contracts = (DESKTOP / "Services" / "FrontendContracts.cs").read_text(encoding="utf-8")
+    assert 'x:Name="SummariesNavItem" Content="Саммари" Tag="summaries"' in shell
+    assert '"summaries" => typeof(SummariesPage)' in main_window
+    assert 'Content="Саммари"' in home and 'OpenSummariesButton_Click' in home_codebehind
+    assert 'Content="Все саммари"' in meetings
+    assert 'App.MainWindow.NavigateTo("summaries", new MeetingNavigationTarget(meetingId))' in meetings_codebehind
+    assert 'SummaryNavigationRequest' in contracts and 'SummaryNavigationRequest' in main_window
+
+
+def test_meeting_workspace_uses_overflow_actions_and_summary_tab():
     page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
     assert 'x:Name="WorkspaceMoreButton"' in page
     assert 'MenuFlyoutItem x:Name="RetryMenuItem"' in page
     assert 'MenuFlyoutItem x:Name="DeleteMeetingMenuItem"' in page
-    assert 'Header="Протокол"' in page
+    assert 'Header="Саммари"' in page
     assert 'WorkspaceMoreButton.IsEnabled' in codebehind
 
 
