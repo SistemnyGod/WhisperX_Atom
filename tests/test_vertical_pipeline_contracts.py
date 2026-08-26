@@ -69,6 +69,7 @@ def test_usable_v1_creates_deterministic_draft_without_qwen_and_v2_remains_separ
     assert 'build_deterministic_summary' in deterministic
     assert 'self._gpu_lease' not in deterministic
     assert 'DETERMINISTIC_SUMMARY_MODEL' in deterministic
+    assert '"ASR_LANGUAGE_MISMATCH"' not in ml[ml.index('def _v1_summary_allowed'):ml.index('def persist_asr_draft')]
 
 
 def test_enrichment_failure_keeps_usable_v1_and_summary_worker_is_optional():

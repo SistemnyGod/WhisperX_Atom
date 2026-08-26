@@ -2774,7 +2774,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         }
         var transcriptSql = options?.TranscriptVersion is int
             ? "SELECT id,COALESCE(version_kind,'GENERATED') FROM transcripts WHERE meeting_id=@meeting AND version=@version LIMIT 1"
-            : "SELECT id,COALESCE(version_kind,'GENERATED') FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+            : "SELECT id,COALESCE(version_kind,'GENERATED') FROM transcripts t WHERE meeting_id=@meeting ORDER BY CASE WHEN COALESCE(version_kind,'')='ENRICHED' AND status='READY' AND NOT (COALESCE(warnings,'[]'::jsonb) ?| ARRAY['NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH']) AND EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') THEN 0 WHEN COALESCE(version_kind,'')<>'ENRICHED' AND NOT (COALESCE(warnings,'[]'::jsonb) ? 'NO_SPEECH_DETECTED') AND EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') THEN 1 ELSE 2 END,version DESC LIMIT 1";
         await using var transcript = new NpgsqlCommand(transcriptSql, connection, tx);
         transcript.Parameters.AddWithValue("meeting", meetingId);
         if (options?.TranscriptVersion is int transcriptVersion)
@@ -2897,6 +2897,22 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 sourceHash = hash.GetString() ?? string.Empty;
             if (quality.RootElement.TryGetProperty("acoustic_profile", out var profile) && profile.ValueKind == JsonValueKind.String)
                 acousticProfile = profile.GetString() ?? "AUTO";
+            // Older builds classified a whole Russian transcript as a language
+            // mismatch when it contained even one stock English Whisper phrase.
+            // Reclassify only the narrowly provable marker-only case so repair
+            // can enrich it without rerunning the long ASR stage.
+            if (!v1Enrichable && v1Usable && blockingWarnings.Contains("ASR_LANGUAGE_MISMATCH")
+                && quality.RootElement.TryGetProperty("language_quality", out var languageQuality)
+                && languageQuality.ValueKind == JsonValueKind.Object
+                && languageQuality.TryGetProperty("known_hallucination", out var marker)
+                && marker.ValueKind == JsonValueKind.True
+                && languageQuality.TryGetProperty("cyrillic_ratio", out var cyrillic)
+                && cyrillic.TryGetDouble(out var cyrillicRatio) && cyrillicRatio >= 0.70
+                && languageQuality.TryGetProperty("latin_ratio", out var latin)
+                && latin.TryGetDouble(out var latinRatio) && latinRatio < 0.20)
+            {
+                v1Enrichable = true;
+            }
         }
         catch (JsonException) { }
 
@@ -3095,7 +3111,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         await using var connection = await OpenAsync();
         var sql = transcriptVersion is int
             ? "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE meeting_id=@meeting AND version=@version LIMIT 1"
-            : "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1";
+            : "SELECT status,COALESCE(version_kind,'GENERATED'),COALESCE(warnings,'[]'::jsonb)::text,EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') FROM transcripts t WHERE meeting_id=@meeting ORDER BY CASE WHEN COALESCE(version_kind,'')='ENRICHED' AND status='READY' AND NOT (COALESCE(warnings,'[]'::jsonb) ?| ARRAY['NO_SPEECH_DETECTED','ASR_LANGUAGE_MISMATCH']) AND EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') THEN 0 WHEN COALESCE(version_kind,'')<>'ENRICHED' AND NOT (COALESCE(warnings,'[]'::jsonb) ? 'NO_SPEECH_DETECTED') AND EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') THEN 1 ELSE 2 END,version DESC LIMIT 1";
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("meeting", meetingId);
         if (transcriptVersion is int version) command.Parameters.AddWithValue("version", version);

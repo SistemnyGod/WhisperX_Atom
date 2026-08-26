@@ -26,6 +26,9 @@ public sealed partial class MainWindow : Window
     private DateTimeOffset _globalRecordingSampleAtUtc;
     private bool _globalRecordingPaused;
     private string? _lastNotificationText;
+    private readonly Queue<TransientNotification> _pendingNotifications = new();
+    private DispatcherQueueTimer? _notificationTimer;
+    private bool _notificationVisible;
 
     public MainWindow(FrontendServices services)
     {
@@ -46,6 +49,7 @@ public sealed partial class MainWindow : Window
             AppWindow.SetIcon(iconPath);
 
         _services = services;
+        _services.Notifications.Requested += Notifications_Requested;
         AppSystemStatusControl.SetSummary("Система проверяется", "NeutralStatusBrush");
         _globalRecordingTimer = _uiDispatcherQueue.CreateTimer();
         _globalRecordingTimer.Interval = TimeSpan.FromSeconds(1);
@@ -271,6 +275,12 @@ public sealed partial class MainWindow : Window
         _lastRecorderResponse = recorderResponse;
         UpdateGlobalRecordingController(recorderResponse);
         SetSystemStatus(status.Item1, status.Item2);
+        if (authenticated)
+        {
+            try { await _services.PipelineNotifications.RefreshAsync(cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch { /* Pipeline notifications are optional UI feedback. */ }
+        }
     }
 
     private void UpdateGlobalRecordingController(AgentIpcResponse? response)
@@ -482,22 +492,75 @@ public sealed partial class MainWindow : Window
         if (string.Equals(text, "Проверка системы", StringComparison.OrdinalIgnoreCase)) return;
         if (string.Equals(_lastNotificationText, text, StringComparison.Ordinal)) return;
         _lastNotificationText = text;
-        GlobalNotificationBar.Title = brushKey switch
+        var title = brushKey switch
         {
             "DangerBrush" => "Требуется внимание",
             "WarningBrush" => "Проверка состояния",
             "SuccessBrush" => "Компоненты готовы к записи",
             _ => "Состояние системы"
         };
-        GlobalNotificationBar.Severity = brushKey switch
+        var severity = brushKey switch
         {
-            "DangerBrush" => InfoBarSeverity.Error,
-            "WarningBrush" => InfoBarSeverity.Warning,
-            "SuccessBrush" => InfoBarSeverity.Success,
+            "DangerBrush" => TransientNotificationSeverity.Error,
+            "WarningBrush" => TransientNotificationSeverity.Warning,
+            "SuccessBrush" => TransientNotificationSeverity.Success,
+            _ => TransientNotificationSeverity.Informational
+        };
+        _services.Notifications.Publish($"system:{text}", title, text, severity);
+    }
+
+    private void Notifications_Requested(TransientNotification notification)
+    {
+        if (!_uiDispatcherQueue.HasThreadAccess)
+        {
+            _uiDispatcherQueue.TryEnqueue(() => Notifications_Requested(notification));
+            return;
+        }
+        _pendingNotifications.Enqueue(notification);
+        if (!_notificationVisible) ShowNextNotification();
+    }
+
+    private void ShowNextNotification()
+    {
+        _notificationTimer?.Stop();
+        if (_pendingNotifications.Count == 0)
+        {
+            _notificationVisible = false;
+            GlobalNotificationBar.IsOpen = false;
+            return;
+        }
+
+        var notification = _pendingNotifications.Dequeue();
+        _notificationVisible = true;
+        GlobalNotificationBar.Title = notification.Title;
+        GlobalNotificationBar.Message = notification.Message;
+        GlobalNotificationBar.Severity = notification.Severity switch
+        {
+            TransientNotificationSeverity.Success => InfoBarSeverity.Success,
+            TransientNotificationSeverity.Warning => InfoBarSeverity.Warning,
+            TransientNotificationSeverity.Error => InfoBarSeverity.Error,
             _ => InfoBarSeverity.Informational
         };
-        GlobalNotificationBar.Message = text;
         GlobalNotificationBar.IsOpen = true;
+        _notificationTimer ??= _uiDispatcherQueue.CreateTimer();
+        _notificationTimer.IsRepeating = false;
+        _notificationTimer.Interval = notification.Duration;
+        _notificationTimer.Tick -= NotificationTimer_Tick;
+        _notificationTimer.Tick += NotificationTimer_Tick;
+        _notificationTimer.Start();
+    }
+
+    private void NotificationTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        sender.Stop();
+        GlobalNotificationBar.IsOpen = false;
+    }
+
+    private void GlobalNotificationBar_Closed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        _notificationTimer?.Stop();
+        _notificationVisible = false;
+        ShowNextNotification();
     }
 
     private void Updates_StateChanged()
@@ -634,6 +697,8 @@ public sealed partial class MainWindow : Window
     private async void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         _services.Updates.StateChanged -= Updates_StateChanged;
+        _services.Notifications.Requested -= Notifications_Requested;
+        _notificationTimer?.Stop();
         _globalRecordingTimer?.Stop();
         _statusCts.Cancel();
         _statusCts.Dispose();

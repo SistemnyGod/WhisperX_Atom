@@ -345,7 +345,7 @@ class ProcessingService:
                     ctx.asr_preprocessing.update({"preprocessing_applied": True, "preprocessing_profile": "asr_far_field", "acoustic_profile": "LARGE_ROOM", "asr_enhancement_reason": enhancement_reason})
                 else:
                     ctx.asr_audio_path = original_path
-            draft_warnings = [code for code in ("ASR_LANGUAGE_MISMATCH" if language_report["mismatch"] else None, signal_warning, "AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None) if code]
+            draft_warnings = [code for code in (language_report.get("code"), signal_warning, "AUDIO_SIGNAL_UNUSABLE" if ctx.audio_signal_metrics.get("signal_state") == "UNUSABLE" else None) if code]
             asr_draft = ProcessingResult(
                 job_id=request.job_id,
                 language=result.get("language") or config.language,

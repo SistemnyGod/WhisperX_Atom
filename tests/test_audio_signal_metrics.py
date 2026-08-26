@@ -53,3 +53,18 @@ def test_language_quality_flags_common_english_hallucination_only_for_russian():
     assert result["code"] == "ASR_LANGUAGE_MISMATCH"
     assert language_quality("Добрый день коллеги, начинаем совещание", "ru")["mismatch"] is False
     assert language_quality("Thank you for watching!", "en")["mismatch"] is False
+
+
+def test_language_quality_keeps_sparse_hallucination_markers_as_non_blocking_warning():
+    russian_text = (
+        "Коллеги обсудили ремонт, сроки и ответственных. " * 80
+        + " Thank you for watching. Thanks for watching. Thank you for watching."
+    )
+
+    result = language_quality(russian_text, "ru")
+
+    assert result["cyrillic_ratio"] > 0.9
+    assert result["mismatch"] is False
+    assert result["known_hallucination"] is True
+    assert result["hallucination_marker_count"] == 3
+    assert result["code"] == "ASR_HALLUCINATION_MARKERS_PRESENT"

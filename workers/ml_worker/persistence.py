@@ -516,7 +516,9 @@ class JobRepository:
         if segments is not None and not any(str((item or {}).get("text", "")).strip() for item in segments if isinstance(item, dict)):
             return False
         values = {str(item).upper() for item in warnings}
-        return str(error_code or "").upper() not in {"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"} and not values.intersection({"NO_SPEECH_DETECTED", "ASR_LANGUAGE_MISMATCH"})
+        # A language warning may block V2/Qwen, but it must not suppress the
+        # extractive deterministic draft when canonical V1 text exists.
+        return str(error_code or "").upper() != "NO_SPEECH_DETECTED" and "NO_SPEECH_DETECTED" not in values
 
     def persist_asr_draft(self, job_id: str, meeting_id: str, draft: dict[str, Any]) -> str:
         """Persist the ASR-only Transcript V1 before alignment/diarization.

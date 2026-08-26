@@ -177,7 +177,10 @@
                                                 </MenuFlyout></Button.Flyout><FontIcon Glyph="&#xE712;" /></Button>
                                             </StackPanel>
                                             <controls:ProcessingStepper Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Steps="{Binding Steps}" CurrentIndex="{Binding CurrentIndex}" AutomationProperties.Name="Этапы обработки записи" />
-                                            <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding ErrorText}" Foreground="{StaticResource DangerBrush}" FontSize="12" TextWrapping="Wrap" />
+                                            <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Spacing="2">
+                                                <TextBlock Text="{Binding InfoText}" Foreground="{StaticResource WarningBrush}" FontSize="12" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding ErrorText}" Foreground="{StaticResource DangerBrush}" FontSize="12" TextWrapping="Wrap" />
+                                            </StackPanel>
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>

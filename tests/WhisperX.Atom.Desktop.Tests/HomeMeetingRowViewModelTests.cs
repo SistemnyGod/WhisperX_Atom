@@ -30,6 +30,19 @@ public sealed class HomeMeetingRowViewModelTests
         Assert.False(row.CanCancel);
     }
 
+    [Fact]
+    public void DeterministicDraftPendingEnhancementIsInformationalNotAnError()
+    {
+        var meeting = Meeting("PARTIAL_READY");
+        var metrics = new HomeViewModel.MeetingMetrics(meeting.Id, meeting.Title, false, true, 0, "PARTIAL_READY", 100, [], null, "LLM_ENHANCEMENT_PENDING");
+
+        var row = HomeMeetingRowViewModel.Create(meeting, metrics, null);
+
+        Assert.Null(row.ErrorText);
+        Assert.Contains("Черновик саммари готов", row.InfoText);
+        Assert.Equal(5, row.CurrentIndex);
+    }
+
     private static DesktopMeeting Meeting(string status)
     {
         var id = Guid.NewGuid().ToString();

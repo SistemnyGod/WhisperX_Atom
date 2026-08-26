@@ -58,8 +58,15 @@ def test_manual_summary_uses_deterministic_mode_for_a_usable_v1_and_full_mode_fo
     assert 'warningSet.Contains("NO_SPEECH_DETECTED")' in eligibility
     assert 'versionKind != "ENRICHED"' in eligibility
     assert 'status is not "READY" || warningSet.Contains("ASR_LANGUAGE_MISMATCH")' in eligibility
+    assert eligibility.count("CASE WHEN COALESCE(version_kind,'')='ENRICHED'") >= 1
+    assert "WHEN COALESCE(version_kind,'')<>'ENRICHED'" in eligibility
+    queue = store[store.index('public async Task<Guid?> QueueSummaryAsync'):store.index('RepairMeetingPipelineAsync')]
+    assert "CASE WHEN COALESCE(version_kind,'')='ENRICHED'" in queue
+    assert "WHEN COALESCE(version_kind,'')<>'ENRICHED'" in queue
     repair = store[store.index('RepairMeetingPipelineAsync'):store.index('public async Task<SummaryEligibility>')]
     assert 'var v1Enrichable = v1Usable && !blockingWarnings.Contains("ASR_LANGUAGE_MISMATCH")' in repair
+    assert 'cyrillicRatio >= 0.70' in repair
+    assert 'latinRatio < 0.20' in repair
     assert 'var summaryMode = qualifiedV2Id is null ? "DETERMINISTIC_ONLY" : "FULL"' in repair
 
 

@@ -373,6 +373,8 @@ public sealed class FrontendServices
         VoiceHost = new VoiceHostController(this);
         Diagnostics = new ClientRuntimeDiagnostics(this);
         Updates = new ClientUpdateService(this);
+        Notifications = new TransientNotificationService();
+        PipelineNotifications = new PipelineNotificationMonitor(backend, Notifications);
     }
 
     public IRecorderService Recorder { get; }
@@ -389,6 +391,8 @@ public sealed class FrontendServices
     public VoiceHostController VoiceHost { get; }
     public ClientRuntimeDiagnostics Diagnostics { get; }
     public ClientUpdateService Updates { get; }
+    public TransientNotificationService Notifications { get; }
+    public PipelineNotificationMonitor PipelineNotifications { get; }
     public event Action<Guid, Guid?>? AssistantResultAvailable
     {
         add => VoiceHost.AssistantResultAvailable += value;

@@ -260,7 +260,12 @@ def language_quality(text: str, language: str | None, confidence: float | None =
     total = max(1, len(letters))
     cyrillic_ratio = cyrillic / total
     latin_ratio = latin / total
-    known_hallucination = bool(re.search(r"thank you for watching|thanks for watching|subscribe to|thank you", text, re.I))
+    hallucination_matches = re.findall(
+        r"thank you for watching|thanks for watching|subscribe to|thank you",
+        text,
+        re.I,
+    )
+    known_hallucination = bool(hallucination_matches)
     tokens = re.findall(r"[\w\u0400-\u04ff]+", text.lower())
     repeated_ratio = 0.0
     if len(tokens) >= 6:
@@ -268,17 +273,24 @@ def language_quality(text: str, language: str | None, confidence: float | None =
     low_confidence = confidence is not None and confidence < 0.38
     mismatch = normalized_language.startswith("ru") and len(letters) >= 12 and (
         (latin_ratio >= 0.55 and cyrillic_ratio < 0.30)
-        or known_hallucination
         or (repeated_ratio >= 0.68 and low_confidence)
+    )
+    diagnostic_code = (
+        "ASR_LANGUAGE_MISMATCH"
+        if mismatch
+        else "ASR_HALLUCINATION_MARKERS_PRESENT"
+        if known_hallucination
+        else None
     )
     return {
         "language": normalized_language,
         "cyrillic_ratio": round(cyrillic_ratio, 4),
         "latin_ratio": round(latin_ratio, 4),
         "known_hallucination": known_hallucination,
+        "hallucination_marker_count": len(hallucination_matches),
         "confidence": round(float(confidence), 4) if confidence is not None else None,
         "repeated_ratio": round(repeated_ratio, 4),
         "low_confidence": low_confidence,
         "mismatch": mismatch,
-        "code": "ASR_LANGUAGE_MISMATCH" if mismatch else None,
+        "code": diagnostic_code,
     }

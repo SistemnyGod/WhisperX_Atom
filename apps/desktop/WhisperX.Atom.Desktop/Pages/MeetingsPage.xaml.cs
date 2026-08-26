@@ -325,12 +325,38 @@ public sealed partial class MeetingsPage : Page
         ImportProgressPanel.Visibility = Visibility.Visible;
         foreach (var file in batch)
         {
-            var progress = new Progress<DesktopImportProgress>(UpdateImportProgress);
-            await _services.Backend.ImportFileWithProgressAsync(
-                file.Path,
-                Path.GetFileNameWithoutExtension(file.Name),
-                progress,
-                _pageCts.Token);
+            var notificationKey = $"import:{Guid.NewGuid():N}";
+            _services.Notifications.Publish(
+                $"{notificationKey}:started",
+                "Загрузка файла",
+                $"{file.Name}: передаём файл на сервер.");
+            try
+            {
+                var progress = new Progress<DesktopImportProgress>(state =>
+                {
+                    UpdateImportProgress(state);
+                    if (state.Stage.Equals("PROCESSING", StringComparison.OrdinalIgnoreCase))
+                        _services.Notifications.Publish(
+                            $"{notificationKey}:uploaded",
+                            "Файл загружен",
+                            $"{file.Name}: сервер принял файл и запускает обработку.",
+                            TransientNotificationSeverity.Success);
+                });
+                await _services.Backend.ImportFileWithProgressAsync(
+                    file.Path,
+                    Path.GetFileNameWithoutExtension(file.Name),
+                    progress,
+                    _pageCts.Token);
+            }
+            catch
+            {
+                _services.Notifications.Publish(
+                    $"{notificationKey}:failed",
+                    "Загрузка не завершена",
+                    $"{file.Name}: не удалось передать файл на сервер.",
+                    TransientNotificationSeverity.Error);
+                throw;
+            }
         }
 
         ImportProgressText.Text = batch.Count == 1

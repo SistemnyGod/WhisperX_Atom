@@ -367,6 +367,24 @@ def test_summary_view_is_reachable_from_shell_home_and_meeting_workspace():
     assert 'SummaryNavigationRequest' in contracts and 'SummaryNavigationRequest' in main_window
 
 
+def test_pipeline_notifications_are_transient_and_cover_import_to_summary():
+    service = (DESKTOP / "Services" / "TransientNotificationService.cs").read_text(encoding="utf-8")
+    monitor = (DESKTOP / "Services" / "PipelineNotificationMonitor.cs").read_text(encoding="utf-8")
+    shell = (DESKTOP / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+    home = (DESKTOP / "Pages" / "HomePage.xaml.cs").read_text(encoding="utf-8")
+    meetings = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")
+
+    assert "Math.Clamp(requestedDuration.TotalSeconds, 5, 10)" in service
+    assert "Идёт транскрибация" in monitor
+    assert "Стенограмма получена" in monitor
+    assert "Готовим саммари" in monitor
+    assert "Обработка завершена" in monitor
+    assert "GlobalNotificationBar.IsOpen = false" in shell
+    assert "ImportFileWithProgressAsync" in home
+    assert "Файл загружен" in home
+    assert "Файл загружен" in meetings
+
+
 def test_meeting_workspace_uses_overflow_actions_and_summary_tab():
     page = (DESKTOP / "Pages" / "MeetingsPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "MeetingsPage.xaml.cs").read_text(encoding="utf-8")

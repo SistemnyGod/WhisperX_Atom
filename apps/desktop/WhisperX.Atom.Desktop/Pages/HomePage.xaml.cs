@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
+using WhisperX.Atom.Desktop;
 using WhisperX_Atom_Desktop.Services;
 using WhisperX_Atom_Desktop.ViewModels;
 
@@ -247,13 +248,32 @@ public sealed partial class HomePage : Page
         {
             ErrorInfoBar.IsOpen = false;
             if (_pageCts is null) return;
-            await _services.Backend.ImportFileAsync(file.Path, cancellationToken: _pageCts.Token);
+            var notificationKey = $"import:{Guid.NewGuid():N}";
+            _services.Notifications.Publish(
+                $"{notificationKey}:started",
+                "Загрузка файла",
+                $"{file.Name}: передаём файл на сервер.");
+            var progress = new Progress<DesktopImportProgress>(state =>
+            {
+                if (state.Stage.Equals("PROCESSING", StringComparison.OrdinalIgnoreCase))
+                    _services.Notifications.Publish(
+                        $"{notificationKey}:uploaded",
+                        "Файл загружен",
+                        $"{file.Name}: сервер принял файл и запускает обработку.",
+                        TransientNotificationSeverity.Success);
+            });
+            await _services.Backend.ImportFileWithProgressAsync(file.Path, Path.GetFileNameWithoutExtension(file.Name), progress, _pageCts.Token);
             if (ViewModel is not null) await ViewModel.RefreshAsync(_pageCts.Token);
             UpdateEmptyState();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
+            _services.Notifications.Publish(
+                $"import-error:{file.Name}:{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}",
+                "Загрузка не завершена",
+                $"{file.Name}: не удалось передать файл на сервер.",
+                TransientNotificationSeverity.Error);
             ErrorInfoBar.Severity = InfoBarSeverity.Error;
             ErrorInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось импортировать файл.");
             ErrorInfoBar.IsOpen = true;

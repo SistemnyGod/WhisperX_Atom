@@ -634,6 +634,7 @@ public sealed class HomeMeetingRowViewModel
         CurrentIndex = state.CurrentIndex;
         CurrentStageText = state.CurrentStageText;
         ErrorText = state.ErrorText;
+        InfoText = state.InfoText;
         LocalSessionId = state.LocalSessionId;
         RetryJobId = state.RetryJobId;
         CanStopDelivery = state.CanStopDelivery;
@@ -652,6 +653,7 @@ public sealed class HomeMeetingRowViewModel
     public int CurrentIndex { get; }
     public string CurrentStageText { get; }
     public string? ErrorText { get; }
+    public string? InfoText { get; }
     public string? LocalSessionId { get; }
     public string? RetryJobId { get; }
     public bool CanStopDelivery { get; }
@@ -662,6 +664,7 @@ public sealed class HomeMeetingRowViewModel
     public static HomeMeetingRowViewModel Create(DesktopMeeting meeting, HomeViewModel.MeetingMetrics? metrics, LocalSessionSummary? localSession)
     {
         string? error = null;
+        string? info = null;
         var stage = meeting.Status;
         var currentIndex = 0;
         string? retryJobId = null;
@@ -673,6 +676,11 @@ public sealed class HomeMeetingRowViewModel
             hasSummary = metrics.HasSummary;
             retryJobId = metrics.RetryableJob?.Id;
             error = metrics.ErrorCode;
+            if (string.Equals(error, "LLM_ENHANCEMENT_PENDING", StringComparison.OrdinalIgnoreCase))
+            {
+                error = null;
+                info = "Черновик саммари готов. Улучшенная версия ожидает обработанную стенограмму V2.";
+            }
             pipeline = metrics.Pipeline ?? [];
         }
 
@@ -733,6 +741,7 @@ public sealed class HomeMeetingRowViewModel
             currentIndex,
             PipelineSteps[currentIndex],
             error,
+            info,
             localSession?.SessionId,
             retryJobId,
             canStop,
@@ -749,5 +758,5 @@ public sealed class HomeMeetingRowViewModel
         "FAILED" => "Ошибка обработки",
         _ => $"Требует проверки: {value}"
     };
-    private sealed record MeetingRowState(int CurrentIndex, string CurrentStageText, string? ErrorText, string? LocalSessionId, string? RetryJobId, bool CanStopDelivery, bool CanRetry, bool CanCancel, bool CanDelete);
+    private sealed record MeetingRowState(int CurrentIndex, string CurrentStageText, string? ErrorText, string? InfoText, string? LocalSessionId, string? RetryJobId, bool CanStopDelivery, bool CanRetry, bool CanCancel, bool CanDelete);
 }

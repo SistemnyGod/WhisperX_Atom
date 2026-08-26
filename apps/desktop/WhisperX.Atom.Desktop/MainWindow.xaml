@@ -200,6 +200,7 @@
             MaxWidth="460"
             IsOpen="False"
             IsClosable="True"
+            Closed="GlobalNotificationBar_Closed"
             Title="Состояние системы"
             AutomationProperties.Name="Уведомление о состоянии системы" />
 
