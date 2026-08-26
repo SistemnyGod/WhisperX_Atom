@@ -16,7 +16,19 @@ from whisperx_atom.audio_signal import analyze_wav
 # hour processing cutoff.  Operators may still set MAX_MEDIA_DURATION_MS to a
 # positive value when a deployment deliberately wants a policy limit; ``0``
 # (the default) means unlimited duration.
-MAX_BYTES = int(os.getenv("MAX_MEDIA_BYTES", str(8 * 1024 * 1024 * 1024)))
+DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read an optional positive integer without making worker startup fatal."""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+MAX_BYTES = _positive_int_env("MAX_MEDIA_BYTES", DEFAULT_MAX_BYTES)
 
 
 def _duration_limit_from_env() -> int:
@@ -70,12 +82,26 @@ def probe_audio(path: Path) -> dict:
     return {"streams": streams, "format": payload.get("format", {}), "duration_ms": duration_ms}
 
 
-def _run_ffmpeg(input_path: Path, output_path: Path, args: list[str]) -> None:
+def _run_ffmpeg(input_path: Path, output_path: Path, args: list[str], *, timeout_seconds: int = 1800) -> None:
     temporary = output_path.with_name(output_path.stem + ".part" + output_path.suffix)
     temporary.unlink(missing_ok=True)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), *args, str(temporary)]
-    subprocess.run(command, check=True, timeout=900)
+    subprocess.run(command, check=True, timeout=max(1, timeout_seconds))
     temporary.replace(output_path)
+
+
+def _processing_timeout_seconds(duration_ms: int) -> int:
+    """Scale the conversion budget with recording length; no fixed 15-minute cap."""
+    seconds = max(0, int(duration_ms / 1000))
+    return max(900, seconds * 2 + 300)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _measure_pcm_quality(path: Path) -> dict:
@@ -162,20 +188,21 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
     archive = output_dir / "archive.flac"
     preview = output_dir / "preview.opus"
     asr = output_dir / "asr.wav"
+    ffmpeg_timeout = _processing_timeout_seconds(int(probe["duration_ms"]))
 
     # The archive is the lossless master. Preserve source sample rate and
     # channel layout; only the preview and ASR derivative are normalized.
-    _run_ffmpeg(input_path, archive, ["-map", "0:a:0", "-c:a", "flac", "-compression_level", "5"])
-    _run_ffmpeg(input_path, preview, ["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k"])
+    _run_ffmpeg(input_path, archive, ["-map", "0:a:0", "-c:a", "flac", "-compression_level", "5"], timeout_seconds=ffmpeg_timeout)
+    _run_ffmpeg(input_path, preview, ["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k"], timeout_seconds=ffmpeg_timeout)
     asr_resampler = "soxr"
     try:
-        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-af", "aresample=16000:resampler=soxr:precision=28", "-c:a", "pcm_s16le"])
+        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-af", "aresample=16000:resampler=soxr:precision=28", "-c:a", "pcm_s16le"], timeout_seconds=ffmpeg_timeout)
     except subprocess.CalledProcessError:
         # Some development FFmpeg builds omit libsoxr. Keep the derivative
         # usable while exposing the downgrade in quality metadata; release
         # acceptance can require soxr explicitly.
         asr_resampler = "swresample-fallback"
-        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        _run_ffmpeg(input_path, asr, ["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"], timeout_seconds=ffmpeg_timeout)
 
     audio_stream = next(stream for stream in probe["streams"] if stream.get("codec_type") == "audio")
     assembly_input = input_path.parent / "assembly-input.json"
@@ -234,7 +261,7 @@ def prepare_media(input_path: Path, output_dir: Path) -> MediaDerivatives:
         for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
     quality_report["master_sha256"] = digest.hexdigest()
-    quality_report["asr_sha256"] = hashlib.sha256(asr.read_bytes()).hexdigest() if asr.is_file() else None
+    quality_report["asr_sha256"] = _sha256_file(asr) if asr.is_file() else None
     (output_dir / "audio-quality.json").write_text(
         json.dumps(quality_report, ensure_ascii=False, indent=2),
         encoding="utf-8",

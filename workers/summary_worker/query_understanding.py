@@ -9,6 +9,7 @@ asking for so retrieval and the answer policy can be specialised safely.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 from typing import Any, Protocol
 
@@ -59,7 +60,11 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     size = min(len(left), len(right))
     if size == 0:
         return 0.0
-    value = sum(left[index] * right[index] for index in range(size))
+    left_norm = math.sqrt(sum(left[index] * left[index] for index in range(size)))
+    right_norm = math.sqrt(sum(right[index] * right[index] for index in range(size)))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    value = sum(left[index] * right[index] for index in range(size)) / (left_norm * right_norm)
     return max(-1.0, min(1.0, value))
 
 

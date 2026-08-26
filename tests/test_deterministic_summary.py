@@ -34,3 +34,21 @@ def test_empty_transcript_cannot_create_fallback():
 
     with pytest.raises(ValueError, match="transcript_has_no_segments"):
         build_deterministic_summary([])
+
+
+def test_status_fact_is_not_promoted_to_action_item():
+    result = build_deterministic_summary([
+        TranscriptSegment("seg-status", 0, 1000, "Иван", "Статус ремонта: работа продолжается"),
+    ])
+
+    assert result["action_items"] == []
+    assert [item["evidence_segment_ids"] for item in result["notable_facts"]].count(["seg-status"]) == 1
+
+
+def test_protocol_fallback_keeps_open_questions_with_evidence():
+    result = build_deterministic_summary([
+        TranscriptSegment("seg-question", 0, 1000, "Иван", "Какой срок ремонта?"),
+    ], profile="MEETING_PROTOCOL_RU")
+
+    assert result["open_questions"][0]["text"] == "Какой срок ремонта?"
+    assert result["open_questions"][0]["evidence_segment_ids"] == ["seg-question"]

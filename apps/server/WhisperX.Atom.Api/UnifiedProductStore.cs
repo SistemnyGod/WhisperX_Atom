@@ -2841,7 +2841,10 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
     /// </summary>
     public async Task<PipelineRepairResult?> RepairMeetingPipelineAsync(Guid meetingId, Guid? actorUserId, bool apply)
     {
-        const string v1Sql = "SELECT t.id,COALESCE(t.language,'ru'),COALESCE(t.quality_metadata,'{}'::jsonb)::text,COALESCE(t.warnings,'[]'::jsonb)::text FROM transcripts t WHERE t.meeting_id=@meeting AND COALESCE(t.version_kind,'')='ASR_DRAFT' ORDER BY t.version DESC LIMIT 1";
+        // Imported and compatibility transcripts are canonical V1 sources too.
+        // Restricting repair to ASR_DRAFT made historical/V1-only meetings
+        // appear unrecoverable even though their segments were already stored.
+        const string v1Sql = "SELECT t.id,COALESCE(t.language,'ru'),COALESCE(t.quality_metadata,'{}'::jsonb)::text,COALESCE(t.warnings,'[]'::jsonb)::text FROM transcripts t WHERE t.meeting_id=@meeting AND COALESCE(t.version_kind,'ASR_DRAFT') IN ('ASR_DRAFT','V1','HISTORICAL_IMPORT') ORDER BY CASE WHEN t.status IN ('READY','PARTIAL_READY') AND NOT (COALESCE(t.warnings,'[]'::jsonb) ? 'NO_SPEECH_DETECTED') AND EXISTS(SELECT 1 FROM transcript_segments s WHERE s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false AND btrim(COALESCE(s.text,''))<>'') THEN 0 ELSE 1 END,t.version DESC LIMIT 1";
         var actions = new List<PipelineRepairAction>();
         await using var connection = await OpenAsync();
         await using var tx = await connection.BeginTransactionAsync();
@@ -3038,6 +3041,7 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
         Guid? summaryJobId = null;
         string? summaryStatus = null;
         string? summaryErrorCode = null;
+        var summaryMaterialized = false;
         await using (var summary = new NpgsqlCommand("SELECT id,status,error_code FROM jobs WHERE input_transcript_id=@transcript AND type='SUMMARIZE' ORDER BY created_at DESC LIMIT 1 FOR UPDATE", connection, tx))
         {
             summary.Parameters.AddWithValue("transcript", summaryTranscriptId.Value);
@@ -3048,6 +3052,12 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
                 summaryStatus = reader.GetString(1).ToUpperInvariant();
                 summaryErrorCode = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
+        }
+        if (summaryJobId is Guid existingSummaryJobId)
+        {
+            await using var materialized = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM summaries WHERE job_id=@job)", connection, tx);
+            materialized.Parameters.AddWithValue("job", existingSummaryJobId);
+            summaryMaterialized = (bool)(await materialized.ExecuteScalarAsync() ?? false);
         }
         var summaryPayload = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = summaryJobId, meeting_id = meetingId, transcript_id = summaryTranscriptId, source_hash = sourceHash, summary_profile = (configuration["AUTO_SUMMARY_PROFILE"] ?? "MEETING_PROTOCOL_RU").Trim().ToUpperInvariant(), prompt_version = configuration["AUTO_SUMMARY_PROMPT_VERSION"] ?? "meeting-protocol-ru-v2", summaryMode, sourceQuality, enhancementPending = summaryMode == "DETERMINISTIC_ONLY", meeting_context = new { }, correlation_id = correlationId });
         if (!v1Usable)
@@ -3075,6 +3085,23 @@ public sealed class UnifiedProductStore(IConfiguration configuration)
             actions.Add(new PipelineRepairAction("SUMMARY", "ACTIVE", "EXISTING_JOB_REUSED", summaryJobId, summaryTranscriptId));
             if (apply)
                 await EnsurePendingOutboxAsync(connection, tx, "llm.summarize", summaryJobId!.Value, summaryPayload);
+        }
+        else if (summaryJobId is Guid missingSummaryJob
+            && !summaryMaterialized
+            && (summaryStatus is "READY" or "NEEDS_REVIEW"))
+        {
+            // A job can reach a terminal state just before its Summary row is
+            // committed (or after an operator removed only the derived row).
+            // Requeue the same job instead of creating a second job or claiming
+            // that the meeting is complete without user-visible content.
+            actions.Add(new PipelineRepairAction("SUMMARY", apply ? "QUEUED" : "MISSING", "SUMMARY_ROW_MISSING", missingSummaryJob, summaryTranscriptId));
+            if (apply)
+            {
+                await using var repair = new NpgsqlCommand("UPDATE jobs SET status='QUEUED',stage='TRANSCRIPT_READY',progress=0,error_code=NULL,error_message=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE id=@job AND status IN ('READY','NEEDS_REVIEW')", connection, tx);
+                repair.Parameters.AddWithValue("job", missingSummaryJob);
+                await repair.ExecuteNonQueryAsync();
+                await EnsurePendingOutboxAsync(connection, tx, "llm.summarize", missingSummaryJob, summaryPayload);
+            }
         }
         else if (summaryStatus == "FAILED" && IsRetryableRepairFailure(summaryErrorCode))
         {

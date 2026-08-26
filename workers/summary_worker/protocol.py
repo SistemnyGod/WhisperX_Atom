@@ -233,7 +233,29 @@ def normalize_protocol_result(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "deadline_iso": None,
                 "evidence_segment_ids": _raw_evidence(item.get("evidence_segment_ids"), 12),
             })
-    return {"questions_and_decisions": questions, "tasks": tasks}
+    def text_items(name: str, limit: int) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        raw_items = payload.get(name, [])
+        if not isinstance(raw_items, list):
+            return result
+        for item in raw_items[:limit]:
+            if not isinstance(item, Mapping):
+                continue
+            text = _nullable_text(item.get("text", item.get("question", item.get("fact", ""))))
+            if not text:
+                continue
+            result.append({
+                "text": text[:1200],
+                "evidence_segment_ids": _raw_evidence(item.get("evidence_segment_ids"), 12),
+            })
+        return result
+
+    return {
+        "questions_and_decisions": questions,
+        "tasks": tasks,
+        "open_questions": text_items("open_questions", 20),
+        "notable_facts": text_items("notable_facts", 40),
+    }
 
 
 def validate_protocol_result(
@@ -249,6 +271,8 @@ def validate_protocol_result(
     normalized = normalize_protocol_result(payload)
     questions: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
+    open_questions: list[dict[str, Any]] = []
+    notable_facts: list[dict[str, Any]] = []
     rejected_items = 0
     review_items = 0
 
@@ -308,30 +332,57 @@ def validate_protocol_result(
         }
         tasks.append(item)
 
+    def validate_text_collection(name: str, target: list[dict[str, Any]]) -> None:
+        nonlocal rejected_items, review_items
+        for item in normalized[name]:
+            if _contains_structural_artifact(item.get("text")):
+                rejected_items += 1
+                continue
+            evidence = _unique_ids(item["evidence_segment_ids"], valid_ids)
+            item["evidence_segment_ids"] = evidence
+            evidence_text = " ".join(segment_texts.get(value, "") for value in evidence)
+            supported = bool(evidence) and _claim_supported(item["text"], evidence_text)
+            if not supported:
+                rejected_items += 1
+                continue
+            item["source_start_ms"], item["source_end_ms"] = _source_range(evidence, segment_times)
+            item["validation"] = {
+                "evidence": True,
+                "confidence": _support_confidence(item["text"], evidence_text),
+                "needs_review": False,
+                "review_reasons": [],
+            }
+            target.append(item)
+
+    validate_text_collection("open_questions", open_questions)
+    validate_text_collection("notable_facts", notable_facts)
+
     questions = _deduplicate_rows(questions, ("topic", "decision"), 40)
     tasks = _deduplicate_rows(tasks, ("task",), 40)
-    total = len(questions) + len(tasks) + rejected_items
+    total = len(questions) + len(tasks) + len(open_questions) + len(notable_facts) + rejected_items
     score = 1.0 if total == 0 else max(0.0, min(1.0, 1.0 - (rejected_items + review_items) / total))
     reasons = []
     if rejected_items:
         reasons.append("UNSUPPORTED_ITEMS_REJECTED")
     if review_items:
         reasons.append("ITEMS_NEED_REVIEW")
-    if not questions and not tasks:
+    if not questions and not tasks and not open_questions and not notable_facts:
         reasons.append("NO_CONFIRMED_DECISIONS")
-    if rejected_items and not questions and not tasks:
+    if rejected_items and not questions and not tasks and not open_questions and not notable_facts:
         status = "FAILED"
     else:
         status = "NEEDS_REVIEW" if rejected_items or review_items else "READY"
     return {
         "questions_and_decisions": questions,
         "tasks": tasks,
+        "open_questions": open_questions,
+        "notable_facts": notable_facts,
         "quality": {
             "status": status,
             "score": round(score, 3),
             "question_count": len(questions),
             "task_count": len(tasks),
-            "supported_count": len(questions) + len(tasks),
+            "supported_count": len(questions) + len(tasks) + len(open_questions) + len(notable_facts),
             "partial_count": review_items,
             "rejected_count": rejected_items,
             "review_items": review_items,

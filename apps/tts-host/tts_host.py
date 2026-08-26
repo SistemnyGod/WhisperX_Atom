@@ -14,6 +14,8 @@ from silero_runtime import SileroRuntime
 
 BUILD_IDENTITY = os.environ.get("WHISPERX_BUILD_IDENTITY", "")
 MODEL_NAME = "v5_5_ru"
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
 
 
 def _load_build_identity(root: Path) -> str:
@@ -50,6 +52,31 @@ def _cleanup_old(temp_root: Path) -> None:
         pass
 
 
+def _parent_is_alive(parent_pid: int | None) -> bool:
+    """Return false when the owning host process has exited on Windows."""
+    if not parent_pid or os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(parent_pid))
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return int(exit_code.value) == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        # A same-user process should be queryable.  If the platform denies the
+        # probe, keep the host alive and let the owning pipe decide shutdown;
+        # this avoids killing TTS on a transient Windows API failure.
+        return True
+
+
 def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: int) -> int:
     if not model_path.is_file():
         _log("TTS_MODEL_MISSING")
@@ -58,14 +85,9 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
     runtime: SileroRuntime | None = None
     for raw in sys.stdin:
         operation: str | None = None
-        if parent_pid:
-            try:
-                if os.name == "nt":
-                    import ctypes
-                    # Avoid holding a process handle; failure is non-fatal.
-                    ctypes.windll.kernel32.GetExitCodeProcess
-            except Exception:
-                pass
+        if not _parent_is_alive(parent_pid):
+            _log("TTS_PARENT_EXITED")
+            return 0
         try:
             # Windows PowerShell 5.1's redirected StreamWriter emits an
             # UTF-8 BOM before the first line. Accept it without relaxing
@@ -85,6 +107,8 @@ def run(model_path: Path, temp_root: Path, parent_pid: int | None, cpu_threads: 
                 if runtime is None:
                     runtime = SileroRuntime(model_path, temp_root, request.cpu_threads)
                     runtime.load()
+                else:
+                    runtime.configure_cpu_threads(request.cpu_threads)
                 response = {"ok": True, "state": "READY", "engine": "SILERO", "model": MODEL_NAME, "voice": request.speaker, "buildIdentity": BUILD_IDENTITY, **runtime.synthesize(request.text, request.speaker, request.sample_rate, request.request_id)}
             else:
                 response = {"ok": True, "state": "STOPPED"}

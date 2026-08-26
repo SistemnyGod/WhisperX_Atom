@@ -57,6 +57,35 @@ class TtsHostContractTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             self.assertEqual(response["state"], "READY")
 
+    def test_synthesis_threads_are_applied_after_preflight_ping(self):
+        class FakeRuntime:
+            model_load_ms = 1
+
+            def __init__(self, *_args, **_kwargs):
+                self.cpu_threads = _args[2] if len(_args) > 2 else 4
+
+            def load(self):
+                pass
+
+            def configure_cpu_threads(self, value):
+                self.cpu_threads = value
+
+            def synthesize(self, text, speaker, sample_rate, request_id):
+                return {"audioPath": "", "durationMs": 1, "synthesisMs": 1, "modelLoadMs": 1, "cpuThreads": self.cpu_threads}
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.pt"
+            model.write_bytes(b"pilot")
+            output = io.StringIO()
+            request = (
+                '{"schemaVersion":1,"id":"ping","op":"ping"}\n'
+                '{"schemaVersion":1,"id":"synth","op":"synthesize","text":"тест","speaker":"aidar","sampleRate":24000,"cpuThreads":2}\n'
+            )
+            with patch.object(tts_host, "SileroRuntime", FakeRuntime), patch.object(sys, "stdin", io.StringIO(request)), patch.object(sys, "stdout", output):
+                self.assertEqual(tts_host.run(model, Path(directory) / "temp", None, 4), 0)
+            responses = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(responses[1]["cpuThreads"], 2)
+
     def test_packaged_identity_is_used_when_environment_is_empty(self):
         identity = "1.0.1+" + "a" * 40
         with patch.object(tts_host, "BUILD_IDENTITY", ""), patch.object(
@@ -76,6 +105,13 @@ class TtsHostContractTests(unittest.TestCase):
         self.assertIn("silero-v5_5_ru", publisher)
         self.assertNotIn("PIPER_JARVIS", publisher)
         self.assertNotIn("piper.exe", publisher)
+
+    def test_tts_host_checks_parent_and_applies_request_threads_after_ping(self):
+        source = (ROOT / "apps" / "tts-host" / "tts_host.py").read_text(encoding="utf-8")
+        runtime = (ROOT / "apps" / "tts-host" / "silero_runtime.py").read_text(encoding="utf-8")
+        self.assertIn("_parent_is_alive", source)
+        self.assertIn("configure_cpu_threads", source)
+        self.assertIn("torch.set_num_threads(requested)", runtime)
 
 
 if __name__ == "__main__":

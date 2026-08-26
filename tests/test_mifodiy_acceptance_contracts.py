@@ -119,3 +119,4 @@ def test_mifodiy_qa_fails_on_expected_actual_mismatch_and_keeps_reports_private(
     assert "executedCaseCount" in runner and "exit 1" in runner
     assert "executionTarget" in schema
     assert "questionSha256" in runner
+    assert "voiceHostSha256" in runner and "refiner" in runner and "ThreadCount" in runner

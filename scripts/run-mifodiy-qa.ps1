@@ -5,6 +5,14 @@ param(
     [string]$Username,
     [string]$Password,
     [string]$OutputPath,
+    [string]$BuildIdentity,
+    [string]$VoiceHostSha256,
+    [string]$ModelRevision,
+    [string]$ModelSha256,
+    [string]$WhisperCppRevision,
+    [string]$BridgeRevision,
+    [int]$AbiVersion = 0,
+    [int]$ThreadCount = 0,
     [switch]$ValidateOnly
 )
 
@@ -154,6 +162,18 @@ $targetValues = @($cases | ForEach-Object { if ($_.executionTarget) { [string]$_
 $report = [ordered]@{
     schema = "mifodiy-qa-v2"
     generatedAtUtc = [DateTimeOffset]::UtcNow
+    buildIdentity = if ([string]::IsNullOrWhiteSpace($BuildIdentity)) { $null } else { $BuildIdentity.Trim() }
+    voiceHostSha256 = if ([string]::IsNullOrWhiteSpace($VoiceHostSha256)) { $null } else { $VoiceHostSha256.Trim().ToLowerInvariant() }
+    refiner = if (-not [string]::IsNullOrWhiteSpace($ModelRevision) -or -not [string]::IsNullOrWhiteSpace($ModelSha256) -or $AbiVersion -gt 0 -or $ThreadCount -gt 0) {
+        [ordered]@{
+            modelRevision = if ([string]::IsNullOrWhiteSpace($ModelRevision)) { $null } else { $ModelRevision.Trim().ToLowerInvariant() }
+            modelSha256 = if ([string]::IsNullOrWhiteSpace($ModelSha256)) { $null } else { $ModelSha256.Trim().ToLowerInvariant() }
+            whisperCppRevision = if ([string]::IsNullOrWhiteSpace($WhisperCppRevision)) { $null } else { $WhisperCppRevision.Trim().ToLowerInvariant() }
+            bridgeRevision = if ([string]::IsNullOrWhiteSpace($BridgeRevision)) { $null } else { $BridgeRevision.Trim().ToLowerInvariant() }
+            abiVersion = if ($AbiVersion -gt 0) { $AbiVersion } else { $null }
+        }
+    } else { $null }
+    threadCount = if ($ThreadCount -gt 0) { $ThreadCount } else { $null }
     executionTarget = if ($targetValues.Count -eq 1) { $targetValues[0] } else { "MIXED" }
     mode = if ($ValidateOnly) { "VALIDATION_ONLY" } elseif ($targetValues.Count -eq 1 -and $targetValues[0] -eq "ASSISTANT_API") { "ASSISTANT_API" } else { "MIXED" }
     caseCount = $cases.Count

@@ -66,6 +66,13 @@ class MediaFormatTests(unittest.TestCase):
         with patch.dict("os.environ", {"MAX_MEDIA_DURATION_MS": "7200000"}, clear=False):
             self.assertEqual(media_worker._duration_limit_from_env(), 7200000)
 
+    def test_malformed_size_limit_uses_safe_default_and_processing_budget_scales(self) -> None:
+        with patch.dict("os.environ", {"MAX_MEDIA_BYTES": "not-a-number"}, clear=False):
+            self.assertEqual(media_worker._positive_int_env("MAX_MEDIA_BYTES", media_worker.DEFAULT_MAX_BYTES), media_worker.DEFAULT_MAX_BYTES)
+        with patch.dict("os.environ", {"MAX_MEDIA_BYTES": "-1"}, clear=False):
+            self.assertEqual(media_worker._positive_int_env("MAX_MEDIA_BYTES", media_worker.DEFAULT_MAX_BYTES), media_worker.DEFAULT_MAX_BYTES)
+        self.assertGreater(media_worker._processing_timeout_seconds(60 * 60 * 1000), 900)
+
 
 if __name__ == "__main__":
     unittest.main()

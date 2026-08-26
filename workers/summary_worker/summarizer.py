@@ -489,7 +489,12 @@ class SummaryOrchestrator:
         quality["rejected_items"] = int(quality.get("rejected_items", 0)) + len(rejected)
         quality["question_count"] = len(result["questions_and_decisions"])
         quality["task_count"] = len(result["tasks"])
-        quality["supported_count"] = quality["question_count"] + quality["task_count"]
+        quality["supported_count"] = (
+            quality["question_count"]
+            + quality["task_count"]
+            + len(result.get("open_questions", ()))
+            + len(result.get("notable_facts", ()))
+        )
         quality["partial_count"] = quality["review_items"]
         quality["rejected_count"] = quality["rejected_items"]
         quality["unsupported_deadlines_removed"] = deadline_reviews
@@ -511,7 +516,13 @@ class SummaryOrchestrator:
         if truncated and "PROTOCOL_LIMIT_TRUNCATED" not in reasons:
             reasons.append("PROTOCOL_LIMIT_TRUNCATED")
         quality["reasons"] = reasons
-        total_items = len(result["questions_and_decisions"]) + len(result["tasks"]) + quality["rejected_items"]
+        total_items = (
+            len(result["questions_and_decisions"])
+            + len(result["tasks"])
+            + len(result.get("open_questions", ()))
+            + len(result.get("notable_facts", ()))
+            + quality["rejected_items"]
+        )
         quality["score"] = round(
             1.0 if total_items == 0 else max(0.0, min(1.0, 1.0 - (quality["rejected_items"] + quality["review_items"]) / total_items)),
             3,

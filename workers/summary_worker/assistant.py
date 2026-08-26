@@ -732,6 +732,10 @@ class AssistantRepository:
         """
         fts_anchor_limit = max(8, min(int(os.getenv("ASSISTANT_FTS_ANCHOR_LIMIT", "64")), 512))
         semantic_candidate_limit = max(32, min(int(os.getenv("ASSISTANT_SEMANTIC_CANDIDATE_LIMIT", "512")), 4096))
+        # A broad history request must see more than the first few newest
+        # segments.  Keep the query bounded, but reserve enough room for a
+        # small chronological slice from every meeting in a normal deployment.
+        semantic_candidate_limit_for_sql = max(semantic_candidate_limit, 2048) if not (query or "").strip() else semantic_candidate_limit
         lookback_days = max(1, min(int(os.getenv("ASSISTANT_MEMORY_FALLBACK_LOOKBACK_DAYS", "365")), 3650))
         date_start, date_end = self._temporal_bounds(date_range)
         with self._db.connection() as connection:
@@ -763,10 +767,32 @@ class AssistantRepository:
                     ORDER BY rank DESC,meeting_created_at DESC,meeting_id,ordinal
                     LIMIT %s
                 ), semantic_pool AS (
-                    SELECT base.*, 0.0::real AS rank
-                    FROM base
-                    WHERE NOT EXISTS (SELECT 1 FROM fts_anchors anchor WHERE anchor.id=base.id)
-                    ORDER BY meeting_created_at DESC,meeting_id,ordinal
+                    SELECT per_meeting.id,per_meeting.meeting_id,per_meeting.start_ms,per_meeting.end_ms,
+                           per_meeting.transcript_id,per_meeting.transcript_version,per_meeting.speaker,
+                           per_meeting.text,per_meeting.version_kind,per_meeting.ordinal,
+                           per_meeting.meeting_created_at,per_meeting.search_vector,0.0::real AS rank
+                    FROM (
+                        SELECT per_bucket.*,
+                               row_number() OVER (
+                                   PARTITION BY per_bucket.meeting_id,per_bucket.meeting_bucket
+                                   ORDER BY per_bucket.ordinal,per_bucket.id
+                               ) AS bucket_row
+                        FROM (
+                            -- Use one row from each of twelve chronological
+                            -- buckets instead of the first twelve rows. This
+                            -- keeps broad history questions representative
+                            -- for long meetings while remaining bounded.
+                            SELECT base.*,
+                                   ntile(12) OVER (
+                                       PARTITION BY base.meeting_id
+                                       ORDER BY base.ordinal,base.id
+                                   ) AS meeting_bucket
+                            FROM base
+                            WHERE NOT EXISTS (SELECT 1 FROM fts_anchors anchor WHERE anchor.id=base.id)
+                        ) per_bucket
+                    ) per_meeting
+                    WHERE per_meeting.bucket_row = 1
+                    ORDER BY per_meeting.meeting_created_at DESC,per_meeting.meeting_id,per_meeting.ordinal
                     LIMIT %s
                 ), bounded AS (
                     SELECT * FROM fts_anchors
@@ -778,7 +804,7 @@ class AssistantRepository:
                 FROM bounded
                 ORDER BY (rank > 0) DESC,rank DESC,meeting_created_at DESC,meeting_id,ordinal
                 """,
-                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, date_start, date_start, date_end, date_end, query, query, fts_anchor_limit, semantic_candidate_limit),
+                (meeting_id, meeting_id, include_all, owner_user_id, meeting_id, lookback_days, date_start, date_start, date_end, date_end, query, query, fts_anchor_limit, semantic_candidate_limit_for_sql),
             ).fetchall()
 
             candidates = [

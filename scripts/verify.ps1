@@ -18,6 +18,8 @@ function Invoke-Check([string]$Name, [scriptblock]$Action) {
   Write-Host "[OK]  $Name" -ForegroundColor Green
 }
 Set-Location $repo
+$savedPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($savedPythonPath)) { $repo } else { "$repo;$savedPythonPath" }
 Invoke-Check "API build" { dotnet build apps/server/WhisperX.Atom.Api/WhisperX.Atom.Api.csproj --nologo }
 Invoke-Check "Python compile" { py -3.12 -m compileall -q whisperx_atom workers }
 Invoke-Check "Python test runtime" {

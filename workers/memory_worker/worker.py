@@ -293,15 +293,30 @@ class MemoryProjectionRepository:
                 )[:MEMORY_MAX_FACTS_PER_JOB]
                 has_candidates = has_explicit_fact_candidates(segments)
                 for fact in facts:
+                    evidence_json = json.dumps(list(fact.evidence_segment_ids))
+                    # ``transcript_facts`` predates a natural uniqueness key.
+                    # Keep retries idempotent at the insert boundary as well
+                    # as at the job boundary, so a partially committed/cleaned
+                    # projection cannot accumulate identical active facts.
                     connection.execute(
                         """INSERT INTO transcript_facts(
                              meeting_id,transcript_id,transcript_version,fact_type,subject,predicate,value,
                              start_ms,end_ms,confidence,evidence_segment_ids,state,source_text,owner_user_id,derivation_type)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)""",
+                           SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s
+                            WHERE NOT EXISTS (
+                              SELECT 1 FROM transcript_facts
+                               WHERE transcript_id=%s AND transcript_version=%s AND state='ACTIVE'
+                                 AND fact_type=%s
+                                 AND subject IS NOT DISTINCT FROM %s
+                                 AND predicate=%s AND value=%s
+                                 AND evidence_segment_ids=%s::jsonb
+                            )""",
                         (
                             meeting_id, transcript_id, transcript_version, fact.fact_type, fact.subject,
                             fact.fact_type.lower(), fact.value, fact.start_ms, fact.end_ms, fact.confidence,
-                            json.dumps(list(fact.evidence_segment_ids)), fact.state, fact.source_text[:4000], owner_id, fact.derivation_type,
+                            evidence_json, fact.state, fact.source_text[:4000], owner_id, fact.derivation_type,
+                            transcript_id, transcript_version, fact.fact_type, fact.subject,
+                            fact.fact_type.lower(), fact.value, evidence_json,
                         ),
                     )
                 return FactExtractionResult(len(facts), len(segments), has_candidates)
@@ -364,9 +379,16 @@ class MemoryProjectionRepository:
                 WHERE COALESCE(f.owner_user_id,m.owner_id)=%s
                   AND f.state='ACTIVE'
                   AND f.subject IS NOT NULL
-                  AND (f.subject_normalized = ANY(%s::text[]) OR f.subject_normalized IS NULL)
+                  -- A NULL normalizer value is only safe to consider for the
+                  -- transcript currently being indexed.  Including every
+                  -- NULL fact for an owner turns a small topic rebuild into
+                  -- an unbounded deployment-wide scan.  The backfill job
+                  -- normalizes older rows before they participate in a
+                  -- cross-meeting scope.
+                  AND (f.subject_normalized = ANY(%s::text[]) OR
+                       (f.subject_normalized IS NULL AND f.transcript_id=%s))
                 ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) NULLS LAST,f.start_ms,f.id""",
-            (owner_id, list(keys)),
+            (owner_id, list(keys), str(payload["transcriptId"])),
         ).fetchall()
         values = []
         for row in rows:

@@ -124,6 +124,8 @@ def test_release_gate_requires_all_live_acceptance_scenarios():
     assert "backupVerified" in gate and "cleanRestore" in gate
     assert 'summaryTerminalUsable = ($summaryStatus -in @("READY", "NEEDS_REVIEW"))' in gate
     assert "summaryQualityGreen" in gate
+    assert "transcription-quality-ab" in gate and "[string]$json.buildIdentity -eq $releaseIdentity" in gate
+    assert "voiceHostSha256" in gate and "json.refiner.nativeSha256" in gate
 
 
 def test_acceptance_registry_is_single_source_and_uses_container_gpu_release():

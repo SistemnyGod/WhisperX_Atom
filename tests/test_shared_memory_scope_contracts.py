@@ -36,7 +36,7 @@ def test_deployment_read_scope_is_additive_and_mutations_remain_owner_checked():
     compose = read("compose.lan.yml")
     assert 'MEETING_READ_SCOPE' in api
     assert 'CanReadMeetingAsync' in api
-    assert 'MEETING_READ_SCOPE: "${MEETING_READ_SCOPE:-ORGANIZATION}"' in compose
+    assert 'MEETING_READ_SCOPE: "${MEETING_READ_SCOPE:-DEPLOYMENT}"' in compose
     assert 'ORGANIZATION' in api
     assert 'DEPLOYMENT' in api
     # Read-only transcript/summary routes use the deployment scope; destructive
@@ -61,6 +61,10 @@ def test_memory_status_and_rebuild_are_diagnostic_and_idempotent_endpoints():
     assert "READY_EMPTY" in store
     assert "MissingProjectionCount" in store
     assert "FactBackedTranscriptCount" in store
+    worker = read("workers/memory_worker/worker.py")
+    assert "WHERE NOT EXISTS" in worker
+    assert "evidence_segment_ids=%s::jsonb" in worker
+    assert "f.subject_normalized IS NULL AND f.transcript_id=%s" in worker
 
 
 def test_assistant_broad_retrieval_is_bounded_and_uses_deployment_scope():
@@ -70,6 +74,8 @@ def test_assistant_broad_retrieval_is_bounded_and_uses_deployment_scope():
     assert "ORGANIZATION" in worker and "DEPLOYMENT" in worker
     assert "LIMIT 128" in worker and "LIMIT 64" in worker
     assert "COALESCE(m.occurred_at,m.created_at)" in worker
+    assert "semantic_candidate_limit_for_sql" in worker
+    assert "PARTITION BY base.meeting_id" in worker
 
 
 def test_calendar_scope_requires_selection_before_qwen_when_date_has_multiple_meetings():

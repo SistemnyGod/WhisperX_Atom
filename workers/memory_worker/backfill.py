@@ -65,7 +65,7 @@ def main() -> int:
                   JOIN meetings m ON m.id=t.meeting_id
                   LEFT JOIN memory_jobs j ON j.transcript_id=t.id AND j.transcript_version=t.version
                  WHERE t.status IN ('READY','PARTIAL_READY')
-                   AND t.version_kind IN ('ENRICHED','V2','HISTORICAL_IMPORT')
+                   AND t.version_kind IN ('ASR_DRAFT','V1','ENRICHED','V2','HISTORICAL_IMPORT')
                    AND t.version=(SELECT max(t2.version) FROM transcripts t2 WHERE t2.meeting_id=t.meeting_id)
                    {rebuild_status}
                  ORDER BY COALESCE((SELECT MIN(rs.started_at) FROM recording_sessions rs WHERE rs.meeting_id=m.id),m.created_at) NULLS LAST,m.id,t.id

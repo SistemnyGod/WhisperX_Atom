@@ -68,6 +68,10 @@ def test_manual_summary_uses_deterministic_mode_for_a_usable_v1_and_full_mode_fo
     assert 'cyrillicRatio >= 0.70' in repair
     assert 'latinRatio < 0.20' in repair
     assert 'var summaryMode = qualifiedV2Id is null ? "DETERMINISTIC_ONLY" : "FULL"' in repair
+    assert "t.status IN ('READY','PARTIAL_READY')" in repair
+    assert "ORDER BY CASE WHEN t.status IN ('READY','PARTIAL_READY')" in repair
+    assert 'SELECT EXISTS(SELECT 1 FROM summaries WHERE job_id=@job)' in repair
+    assert 'SUMMARY_ROW_MISSING' in repair
 
 
 def test_pipeline_repair_is_privileged_preview_apply_and_does_not_replay_asr():

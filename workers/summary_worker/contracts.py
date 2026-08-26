@@ -67,6 +67,24 @@ def _protocol_validation_schema() -> dict[str, Any]:
     }
 
 
+def _protocol_text_item_schema(max_items: int = 20) -> dict[str, Any]:
+    """Schema for optional evidence-only protocol collections."""
+    return {
+        "type": "array",
+        "maxItems": max_items,
+        "items": {
+            "type": "object",
+            "required": ["text", "evidence_segment_ids"],
+            "properties": {
+                "text": {"type": "string"},
+                "evidence_segment_ids": _evidence_schema(12),
+                "validation": _protocol_validation_schema(),
+            },
+            "additionalProperties": False,
+        },
+    }
+
+
 SUMMARY_SCHEMA_V2: dict[str, Any] = {
     "type": "object",
     "required": [
@@ -217,6 +235,10 @@ MEETING_PROTOCOL_RU_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        # Additive fields used by deterministic fallback. Existing Qwen
+        # responses remain valid because these collections are optional.
+        "open_questions": _protocol_text_item_schema(20),
+        "notable_facts": _protocol_text_item_schema(40),
         "quality": {
             "type": "object",
             "required": ["status", "score", "review_items", "rejected_items"],
@@ -402,6 +424,8 @@ class MeetingProtocolRuResult:
     block_count: int | None = None
     quality: Mapping[str, Any] = field(default_factory=dict)
     prompt_version: str = PROTOCOL_RU_PROMPT_VERSION
+    open_questions: tuple[dict[str, Any], ...] = ()
+    notable_facts: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         quality = {
@@ -421,6 +445,8 @@ class MeetingProtocolRuResult:
             "profile": MEETING_PROTOCOL_RU,
             "questions_and_decisions": [dict(item) for item in self.questions_and_decisions],
             "tasks": [dict(item) for item in self.tasks],
+            "open_questions": [dict(item) for item in self.open_questions],
+            "notable_facts": [dict(item) for item in self.notable_facts],
             "source_hash": self.source_hash,
             "block_count": self.block_count,
             "quality": quality,

@@ -137,13 +137,29 @@ public sealed class SummariesViewModel : ObservableObject
             catch (OperationCanceledException) { throw; }
             catch { }
 
-            var page = await _services.Backend.GetSummaryRegistryPageAsync(1, 100, SearchText, cancellationToken: cancellationToken);
-            _allItems.AddRange(page.Items.Select(item => new SummaryRegistryItem(item.Meeting, item.Summary))
-                .OrderByDescending(item => item.Meeting.CreatedAt));
+            // The registry is paged server-side.  Loading only the first page
+            // made older READY summaries disappear once a deployment exceeded
+            // the arbitrary 100-item boundary.  Keep the existing filter and
+            // API contract, but consume all available pages with a bounded
+            // page size and an empty-page guard.
+            DesktopRegistryPage<DesktopSummaryRegistryRow>? page = null;
+            var pageNumber = 1;
+            const int pageSize = 200;
+            do
+            {
+                page = await _services.Backend.GetSummaryRegistryPageAsync(pageNumber, pageSize, SearchText, cancellationToken: cancellationToken);
+                _allItems.AddRange(page.Items.Select(item => new SummaryRegistryItem(item.Meeting, item.Summary)));
+                if (!page.HasMore || page.Items.Count == 0) break;
+                pageNumber++;
+            }
+            while (pageNumber <= 1000);
+
+            _allItems.Sort((left, right) => right.Meeting.CreatedAt.CompareTo(left.Meeting.CreatedAt));
             ApplyFilterNow();
-            StatusText = page.TotalCount == 0
+            var totalCount = page?.TotalCount ?? 0;
+            StatusText = totalCount == 0
                 ? "Встреч пока нет."
-                : $"Показано встреч: {_allItems.Count} из {page.TotalCount}; саммари готовы: {_allItems.Count(item => item.HasSummary)}.";
+                : $"Показано встреч: {_allItems.Count} из {totalCount}; саммари готовы: {_allItems.Count(item => item.HasSummary)}.";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)

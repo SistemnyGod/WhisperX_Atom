@@ -16,6 +16,17 @@ class SileroRuntime:
         self.torch: Any | None = None
         self.model_load_ms = 0
 
+    def configure_cpu_threads(self, cpu_threads: int) -> None:
+        """Apply the request's bounded CPU setting to an already loaded model."""
+        requested = max(1, min(int(cpu_threads), 32))
+        if self.torch is not None and requested != self.cpu_threads:
+            # torch.set_num_threads is process-wide, but this host owns the
+            # runtime and serializes synthesis requests.  Applying it here
+            # keeps a pre-flight ping from silently pinning every later
+            # request to the launch default.
+            self.torch.set_num_threads(requested)
+        self.cpu_threads = requested
+
     def load(self) -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         started = time.perf_counter()
@@ -65,4 +76,5 @@ class SileroRuntime:
             "durationMs": duration_ms,
             "synthesisMs": int((time.perf_counter() - started) * 1000),
             "modelLoadMs": self.model_load_ms,
+            "cpuThreads": self.cpu_threads,
         }

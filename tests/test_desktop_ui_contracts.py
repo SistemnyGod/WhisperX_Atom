@@ -469,6 +469,13 @@ def test_summary_registry_does_not_render_failed_content_as_raw_text():
     assert "Саммари не показано" in presentation
 
 
+def test_summary_registry_consumes_all_server_pages():
+    view_model = (DESKTOP / "ViewModels" / "SummariesViewModel.cs").read_text(encoding="utf-8")
+    assert "pageNumber++" in view_model
+    assert "page.HasMore" in view_model
+    assert "const int pageSize = 200" in view_model
+
+
 def test_summary_compact_mode_uses_master_detail_and_scoped_warning_notice():
     page = (DESKTOP / "Pages" / "SummariesPage.xaml").read_text(encoding="utf-8")
     codebehind = (DESKTOP / "Pages" / "SummariesPage.xaml.cs").read_text(encoding="utf-8")

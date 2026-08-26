@@ -116,6 +116,9 @@ $acceptanceBlockers = [System.Collections.Generic.List[string]]::new()
 $releaseIdentityPath = Join-Path $repo "artifacts\desktop\build-identity.json"
 $releaseManifest = if (Test-Path -LiteralPath $releaseIdentityPath -PathType Leaf) { Get-Content -LiteralPath $releaseIdentityPath -Raw | ConvertFrom-Json } else { $null }
 $releaseIdentity = if ($releaseManifest) { [string]$releaseManifest.buildIdentity } else { $null }
+$releaseVoiceHostSha256 = if ($releaseManifest) {
+    [string](@($releaseManifest.components | Where-Object { [string]$_.name -eq 'VoiceHost' } | Select-Object -First 1).sha256)
+} else { $null }
 $releaseThreadValue = if ($releaseManifest) { Get-JsonProperty $releaseManifest 'voiceRefinerThreads' } else { $null }
 $releaseThreadCount = if ($null -ne $releaseThreadValue) { [int]$releaseThreadValue } else { 1 }
 $voiceManifestPath = Join-Path $repo "apps\voice-host\Models\Voice\whisper-shadow\voice-refiner.manifest.json"
@@ -178,7 +181,24 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                     [string]$json.mode -in @("ASSISTANT_API", "PRODUCTION_E2E") -and
                     [int]$json.executedCaseCount -ge 700 -and
                     [int]$json.failedCaseCount -eq 0 -and
-                    $json.caseResultsComplete -eq $true
+                    $json.caseResultsComplete -eq $true -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
+                    [string]$json.buildIdentity -eq $releaseIdentity -and
+                    -not [string]::IsNullOrWhiteSpace([string]$json.voiceHostSha256) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseVoiceHostSha256) -and
+                    [string]$json.voiceHostSha256 -eq $releaseVoiceHostSha256
+                if ($scenarioReady -and ($null -eq $json.refiner -or $null -eq $voiceManifest)) {
+                    $scenarioReady = $false
+                } elseif ($scenarioReady) {
+                    $scenarioReady = [int]$json.refiner.abiVersion -eq [int]$voiceManifest.native.abiVersion -and
+                        [string]$json.refiner.modelRevision -eq [string]$voiceManifest.model.revision -and
+                        [string]$json.refiner.modelSha256 -eq [string]$voiceManifest.model.sha256 -and
+                        [string]$json.refiner.whisperCppRevision -eq [string]$voiceManifest.native.whisperCppRevision -and
+                        [string]$json.refiner.bridgeRevision -eq [string]$voiceManifest.native.bridgeRevision -and
+                        [string]$json.refiner.nativeSha256 -eq [string]$voiceManifest.native.sha256 -and
+                        [int]$json.threadCount -eq $releaseThreadCount
+                }
             } elseif ($scenario -eq "audio-capture-parity") {
                 # A fixture or an old A/B report must not satisfy the new
                 # parity gate.  Only a live native-format probe with privacy
@@ -209,6 +229,8 @@ foreach ($scenario in $requiredAcceptanceScenarios) {
                     [string]$json.scenario -eq "transcription-quality-ab" -and
                     $json.status -eq "PASSED" -and
                     -not [string]::IsNullOrWhiteSpace([string]$json.buildIdentity) -and
+                    -not [string]::IsNullOrWhiteSpace($releaseIdentity) -and
+                    [string]$json.buildIdentity -eq $releaseIdentity -and
                     @($json.candidates).Count -ge 2 -and
                     $json.safety.transcriptIncluded -eq $false -and
                     $json.safety.audioIncluded -eq $false

@@ -36,6 +36,13 @@ def _item(text: str, segment_id: str) -> dict[str, Any]:
     }
 
 
+def _fact_item(text: str, evidence_segment_ids: Iterable[str]) -> dict[str, Any]:
+    ids = [str(value) for value in evidence_segment_ids if str(value)]
+    item = _item(text, ids[0] if ids else "")
+    item["evidence_segment_ids"] = ids
+    return item
+
+
 def build_deterministic_summary(
     segments: Iterable[TranscriptSegment],
     profile: str | None = None,
@@ -120,7 +127,8 @@ def build_deterministic_summary(
     # Add only explicit fact types. Values, names and dates remain exactly as
     # present in the rehydrated canonical evidence; missing fields stay null.
     fact_decisions = [fact for fact in valid_facts if fact.fact_type == "DECISION"]
-    fact_tasks = [fact for fact in valid_facts if fact.fact_type in {"TASK", "STATUS"}]
+    fact_tasks = [fact for fact in valid_facts if fact.fact_type == "TASK"]
+    fact_statuses = [fact for fact in valid_facts if fact.fact_type == "STATUS"]
     fact_responsibles = {fact.subject or "": fact.value for fact in valid_facts if fact.fact_type == "RESPONSIBLE"}
     fact_deadlines = {fact.subject or "": fact.value for fact in valid_facts if fact.fact_type == "DEADLINE"}
     for fact in fact_decisions:
@@ -141,6 +149,27 @@ def build_deterministic_summary(
             "evidence_segment_ids": list(fact.evidence_segment_ids),
             "validation": {"evidence": True, "responsible": subject in fact_responsibles, "deadline": subject in fact_deadlines, "needs_review": True, "review_reasons": ["LLM_ENHANCEMENT_PENDING"]},
         })
+    # STATUS is a reportable fact, not an action item.  Keep it in the
+    # evidence-only facts collection so a deterministic draft never presents
+    # a state observation as a task for somebody to execute.
+    existing_notable_evidence = {
+        tuple(str(value) for value in item.get("evidence_segment_ids", ()))
+        for item in notable_facts
+    }
+    for fact in fact_statuses:
+        if not fact.evidence_segment_ids or str(fact.evidence_segment_ids[0]) not in segment_by_id:
+            continue
+        evidence = tuple(str(value) for value in fact.evidence_segment_ids)
+        # The segment loop above already exposes unmarked prose as a
+        # notable fact. Replace that view with the fact-backed representation
+        # once, rather than showing the same canonical segment twice.
+        if evidence in existing_notable_evidence:
+            notable_facts = [
+                item for item in notable_facts
+                if tuple(str(value) for value in item.get("evidence_segment_ids", ())) != evidence
+            ]
+        notable_facts.append(_fact_item(segment_by_id[evidence[0]].text, evidence))
+        existing_notable_evidence.add(evidence)
 
     # Keep the visible draft short and deterministic. Every sentence is copied
     # from a canonical segment; no connective claim is generated.
@@ -180,6 +209,8 @@ def build_deterministic_summary(
         return {
             "questions_and_decisions": questions_and_decisions,
             "tasks": tasks,
+            "open_questions": open_questions[:20],
+            "notable_facts": notable_facts[:40],
             "quality": {
                 "status": "NEEDS_REVIEW",
                 "score": 0.0,

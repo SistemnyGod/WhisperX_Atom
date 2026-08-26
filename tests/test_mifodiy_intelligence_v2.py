@@ -4,7 +4,7 @@ from workers.summary_worker.evidence_bundles import build_evidence_bundles
 from workers.summary_worker.fact_extraction import extract_transcript_facts
 from workers.summary_worker.intelligence_qa import CASE_COUNTS, evaluate_intent_cases, generate_reasoning_cases, validate_reasoning_corpus
 from pathlib import Path
-from workers.summary_worker.query_understanding import AssistantQueryPlan, understand_query
+from workers.summary_worker.query_understanding import AssistantQueryPlan, _cosine, understand_query
 from workers.summary_worker.retrieval_planner import build_retrieval_plan
 
 
@@ -14,6 +14,12 @@ def test_query_understanding_classifies_required_fields_without_scope_resolution
     assert plan.requested_fields == ("responsible",)
     assert plan.topic and "ремонт" in plan.topic
     assert plan.confidence >= 0.9
+
+
+def test_semantic_similarity_is_scale_invariant_and_rejects_zero_vectors():
+    assert _cosine((10.0, 0.0), (1.0, 0.0)) == 1.0
+    assert _cosine((1.0, 0.0), (0.0, 1.0)) == 0.0
+    assert _cosine((0.0, 0.0), (1.0, 0.0)) == 0.0
 
 
 def test_follow_up_inherits_topic_but_changes_requested_field():

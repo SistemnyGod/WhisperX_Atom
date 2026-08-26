@@ -28,5 +28,4 @@ def test_historical_receipt_is_owner_scoped_and_idempotent():
 
 def test_memory_backfill_includes_historical_import_without_changing_existing_kinds():
     backfill = BACKFILL.read_text(encoding="utf-8")
-    assert "('ENRICHED','V2','HISTORICAL_IMPORT')" in backfill
-
+    assert "('ASR_DRAFT','V1','ENRICHED','V2','HISTORICAL_IMPORT')" in backfill
