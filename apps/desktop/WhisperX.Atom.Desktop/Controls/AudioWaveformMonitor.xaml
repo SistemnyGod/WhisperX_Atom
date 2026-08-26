@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="WhisperX_Atom_Desktop.Controls.AudioWaveformMonitor"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="4">
+        <Canvas x:Name="WaveformCanvas" Height="54" MinWidth="120" SizeChanged="WaveformCanvas_SizeChanged">
+        </Canvas>
+    </Border>
+</UserControl>

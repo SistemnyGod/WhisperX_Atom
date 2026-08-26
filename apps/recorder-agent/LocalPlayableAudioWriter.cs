@@ -1,0 +1,304 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace WhisperX.Atom.Recorder;
+
+/// <summary>
+/// Builds user-playable WAV/RF64 files directly from durable PCM. FFmpeg is
+/// deliberately not involved, so local preservation remains available offline.
+/// </summary>
+public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSettings storage)
+{
+    private const long LowSpaceReserveBytes = 64L * 1024 * 1024;
+    private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
+    /// <summary>
+    /// Reconcile the durable READY marker with the actual files.  This is
+    /// intentionally separate from capture and is safe to call after restart.
+    /// </summary>
+    public async Task<bool> ValidateReadyAsync(string sessionId, bool verifyHash, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (info is null || !string.Equals(info.PlayableAudioState, "READY", StringComparison.OrdinalIgnoreCase)) return false;
+            var files = await spool.GetPlayableFilesAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (files.Count == 0 || string.IsNullOrWhiteSpace(info.PlayableAudioPath)) return false;
+            var manifest = File.Exists(Path.Combine(info.PlayableAudioPath, "recording.json"))
+                ? Path.Combine(info.PlayableAudioPath, "recording.json")
+                : Path.Combine(info.PlayableAudioPath, ".whisperx", "recording.json");
+            if (!File.Exists(manifest)) return false;
+            foreach (var file in files)
+            {
+                if (!File.Exists(file.LocalPath)) return false;
+                var format = ParseFormat(file.Encoding, file.Encoding.Contains("FLOAT", StringComparison.OrdinalIgnoreCase) ? 32 : InferBits(file.Encoding), file.Channels, file.SampleRate);
+                var expectedDataSize = checked(file.SampleCount * format.BlockAlign);
+                if (new FileInfo(file.LocalPath).Length != file.SizeBytes
+                    || !await IsMatchingWaveAsync(file.LocalPath, expectedDataSize, format, file.SampleCount, cancellationToken).ConfigureAwait(false))
+                    return false;
+                if (verifyHash && !string.IsNullOrWhiteSpace(file.Sha256)
+                    && !string.Equals(await Sha256Async(file.LocalPath, cancellationToken).ConfigureAwait(false), file.Sha256, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return false; }
+    }
+
+    public async Task BuildAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("recording_session_not_found");
+        if (info.PlayableAudioState == "NOT_REQUIRED") return;
+
+        var durability = await spool.GetLocalDurabilityAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (durability.State == "RECOVERY_PENDING")
+        {
+            await spool.SetPlayableAudioStateAsync(sessionId, "RECOVERY_PENDING", error: durability.ErrorCode ?? "RAW_RECOVERY_PENDING", clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (durability.State != "LOCAL_READY")
+        {
+            await spool.SetPlayableAudioStateAsync(sessionId, "FAILED", error: durability.ErrorCode ?? "NO_AUDIO_CAPTURED", clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var raw = await spool.GetRawChunksAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (raw.Count == 0)
+        {
+            // Durability can remain LOCAL_READY for an encoded-only legacy
+            // session after raw retention. Do not misreport that as missing
+            // capture; it is a permanent inability to rebuild a WAV from the
+            // retained source and must be visible for diagnostics.
+            var encoded = await spool.GetArchiveChunksAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            var error = encoded.Count > 0 ? "PLAYABLE_SOURCE_PURGED" : "NO_AUDIO_CAPTURED";
+            await spool.SetPlayableAudioStateAsync(sessionId, "FAILED", error: error, clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var files = new List<PlayableAudioFile>();
+        try
+        {
+            var directory = LocalMeetingDirectoryResolver.Resolve(storage, info, sessionId);
+            var groups = raw.GroupBy(x => x.TrackId, StringComparer.Ordinal).OrderBy(x => x.Key, StringComparer.Ordinal).ToArray();
+            var maxEnd = groups.SelectMany(g => g).Max(x => checked(x.StartSample + x.SampleCount));
+            var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken).ConfigureAwait(false))
+                .Select(x => x.Profile).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? "ROOM";
+            // New archives keep the generated WAV fallback and its manifest in
+            // the hidden technical directory. The user-visible root contains
+            // the canonical FLAC; WAV/MP3 are created only through Export.
+            var outputDirectory = Directory.Exists(Path.Combine(directory, ".whisperx"))
+                ? Path.Combine(directory, ".whisperx")
+                : directory;
+            Directory.CreateDirectory(outputDirectory);
+            await spool.SetPlayableAudioStateAsync(sessionId, "BUILDING", path: directory, clearError: true, clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            foreach (var group in groups)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var chunks = group.OrderBy(x => x.Sequence).ToArray();
+                var first = chunks[0];
+                ValidateChunks(chunks);
+                var format = ParseFormat(first.Encoding, first.BitsPerSample, first.Channels, first.SampleRate);
+                var totalSamples = string.Equals(profile, "ONLINE", StringComparison.OrdinalIgnoreCase)
+                    ? maxEnd : checked(chunks[^1].StartSample + chunks[^1].SampleCount);
+                var name = ResolveFileName(profile, groups.Length, first.TrackType);
+                var finalPath = Path.Combine(outputDirectory, name);
+                await WriteWaveAsync(chunks, finalPath, format, totalSamples, cancellationToken).ConfigureAwait(false);
+                var size = new FileInfo(finalPath).Length;
+                files.Add(new PlayableAudioFile(sessionId, first.TrackId, first.TrackType, name, finalPath, size, totalSamples, format.SampleRate, format.Channels, format.Encoding, await Sha256Async(finalPath, cancellationToken).ConfigureAwait(false)));
+            }
+
+            var manifestPath = Path.Combine(outputDirectory, "recording.json");
+            var manifestPart = manifestPath + ".part";
+            await File.WriteAllTextAsync(manifestPart, JsonSerializer.Serialize(new
+            {
+                sessionId,
+                info.MeetingId,
+                info.Title,
+                info.StartedAt,
+                profile,
+                files
+            }, _json), cancellationToken).ConfigureAwait(false);
+            await FlushFileAsync(manifestPart, cancellationToken).ConfigureAwait(false);
+            File.Move(manifestPart, manifestPath, true);
+            await spool.ReplacePlayableFilesAsync(sessionId, files, cancellationToken).ConfigureAwait(false);
+            await spool.SetPlayableAudioStateAsync(sessionId, "READY", path: directory, clearError: true, clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            var code = ex.Message.Contains("PLAYABLE_STORAGE_LOW", StringComparison.OrdinalIgnoreCase)
+                || ex is IOException && ex.Message.Contains("space", StringComparison.OrdinalIgnoreCase)
+                ? "PLAYABLE_STORAGE_LOW" : Classify(ex);
+            await spool.SetPlayableAudioStateAsync(sessionId, "FAILED", error: code, retryCount: info.PlayableAudioRetryCount + 1, nextRetryAtUtc: DateTimeOffset.UtcNow.AddMinutes(1), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static void ValidateChunks(IReadOnlyList<RawRecordingChunk> chunks)
+    {
+        var descriptor = ParseFormat(chunks[0].Encoding, chunks[0].BitsPerSample, chunks[0].Channels, chunks[0].SampleRate);
+        var timeline = chunks.Select(x => new RecordingTimelineChunk(x.TrackId, x.Sequence, x.TrackType, x.Encoding, x.StartSample, x.SampleCount, x.SampleRate, x.Channels, x.BitsPerSample, IsDurable(x), ExpectedEncoding: chunks[0].Encoding, ExpectedBitsPerSample: chunks[0].BitsPerSample)).ToArray();
+        var error = RecordingTimelineValidator.Validate(timeline);
+        if (error is not null) throw new InvalidDataException(error);
+        foreach (var chunk in chunks)
+        {
+            var expected = checked(chunk.SampleCount * descriptor.BlockAlign);
+            if (!File.Exists(chunk.RawPath) || new FileInfo(chunk.RawPath).Length != expected)
+                throw new InvalidDataException("SESSION_CHUNK_NOT_DURABLE");
+        }
+    }
+
+    private static bool IsDurable(RawRecordingChunk chunk)
+    {
+        try { return File.Exists(chunk.RawPath) && new FileInfo(chunk.RawPath).Length == checked(chunk.SampleCount * Math.Max(1, chunk.Channels * Math.Max(1, chunk.BitsPerSample / 8))); }
+        catch { return false; }
+    }
+
+    private static string ResolveFileName(string profile, int trackCount, string trackType)
+    {
+        if (string.Equals(profile, "ONLINE", StringComparison.OrdinalIgnoreCase) || trackCount > 1)
+            return trackType.Contains("system", StringComparison.OrdinalIgnoreCase) ? "system-audio.wav" : "microphone.wav";
+        return "audio.wav";
+    }
+
+    private static AudioFileFormat ParseFormat(string encoding, int bits, int channels, int sampleRate)
+    {
+        if (sampleRate <= 0 || channels <= 0 || bits is not (16 or 24 or 32)) throw new NotSupportedException("unsupported_audio_format");
+        var normalized = encoding.Trim().ToUpperInvariant();
+        var float32 = bits == 32 && (normalized.Contains("FLOAT") || normalized.Contains("IEEE"));
+        if (!float32 && normalized is not ("PCM_S16LE" or "PCM_S24LE" or "PCM_S32LE" or "PCM" or "EXTENSIBLE" or "PCM16" or "PCM24" or "PCM32"))
+            throw new NotSupportedException("unsupported_audio_encoding");
+        return new AudioFileFormat(sampleRate, channels, bits, float32, float32 ? "FLOAT32" : $"PCM_S{bits}LE");
+    }
+
+    private static async Task WriteWaveAsync(IReadOnlyList<RawRecordingChunk> chunks, string finalPath, AudioFileFormat format, long totalSamples, CancellationToken cancellationToken)
+    {
+        var expectedData = checked(totalSamples * format.BlockAlign);
+        var root = Path.GetPathRoot(finalPath);
+        if (!string.IsNullOrWhiteSpace(root) && new DriveInfo(root).AvailableFreeSpace < expectedData + LowSpaceReserveBytes)
+            throw new IOException("PLAYABLE_STORAGE_LOW");
+        Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
+        if (File.Exists(finalPath) && await IsMatchingWaveAsync(finalPath, expectedData, format, totalSamples, cancellationToken).ConfigureAwait(false)) return;
+        var part = finalPath + ".part";
+        try
+        {
+            await using var stream = new FileStream(part, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan | FileOptions.WriteThrough);
+            var rf64 = expectedData > uint.MaxValue;
+            WriteHeader(stream, format, expectedData, totalSamples, rf64);
+            long writtenSamples = 0;
+            foreach (var chunk in chunks)
+            {
+                var leading = checked(chunk.StartSample - writtenSamples);
+                await WriteSilenceAsync(stream, leading, format.BlockAlign, cancellationToken).ConfigureAwait(false);
+                await CopyFileAsync(chunk.RawPath, stream, cancellationToken).ConfigureAwait(false);
+                writtenSamples = checked(chunk.StartSample + chunk.SampleCount);
+            }
+            await WriteSilenceAsync(stream, checked(totalSamples - writtenSamples), format.BlockAlign, cancellationToken).ConfigureAwait(false);
+            stream.Flush(true);
+            if (stream.Length != HeaderSize(rf64) + expectedData) throw new InvalidDataException("PLAYABLE_SIZE_MISMATCH");
+            PatchHeader(stream, expectedData, totalSamples, rf64);
+            stream.Flush(true);
+            stream.Dispose();
+            File.Move(part, finalPath, true);
+        }
+        catch { try { if (File.Exists(part)) File.Delete(part); } catch { } throw; }
+    }
+
+    private static int HeaderSize(bool rf64) => rf64 ? 80 : 44;
+    private static void WriteHeader(FileStream s, AudioFileFormat f, long dataSize, long samples, bool rf64)
+    {
+        using var w = new BinaryWriter(s, System.Text.Encoding.ASCII, true);
+        w.Write(System.Text.Encoding.ASCII.GetBytes(rf64 ? "RF64" : "RIFF")); w.Write(rf64 ? uint.MaxValue : checked((uint)(HeaderSize(false) - 8 + dataSize))); w.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+        if (rf64) { w.Write(System.Text.Encoding.ASCII.GetBytes("ds64")); w.Write(28u); w.Write((ulong)(dataSize + 72)); w.Write((ulong)dataSize); w.Write((ulong)samples); w.Write(0u); }
+        w.Write(System.Text.Encoding.ASCII.GetBytes("fmt ")); w.Write(16u); w.Write((ushort)(f.IsFloat ? 3 : 1)); w.Write((ushort)f.Channels); w.Write((uint)f.SampleRate); w.Write((uint)(f.SampleRate * f.BlockAlign)); w.Write((ushort)f.BlockAlign); w.Write((ushort)f.BitsPerSample);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("data")); w.Write(rf64 ? uint.MaxValue : checked((uint)dataSize));
+    }
+    private static void PatchHeader(FileStream s, long dataSize, long samples, bool rf64)
+    {
+        using var w = new BinaryWriter(s, System.Text.Encoding.ASCII, true);
+        if (rf64) { s.Position = 20; w.Write((ulong)(dataSize + 72)); s.Position = 28; w.Write((ulong)dataSize); w.Write((ulong)samples); }
+        else { s.Position = 4; w.Write(checked((uint)(s.Length - 8))); s.Position = 40; w.Write(checked((uint)dataSize)); }
+    }
+    private static async Task WriteSilenceAsync(FileStream stream, long samples, int blockAlign, CancellationToken token)
+    {
+        if (samples <= 0) return; var buffer = new byte[Math.Min(1024 * 1024, Math.Max(blockAlign, blockAlign * 4096))];
+        while (samples > 0) { var count = (int)Math.Min(samples, buffer.Length / blockAlign); await stream.WriteAsync(buffer.AsMemory(0, count * blockAlign), token).ConfigureAwait(false); samples -= count; }
+    }
+    private static async Task CopyFileAsync(string source, FileStream destination, CancellationToken token)
+    { await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan); await input.CopyToAsync(destination, 1024 * 1024, token).ConfigureAwait(false); }
+    private static async Task<bool> IsMatchingWaveAsync(string path, long dataSize, AudioFileFormat expected, long sampleCount, CancellationToken token)
+    {
+        try
+        {
+            await using var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (s.Length < 44) return false;
+            var header = new byte[12];
+            await s.ReadExactlyAsync(header.AsMemory(), token).ConfigureAwait(false);
+            var magic = System.Text.Encoding.ASCII.GetString(header, 0, 4);
+            if (magic is not ("RIFF" or "RF64") || System.Text.Encoding.ASCII.GetString(header, 8, 4) != "WAVE") return false;
+            var rf64 = magic == "RF64";
+            long? rf64DataSize = null;
+            int? sampleRate = null;
+            int? channels = null;
+            int? bits = null;
+            bool? isFloat = null;
+            long? foundDataSize = null;
+            long position = 12;
+            while (position + 8 <= s.Length)
+            {
+                s.Position = position;
+                var chunkHeader = new byte[8];
+                await s.ReadExactlyAsync(chunkHeader.AsMemory(), token).ConfigureAwait(false);
+                var id = System.Text.Encoding.ASCII.GetString(chunkHeader, 0, 4);
+                var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader.AsSpan(4, 4));
+                var dataStart = position + 8;
+                if (dataStart > s.Length) return false;
+                if (id == "ds64" && rf64 && chunkSize >= 16 && dataStart + 16 <= s.Length)
+                {
+                    var ds64 = new byte[16];
+                    s.Position = dataStart;
+                    await s.ReadExactlyAsync(ds64.AsMemory(), token).ConfigureAwait(false);
+                    rf64DataSize = checked((long)BinaryPrimitives.ReadUInt64LittleEndian(ds64.AsSpan(8, 8)));
+                }
+                else if (id == "fmt " && chunkSize >= 16 && dataStart + 16 <= s.Length)
+                {
+                    var fmt = new byte[16];
+                    s.Position = dataStart;
+                    await s.ReadExactlyAsync(fmt.AsMemory(), token).ConfigureAwait(false);
+                    var formatCode = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(0, 2));
+                    channels = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(2, 2));
+                    sampleRate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(fmt.AsSpan(4, 4)));
+                    bits = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(14, 2));
+                    isFloat = formatCode == 3;
+                }
+                else if (id == "data")
+                {
+                    foundDataSize = rf64 ? rf64DataSize : chunkSize;
+                    break;
+                }
+                position = checked(dataStart + chunkSize + (chunkSize & 1));
+            }
+            return foundDataSize == dataSize
+                && sampleRate == expected.SampleRate
+                && channels == expected.Channels
+                && bits == expected.BitsPerSample
+                && isFloat == expected.IsFloat
+                && dataSize % expected.BlockAlign == 0
+                && dataSize / expected.BlockAlign == sampleCount;
+        }
+        catch { return false; }
+    }
+
+    private static int InferBits(string encoding) => encoding.Contains("24", StringComparison.OrdinalIgnoreCase) ? 24 : encoding.Contains("32", StringComparison.OrdinalIgnoreCase) ? 32 : 16;
+    private static async Task FlushFileAsync(string path, CancellationToken token)
+    {
+        await using var s = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        s.Flush(true);
+        await Task.CompletedTask;
+    }
+    private static async Task<string> Sha256Async(string path, CancellationToken token) { await using var stream = File.OpenRead(path); return Convert.ToHexString(await SHA256.HashDataAsync(stream, token)).ToLowerInvariant(); }
+    private static string Classify(Exception ex) => ex switch { InvalidDataException => ex.Message, NotSupportedException => "UNSUPPORTED_AUDIO_FORMAT", UnauthorizedAccessException => "PLAYABLE_STORAGE_ACCESS", _ => "PLAYABLE_BUILD_FAILED" };
+    private readonly record struct AudioFileFormat(int SampleRate, int Channels, int BitsPerSample, bool IsFloat, string Encoding) { public int BlockAlign => Channels * (BitsPerSample / 8); }
+}

@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.AssistantPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <Grid Padding="{StaticResource PagePadding}" RowDefinitions="Auto,Auto,*" RowSpacing="{StaticResource PageGap}">
+        <controls:PageHeader Title="ИИ-помощник" Subtitle="Постоянные диалоги по готовым стенограммам с подтверждёнными источниками">
+            <controls:PageHeader.Actions>
+                <StackPanel x:Name="AssistantHeaderActions" Orientation="Horizontal" Spacing="10">
+                    <ComboBox x:Name="ModeBox" Header="Режим" ItemsSource="{Binding Modes}" DisplayMemberPath="Label" Width="190" SelectionChanged="ModeBox_SelectionChanged" />
+                    <ComboBox x:Name="ContextBox" Header="Контекст" ItemsSource="{Binding Contexts}" DisplayMemberPath="Label" Width="270" SelectionChanged="ContextBox_SelectionChanged" />
+                    <Button x:Name="NewChatButton" Content="Новый чат" Style="{StaticResource PrimaryButtonStyle}" Click="NewChatButton_Click" />
+                </StackPanel>
+            </controls:PageHeader.Actions>
+        </controls:PageHeader>
+
+        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" MaxWidth="920" HorizontalAlignment="Left" />
+
+        <Grid x:Name="AssistantShell" Grid.Row="2" ColumnDefinitions="260,*,340" ColumnSpacing="12" SizeChanged="AssistantShell_SizeChanged">
+            <Border x:Name="ConversationCard" Style="{StaticResource CardStyle}" Padding="12">
+                <Grid RowDefinitions="Auto,Auto,Auto,*" RowSpacing="10">
+                    <TextBlock Text="Чаты" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Grid.Row="1" Text="Режим и контекст фиксируются при создании чата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                    <StackPanel Grid.Row="2" Spacing="3" Margin="0,2,0,0">
+                        <TextBlock Text="Память Мифодия" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding MemoryCoverage.CoverageText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" AutomationProperties.Name="Покрытие общей памяти" />
+                        <TextBlock Text="{Binding MemoryCoverage.StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <Button Content="Обновить индекс памяти" IsEnabled="{Binding CanRebuildMemory}" Style="{StaticResource CardButtonStyle}" Click="RebuildMemoryButton_Click" AutomationProperties.Name="Предпросмотр и обновление памяти Мифодия" />
+                    </StackPanel>
+                    <ListView x:Name="ConversationsList" Grid.Row="3" ItemsSource="{Binding Conversations}" SelectionMode="Single" SelectionChanged="ConversationsList_SelectionChanged" BorderThickness="0">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Padding="4,8" RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto">
+                                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Row="1" Text="{Binding ContextLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <Button Grid.Column="1" Content="⋯" Tag="{Binding}" Style="{StaticResource IconButtonStyle}" Click="ConversationMenuButton_Click" AutomationProperties.Name="Действия чата" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <Border x:Name="ChatCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="16">
+                <Grid RowDefinitions="Auto,*,Auto,Auto" RowSpacing="12">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                        <Button x:Name="BackToChatsButton" Visibility="Collapsed" Style="{StaticResource IconButtonStyle}" Click="BackToChatsButton_Click" AutomationProperties.Name="Вернуться к списку чатов">
+                            <SymbolIcon Symbol="Back" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock Text="Диалог" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock x:Name="ContextText" Text="Выберите или создайте чат" Foreground="{StaticResource MutedTextBrush}" />
+                        </StackPanel>
+                        <Button x:Name="ShowEvidenceButton" Grid.Column="2" Content="Источники" Visibility="Collapsed" Style="{StaticResource CardButtonStyle}" Click="ShowEvidenceButton_Click" />
+                        <ProgressRing x:Name="LoadingRing" Grid.Column="3" Width="22" Height="22" IsActive="False" />
+                    </Grid>
+                    <ListView x:Name="MessagesList" Grid.Row="1" ItemsSource="{Binding Messages}" SelectionMode="Single" SelectionChanged="MessagesList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <controls:AssistantMessageBubble Message="{Binding}" />
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel x:Name="ChatEmptyState" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="430" Spacing="8">
+                        <TextBlock x:Name="ChatEmptyText" Text="Выберите чат и задайте вопрос." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                        <TextBlock Text="Начните с одного из примеров или сформулируйте свой вопрос." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                        <StackPanel x:Name="QuestionSuggestions" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="Что решили?" Style="{StaticResource CardButtonStyle}" Tag="Что решили по этому совещанию?" Click="QuestionSuggestionButton_Click" />
+                            <Button Content="Поручения" Style="{StaticResource CardButtonStyle}" Tag="Какие поручения назначены?" Click="QuestionSuggestionButton_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Grid x:Name="QuestionComposer" Grid.Row="2" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                        <TextBox x:Name="QuestionBox" Header="Вопрос" PlaceholderText="Задайте вопрос помощнику" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" Style="{StaticResource InputStyle}" TextChanged="QuestionBox_TextChanged" />
+                        <Button x:Name="AskButton" Grid.Column="1" Content="Спросить" VerticalAlignment="Bottom" Style="{StaticResource PrimaryButtonStyle}" Click="AskButton_Click" />
+                    </Grid>
+                    <StackPanel Grid.Row="3" Spacing="3">
+                        <TextBlock x:Name="StatusText" Text="" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding AnswerTypeText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding SourceSummaryText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding MissingFieldsText}" Foreground="{StaticResource WarningBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border x:Name="EvidenceCard" Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16">
+                <Grid RowDefinitions="Auto,*" RowSpacing="10">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                        <Button x:Name="BackFromEvidenceButton" Visibility="Collapsed" Style="{StaticResource IconButtonStyle}" Click="BackFromEvidenceButton_Click" AutomationProperties.Name="Вернуться к диалогу">
+                            <SymbolIcon Symbol="Back" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <TextBlock Text="Источники" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Ответы без подтверждённых источников требуют проверки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <ListView x:Name="EvidenceList" Grid.Row="1" ItemsSource="{Binding Evidence}" SelectionMode="None" BorderThickness="0">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Spacing="5" Padding="0,8">
+                                    <TextBlock Text="{Binding Timecode}" Foreground="{StaticResource AccentBrush}" />
+                                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <Button Content="Открыть источник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenEvidenceButton_Click" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock x:Name="EvidenceEmptyText" Grid.Row="1" Text="Источники появятся после ответа." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Page>

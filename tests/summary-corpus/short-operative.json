@@ -1,0 +1,12 @@
+{
+  "name": "short-operative",
+  "segments": [
+    {"id": "1", "start_ms": 0, "end_ms": 1000, "text": "Решили проверить насос до конца смены."},
+    {"id": "2", "start_ms": 1000, "end_ms": 2000, "text": "Есть риск повторной остановки оборудования."}
+  ],
+  "facts": [
+    {"type": "action_item", "text": "Проверить насос", "responsible_text": null, "deadline_text": "до конца смены", "evidence_segment_ids": ["1"]},
+    {"type": "risk", "text": "Повторная остановка оборудования", "evidence_segment_ids": ["2"]}
+  ],
+  "expected": {"supported": 2, "rejected": 0, "action_items": 1, "risks": 1}
+}

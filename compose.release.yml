@@ -1,0 +1,25 @@
+# Immutable release override. The base compose files provide the complete
+# service contract and persistent mounts; this file only selects pre-built
+# release images and explicitly removes every build context.
+services:
+  api:
+    image: whisperx-atom-api:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  outbox-relay:
+    image: whisperx-atom-outbox-relay:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  import-worker:
+    image: whisperx-atom-import-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  media-worker:
+    image: whisperx-atom-media-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  gpu-worker:
+    image: whisperx-atom-gpu-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  summary-worker:
+    image: whisperx-atom-summary-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null
+  memory-worker:
+    image: whisperx-atom-memory-worker:${WHISPERX_RELEASE_TAG:?Set WHISPERX_RELEASE_TAG}
+    build: !reset null

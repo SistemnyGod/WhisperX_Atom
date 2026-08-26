@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Program.cs;RecordingCoordinator.cs;RecordingCoordinatorFacade.cs;AgentApiClient.cs;DeviceHealth.cs;DeviceHealthMonitor.cs;AgentPipeHost.cs;AgentPipeSecurity.cs;LocalArchiveWriter.cs;FlacEncoder.cs;RawChunkRecovery.cs;GlobalRawEncoderWorker.cs;RawEncoderRuntimeState.cs;SessionFinalizationCoordinator.cs;RecordingDeliveryCoordinator.cs;RecorderToolPaths.cs;AudioRuntimeProbeRunner.cs;AudioRuntimeProbe.cs;AudioRuntimeProbe\**;AudioSampleFormat.cs;LegacyWasapi*.cs" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.12" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.12" />
+  </ItemGroup>
+</Project>

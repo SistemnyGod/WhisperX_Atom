@@ -1,0 +1,7 @@
+Silero v5_5_ru
+
+This internal pilot may include the Silero v5_5_ru voice model staged at build
+time. The model is not stored in this repository. It is used for a local,
+non-commercial evaluation only. Before any commercial or external distribution
+obtain and record the applicable license and attribution from the official
+Silero model repository.

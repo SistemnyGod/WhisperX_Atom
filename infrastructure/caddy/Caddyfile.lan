@@ -1,0 +1,44 @@
+{
+  auto_https off
+  admin off
+}
+
+:8080 {
+  log {
+    output stdout
+    # Access logs intentionally contain request metadata only. Caddy does not
+    # log request bodies; sensitive headers are explicitly removed.
+    format filter {
+      wrap json
+      request>headers>Cookie delete
+      request>headers>Authorization delete
+    }
+  }
+
+  @api path /api/* /health* /ready
+  handle @api {
+    reverse_proxy api:8080 {
+      transport http {
+        dial_timeout 3s
+        response_header_timeout 120s
+        read_timeout 120s
+        write_timeout 120s
+      }
+    }
+  }
+
+  handle /files/* {
+    reverse_proxy tusd:1080 {
+      transport http {
+        dial_timeout 3s
+        response_header_timeout 120s
+        read_timeout 10m
+        write_timeout 10m
+      }
+    }
+  }
+
+  handle {
+    respond "not found" 404
+  }
+}

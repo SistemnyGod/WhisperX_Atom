@@ -1,0 +1,12 @@
+{
+  "name": "conflicting-decisions",
+  "segments": [
+    {"id": "1", "start_ms": 1000, "end_ms": 2000, "text": "Решили остановить печь завтра."},
+    {"id": "2", "start_ms": 3000, "end_ms": 4000, "text": "Переносим остановку печи на понедельник."}
+  ],
+  "facts": [
+    {"type": "decision", "text": "Остановить печь завтра", "evidence_segment_ids": ["1"]},
+    {"type": "decision", "text": "Перенести остановку печи на понедельник", "evidence_segment_ids": ["2"]}
+  ],
+  "expected": {"conflict_groups": 1, "reviewed_facts": 2, "reason": "CONFLICTING_STATEMENTS"}
+}

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="WhisperX_Atom_Desktop.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="WhisperX Atom Desktop">
+    <Grid Background="White">
+        <TextBlock Text="WhisperX Atom Desktop" HorizontalAlignment="Center" VerticalAlignment="Center" />
+    </Grid>
+</Window>

@@ -1,0 +1,438 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.MeetingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <Grid x:Name="PageRoot" Padding="{StaticResource PagePadding}" RowDefinitions="Auto,*" RowSpacing="{StaticResource PageGap}">
+        <controls:PageHeader Title="Совещания" Subtitle="История записей, обработка и результаты встреч">
+            <controls:PageHeader.Actions>
+                <StackPanel x:Name="MeetingsActionsPanel" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Обновить" Style="{StaticResource ToolbarButtonStyle}" Click="RefreshButton_Click" AutomationProperties.Name="Обновить список совещаний" ToolTipService.ToolTip="Загрузить актуальный список совещаний" />
+                    <Button Content="Импортировать файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" AutomationProperties.Name="Импортировать аудиофайл" ToolTipService.ToolTip="Загрузить аудио или видео для обработки" />
+                    <Button Content="Все саммари" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSummariesButton_Click" AutomationProperties.Name="Открыть все саммари" ToolTipService.ToolTip="Открыть отдельный раздел с итогами встреч" />
+                </StackPanel>
+            </controls:PageHeader.Actions>
+        </controls:PageHeader>
+
+        <Grid x:Name="MeetingsGrid" Grid.Row="1" ColumnDefinitions="*,420" RowDefinitions="*,0" ColumnSpacing="16" RowSpacing="16">
+            <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="16">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" RowSpacing="12">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="Журнал совещаний" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                    <TextBox x:Name="SearchBox" Grid.Row="1" PlaceholderText="Поиск по названию или описанию" Style="{StaticResource SearchInputStyle}" TextChanged="SearchBox_TextChanged" ToolTipService.ToolTip="Ctrl+F — перейти к поиску" />
+                    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <ComboBox x:Name="StatusFilterCombo" ItemsSource="{Binding StatusFilters}" SelectedItem="{Binding StatusFilter, Mode=TwoWay}" Style="{StaticResource FormComboBoxStyle}" SelectionChanged="StatusFilterCombo_SelectionChanged" />
+                        <Button x:Name="ClearFiltersButton" Grid.Column="1" Content="Сбросить фильтры" Style="{StaticResource SecondaryButtonStyle}" Click="ClearFiltersButton_Click" Visibility="Collapsed" AutomationProperties.Name="Сбросить фильтры совещаний" ToolTipService.ToolTip="Очистить поиск и вернуть все статусы" />
+                    </Grid>
+                    <StackPanel Grid.Row="3" Spacing="7">
+                        <Border x:Name="ImportDropZone" AllowDrop="True" DragOver="ImportDropZone_DragOver" Drop="ImportDropZone_Drop" Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1" CornerRadius="7" Padding="12,9">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE898;" Foreground="{StaticResource AccentBrush}" />
+                                <TextBlock Text="Перетащите аудио или видео сюда · MP3, WAV, FLAC, M4A, MP4" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="ImportProgressPanel" Visibility="Collapsed" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderStrongBrush}" BorderThickness="1" CornerRadius="7" Padding="12,10">
+                            <Grid RowDefinitions="Auto,Auto" RowSpacing="7">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <TextBlock x:Name="ImportProgressText" Text="Подготавливаем импорт…" Foreground="{StaticResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock x:Name="ImportProgressPercentText" Grid.Column="1" Text="0%" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                </Grid>
+                                <ProgressBar x:Name="ImportProgressBar" Grid.Row="1" Minimum="0" Maximum="100" Value="0" Height="6" />
+                            </Grid>
+                        </Border>
+                        <Grid Background="{StaticResource TableHeaderBrush}" Padding="12,9" ColumnDefinitions="100,*,150">
+                            <TextBlock Text="Дата" Style="{StaticResource TableHeaderStyle}" />
+                            <TextBlock Grid.Column="1" Text="Название" Style="{StaticResource TableHeaderStyle}" />
+                            <TextBlock Grid.Column="2" Text="Статус" Style="{StaticResource TableHeaderStyle}" />
+                        </Grid>
+                    </StackPanel>
+                    <Grid Grid.Row="4">
+                        <ListView x:Name="MeetingsList" ItemsSource="{Binding FilteredMeetings}" SelectionMode="Single" SelectionChanged="MeetingsList_SelectionChanged" BorderThickness="0" Padding="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="12,9" MinHeight="{StaticResource TableRowHeight}">
+                                        <Grid ColumnDefinitions="100,*,150" ColumnSpacing="10">
+                                            <TextBlock Text="{Binding CreatedAtText}" Style="{StaticResource TableCellStyle}" Foreground="{StaticResource MutedTextBrush}" />
+                                            <StackPanel Grid.Column="1" Spacing="2">
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Title}" />
+                                                <TextBlock Text="{Binding Description}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <controls:StatusBadge Grid.Column="2" Text="{Binding StatusText}" Status="{Binding Status}" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <StackPanel x:Name="ListEmptyState" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Padding="18">
+                            <SymbolIcon Symbol="Calendar" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                            <TextBlock x:Name="ListEmptyTitle" Text="Совещаний нет" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+                            <TextBlock x:Name="ListEmptyDescription" Text="Войдите в API или импортируйте первую запись." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+                            <StackPanel x:Name="ListEmptyActions" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                                <Button x:Name="ListEmptyStartButton" Content="Новая запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" AutomationProperties.Name="Начать новую запись" />
+                                <Button x:Name="ListEmptySettingsButton" Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" Visibility="Collapsed" AutomationProperties.Name="Открыть настройки подключения" />
+                            </StackPanel>
+                        </StackPanel>
+                        <ProgressRing x:Name="ListLoadingRing" IsActive="False" Width="30" Height="30" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0" />
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border x:Name="WorkspaceCard" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="0">
+                <Grid RowDefinitions="Auto,Auto,*">
+                    <Grid x:Name="WorkspaceHeaderGrid" Padding="20,18" ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                        <StackPanel Spacing="3">
+                            <TextBlock x:Name="WorkspaceEyebrow" Text="ВЫБРАННОЕ СОВЕЩАНИЕ" Style="{StaticResource EyebrowStyle}" />
+                            <TextBlock x:Name="WorkspaceTitle" Text="Выберите встречу слева" FontSize="{StaticResource MetricTitleSize}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="WorkspaceMeta" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                            <controls:StatusBadge x:Name="WorkspaceStatusBadge" Text="Ожидает выбора встречи" Status="" HorizontalAlignment="Left" Margin="0,4,0,0" />
+                        </StackPanel>
+                        <StackPanel x:Name="WorkspaceActionsPanel" Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                            <Button x:Name="OpenWorkspaceButton" Content="Открыть" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Click="OpenWorkspaceButton_Click" ToolTipService.ToolTip="Открыть рабочее пространство встречи" AutomationProperties.Name="Открыть совещание" />
+                            <Button x:Name="RefreshWorkspaceButton" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RefreshWorkspaceButton_Click" />
+                            <Button x:Name="RetryButton" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="RetryButton_Click" ToolTipService.ToolTip="Запустить обработку ещё раз" />
+                            <Button x:Name="WorkspaceMoreButton" Content="⋯" Style="{StaticResource IconButtonStyle}" IsEnabled="False" AutomationProperties.Name="Дополнительные действия совещания" ToolTipService.ToolTip="Отменить, экспортировать или удалить">
+                            <Button.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem x:Name="RefreshWorkspaceMenuItem" Text="Обновить" Click="RefreshWorkspaceButton_Click" />
+                                    <MenuFlyoutItem x:Name="RetryMenuItem" Text="Повторить обработку" Click="RetryButton_Click" />
+                                    <MenuFlyoutItem x:Name="CancelProcessingMenuItem" Text="Отменить обработку" Click="CancelProcessingButton_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Name="ExportTranscriptMenuItem" Text="Экспортировать стенограмму TXT" Click="ExportTranscriptTextButton_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem x:Name="DeleteMeetingMenuItem" Text="Удалить совещание" Click="DeleteMeetingButton_Click" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                            </Button>
+                        </StackPanel>
+                        <!-- Retained for code-behind and accessibility compatibility; destructive actions stay in the overflow menu. -->
+                        <Button x:Name="CancelProcessingButton" Grid.Column="5" Visibility="Collapsed" Content="Отменить обработку" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="CancelProcessingButton_Click" />
+                        <Button x:Name="DeleteMeetingButton" Grid.Column="6" Visibility="Collapsed" Content="Удалить" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" Click="DeleteMeetingButton_Click" />
+                    </Grid>
+
+                    <Grid Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="20,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="22">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Состояние обработки" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock x:Name="PipelineText" Text="—" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock Text="Длительность" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock x:Name="DurationText" Text="—" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="2">
+                            <TextBlock Text="Файлы" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock x:Name="MediaCountText" Text="—" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="2">
+                        <StackPanel x:Name="WorkspaceEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Padding="24">
+                            <SymbolIcon Symbol="Document" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                            <TextBlock Text="Выберите совещание" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <TextBlock Text="Здесь появятся стенограмма, саммари, решения, поручения и файлы." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center" MaxWidth="420" />
+                        </StackPanel>
+
+                        <StackPanel x:Name="WorkspaceInspector" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10" Padding="24" MaxWidth="420">
+                            <TextBlock Text="Карточка совещания" Style="{StaticResource SectionTitleStyle}" HorizontalAlignment="Center" />
+                            <TextBlock Text="Выберите «Открыть совещание», чтобы перейти к стенограмме, саммари, решениям, поручениям и файлам." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                            <Grid ColumnDefinitions="*,*" ColumnSpacing="18" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding MeetingDateText}" FontWeight="SemiBold" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Длительность" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                    <TextBlock Text="{Binding DurationText}" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+
+                        <Grid x:Name="WorkspaceContent" Visibility="Collapsed">
+                            <TabView x:Name="WorkspaceTabs" Style="{StaticResource WorkspaceTabViewStyle}" IsAddTabButtonVisible="False" TabWidthMode="Equal" SelectionChanged="WorkspaceTabs_SelectionChanged">
+                                <TabViewItem Header="Обзор" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="Этап обработки" Style="{StaticResource SectionTitleStyle}" />
+                                            <TextBlock x:Name="OverviewPipelineText" Foreground="{StaticResource MutedTextBrush}" />
+                                            <ListView ItemsSource="{Binding Jobs}" SelectionMode="None" BorderThickness="0" MaxHeight="260">
+                                                <ListView.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Grid Padding="8" ColumnDefinitions="150,*,Auto" ColumnSpacing="10">
+                                                            <TextBlock Text="{Binding Type}" FontWeight="SemiBold" />
+                                                            <TextBlock Grid.Column="1" Text="{Binding StageText}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Grid.Column="2" Text="{Binding StatusText}" Foreground="{StaticResource AccentBrush}" />
+                                                        </Grid>
+                                                    </DataTemplate>
+                                                </ListView.ItemTemplate>
+                                            </ListView>
+                                            <TextBlock x:Name="OverviewEmptyText" Text="Job обработки пока нет." Foreground="{StaticResource MutedTextBrush}" />
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </TabViewItem>
+
+                                <TabViewItem Header="Мифодий" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Frame x:Name="MeetingAssistantFrame" />
+                                </TabViewItem>
+
+                                <TabViewItem Header="Стенограмма" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Grid Padding="20" RowDefinitions="Auto,*" RowSpacing="12">
+                                        <Grid x:Name="TranscriptHeaderGrid" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Text="Стенограмма встречи" Style="{StaticResource SectionTitleStyle}" />
+                                                <TextBlock x:Name="TranscriptMetaText" Text="Стенограмма ещё не готова" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                <TextBlock x:Name="TranscriptQualityText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                <TextBlock x:Name="TranscriptWarningText" Foreground="{StaticResource WarningBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <Button x:Name="TranscriptReprocessButton" Grid.Column="1" Content="Повторить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="ReprocessTranscriptButton_Click" />
+                                            <Button x:Name="TranscriptExportButton" Grid.Column="2" Content="Экспорт" Style="{StaticResource SecondaryButtonStyle}" AutomationProperties.Name="Экспортировать материалы совещания">
+                                                <Button.Flyout>
+                                                    <MenuFlyout>
+                                                        <MenuFlyoutItem Text="Скачать стенограмму TXT" Click="ExportTranscriptTextButton_Click" />
+                                                        <MenuFlyoutItem Text="Скачать субтитры SRT" Click="ExportTranscriptSrtButton_Click" />
+                                                        <MenuFlyoutSeparator />
+                                                        <MenuFlyoutItem Text="Скачать аудио" Click="DownloadPrimaryAudioButton_Click" />
+                                                    </MenuFlyout>
+                                                </Button.Flyout>
+                                            </Button>
+                                        </Grid>
+                                        <Grid x:Name="TranscriptWorkspaceGrid" Grid.Row="1" ColumnDefinitions="*,300" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="12">
+                                            <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
+                                                <MediaPlayerElement x:Name="TranscriptPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
+                                                <Grid x:Name="TranscriptToolbar" Grid.Row="1" RowDefinitions="Auto,Auto" RowSpacing="8">
+                                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+                                                        <TextBox x:Name="TranscriptSearchBox" PlaceholderText="Поиск по стенограмме" Style="{StaticResource InputStyle}" TextChanged="TranscriptSearchBox_TextChanged" />
+                                                        <Button Grid.Column="1" Content="Пред." Style="{StaticResource SecondaryButtonStyle}" Click="PreviousTranscriptMatchButton_Click" />
+                                                        <Button Grid.Column="2" Content="След." Style="{StaticResource SecondaryButtonStyle}" Click="NextTranscriptMatchButton_Click" />
+                                                        <TextBlock x:Name="TranscriptSearchStatus" Grid.Column="3" MinWidth="88" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </Grid>
+                                                    <StackPanel x:Name="TranscriptOptionsPanel" Grid.Row="1" Orientation="Horizontal" Spacing="14">
+                                                        <CheckBox x:Name="HideTechnicalEventsCheckBox" Content="Скрывать технические события" IsChecked="True" Checked="HideTechnicalEventsCheckBox_Changed" Unchecked="HideTechnicalEventsCheckBox_Changed" VerticalAlignment="Center" />
+                                                        <CheckBox x:Name="TranscriptAutoScrollCheckBox" Content="Автопрокрутка" IsChecked="True" VerticalAlignment="Center" />
+                                                        <Button x:Name="EditSegmentButton" Content="Изменить сегмент" Style="{StaticResource SecondaryButtonStyle}" IsEnabled="False" Click="EditSegmentButton_Click" />
+                                                    </StackPanel>
+                                                </Grid>
+                                                <Grid Grid.Row="2">
+                                                    <ListView x:Name="TranscriptList" ItemsSource="{Binding TranscriptSegments}" SelectionMode="Single" SelectionChanged="TranscriptList_SelectionChanged" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                        <ListView.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="10,12">
+                                                                    <Grid ColumnDefinitions="82,*" ColumnSpacing="12">
+                                                                        <TextBlock Text="{Binding TimeLabel}" Foreground="{StaticResource AccentBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                                        <StackPanel Grid.Column="1" Spacing="4">
+                                                                            <TextBlock Text="{Binding Speaker}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" />
+                                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" MaxWidth="880" HorizontalAlignment="Left" LineHeight="22" />
+                                                                        </StackPanel>
+                                                                    </Grid>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ListView.ItemTemplate>
+                                                    </ListView>
+                                                    <StackPanel x:Name="TranscriptEmptyState" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" Padding="20">
+                                                        <SymbolIcon Symbol="Document" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                                                        <TextBlock x:Name="TranscriptEmptyTitle" Text="Сегментов нет" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                                                        <TextBlock x:Name="TranscriptEmptyDescription" Text="После завершения обработки здесь появится текст стенограммы." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Grid>
+                                            <Border x:Name="TranscriptStatusPanel" Grid.Column="1" Background="{StaticResource SurfaceBlueBrush}" Padding="14" CornerRadius="10">
+                                                <StackPanel Spacing="8">
+                                                    <TextBlock Text="Состояние обработки" Style="{StaticResource SectionTitleStyle}" />
+                                                    <ListView ItemsSource="{Binding Jobs}" SelectionMode="None" BorderThickness="0" MaxHeight="210">
+                                                        <ListView.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Grid Padding="0,5" ColumnDefinitions="18,*,Auto" ColumnSpacing="6">
+                                                                    <FontIcon Glyph="&#xE73E;" Foreground="{StaticResource AccentBrush}" FontSize="13" />
+                                                                    <TextBlock Grid.Column="1" Text="{Binding Type}" TextTrimming="CharacterEllipsis" />
+                                                                    <controls:StatusBadge Grid.Column="2" Text="{Binding StatusText}" Status="{Binding Status}" />
+                                                                </Grid>
+                                                            </DataTemplate>
+                                                        </ListView.ItemTemplate>
+                                                    </ListView>
+                                                    <TextBlock x:Name="TranscriptJobsEmptyText" Text="Ожидаем задания обработки…" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="8" Margin="0,4,0,0">
+                                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="8">
+                                                            <StackPanel Spacing="2">
+                                                                <TextBlock Text="Качество" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                                <TextBlock x:Name="TranscriptSideQualityText" Text="{Binding TranscriptQualityText}" Foreground="{StaticResource SuccessBrush}" FontWeight="SemiBold" />
+                                                            </StackPanel>
+                                                        </Border>
+                                                        <Border Grid.Column="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="8">
+                                                            <StackPanel Spacing="2">
+                                                                <TextBlock Text="Сегменты" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                                <TextBlock Text="{Binding TranscriptSegments.Count}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </Grid>
+                                                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource HeroBorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,4,0,0">
+                                                        <StackPanel Spacing="5">
+                                                            <TextBlock Text="Саммари" Style="{StaticResource SectionTitleStyle}" />
+                                                            <TextBlock Text="{Binding SummaryMetaText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                                            <TextBlock Text="{Binding SummaryText}" TextWrapping="Wrap" MaxLines="6" TextTrimming="CharacterEllipsis" />
+                                                            <Button Content="Открыть саммари" Style="{StaticResource CardButtonStyle}" Click="OpenSummaryTabButton_Click" AutomationProperties.Name="Открыть саммари выбранной встречи" ToolTipService.ToolTip="Перейти в отдельный раздел саммари" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <TextBlock Text="Спикеры" Style="{StaticResource SectionTitleStyle}" Margin="0,4,0,0" />
+                                                    <ListView ItemsSource="{Binding Speakers}" SelectionMode="None" BorderThickness="0" MaxHeight="120">
+                                                        <ListView.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding DisplayName}" Padding="0,5" />
+                                                            </DataTemplate>
+                                                        </ListView.ItemTemplate>
+                                                    </ListView>
+                                                    <TextBlock x:Name="SpeakersEmptyText" Text="Спикеры пока не определены." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="Нажмите на сегмент, чтобы перейти к его началу в preview, если он доступен." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                    </Grid>
+                                </TabViewItem>
+
+                                <TabViewItem Header="Саммари" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
+                                        <StackPanel Spacing="12">
+                                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                                <StackPanel Spacing="3">
+                                                    <TextBlock Text="Итог встречи" Style="{StaticResource SectionTitleStyle}" />
+                                                    <TextBlock x:Name="SummaryMetaText" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="Пересобрать саммари" Style="{StaticResource SecondaryButtonStyle}" Click="RebuildSummaryButton_Click" />
+                                                <Button x:Name="RepairPipelineButton" Grid.Column="2" Content="Восстановить обработку" Style="{StaticResource SecondaryButtonStyle}" Click="RepairPipelineButton_Click" ToolTipService.ToolTip="Только для администратора: проверяет и восстанавливает отсутствующие V2 и саммари без повторной записи." Visibility="Collapsed" />
+                                            </Grid>
+                                            <TextBlock x:Name="SummaryText" Text="Саммари пока не готово." TextWrapping="Wrap" LineHeight="22" />
+                                            <Grid x:Name="ProtocolCardsGrid" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="12" RowSpacing="12" Margin="0,8,0,0">
+                                                <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+                                                    <StackPanel Spacing="6">
+                                                        <TextBlock Text="Решения" Style="{StaticResource SectionTitleStyle}" />
+                                                        <ListView ItemsSource="{Binding Decisions}" SelectionMode="None" MaxHeight="180" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                            <ListView.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <StackPanel Spacing="3" Padding="0,4">
+                                                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource CaptionStyle}" Foreground="{StaticResource AccentBrush}" />
+                                                                    </StackPanel>
+                                                                </DataTemplate>
+                                                            </ListView.ItemTemplate>
+                                                        </ListView>
+                                                        <TextBlock Text="Решения пока не зафиксированы." Style="{StaticResource CaptionStyle}" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Grid.Column="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+                                                    <StackPanel Spacing="6">
+                                                        <TextBlock Text="Поручения" Style="{StaticResource SectionTitleStyle}" />
+                                                        <ListView ItemsSource="{Binding Tasks}" SelectionMode="None" MaxHeight="180" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                                            <ListView.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <StackPanel Spacing="3" Padding="0,4">
+                                                                        <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
+                                                                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource CaptionStyle}" Foreground="{StaticResource AccentBrush}" />
+                                                                    </StackPanel>
+                                                                </DataTemplate>
+                                                            </ListView.ItemTemplate>
+                                                        </ListView>
+                                                        <TextBlock Text="Поручений пока нет." Style="{StaticResource CaptionStyle}" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </TabViewItem>
+
+                                <TabViewItem Header="Решения" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Grid Padding="20">
+                                        <ListView ItemsSource="{Binding Decisions}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListView.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,12">
+                                                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                            <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{StaticResource AccentBrush}" />
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ListView.ItemTemplate>
+                                        </ListView>
+                                        <TextBlock x:Name="DecisionsEmptyText" Text="Решения пока не зафиксированы." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Grid>
+                                </TabViewItem>
+
+                                <TabViewItem Header="Поручения" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Grid Padding="20">
+                                        <ListView ItemsSource="{Binding Tasks}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListView.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Padding="8,12" ColumnDefinitions="*,160,150" ColumnSpacing="12">
+                                                        <StackPanel Spacing="3">
+                                                            <TextBlock Text="{Binding Task}" TextWrapping="Wrap" />
+                                                            <TextBlock Text="{Binding ResponsibleText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                        </StackPanel>
+                                                        <ComboBox Grid.Column="1" Style="{StaticResource FormComboBoxStyle}" SelectedValue="{Binding Status, Mode=OneWay}" SelectedValuePath="Content" SelectionChanged="TaskStatusCombo_SelectionChanged" MinWidth="140">
+                                                            <ComboBoxItem Content="NEEDS_REVIEW" />
+                                                            <ComboBoxItem Content="OPEN" />
+                                                            <ComboBoxItem Content="DONE" />
+                                                            <ComboBoxItem Content="CANCELLED" />
+                                                        </ComboBox>
+                                                        <TextBlock Grid.Column="2" Text="{Binding DeadlineText}" Foreground="{StaticResource MutedTextBrush}" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ListView.ItemTemplate>
+                                        </ListView>
+                                        <TextBlock x:Name="TasksEmptyText" Text="Поручений пока нет." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Grid>
+                                </TabViewItem>
+
+                                <TabViewItem Header="Файлы" Style="{StaticResource WorkspaceTabItemStyle}">
+                                    <Grid Padding="20" RowDefinitions="*,Auto" RowSpacing="14">
+                                        <ListView x:Name="MediaList" ItemsSource="{Binding Media}" SelectionMode="None" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListView.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Padding="8,12" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
+                                                        <StackPanel Spacing="3">
+                                                            <TextBlock Text="{Binding OriginalName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                                        </StackPanel>
+                                                        <TextBlock Grid.Column="1" Text="{Binding SizeBytes}" Foreground="{StaticResource MutedTextBrush}" />
+                                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+                                                            <Button Content="Скачать аудио" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="DownloadAudioButton_Click" />
+                                                            <Button Content="Скачать исходник" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="DownloadOriginalButton_Click" />
+                                                            <Button Content="Открыть preview" Tag="{Binding}" Style="{StaticResource CardButtonStyle}" Click="OpenPreviewButton_Click" />
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ListView.ItemTemplate>
+                                        </ListView>
+                                        <TextBlock x:Name="MediaEmptyText" Text="Файлы совещания пока недоступны." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        <Border Grid.Row="1" Background="{StaticResource SurfaceBlueBrush}" Padding="12" CornerRadius="10">
+                                            <StackPanel Spacing="8">
+                                                <TextBlock Text="Предпросмотр" Style="{StaticResource SectionTitleStyle}" />
+                                                <MediaPlayerElement x:Name="PreviewPlayer" AreTransportControlsEnabled="True" AutoPlay="False" MinHeight="70" />
+                                                <TextBlock x:Name="PreviewStatusText" Text="Выберите файл с доступным preview." Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
+                                </TabViewItem>
+                            </TabView>
+                        </Grid>
+                        <Grid x:Name="WorkspaceLoadingOverlay" Visibility="Collapsed" Background="{StaticResource SurfaceBrush}">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                                <ProgressRing IsActive="True" Width="32" Height="32" HorizontalAlignment="Center" />
+                                <TextBlock Text="Загружаю данные встречи…" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <InfoBar x:Name="ErrorInfoBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" VerticalAlignment="Top" Margin="10">
+            <InfoBar.ActionButton>
+                <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+        <ProgressRing x:Name="LoadingRing" Grid.Row="1" IsActive="False" Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,18,0,0" />
+    </Grid>
+</Page>

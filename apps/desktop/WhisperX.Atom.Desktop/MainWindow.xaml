@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="WhisperX_Atom_Desktop.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:WhisperX_Atom_Desktop"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="WhisperX Atom Desktop"
+    mc:Ignorable="d">
+    <Grid Background="{StaticResource PageBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TitleBar
+            x:Name="AppTitleBar"
+            Title="WhisperX Atom Desktop"
+            BackRequested="TitleBar_BackRequested"
+            IsBackButtonVisible="{x:Bind NavFrame.CanGoBack, Mode=OneWay}"
+            IsPaneToggleButtonVisible="True"
+            PaneToggleRequested="TitleBar_PaneToggleRequested">
+            <TitleBar.IconSource>
+                <ImageIconSource ImageSource="Assets/AppIcon.ico" />
+            </TitleBar.IconSource>
+            <TitleBar.Content>
+                <Grid x:Name="TitleContentGrid" ColumnDefinitions="*,Auto" VerticalAlignment="Center" Margin="16,0,12,0" SizeChanged="TitleContentGrid_SizeChanged">
+                    <TextBlock x:Name="PageTitleText" Text="Главная" Visibility="Collapsed" Style="{StaticResource SectionTitleStyle}" VerticalAlignment="Center" />
+                    <StackPanel x:Name="TopStatusCluster" Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <controls:AppSystemStatus x:Name="AppSystemStatusControl" OpenSystemStatusRequested="AppSystemStatusControl_OpenSystemStatusRequested" />
+                        <!-- Legacy named status elements remain as an internal compatibility surface for existing polling code. -->
+                        <Border x:Name="RecorderStatusPill" Width="132" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="RecorderStatusText" Text="Recorder · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние локального Recorder Agent и захвата микрофона" AutomationProperties.Name="Состояние Recorder Agent" /></Border>
+                        <Border x:Name="ServerStatusPill" Width="132" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="ServerStatusText" Text="Сервер · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Доступность LAN-сервера и текущей API-сессии" AutomationProperties.Name="Состояние API-сервера" /></Border>
+                        <Border x:Name="WhisperXStatusPill" Width="132" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="WhisperXStatusText" Text="WhisperX · проверка" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Готовность WhisperX, GPU и воркеров обработки" AutomationProperties.Name="Состояние WhisperX" /></Border>
+                        <Border x:Name="VoiceStatusPill" Width="152" Visibility="Collapsed" Style="{StaticResource TopStatusPillStyle}"><TextBlock x:Name="VoiceStatusText" Text="Мифодий · выключен" Style="{StaticResource TopStatusStyle}" ToolTipService.ToolTip="Состояние голосового помощника" AutomationProperties.Name="Состояние Мифодия" /></Border>
+                        <Button x:Name="StatusDetailsButton" Visibility="Collapsed" Content="Состояние" Style="{StaticResource GhostButtonStyle}" Padding="8,4" MinHeight="32" AutomationProperties.Name="Подробности состояния системы">
+                            <Button.Flyout>
+                                <Flyout Placement="Bottom">
+                                    <StackPanel MinWidth="280" MaxWidth="360" Spacing="8" Padding="4">
+                                        <TextBlock Text="Состояние системы" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock x:Name="StatusFlyoutSummaryText" Text="Проверяем компоненты…" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock x:Name="StatusFlyoutRecorderText" Text="Recorder Host · проверка" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutMicrophoneText" Text="Микрофон · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutStorageText" Text="Локальное место · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock x:Name="StatusFlyoutServerText" Text="Сервер · проверка" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="StatusFlyoutWhisperText" Text="WhisperX · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                                <TextBlock Text="Qwen · отключена" Style="{StaticResource CaptionStyle}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
+                        <TextBlock x:Name="ProfileText" Text="Локальная сессия" Style="{StaticResource TopStatusStyle}" Margin="4,0,0,0" ToolTipService.ToolTip="Текущий пользователь и состояние локальной сессии" AutomationProperties.Name="Текущий пользователь" />
+                    </StackPanel>
+                    <Ellipse x:Name="SystemStatusIndicator" Visibility="Collapsed" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" />
+                    <TextBlock x:Name="SystemStatusText" Visibility="Collapsed" Text="Проверка системы" />
+                </Grid>
+            </TitleBar.Content>
+        </TitleBar>
+
+        <NavigationView
+            x:Name="NavView"
+            Grid.Row="1"
+            PaneDisplayMode="Auto"
+            OpenPaneLength="224"
+            CompactPaneLength="48"
+            SelectionFollowsFocus="Enabled"
+            Background="{StaticResource PageBackgroundBrush}"
+            IsBackButtonVisible="Collapsed"
+            IsPaneToggleButtonVisible="False"
+            SelectionChanged="NavView_SelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem
+                    x:Name="HomeNavItem"
+                    Content="Главная"
+                    IsSelected="True"
+                    Tag="home">
+                    <ToolTipService.ToolTip>Рабочий стол</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Главная</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE80F;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader Content="СОВЕЩАНИЯ" Style="{StaticResource NavigationHeaderStyle}" />
+                <NavigationViewItem x:Name="RecordingNavItem" Content="Запись" Tag="recording">
+                    <ToolTipService.ToolTip>Начать и управлять записью</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Запись</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE720;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="MeetingsNavItem" Content="Совещания" Tag="meetings">
+                    <ToolTipService.ToolTip>Журнал и результаты совещаний</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Совещания</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE787;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader Content="РЕЗУЛЬТАТЫ" Style="{StaticResource NavigationHeaderStyle}" />
+                    <NavigationViewItem x:Name="SeriesNavItem" Visibility="Collapsed" Content="Серии оперативок" Tag="series">
+                    <ToolTipService.ToolTip>Повторяющиеся оперативки</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Серии оперативок</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="TranscriptsNavItem" Content="Стенограммы" Tag="transcripts">
+                    <ToolTipService.ToolTip>Реестр стенограмм</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Стенограммы</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A1;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="SpeakersNavItem" Content="Спикеры" Tag="speakers">
+                    <ToolTipService.ToolTip>Голосовые профили и спикеры</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Спикеры</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE716;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="SummariesNavItem" Content="Саммари" Tag="summaries">
+                    <ToolTipService.ToolTip>Итоги и доказательства</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Саммари</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8A5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="TasksNavItem" Content="Задачи" Tag="tasks">
+                    <ToolTipService.ToolTip>Поручения и статусы</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Задачи</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE73E;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader x:Name="AnalysisNavHeader" Visibility="Collapsed" Content="АНАЛИЗ" Style="{StaticResource NavigationHeaderStyle}" />
+                <NavigationViewItem x:Name="SearchNavItem" Visibility="Collapsed" Content="Поиск" Tag="search">
+                    <ToolTipService.ToolTip>Поиск по рабочим данным</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Поиск</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE721;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="AnalyticsNavItem" Visibility="Collapsed" Content="Аналитика" Tag="analytics">
+                    <ToolTipService.ToolTip>Показатели обработки</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Аналитика</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9D2;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader Content="МИФОДИЙ" Style="{StaticResource NavigationHeaderStyle}" />
+                <NavigationViewItem x:Name="AssistantNavItem" Content="ИИ-помощник" Tag="assistant">
+                    <ToolTipService.ToolTip>Чат с локальной нейросетью по стенограммам</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>ИИ-помощник</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE99A;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItemHeader Content="СИСТЕМА" Style="{StaticResource NavigationHeaderStyle}" />
+                <NavigationViewItem x:Name="AgentsNavItem" Visibility="Collapsed" Content="Состояние системы" Tag="agents">
+                    <ToolTipService.ToolTip>Состояние Recorder Agent</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Агенты</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE716;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="AdministrationNavItem" Visibility="Collapsed" Content="Администрирование" Tag="administration">
+                    <ToolTipService.ToolTip>Пользователи и политики</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Администрирование</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE7EF;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="SettingsNavItem" Content="Настройки" Tag="settings">
+                    <ToolTipService.ToolTip>Подключение и локальный архив</ToolTipService.ToolTip>
+                    <AutomationProperties.Name>Настройки</AutomationProperties.Name>
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <Frame x:Name="NavFrame" />
+        </NavigationView>
+
+        <InfoBar
+            x:Name="GlobalNotificationBar"
+            Grid.Row="1"
+            Canvas.ZIndex="30"
+            Margin="0,16,24,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            MaxWidth="460"
+            IsOpen="False"
+            IsClosable="True"
+            Closed="GlobalNotificationBar_Closed"
+            Title="Состояние системы"
+            AutomationProperties.Name="Уведомление о состоянии системы" />
+
+        <InfoBar
+            x:Name="UpdateNotificationBar"
+            Grid.Row="1"
+            Canvas.ZIndex="31"
+            Margin="0,76,24,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            MaxWidth="460"
+            IsOpen="False"
+            IsClosable="True"
+            Severity="Informational"
+            Title="Обновление приложения"
+            AutomationProperties.Name="Уведомление об обновлении приложения" />
+
+        <Border
+            x:Name="GlobalRecordingController"
+            Grid.Row="1"
+            Visibility="Collapsed"
+            VerticalAlignment="Bottom"
+            HorizontalAlignment="Stretch"
+            Margin="12,0,12,12"
+            Padding="14,10"
+            Background="{StaticResource SurfaceBrush}"
+            BorderBrush="{StaticResource BorderStrongBrush}"
+            BorderThickness="1"
+            CornerRadius="10">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Ellipse x:Name="GlobalRecordingIndicator" Width="9" Height="9" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingStateText" Text="Запись" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingTimerText" Text="00:00:00" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock x:Name="GlobalRecordingMicrophoneText" Text="Микрофон" Foreground="{StaticResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="240" VerticalAlignment="Center" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="GlobalPauseResumeButton" Content="Пауза" Style="{StaticResource SecondaryButtonStyle}" Click="GlobalPauseResumeButton_Click" AutomationProperties.Name="Пауза текущей записи" />
+                    <Button x:Name="GlobalMarkerButton" Content="Метка" Style="{StaticResource GhostButtonStyle}" Click="GlobalMarkerButton_Click" AutomationProperties.Name="Добавить метку в текущую запись" />
+                    <Button x:Name="GlobalStopButton" Content="Завершить" Style="{StaticResource DangerButtonStyle}" Click="GlobalStopButton_Click" AutomationProperties.Name="Завершить текущую запись" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+    </Grid>
+</Window>

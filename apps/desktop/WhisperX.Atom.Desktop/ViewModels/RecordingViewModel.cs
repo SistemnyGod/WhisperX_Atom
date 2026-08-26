@@ -1,0 +1,2371 @@
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using CommunityToolkit.Mvvm.ComponentModel;
+using WhisperX.Atom.Desktop;
+using WhisperX.Atom.Recorder;
+using WhisperX_Atom_Desktop.Services;
+
+namespace WhisperX_Atom_Desktop.ViewModels;
+
+/// <summary>
+/// A privacy-safe, local-only row for the recording library. It intentionally
+/// contains metadata and user-selected paths, never PCM or transcript text.
+/// </summary>
+public sealed record LocalRecordingItem(
+    string SessionId,
+    string Title,
+    DateTimeOffset? StartedAt,
+    string StartedLabel,
+    string DurationLabel,
+    string SizeLabel,
+    string ArchivePath,
+    string? AudioPath,
+    string LocalStatus,
+    string DeliveryStatus,
+    bool CanPlay,
+    bool CanRetry,
+    string ArchiveWarning)
+{
+    public string ArchiveWarningVisibility => string.IsNullOrWhiteSpace(ArchiveWarning) ? "Collapsed" : "Visible";
+}
+
+public sealed class RecordingViewModel : ObservableObject
+{
+    private readonly FrontendServices _services;
+    private CancellationTokenSource? _pollCts;
+    private Task? _pollTask;
+    private Task? _deviceSubscriptionTask;
+    private Task? _audioTelemetryTask;
+    private Task? _mediaClockTask;
+    private RecordingState _state = RecordingState.Checking;
+    private string _title = "Новая запись";
+    private string? _sessionId;
+    private Guid? _meetingId;
+    private long? _mediaTimeMs;
+    private string _statusMessage = "Проверяю Recorder Agent и устройства…";
+    private string _errorMessage = string.Empty;
+    private string _archiveRoot;
+    private int _pendingUploads;
+    private string? _microphoneDeviceId;
+    private string? _systemAudioDeviceId;
+    private string? _confirmedMicrophoneDeviceId;
+    private string? _confirmedSystemAudioDeviceId;
+    private string _recordingProfile = "ROOM";
+    private string _acousticProfile = "AUTO";
+    private bool _recordingProfileManaged;
+    private CancellationTokenSource? _processingCts;
+    private Task? _processingTask;
+    private string? _processingObservedJobKey;
+    private DateTimeOffset _processingObservedSinceUtc;
+    private bool _processingJobObserved;
+    private CancellationTokenSource? _sessionCts;
+    private Task? _sessionTask;
+    private bool _serverProcessingExpected;
+    private bool _hasAudioSource;
+    private bool _recorderRuntimeReady;
+    private bool _localStorageReady;
+    private bool _isProcessing;
+    private int _processingProgress;
+    private int _rawChunksPending;
+    private int _rawChunksFailed;
+    private long _rawChunksBytes;
+    private double? _microphoneDb;
+    private double? _systemAudioDb;
+    private double? _microphoneRmsDb;
+    private double? _systemAudioRmsDb;
+    private bool? _microphoneClipping;
+    private bool? _systemAudioClipping;
+    private bool _microphoneTelemetryStale = true;
+    private bool _systemAudioTelemetryStale = true;
+    private string _effectiveMicrophoneName = "Устройство не подтверждено";
+    private string _microphoneSignalState = "UNKNOWN";
+    private IReadOnlyList<double> _microphoneWaveform = Array.Empty<double>();
+    private IReadOnlyList<double> _systemAudioWaveform = Array.Empty<double>();
+    private string _microphoneTestStatus = "Микрофон ещё не проверен.";
+    private string _voiceStatus = "Проверка голосового помощника…";
+    private string _roomAcousticCheckStatus = "Проверка кабинета ещё не запускалась.";
+    private bool _roomAcousticCheckRunning;
+    private string _systemAudioTestStatus = "Системный звук ещё не проверен.";
+    private bool _deviceListRefreshInProgress;
+    private bool _deviceEventStreamSupported;
+    private bool _audioTelemetryStreamSupported;
+    private long _lastLiveTelemetrySequence;
+    private DateTimeOffset _lastLiveTelemetryAtUtc = DateTimeOffset.MinValue;
+    private long _authoritativeMediaTimeMs;
+    private long _mediaClockAnchorTicks;
+    private long _mediaClockAnchorMs;
+    private string _processingStatus = "После остановки здесь появится статус WhisperX.";
+    private string _transcriptStatus = "Стенограмма ещё не запущена.";
+    private string _processingError = string.Empty;
+    private DesktopPipelineSnapshot? _pipelineSnapshot;
+    private string _warningMessage = string.Empty;
+    private AgentIpcResponse? _lastAgentResponse;
+    private string? _archivePath;
+    private string _localFinalizeState = "PENDING";
+    private string _encodingState = "PENDING";
+    private string _archiveState = "PENDING";
+    private string _deliveryState = "NOT_STARTED";
+    private string _playableAudioState = "NOT_REQUIRED";
+    private string? _playableAudioPath;
+    private string? _playableAudioError;
+    private IReadOnlyList<PlayableAudioFile> _playableAudioFiles = Array.Empty<PlayableAudioFile>();
+    private string? _sessionErrorCode;
+    private string? _sessionTraceId;
+    private DateTimeOffset? _nextRetryAtUtc;
+    private bool _sessionRetryable;
+    private int _chunksTotal;
+    private int _chunksConfirmed;
+    private int _chunksReady;
+    private int _chunksUploading;
+    private int _chunksFailed;
+    private long _bytesPending;
+    private double? _oldestPendingAgeSeconds;
+    private int _backgroundPendingSessions;
+    private int _backgroundFailedSessions;
+    private int _rawChunksReady;
+    private int _rawChunksReadyForUpload;
+    private int _rawChunkCount;
+    private int _rawWritingCount;
+    private int _rawEncodingCount;
+    private int _rawFinalizerQueueDepth;
+    private int _rawFinalizerCapacity;
+    private string _startupState = "UNKNOWN";
+    private string _recoveryState = "NOT_STARTED";
+    private string _encoderState = "UNKNOWN";
+    private string _storageWatermarkState = "NORMAL";
+    private double _storageFreePercent;
+    private long _storageFreeBytes;
+    private long _storageMinimumFreeBytes;
+    private long _storageCaptureReserveBytes;
+    private long _storagePostProcessingReserveBytes;
+    private long _storageEmergencyStopFreeBytes;
+    private readonly Dictionary<string, LocalSessionSummary> _localSessionsById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _localLibraryGate = new(1, 1);
+
+    public RecordingViewModel(FrontendServices services)
+    {
+        _services = services;
+        var settings = services.Settings.Load();
+        _archiveRoot = string.IsNullOrWhiteSpace(settings.ArchiveRoot) ? DesktopSettings.DefaultArchiveRoot() : settings.ArchiveRoot!;
+        _microphoneDeviceId = settings.MicrophoneDeviceId;
+        // AudioGraph Host now exposes render-loopback as an independent
+        // system-audio track. Keep the configured endpoint across runtime
+        // changes; it is never mixed into the microphone PCM.
+        _systemAudioDeviceId = settings.SystemAudioDeviceId;
+        _confirmedMicrophoneDeviceId = settings.MicrophoneDeviceId;
+        _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
+        _recordingProfile = NormalizeRecordingProfile(settings.RecordingProfile);
+        _acousticProfile = NormalizeAcousticProfile(settings.AcousticProfile);
+    }
+
+    public ObservableCollection<AudioDeviceOption> Microphones { get; } = [];
+    public ObservableCollection<AudioDeviceOption> SystemAudioDevices { get; } = [];
+    public ObservableCollection<LocalRecordingItem> LocalRecordings { get; } = [];
+    public bool HasLocalRecordings => LocalRecordings.Count > 0;
+    public string LocalRecordingsEmptyVisibility => HasLocalRecordings ? "Collapsed" : "Visible";
+    public IReadOnlyList<RecordingProfileOption> RecordingProfiles { get; } =
+    [
+        new("ROOM", "Комната — микрофон"),
+        new("ONLINE", "Онлайн — микрофон + система"),
+        new("MIC_ONLY", "Только микрофон"),
+        new("SYSTEM_ONLY", "Только системный звук")
+    ];
+    public IReadOnlyList<RecordingProfileOption> AcousticProfiles { get; } =
+    [
+        new("AUTO", "Авто — по уровню сигнала"),
+        new("STANDARD", "Обычный кабинет"),
+        new("LARGE_ROOM", "Большой кабинет — усиление")
+    ];
+    public RecordingState State { get => _state; private set { if (SetProperty(ref _state, value)) { NotifyCommands(); OnPropertyChanged(nameof(CanTestAudio)); OnPropertyChanged(nameof(CanRunRoomAcousticCheck)); } } }
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (SetProperty(ref _title, value) && _meetingId is Guid meetingId)
+                _services.ActiveMeeting.Set(meetingId, value);
+        }
+    }
+    public string? SessionId
+    {
+        get => _sessionId;
+        private set
+        {
+            if (SetProperty(ref _sessionId, value)) OnPropertyChanged(nameof(CanRetryUpload));
+        }
+    }
+    public Guid? MeetingId
+    {
+        get => _meetingId;
+        private set
+        {
+            if (SetProperty(ref _meetingId, value) && value is Guid meetingId)
+                _services.ActiveMeeting.Set(meetingId, Title);
+        }
+    }
+    public long? MediaTimeMs { get => _mediaTimeMs; private set { if (SetProperty(ref _mediaTimeMs, value)) OnPropertyChanged(nameof(MediaTimeLabel)); } }
+    public string MediaTimeLabel => MediaTimeMs is long value ? FormatMediaTime(value) : "00:00:00";
+    public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
+    public string ErrorMessage { get => _errorMessage; private set { if (SetProperty(ref _errorMessage, value)) OnPropertyChanged(nameof(HasError)); } }
+    public bool HasError => !string.IsNullOrWhiteSpace(ErrorMessage);
+    public string WarningMessage { get => _warningMessage; private set { if (SetProperty(ref _warningMessage, value)) OnPropertyChanged(nameof(HasWarning)); } }
+    public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
+    public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
+    public string? ArchivePath
+    {
+        get => _archivePath;
+        private set
+        {
+            if (!SetProperty(ref _archivePath, value)) return;
+            OnPropertyChanged(nameof(CanOpenLocalArchive));
+            OnPropertyChanged(nameof(ArchiveWarningLabel));
+            OnPropertyChanged(nameof(ArchiveWarningVisibility));
+            NotifyPlayableAudioSelectionChanged();
+        }
+    }
+    public string LocalFinalizeState
+    {
+        get => _localFinalizeState;
+        private set
+        {
+            if (SetProperty(ref _localFinalizeState, value))
+            {
+                OnPropertyChanged(nameof(LocalFinalizeStatusLabel));
+                OnPropertyChanged(nameof(LocalRecordingFooterLabel));
+            }
+        }
+    }
+    public string EncodingState { get => _encodingState; private set { if (SetProperty(ref _encodingState, value)) OnPropertyChanged(nameof(EncodingStatusLabel)); } }
+    public string ArchiveState { get => _archiveState; private set { if (SetProperty(ref _archiveState, value)) OnPropertyChanged(nameof(ArchiveStatusLabel)); } }
+    public string DeliveryState { get => _deliveryState; private set { if (SetProperty(ref _deliveryState, value)) OnPropertyChanged(nameof(DeliveryStatusLabel)); } }
+    public string PlayableAudioState
+    {
+        get => _playableAudioState;
+        private set
+        {
+            if (SetProperty(ref _playableAudioState, value))
+            {
+                OnPropertyChanged(nameof(PlayableAudioStatusLabel));
+                OnPropertyChanged(nameof(LocalFinalizeStatusLabel));
+                OnPropertyChanged(nameof(LocalRecordingFooterLabel));
+            }
+        }
+    }
+    public string? PlayableAudioPath { get => _playableAudioPath; private set { if (SetProperty(ref _playableAudioPath, value)) { OnPropertyChanged(nameof(CanOpenPlayableAudio)); OnPropertyChanged(nameof(CanOpenLocalArchive)); NotifyPlayableAudioSelectionChanged(); } } }
+    public string? PlayableAudioError
+    {
+        get => _playableAudioError;
+        private set
+        {
+            if (SetProperty(ref _playableAudioError, value))
+                OnPropertyChanged(nameof(PlayableAudioStatusLabel));
+        }
+    }
+    public IReadOnlyList<PlayableAudioFile> PlayableAudioFiles
+    {
+        get => _playableAudioFiles;
+        private set
+        {
+            if (SetProperty(ref _playableAudioFiles, value))
+            {
+                NotifyPlayableAudioSelectionChanged();
+            }
+        }
+    }
+    public string PlayableAudioStatusLabel => _playableAudioState.ToUpperInvariant() switch
+    {
+        "PENDING" => "Подготовка файла ожидает",
+        "BUILDING" => "Файл собирается из PCM",
+        "RECOVERY_PENDING" => "Ожидается восстановление PCM",
+        "READY" => "Файл готов",
+        "FAILED" => $"Ошибка файла{(string.IsNullOrWhiteSpace(_playableAudioError) ? string.Empty : $": {_playableAudioError}")}",
+        _ => "Файл не требуется"
+    };
+    public bool CanOpenPlayableAudio => PlayableAudioFilePath is not null;
+    public string? MasterAudioPath
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(_archivePath)) return null;
+            var candidate = File.Exists(_archivePath)
+                ? _archivePath
+                : File.Exists(Path.Combine(_archivePath, "Аудиозапись.flac"))
+                    ? Path.Combine(_archivePath, "Аудиозапись.flac")
+                    : Path.Combine(_archivePath, "export", "master.flac");
+            return File.Exists(candidate) ? candidate : null;
+        }
+    }
+    public bool CanOpenMasterAudio => MasterAudioPath is not null;
+    public string? MicrophoneAudioPath => FindPlayableTrack("microphone")?.LocalPath;
+    public bool CanOpenMicrophoneAudio => MicrophoneAudioPath is not null;
+    public string? SystemAudioPath => FindPlayableTrack("system")?.LocalPath;
+    public bool CanOpenSystemAudio => SystemAudioPath is not null;
+    public bool HasSeparatePlayableTracks => CanOpenMicrophoneAudio || CanOpenSystemAudio;
+    public string? PlayableAudioFilePath => MasterAudioPath ?? MicrophoneAudioPath ?? SystemAudioPath;
+
+    public string? GetPlayableAudioPath(string role) => role.Trim().ToLowerInvariant() switch
+    {
+        "master" => MasterAudioPath,
+        "microphone" => MicrophoneAudioPath,
+        "system" => SystemAudioPath,
+        _ => PlayableAudioFilePath
+    };
+
+    private PlayableAudioFile? FindPlayableTrack(string fragment) =>
+        PlayableAudioFiles.FirstOrDefault(file =>
+            File.Exists(file.LocalPath) &&
+            file.TrackType.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+
+    private void NotifyPlayableAudioSelectionChanged()
+    {
+        OnPropertyChanged(nameof(CanOpenPlayableAudio));
+        OnPropertyChanged(nameof(PlayableAudioFilePath));
+        OnPropertyChanged(nameof(MasterAudioPath));
+        OnPropertyChanged(nameof(CanOpenMasterAudio));
+        OnPropertyChanged(nameof(MicrophoneAudioPath));
+        OnPropertyChanged(nameof(CanOpenMicrophoneAudio));
+        OnPropertyChanged(nameof(SystemAudioPath));
+        OnPropertyChanged(nameof(CanOpenSystemAudio));
+        OnPropertyChanged(nameof(HasSeparatePlayableTracks));
+        OnPropertyChanged(nameof(CanOpenLocalArchive));
+    }
+    public string LocalFinalizeStatusLabel => _localFinalizeState.ToUpperInvariant() switch
+    {
+        "FINALIZING_LOCAL" => "Локальный master собирается",
+        "LOCAL_READY" => _playableAudioState == "READY" ? "Файл записи готов" : "Исходный PCM защищён; файл готовится",
+        "RECOVERY_PENDING" => "Ожидает восстановления локального файла",
+        "LOCAL_FAILED" => "Локальная сборка не завершена",
+        _ => "Локальное сохранение ожидает"
+    };
+    public string LocalRecordingFooterLabel => _playableAudioState.ToUpperInvariant() switch
+    {
+        "READY" => "Запись сохранена локально. Можно закрыть приложение — кодирование и доставка продолжатся в фоне.",
+        "BUILDING" => "Исходный PCM защищён. Пользовательский файл собирается в фоне; запись не потеряна.",
+        "RECOVERY_PENDING" => "Исходный PCM защищён. Recorder восстановит незавершённый файл автоматически.",
+        "FAILED" => "Исходный PCM защищён. Файл не собран, но запись можно восстановить после исправления причины.",
+        _ => "Исходный PCM защищён. Пользовательский файл будет собран в фоне после остановки записи."
+    };
+    public string DeliveryStatusLabel => DisplayDeliveryState(_deliveryState);
+    public string EncodingStatusLabel => _encodingState.ToUpperInvariant() switch
+    {
+        "ENCODING" => "Кодирование локального файла",
+        "WAITING_FOR_ENCODER" => "Ожидает кодировщик",
+        "ENCODE_FAILED" => "Ошибка кодирования",
+        "FLAC_READY" => "Чанки готовы",
+        "TERMINAL_FAILED" => "Требуется восстановление исходного PCM",
+        _ => "Ожидание кодирования"
+    };
+    public string ArchiveStatusLabel => _archiveState.ToUpperInvariant() switch
+    {
+        "READY" => "Архив готов",
+        "FAILED" => "Архив не собран; исходные чанки сохранены",
+        "BUILDING" => "Архив собирается",
+        "PENDING" => "Собирается после записи",
+        _ => "Архив ожидает"
+    };
+    public string ArchiveWarningLabel => IsFallbackArchivePath(ArchivePath)
+        ? $"Основная папка архива недоступна. Эта запись сохранена в резервной папке: {ArchivePath}"
+        : string.Empty;
+    public string ArchiveWarningVisibility => string.IsNullOrWhiteSpace(ArchiveWarningLabel) ? "Collapsed" : "Visible";
+    public string DeliveryDiagnosticLabel => string.IsNullOrWhiteSpace(_sessionErrorCode)
+        ? "Причина доставки: —"
+        : $"Причина: {_sessionErrorCode}{(_nextRetryAtUtc is DateTimeOffset retry ? $" · следующая попытка {retry.ToLocalTime():HH:mm:ss}" : string.Empty)}";
+    public string DeliveryTraceLabel => string.IsNullOrWhiteSpace(_sessionTraceId) ? string.Empty : $"Trace: {_sessionTraceId}";
+    public string ChunkSyncLabel => _chunksTotal == 0
+        ? "Чанки: пока не созданы"
+        : $"Чанки: {_chunksConfirmed} / {_chunksTotal} подтверждено · ожидают: {_chunksReady + _chunksUploading + _chunksFailed}";
+    public string PendingBytesLabel => _bytesPending <= 0
+        ? "Ожидающих данных: нет"
+        : $"Ожидают отправки: {FormatBytes(_bytesPending)}";
+    public string PendingAgeLabel => _oldestPendingAgeSeconds is not double age
+        ? "Возраст очереди: —"
+        : $"Старейший ожидающий чанк: {TimeSpan.FromSeconds(age):g}";
+    public string BackgroundDeliveryLabel => _backgroundPendingSessions == 0 && _backgroundFailedSessions == 0
+        ? "Фоновых сессий доставки нет"
+        : $"Фоновые сессии: {_backgroundPendingSessions} в доставке · {_backgroundFailedSessions} с ошибками";
+    public string RawReadyLabel => _rawChunksReadyForUpload == 0
+        ? "Закодированные чанки: нет ожидающих отправки"
+        : $"Закодированные чанки: {_rawChunksReadyForUpload} ожидают отправки";
+    public string RawEncoderReadyLabel => _rawChunksReady == 0
+        ? "Сырой PCM: очередь на кодирование пуста"
+        : $"Сырой PCM: {_rawChunksReady} чанков готовы к кодированию";
+    public bool CanOpenLocalArchive => (!string.IsNullOrWhiteSpace(ArchivePath) && Directory.Exists(ArchivePath))
+        || (!string.IsNullOrWhiteSpace(PlayableAudioPath) && Directory.Exists(PlayableAudioPath));
+    public string? SelectedMicrophoneId => _microphoneDeviceId;
+    public string? SelectedSystemAudioId => _systemAudioDeviceId;
+    public string PendingUploadsLabel => _pendingUploads == 0 ? "Нет ожидающих отправки" : $"В очереди отправки: {_pendingUploads}";
+    public string EncoderBacklogLabel => _rawChunksPending == 0
+        ? "Кодирование аудио: очередь пуста"
+        : _rawChunksFailed > 0
+            ? $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · ошибок: {_rawChunksFailed}"
+            : $"Кодирование аудио: {_rawChunksPending} чанк(ов) ожидают · {FormatBytes(_rawChunksBytes)}";
+    public string RecorderRecoveryLabel => _recoveryState.ToUpperInvariant() switch
+    {
+        "RUNNING" => "Восстановление старых сегментов…",
+        "DEGRADED" => "Восстановление требует внимания; запись доступна",
+        "READY" => "Восстановление завершено",
+        _ => _startupState.Equals("READY", StringComparison.OrdinalIgnoreCase) ? "Recorder готов" : "Recorder запускается"
+    };
+    public string RawPipelineLabel => _rawChunkCount == 0
+        ? "Аудиосегменты ещё не созданы"
+        : $"PCM: {_rawChunkCount} · запись: {_rawWritingCount} · кодирование: {_rawEncodingCount} · очередь финализатора: {_rawFinalizerQueueDepth}/{Math.Max(1, _rawFinalizerCapacity)}";
+    public string StorageWatermarkLabel => _storageWatermarkState switch
+    {
+        "BLOCK_RECORDING" => $"Хранилище: запись заблокирована · свободно {_storageFreePercent:F1}%",
+        "EMERGENCY" => $"Хранилище: аварийный уровень · свободно {_storageFreePercent:F1}%",
+        "CRITICAL" => $"Хранилище: критический уровень · свободно {_storageFreePercent:F1}%",
+        "WARNING" => $"Хранилище: внимание · свободно {_storageFreePercent:F1}%",
+        _ => $"Хранилище: нормально · свободно {_storageFreePercent:F1}%"
+    };
+    public string StorageRecordingCapacityLabel
+    {
+        get
+        {
+            var reserve = _storageCaptureReserveBytes > 0
+                ? _storageCaptureReserveBytes + _storagePostProcessingReserveBytes
+                : _storageMinimumFreeBytes;
+            var available = Math.Max(0L, _storageFreeBytes - reserve);
+            // Two mono 48 kHz PCM16 tracks are the conservative ONLINE
+            // profile; this is an estimate, not a reservation guarantee.
+            var bytesPerHour = 48000d * 2d * 2d * 3600d;
+            var hours = available / bytesPerHour;
+            return hours < 0.1d ? "Запас записи: менее 6 минут" : $"Запас записи: около {hours:F1} ч";
+        }
+    }
+    public ObservableCollection<DesktopTranscriptSegment> TranscriptSegments { get; } = [];
+    public ObservableCollection<string> SessionEvents { get; } = [];
+    public bool IsProcessing { get => _isProcessing; private set => SetProperty(ref _isProcessing, value); }
+    public int ProcessingProgress { get => _processingProgress; private set => SetProperty(ref _processingProgress, value); }
+    public string ProcessingStatus
+    {
+        get => _processingStatus;
+        private set
+        {
+            if (!SetProperty(ref _processingStatus, value)) return;
+            OnPropertyChanged(nameof(ProcessingStageIndex));
+        }
+    }
+    /// <summary>
+    /// Server-owned processing state. Jobs are still queried for the SSE
+    /// compatibility path, but the displayed stage comes from this snapshot
+    /// whenever the current API supports it.
+    /// </summary>
+    public DesktopPipelineSnapshot? PipelineSnapshot
+    {
+        get => _pipelineSnapshot;
+        private set => SetProperty(ref _pipelineSnapshot, value);
+    }
+    public IReadOnlyList<string> ProcessingSteps { get; } = ["ASR", "Выравнивание", "Диаризация", "Стенограмма"];
+    public int ProcessingStageIndex => ProcessingStatus.Contains("стенограм", StringComparison.OrdinalIgnoreCase) ? 3
+        : ProcessingStatus.Contains("диариз", StringComparison.OrdinalIgnoreCase) ? 2
+        : ProcessingStatus.Contains("выравн", StringComparison.OrdinalIgnoreCase) ? 1
+        : ProcessingStatus.Contains("ASR", StringComparison.OrdinalIgnoreCase) ? 0
+        : -1;
+    public string TranscriptStatus { get => _transcriptStatus; private set => SetProperty(ref _transcriptStatus, value); }
+    public string ProcessingError { get => _processingError; private set => SetProperty(ref _processingError, value); }
+    public bool HasTranscript => TranscriptSegments.Count > 0;
+    public bool CanOpenTranscript => MeetingId is Guid && HasTranscript;
+    public string TranscriptPreview => string.Join(" ", TranscriptSegments.Take(3).Select(segment => segment.Text).Where(text => !string.IsNullOrWhiteSpace(text)));
+    public string MicrophoneStatus { get; private set; } = "Микрофон: ожидает проверки";
+    public string SystemAudioStatus { get; private set; } = "Системный звук: ожидает проверки";
+    public string VoiceStatus { get => _voiceStatus; private set => SetProperty(ref _voiceStatus, value); }
+    public double MicrophoneLevel => ToLevel(_microphoneDb);
+    public double SystemAudioLevel => ToLevel(_systemAudioDb);
+    public string MicrophoneDbLabel => FormatDb(_microphoneDb);
+    public string SystemAudioDbLabel => FormatDb(_systemAudioDb);
+    public string MicrophoneTelemetryLabel => FormatTelemetry(_microphoneRmsDb, _microphoneClipping, _microphoneTelemetryStale);
+    public string EffectiveMicrophoneLabel => $"Записывается: {_effectiveMicrophoneName}";
+    public string MicrophoneSignalLabel => _microphoneSignalState switch
+    {
+        "READY" => "Голос записывается",
+        "READY_NO_SIGNAL" => "Поток открыт, сигнала пока нет",
+        "CLIPPING" => "Голос записывается, но уровень перегружен",
+        "FORMAT_MISMATCH" => "Ошибка формата аудиобуфера",
+        "NO_PACKETS" => "Нет данных от микрофона",
+        "UNAVAILABLE" => "Микрофон недоступен",
+        _ => "Состояние сигнала проверяется"
+    };
+    public string MicrophoneSignalState => _microphoneSignalState;
+    public string SystemAudioTelemetryLabel => FormatTelemetry(_systemAudioRmsDb, _systemAudioClipping, _systemAudioTelemetryStale);
+    public IReadOnlyList<double> MicrophoneWaveform => _microphoneWaveform;
+    public IReadOnlyList<double> SystemAudioWaveform => _systemAudioWaveform;
+    public bool MicrophoneTelemetryStale => _microphoneTelemetryStale;
+    public bool SystemAudioTelemetryStale => _systemAudioTelemetryStale;
+    public bool SystemAudioCaptureAvailable => _lastAgentResponse?.Health?.SystemAudioCaptureReady == true;
+    public string MicrophoneTestStatus { get => _microphoneTestStatus; private set => SetProperty(ref _microphoneTestStatus, value); }
+    public string RoomAcousticCheckStatus { get => _roomAcousticCheckStatus; private set => SetProperty(ref _roomAcousticCheckStatus, value); }
+    public bool IsRoomAcousticCheckRunning { get => _roomAcousticCheckRunning; private set { if (SetProperty(ref _roomAcousticCheckRunning, value)) OnPropertyChanged(nameof(CanRunRoomAcousticCheck)); } }
+    public string SystemAudioTestStatus { get => _systemAudioTestStatus; private set => SetProperty(ref _systemAudioTestStatus, value); }
+    public bool IsDeviceListRefreshInProgress => _deviceListRefreshInProgress;
+    public bool CanTestAudio => State is not (RecordingState.Starting or RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
+    public bool CanRunRoomAcousticCheck => CanTestAudio && !IsRoomAcousticCheckRunning;
+    // A previously confirmed Agent/owner pair may continue local-first
+    // capture while the LAN server is offline. It is still not advertised as
+    // server-ready, but the persisted owner makes the local path safe.
+    public bool AgentReady => _services.AgentBootstrap.LastStatus.Authenticated
+        || _services.AgentBootstrap.LastStatus.OfflineEligible
+        || _services.Backend.CanRecordLocally;
+    public bool LocalRecordingAllowed => _services.Backend.CanRecordLocally;
+    public string LocalRecordingStatus => LocalRecordingAllowed
+        ? (_services.Backend.HasSession
+            ? "Локальная запись доступна; серверная доставка работает отдельно."
+            : "Локальная запись доступна в офлайн-режиме.")
+        : "Выполните вход, чтобы разрешить локальную запись на этом компьютере.";
+    public string AgentStatus => _lastAgentResponse is { } response
+        ? AgentStatusFormatter.Format(response)
+        : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
+    public string StateTitle => State switch
+    {
+        RecordingState.Checking => "Проверка устройств",
+        RecordingState.Starting => "Запуск захвата",
+        RecordingState.Recording => "Идёт запись",
+        RecordingState.Paused => "Запись приостановлена",
+        RecordingState.Finalizing => "Сохранение записи",
+        RecordingState.Unavailable => "Recorder Agent недоступен",
+        RecordingState.Error => "Ошибка записи",
+        _ => "Готово к записи"
+    };
+    public bool CanStart => (State is RecordingState.Idle or RecordingState.Error)
+        && _recorderRuntimeReady && _hasAudioSource && _localStorageReady && LocalRecordingAllowed;
+    public bool CanAttemptStart => State is RecordingState.Idle or RecordingState.Error or RecordingState.Unavailable;
+    public string StartReadinessMessage => CanStart
+        ? "Recorder и микрофон готовы. Запись сохраняется локально даже при временной недоступности сервера."
+        : GetStartBlockedMessage();
+    public bool CanPause => State == RecordingState.Recording;
+    public bool CanResume => State == RecordingState.Paused;
+    public bool CanMark => State is RecordingState.Recording or RecordingState.Paused;
+    public bool CanStop => State is RecordingState.Recording or RecordingState.Paused;
+    public bool CanRetryUpload => _sessionRetryable && !string.IsNullOrWhiteSpace(SessionId) && State is (RecordingState.Idle or RecordingState.Error or RecordingState.Finalizing);
+    // Local capture has already stopped in Finalizing; encoding and delivery run in the
+    // background and must not prevent configuring the next recording.
+    public bool CanSelectDevices => State is not (RecordingState.Starting or RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
+    public string RecordingProfile { get => _recordingProfile; private set => SetProperty(ref _recordingProfile, value); }
+    public string AcousticProfile { get => _acousticProfile; private set => SetProperty(ref _acousticProfile, value); }
+    public bool RecordingProfileManaged { get => _recordingProfileManaged; private set => SetProperty(ref _recordingProfileManaged, value); }
+    public bool CanSelectRecordingProfile => !_recordingProfileManaged && State is not (RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing);
+
+    public async Task StartPollingAsync()
+    {
+        await RefreshAsync();
+        await RestoreLatestLocalSessionAsync();
+        await RefreshLocalLibraryAsync();
+        if (_pollCts is not null) return;
+        _pollCts = new CancellationTokenSource();
+        _pollTask = PollLoopAsync(_pollCts.Token);
+        // Older installed Hosts expose only the one-request pipe. Do not open
+        // a long-lived subscription against them: it would occupy the only
+        // listener and make HEALTH/START appear to hang.
+        if (RecorderRuntimeMode.IsAudioGraph && _deviceEventStreamSupported)
+            _deviceSubscriptionTask = DeviceSubscriptionLoopAsync(_pollCts.Token);
+        if (RecorderRuntimeMode.IsAudioGraph && _audioTelemetryStreamSupported)
+            _audioTelemetryTask = AudioTelemetrySubscriptionLoopAsync(_pollCts.Token);
+        _mediaClockTask = MediaClockLoopAsync(_pollCts.Token);
+    }
+
+    public async Task StopPollingAsync()
+    {
+        await StopSessionTrackingAsync();
+        if (_pollCts is not null)
+        {
+            _pollCts.Cancel();
+            try { if (_pollTask is not null) await _pollTask; } catch (OperationCanceledException) { }
+            try { if (_deviceSubscriptionTask is not null) await _deviceSubscriptionTask; } catch (OperationCanceledException) { }
+            try { if (_audioTelemetryTask is not null) await _audioTelemetryTask; } catch (OperationCanceledException) { }
+            try { if (_mediaClockTask is not null) await _mediaClockTask; } catch (OperationCanceledException) { }
+            _pollTask = null;
+            _deviceSubscriptionTask = null;
+            _audioTelemetryTask = null;
+            _mediaClockTask = null;
+            _pollCts.Dispose();
+            _pollCts = null;
+        }
+        await StopProcessingPollingAsync();
+    }
+
+    private async Task RestoreLatestLocalSessionAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(SessionId) || State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing) return;
+        try
+        {
+            var response = await _services.Recorder.ListLocalSessionsAsync(100);
+            var local = response.LocalSessions?
+                .FirstOrDefault(item => item.PlayableAudioState is "PENDING" or "BUILDING" or "READY" or "RECOVERY_PENDING" or "FAILED"
+                    || item.LocalFinalizeState == "LOCAL_READY" && item.DeliveryState is not "CONFIRMED" and not "COMPLETED");
+            if (local is null) return;
+            SessionId = local.SessionId;
+            Title = string.IsNullOrWhiteSpace(local.Title) ? Title : local.Title!;
+            MeetingId = null;
+            LocalFinalizeState = local.LocalFinalizeState;
+            DeliveryState = local.DeliveryState;
+            PlayableAudioState = local.PlayableAudioState;
+            PlayableAudioPath = local.PlayableAudioPath;
+            ArchivePath = local.ArchivePath ?? local.PlayableAudioPath;
+            PlayableAudioError = local.PlayableAudioError;
+            PlayableAudioFiles = local.PlayableFiles;
+            State = RecordingState.Idle;
+            StatusMessage = "Восстановлена локальная запись; доставка и подготовка файла продолжаются в фоне.";
+            StartSessionTracking(local.SessionId);
+        }
+        catch (Exception ex)
+        {
+            // Older Hosts do not implement LIST_LOCAL_SESSIONS; health and
+            // normal recording must remain available in that case.
+            Debug.WriteLine($"Unable to restore local sessions: {ex.Message}");
+        }
+    }
+
+    private async Task StopSessionTrackingAsync()
+    {
+        if (_sessionCts is null) return;
+        _sessionCts.Cancel();
+        try { if (_sessionTask is not null) await _sessionTask; } catch (OperationCanceledException) { }
+        _sessionTask = null;
+        _sessionCts.Dispose();
+        _sessionCts = null;
+    }
+
+    private async Task PollLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            await RefreshAsync(cancellationToken);
+            await RefreshLocalLibraryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>Refreshes the local library without requiring API reachability.</summary>
+    public async Task RefreshLocalLibraryAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await _localLibraryGate.WaitAsync(0, cancellationToken).ConfigureAwait(true)) return;
+        try
+        {
+            var response = await _services.Recorder.ListLocalSessionsAsync(200, cancellationToken).ConfigureAwait(true);
+            // LIST_LOCAL_SESSIONS is additive. Older Hosts return an
+            // unsupported-command response; do not erase a library already
+            // shown by a newer Host in that case.
+            if (!response.Ok && response.LocalSessions is null) return;
+            _localSessionsById.Clear();
+            LocalRecordings.Clear();
+            foreach (var session in response.LocalSessions ?? Array.Empty<LocalSessionSummary>())
+            {
+                _localSessionsById[session.SessionId] = session;
+                if (string.Equals(session.SessionId, SessionId, StringComparison.OrdinalIgnoreCase))
+                    ArchivePath = session.ArchivePath ?? session.PlayableAudioPath;
+                LocalRecordings.Add(ToLocalRecordingItem(session));
+            }
+            OnPropertyChanged(nameof(HasLocalRecordings));
+            OnPropertyChanged(nameof(LocalRecordingsEmptyVisibility));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            // Local library is optional UI. A legacy Host may not implement
+            // the additive command; capture and delivery remain unaffected.
+            Debug.WriteLine($"Unable to refresh local recording library: {ex.Message}");
+        }
+        finally
+        {
+            _localLibraryGate.Release();
+        }
+    }
+
+    public LocalSessionSummary? GetLocalSession(string sessionId)
+        => _localSessionsById.TryGetValue(sessionId, out var session) ? session : null;
+
+    private static bool IsFallbackArchivePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var fallbackRoot = Path.GetFullPath(LocalMeetingDirectoryResolver.FallbackRoot())
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(path)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            return candidate.StartsWith(fallbackRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+        catch (NotSupportedException) { return false; }
+    }
+
+    private static LocalRecordingItem ToLocalRecordingItem(LocalSessionSummary session)
+    {
+        var title = string.IsNullOrWhiteSpace(session.Title) ? "Запись" : session.Title.Trim();
+        var files = session.PlayableFiles ?? Array.Empty<PlayableAudioFile>();
+        var durationSeconds = files
+            .Where(file => file.SampleRate > 0 && file.SampleCount > 0)
+            .Select(file => file.SampleCount / (double)file.SampleRate)
+            .DefaultIfEmpty(0d)
+            .Max();
+        var size = files
+            .Select(file => file.LocalPath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => File.Exists(path) ? new FileInfo(path).Length : 0L)
+            .Sum();
+        var archive = session.ArchivePath ?? session.PlayableAudioPath;
+        string? audio = null;
+        if (!string.IsNullOrWhiteSpace(archive) && Directory.Exists(archive))
+        {
+            archive = Path.GetFullPath(archive);
+            foreach (var candidate in new[] { Path.Combine(archive, "Аудиозапись.flac"), Path.Combine(archive, "export", "master.flac") })
+            {
+                if (!File.Exists(candidate)) continue;
+                // The visible lossless master is the default playback source.
+                // Hidden WAV files under .whisperx are only a recovery/export
+                // fallback and should not be presented as the archive itself.
+                audio = candidate;
+                size = new FileInfo(candidate).Length;
+                break;
+            }
+        }
+        audio ??= files
+            .Where(file => File.Exists(file.LocalPath))
+            .OrderBy(file => file.TrackType.Contains("microphone", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .Select(file => file.LocalPath)
+            .FirstOrDefault();
+        var localStatus = session.PlayableAudioState.ToUpperInvariant() switch
+        {
+            "READY" => "Сохранено локально",
+            "RECOVERY_PENDING" => "Ожидает восстановления",
+            "FAILED" => "Ошибка локального файла",
+            "BUILDING" or "PENDING" => "Сохраняется локально",
+            _ when session.LocalFinalizeState.Equals("LOCAL_READY", StringComparison.OrdinalIgnoreCase) => "Сохранено локально",
+            _ => "Подготовка локального файла"
+        };
+        var delivery = DisplayDeliveryState(session.DeliveryState);
+        var canRetry = session.DeliveryState is not ("CONFIRMED" or "COMPLETED")
+            && session.State is not ("CANCELLED" or "FAILED");
+        var usingFallback = IsFallbackArchivePath(archive);
+        return new LocalRecordingItem(
+            session.SessionId,
+            title,
+            session.StartedAt,
+            session.StartedAt?.ToLocalTime().ToString("dd.MM.yyyy HH:mm") ?? "Дата неизвестна",
+            durationSeconds > 0 ? FormatMediaTime((long)Math.Round(durationSeconds * 1000d)) : "—",
+            size > 0 ? FormatBytes(size) : "—",
+            archive ?? (audio is not null ? Path.GetDirectoryName(audio!) ?? string.Empty : string.Empty),
+            audio,
+            localStatus,
+            delivery,
+            audio is not null,
+            canRetry,
+            usingFallback ? $"Основная папка недоступна. Запись сохранена в резервной папке: {archive}" : string.Empty);
+    }
+
+    private async Task DeviceSubscriptionLoopAsync(CancellationToken cancellationToken)
+    {
+        // DeviceWatcher is the primary source in AudioGraph mode. Reconnect
+        // only after a transient IPC break; the slower HEALTH loop remains a
+        // safety net for recording and delivery state.
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await foreach (var response in _services.Recorder.SubscribeAudioDeviceEventsAsync(cancellationToken))
+                {
+                    ApplyResponse(response, preserveUserFeedback: true);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (RecorderIpcException)
+            {
+                // Host restart is expected during install/recovery.
+            }
+            catch (IOException)
+            {
+                // The dedicated subscription pipe is intentionally disposable.
+            }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    private async Task AudioTelemetrySubscriptionLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await foreach (var response in _services.Recorder.SubscribeAudioTelemetryAsync(cancellationToken))
+                    ApplyLiveTelemetry(response.AudioTelemetry);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (RecorderIpcException) { }
+            catch (IOException) { }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    private async Task MediaClockLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            if (State != RecordingState.Recording || _sessionId is null) continue;
+            if (_lastLiveTelemetryAtUtc == DateTimeOffset.MinValue
+                || DateTimeOffset.UtcNow - _lastLiveTelemetryAtUtc > TimeSpan.FromMilliseconds(500))
+                continue;
+            var elapsedMs = (Stopwatch.GetTimestamp() - _mediaClockAnchorTicks) * 1000d / Stopwatch.Frequency;
+            var estimate = _mediaClockAnchorMs + (long)Math.Clamp(elapsedMs, 0d, 500d);
+            if (estimate > MediaTimeMs.GetValueOrDefault()) MediaTimeMs = estimate;
+        }
+    }
+
+    public async Task RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            ApplyResponse(await _services.Recorder.GetHealthAsync(cancellationToken), preserveUserFeedback: true);
+            try
+            {
+                var voice = await new WhisperX.Atom.Desktop.VoiceHostClient().GetStatusAsync(cancellationToken);
+                VoiceStatus = FormatVoiceStatus(voice, _microphoneSignalState);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch { VoiceStatus = "Voice Host недоступен"; }
+            OnPropertyChanged(nameof(AgentReady));
+            OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(StartReadinessMessage));
+            if (_services.Backend.HasSession && !AgentReady && State is (RecordingState.Idle or RecordingState.Error))
+            {
+                StatusMessage = _services.AgentBootstrap.LastStatus.Message;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (RecorderIpcException ex) when (ex.Transient && (State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing))
+        {
+            WarningMessage = "Recorder Agent занят другой операцией; текущая запись продолжается.";
+        }
+        catch (Exception)
+        {
+            State = RecordingState.Unavailable;
+            StatusMessage = "Подключите Recorder Agent и повторите проверку устройств.";
+            // Background health polling updates the persistent state text but
+            // must not flash and then erase an InfoBar every two seconds.
+            // A user-initiated START below surfaces the same failure until the
+            // user retries it.
+            OnPropertyChanged(nameof(AgentStatus));
+            OnPropertyChanged(nameof(StartReadinessMessage));
+        }
+    }
+
+    private static string FormatVoiceStatus(WhisperX.Atom.Desktop.DesktopVoiceSnapshot? snapshot, string? microphoneSignalState)
+    {
+        if (snapshot is null) return "Voice Host недоступен";
+        if (string.Equals(snapshot.LastErrorCode, "VOICE_ASSISTANT_AUTH_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий: требуется повторный вход";
+        if (snapshot.LastErrorCode?.StartsWith("VOICE_HOST_", StringComparison.OrdinalIgnoreCase) == true)
+            return "Voice Host недоступен";
+        if (snapshot.IsSpeaking || snapshot.State.Equals("RESPONDING", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий озвучивает ответ";
+        if (string.Equals(microphoneSignalState, "NO_PACKETS", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(microphoneSignalState, "READY_NO_SIGNAL", StringComparison.OrdinalIgnoreCase))
+            return "Мифодий ждёт аудиосигнал";
+        return snapshot.State.ToUpperInvariant() switch
+        {
+            "LISTENING" => "Мифодий слушает · готов к команде",
+            "CAPTURING" or "RECOGNIZING" or "WAKEDETECTED" => "Мифодий слушает вопрос",
+            "STARTING" => "Мифодий запускается",
+            "DEGRADED" or "ERROR" => "Мифодий требует внимания",
+            _ when !snapshot.MicrophoneReady => "Мифодий ждёт микрофон",
+            _ => "Мифодий готов к команде"
+        };
+    }
+
+    public async Task<bool> StartRecordingAsync()
+    {
+        if (!CanAttemptStart) return false;
+        if (!CanStart)
+        {
+            ErrorMessage = string.Empty;
+            WarningMessage = string.Empty;
+            State = RecordingState.Checking;
+            StatusMessage = "Проверяю и запускаю локальный Recorder Host…";
+            try
+            {
+                var host = await _services.RecorderService.StartAsync();
+                if (!host.PipeReachable)
+                {
+                    State = RecordingState.Unavailable;
+                    ErrorMessage = MapRecordingError(host.Error ?? "RECORDER_HOST_UNAVAILABLE");
+                    StatusMessage = "Recorder Host не готов. Запись не запущена.";
+                    return false;
+                }
+
+                await RefreshAsync();
+                if (!CanStart)
+                {
+                    State = RecordingState.Error;
+                    ErrorMessage = GetStartBlockedMessage();
+                    StatusMessage = "Устраните указанную причину и повторите запуск записи.";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                State = RecordingState.Unavailable;
+                ErrorMessage = SafeError(ex);
+                StatusMessage = "Recorder Host не готов. Запись не запущена.";
+                return false;
+            }
+        }
+        // A new recording reuses this ViewModel. Stop observers for the
+        // previous session before clearing its UI state; the Agent continues
+        // delivering that session in the background, but its tracker must not
+        // overwrite the new recording's status or transcript.
+        await StopSessionTrackingAsync();
+        await StopProcessingPollingAsync();
+        ErrorMessage = string.Empty;
+        WarningMessage = string.Empty;
+        ArchivePath = null;
+        LocalFinalizeState = "PENDING";
+        EncodingState = "PENDING";
+        ArchiveState = "PENDING";
+        DeliveryState = "NOT_STARTED";
+        PlayableAudioState = "PENDING";
+        PlayableAudioPath = null;
+        PlayableAudioError = null;
+        PlayableAudioFiles = Array.Empty<PlayableAudioFile>();
+        _sessionErrorCode = null;
+        _sessionTraceId = null;
+        _nextRetryAtUtc = null;
+        _sessionRetryable = false;
+        _lastLiveTelemetrySequence = 0;
+        _lastLiveTelemetryAtUtc = DateTimeOffset.MinValue;
+        _authoritativeMediaTimeMs = 0;
+        _mediaClockAnchorMs = 0;
+        _mediaClockAnchorTicks = Stopwatch.GetTimestamp();
+        MediaTimeMs = 0;
+        ProcessingError = string.Empty;
+        TranscriptStatus = "Стенограмма ещё не запущена.";
+        TranscriptSegments.Clear();
+        OnPropertyChanged(nameof(HasTranscript));
+        OnPropertyChanged(nameof(TranscriptPreview));
+        OnPropertyChanged(nameof(CanOpenTranscript));
+        State = RecordingState.Checking;
+        StatusMessage = "Проверяю Recorder Agent и запускаю запись…";
+        try
+        {
+            // Device/profile/archive changes are persisted and acknowledged
+            // when changed and during Agent bootstrap. Replaying all commands
+            // here serialized START behind IPC/SQLite round trips and caused
+            // false timeout errors.
+            await RefreshAsync();
+            if (!_hasAudioSource)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = "Не найден ни один доступный источник аудио.";
+                return false;
+            }
+
+            var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
+            if (!LocalRecordingAllowed)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = "LOCAL_RECORDING_LOGIN_REQUIRED";
+                StatusMessage = "Выполните вход в приложение перед локальной записью.";
+                return false;
+            }
+            var bootstrap = _services.AgentBootstrap.LastStatus;
+            if (!bootstrap.Ready || !bootstrap.ServerConnected)
+            {
+                WarningMessage = "Сервер недоступен: запись будет сохранена локально и доставлена автоматически после восстановления связи.";
+            }
+
+            var ownerUserId = _services.Settings.Load().OwnerUserId;
+            // Meeting creation and binding belong to the background delivery
+            // worker. START must not wait for HTTP, and localOnly=false keeps
+            // the durable session eligible for later automatic delivery.
+            // The command service remains the sole START path; the optional
+            // acoustic profile is carried in the same IPC v6 request.
+            var response = AcousticProfile == "AUTO"
+                ? await _services.RecordingCommands.StartAsync(title, ownerUserId)
+                : await _services.RecordingCommands.StartAsync(title, ownerUserId, AcousticProfile);
+            if (response.Preflight is { EncodingReady: false })
+                WarningMessage = "Запись сохраняется локально; кодирование и отправка продолжатся после восстановления FFmpeg.";
+            if (response.Preflight is { Warnings.Count: > 0 })
+                WarningMessage = string.Join("; ", response.Preflight.Warnings.Select(MapRecordingError));
+            ApplyResponse(response);
+            // The Host reserves the user-facing archive directory before the
+            // first capture frame. Refresh the local-only library in the
+            // background so the path is visible immediately without adding a
+            // server or HTTP round trip to START.
+            if (response.Ok) _ = RefreshLocalLibraryAsync();
+            if (!response.Ok)
+            {
+                State = RecordingState.Error;
+                ErrorMessage = response.Preflight is { Errors.Count: > 0 }
+                    ? string.Join("; ", response.Preflight.Errors.Select(MapRecordingError))
+                    : MapRecordingError(response.Error ?? "Recorder Agent не запустил запись.");
+            }
+            if (response.Ok && response.MeetingId is Guid agentMeetingId)
+            {
+                MeetingId ??= agentMeetingId;
+                _serverProcessingExpected = _services.Backend.HasSession;
+            }
+            return response.Ok;
+        }
+        catch (Exception ex)
+        {
+            State = RecordingState.Error;
+            StatusMessage = "Проверьте устройства и сообщение об ошибке.";
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
+    }
+
+    public Task<bool> PauseAsync() => ExecuteCommandAsync(_services.RecordingCommands.PauseAsync);
+    public Task<bool> ResumeAsync() => ExecuteCommandAsync(_services.RecordingCommands.ResumeAsync);
+    public Task<bool> AddMarkerAsync(string eventType = "MARKER") =>
+        ExecuteCommandAsync(cancellationToken => _services.RecordingCommands.MarkerAsync(eventType, cancellationToken));
+
+    public async Task<bool> StopRecordingAsync()
+    {
+        if (!CanStop) return false;
+        try
+        {
+            ErrorMessage = string.Empty;
+            State = RecordingState.Finalizing;
+            StatusMessage = "Сохраняю локальную запись и запускаю фоновую доставку…";
+            var response = await _services.RecordingCommands.StopAsync();
+            SessionId = response.SessionId ?? SessionId;
+            MeetingId = response.MeetingId ?? MeetingId;
+            if (!response.Ok)
+            {
+                if (response.SessionStatus?.LocalFinalizeState == "RECOVERY_PENDING")
+                {
+                    // STOP completed, but the last .pcm.part still needs
+                    // recovery. Keep the session visible as a warning rather
+                    // than claiming it was saved or turning it into a fatal
+                    // Recorder error.
+                    State = RecordingState.Finalizing;
+                    WarningMessage = MapRecordingError(response.Error ?? "RAW_RECOVERY_PENDING");
+                    if (!string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
+                    return true;
+                }
+                State = RecordingState.Error;
+                ErrorMessage = MapRecordingError(response.Error ?? "Не удалось завершить запись.");
+                return false;
+            }
+            ApplyResponse(response);
+            if (!string.IsNullOrWhiteSpace(SessionId))
+                StartSessionTracking(SessionId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            State = RecordingState.Error;
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> RetryUploadAsync()
+    {
+        if (string.IsNullOrWhiteSpace(SessionId)) return false;
+        try
+        {
+            var response = await _services.Recorder.RetryUploadAsync(SessionId);
+            ApplyResponse(response);
+            if (!response.Ok && response.SessionStatus is null)
+                ErrorMessage = MapRecordingError(response.Error);
+            if (!string.IsNullOrWhiteSpace(SessionId)) StartSessionTracking(SessionId);
+            return response.Ok;
+        }
+        catch (Exception ex) { ErrorMessage = SafeError(ex); return false; }
+    }
+
+    public async Task<bool> RetryLocalUploadAsync(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) return false;
+        try
+        {
+            var response = await _services.Recorder.RetryUploadAsync(sessionId).ConfigureAwait(true);
+            if (!response.Ok && response.SessionStatus is null)
+            {
+                ErrorMessage = MapRecordingError(response.Error);
+                return false;
+            }
+            await RefreshLocalLibraryAsync().ConfigureAwait(true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> ExportLocalAudioAsync(string sessionId, string format, string destinationPath)
+    {
+        try
+        {
+            var response = await _services.Recorder.ExportLocalAudioAsync(sessionId, format, destinationPath).ConfigureAwait(true);
+            if (!response.Ok)
+            {
+                ErrorMessage = MapRecordingError(response.Error ?? "LOCAL_AUDIO_EXPORT_FAILED");
+                return false;
+            }
+            StatusMessage = $"Экспорт завершён: {response.ExportedPath ?? destinationPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
+    }
+
+    public async Task SetMicrophoneAsync(string? id)
+    {
+        if (!CanSelectDevices || string.Equals(_microphoneDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
+        var previous = _confirmedMicrophoneDeviceId;
+        _microphoneDeviceId = NormalizeDeviceId(id);
+        OnPropertyChanged(nameof(SelectedMicrophoneId));
+        await SaveAndSyncDevicesAsync(previous, _confirmedSystemAudioDeviceId, microphoneChanged: true, systemChanged: false);
+    }
+
+    public async Task SetSystemAudioAsync(string? id)
+    {
+        if (!CanSelectDevices || string.Equals(_systemAudioDeviceId, id, StringComparison.OrdinalIgnoreCase)) return;
+        var previous = _confirmedSystemAudioDeviceId;
+        _systemAudioDeviceId = NormalizeDeviceId(id);
+        OnPropertyChanged(nameof(SelectedSystemAudioId));
+        await SaveAndSyncDevicesAsync(_confirmedMicrophoneDeviceId, previous, microphoneChanged: false, systemChanged: true);
+    }
+
+    public async Task SetRecordingProfileAsync(string? profile)
+    {
+        if (!CanSelectRecordingProfile) return;
+        var requested = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        var normalized = NormalizeRecordingProfile(profile);
+        if (string.Equals(_recordingProfile, normalized, StringComparison.Ordinal)) return;
+        try
+        {
+            var response = await _services.Recorder.SetRecordingProfileAsync(normalized);
+            if (!response.Ok)
+            {
+                ErrorMessage = MapRecordingError(response.Error ?? "Не удалось сохранить профиль записи.");
+                return;
+            }
+            RecordingProfile = normalized;
+            SaveSettings();
+            ApplyResponse(response);
+        }
+        catch (Exception ex) { ErrorMessage = SafeError(ex); }
+    }
+
+    public Task SetAcousticProfileAsync(string? profile)
+    {
+        if (!CanSelectDevices) return Task.CompletedTask;
+        var normalized = NormalizeAcousticProfile(profile);
+        if (string.Equals(_acousticProfile, normalized, StringComparison.Ordinal)) return Task.CompletedTask;
+        AcousticProfile = normalized;
+        SaveSettings();
+        return Task.CompletedTask;
+    }
+
+    public async Task TestMicrophoneAsync()
+    {
+        if (!CanTestAudio) return;
+        MicrophoneTestStatus = "Проверяю микрофон…";
+        try
+        {
+            var response = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId);
+            if (response.AudioGraphProbe is { } graph)
+            {
+                MicrophoneTestStatus = !graph.Ready
+                    ? $"Проверка не пройдена: {MapRecordingError(graph.ErrorCode ?? response.Error)}."
+                    : !graph.SignalDetected
+                        ? $"Поток открыт: кадров {graph.FrameCount}, но сигнал не обнаружен."
+                        : graph.Clipping
+                            ? $"Сигнал обнаружен, но есть clipping. Пик: {graph.PeakDb:0} dB."
+                            : $"Микрофон работает. Средний уровень: {graph.AverageRmsDb:0} dB, пик: {graph.PeakDb:0} dB.";
+                await RefreshAsync();
+                return;
+            }
+            var result = response.AudioSourceTest;
+            MicrophoneTestStatus = result is null
+                ? "Не удалось получить результат проверки."
+                : !result.Success
+                    ? $"Аудиопакеты не получены: {result.ErrorCode ?? "AUDIO_TEST_FAILED"}."
+                    : !result.SignalDetected
+                        ? "Сигнал не обнаружен."
+                        : result.Clipping
+                            ? $"Сигнал обнаружен, но есть clipping. Пик: {result.PeakDb:0} dB."
+                            : $"Микрофон работает. Средний уровень: {result.AverageRmsDb:0} dB, пик: {result.PeakDb:0} dB.";
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            MicrophoneTestStatus = $"Проверка не выполнена: {SafeError(ex)}";
+        }
+    }
+
+    public async Task RunRoomAcousticCheckAsync()
+    {
+        if (!CanRunRoomAcousticCheck) return;
+        IsRoomAcousticCheckRunning = true;
+        RoomAcousticCheckStatus = "Проверяю единый фрагмент: 3 секунды тишины, затем 7 секунд речи…";
+        try
+        {
+            // Prefer the coherent V2 probe so noise and speech are measured
+            // from the same endpoint/session. Older Recorder Hosts fall back
+            // to the legacy two-probe flow below.
+            var v2 = await _services.Recorder.RunRoomCheckV2Async(_microphoneDeviceId);
+            if (v2.RoomCheck is not null || !IsLegacyRoomCheckUnsupported(v2.Error))
+            {
+                var check = v2.RoomCheck;
+                if (check is null || !check.Success || check.Quality is null)
+                {
+                    RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(check?.ErrorCode ?? v2.Error ?? "AUDIO_TEST_FAILED")}.";
+                }
+                else if (!check.Quality.Passed || !check.NoiseWindowConfirmed)
+                {
+                    RoomAcousticCheckStatus = $"Качество: {check.Quality.Grade}. Шум {check.Quality.NoiseFloorDb:0} dBFS, речь {check.Quality.SpeechRmsDb:0} dBFS, SNR {check.Quality.EstimatedSnrDb:0.0} dB, clipping {check.Quality.NormalizedClippingRatio:0.###}%, фаза {check.PhaseMetadata}. {check.Quality.Recommendation}";
+                }
+                else
+                {
+                    RoomAcousticCheckStatus = $"Качество: {check.Quality.Grade}. Шум {check.Quality.NoiseFloorDb:0} dBFS, речь {check.Quality.SpeechRmsDb:0} dBFS, SNR {check.Quality.EstimatedSnrDb:0.0} dB, clipping {check.Quality.NormalizedClippingRatio:0.###}%. Фаза подтверждена. {check.Quality.Recommendation}";
+                }
+                await RefreshAsync();
+                return;
+            }
+
+            RoomAcousticCheckStatus = "Совместимый режим: сначала 3 секунды тишины…";
+            var silenceResponse = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 3);
+            var silenceProbe = silenceResponse.AudioGraphProbe;
+            if (silenceProbe is null || !silenceProbe.Ready)
+            {
+                RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(silenceProbe?.ErrorCode ?? silenceResponse.Error ?? "AUDIO_TEST_FAILED")}.";
+                return;
+            }
+            RoomAcousticCheckStatus = "Теперь 7 секунд скажите обычным голосом на рабочем расстоянии…";
+            var speechResponse = await _services.Recorder.TestAudioSourceAsync(_microphoneDeviceId, durationSeconds: 7);
+            var speechProbe = speechResponse.AudioGraphProbe;
+            var speechQuality = speechProbe?.Quality;
+            if (speechQuality is not null && silenceProbe.Quality is not null)
+            {
+                speechQuality = AudioQualityAnalyzer.Combine(silenceProbe.Quality, speechQuality);
+            }
+            var ready = speechProbe?.Ready == true;
+            var signal = speechProbe?.SignalDetected == true;
+            if (!ready)
+            {
+                RoomAcousticCheckStatus = $"Проверка не пройдена: {MapRecordingError(speechProbe?.ErrorCode ?? speechResponse.Error ?? "AUDIO_TEST_FAILED")}.";
+            }
+            else if (!signal || speechQuality is null)
+            {
+                RoomAcousticCheckStatus = "Нужен конференц-микрофон: полезный сигнал не обнаружен.";
+            }
+            else
+            {
+                var grade = speechQuality.Grade.ToString();
+                RoomAcousticCheckStatus = $"Качество: {grade}. Шум {speechQuality.NoiseFloorDb:0} dBFS, речь {speechQuality.SpeechRmsDb:0} dBFS, SNR {speechQuality.EstimatedSnrDb:0.0} dB, clipping {speechQuality.NormalizedClippingRatio:0.###}%. {speechQuality.Recommendation}";
+            }
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            RoomAcousticCheckStatus = $"Проверка не выполнена: {SafeError(ex)}";
+        }
+        finally { IsRoomAcousticCheckRunning = false; }
+    }
+
+    private static bool IsLegacyRoomCheckUnsupported(string? error)
+        => string.Equals(error, "unsupported_command", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(error, "ROOM_CHECK_V2_UNSUPPORTED", StringComparison.OrdinalIgnoreCase);
+
+    public async Task TestSystemAudioAsync()
+    {
+        if (!CanTestAudio) return;
+        SystemAudioTestStatus = "Проверяю системный звук…";
+        try
+        {
+            var response = await _services.Recorder.TestAudioSourceAsync(_systemAudioDeviceId, systemAudio: true);
+            var result = response.AudioSourceTest;
+            SystemAudioTestStatus = result is null
+                ? "Не удалось получить результат проверки."
+                : !result.Success
+                    ? $"Аудиопакеты не получены: {result.ErrorCode ?? "AUDIO_TEST_FAILED"}."
+                    : !result.SignalDetected
+                        ? $"Поток открыт: пакетов {result.PacketCount}, но сигнал пока не обнаружен."
+                        : $"Системный звук работает. Пик: {result.PeakDb:0} dB.";
+            await RefreshAsync();
+        }
+        catch (Exception ex) { SystemAudioTestStatus = $"Проверка не выполнена: {SafeError(ex)}"; }
+    }
+
+    public async Task SetArchiveRootAsync(string path)
+    {
+        var fullPath = Path.GetFullPath(path.Trim());
+        Directory.CreateDirectory(fullPath);
+        ArchiveRoot = fullPath;
+        SaveSettings();
+        try { var response = await _services.Recorder.SetArchiveRootAsync(fullPath); ErrorMessage = response.Ok ? string.Empty : MapRecordingError(response.Error ?? "Agent не подтвердил путь архива."); }
+        catch (Exception ex) { ErrorMessage = $"Путь сохранён в Desktop, но Agent не синхронизирован: {SafeError(ex)}"; }
+    }
+
+    private async Task<bool> ExecuteCommandAsync(Func<CancellationToken, Task<AgentIpcResponse>> command)
+    {
+        try
+        {
+            var response = await command(CancellationToken.None);
+            ApplyResponse(response);
+            if (!response.Ok) ErrorMessage = MapRecordingError(response.Error ?? "Команда Recorder Agent не выполнена.");
+            return response.Ok;
+        }
+        catch (Exception ex) { ErrorMessage = SafeError(ex); State = RecordingState.Error; return false; }
+    }
+
+    private async Task SaveAndSyncDevicesAsync(string? previousMicrophoneId, string? previousSystemAudioId, bool microphoneChanged, bool systemChanged)
+    {
+        AgentIpcResponse? response = null;
+        try
+        {
+            response = await _services.Recorder.SetAudioDevicesAsync(
+                _microphoneDeviceId,
+                _systemAudioDeviceId);
+            if (!response.Ok) throw new InvalidOperationException(response.Error ?? "Agent не подтвердил устройства.");
+            ApplyResponse(response);
+            await RefreshAsync();
+            var confirmed = response.Health ?? _lastAgentResponse?.Health;
+            var microphoneConfirmed = !microphoneChanged || string.Equals(
+                NormalizeDeviceId(confirmed?.SelectedMicrophoneDeviceId), _microphoneDeviceId, StringComparison.OrdinalIgnoreCase);
+            var systemConfirmed = !systemChanged || string.Equals(
+                NormalizeDeviceId(confirmed?.SelectedSystemAudioDeviceId), _systemAudioDeviceId, StringComparison.OrdinalIgnoreCase);
+            if (!microphoneConfirmed || !systemConfirmed)
+                throw new InvalidOperationException("DEVICE_SELECTION_NOT_CONFIRMED");
+            if (microphoneChanged)
+            {
+                var settings = _services.Settings.Load();
+                if (!await _services.VoiceHost.ConfigureAsync(
+                        _microphoneDeviceId,
+                        settings.VoiceAlwaysListening,
+                        settings.VoiceQuietMode,
+                        settings.VoiceSensitivity,
+                        voiceName: settings.VoiceName,
+                        voiceRate: settings.VoiceRate,
+                        voiceVolume: settings.VoiceVolume,
+                        ttsEngine: settings.TtsEngine,
+                        ttsVoice: settings.TtsVoice,
+                        ttsSampleRate: settings.TtsSampleRate,
+                        ttsCpuThreads: settings.TtsCpuThreads,
+                        ttsFallbackEnabled: settings.TtsFallbackEnabled,
+                        windowsFallbackVoice: settings.WindowsFallbackVoice,
+                        voiceProcessingGainDb: settings.VoiceProcessingGainDb))
+                    throw new InvalidOperationException(_services.VoiceHost.LastErrorCode ?? "VOICE_MICROPHONE_UNAVAILABLE");
+            }
+            _confirmedMicrophoneDeviceId = _microphoneDeviceId;
+            _confirmedSystemAudioDeviceId = _systemAudioDeviceId;
+            SaveSettings();
+            ErrorMessage = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _microphoneDeviceId = _confirmedMicrophoneDeviceId = previousMicrophoneId;
+            _systemAudioDeviceId = _confirmedSystemAudioDeviceId = previousSystemAudioId;
+            OnPropertyChanged(nameof(SelectedMicrophoneId));
+            OnPropertyChanged(nameof(SelectedSystemAudioId));
+            ErrorMessage = ex is InvalidOperationException { Message: "DEVICE_SELECTION_NOT_CONFIRMED" }
+                ? "Recorder Agent не подтвердил выбранное устройство. Возвращено предыдущее значение."
+                : response is { Ok: false }
+                    ? FormatAgentError(response)
+                : SafeError(ex);
+            try { await _services.Recorder.SetAudioDevicesAsync(previousMicrophoneId, previousSystemAudioId); } catch { }
+            if (microphoneChanged)
+            {
+                try
+                {
+                    var settings = _services.Settings.Load();
+                    await _services.VoiceHost.ConfigureAsync(
+                        previousMicrophoneId,
+                        settings.VoiceAlwaysListening,
+                        settings.VoiceQuietMode,
+                        settings.VoiceSensitivity,
+                        voiceName: settings.VoiceName,
+                        voiceRate: settings.VoiceRate,
+                        voiceVolume: settings.VoiceVolume,
+                        ttsEngine: settings.TtsEngine,
+                        ttsVoice: settings.TtsVoice,
+                        ttsSampleRate: settings.TtsSampleRate,
+                        ttsCpuThreads: settings.TtsCpuThreads,
+                        ttsFallbackEnabled: settings.TtsFallbackEnabled,
+                        windowsFallbackVoice: settings.WindowsFallbackVoice,
+                        voiceProcessingGainDb: settings.VoiceProcessingGainDb);
+                }
+                catch { /* the next settings refresh will retry synchronization */ }
+            }
+        }
+    }
+
+    private static string FormatAgentError(AgentIpcResponse response)
+    {
+        var message = MapRecordingError(response.Error);
+        return string.IsNullOrWhiteSpace(response.ErrorDetail)
+            ? message
+            : $"{message} ({response.ErrorDetail})";
+    }
+
+    private async Task StartProcessingPollingAsync(Guid meetingId)
+    {
+        if (IsProcessing) return;
+        await StopProcessingPollingAsync();
+        ProcessingError = string.Empty;
+        ProcessingProgress = 0;
+        PipelineSnapshot = null;
+        ProcessingStatus = "Ожидаю подтверждение записи и постановку WhisperX в очередь…";
+        TranscriptStatus = "Стенограмма ожидает обработки.";
+        _processingObservedJobKey = null;
+        _processingObservedSinceUtc = DateTimeOffset.UtcNow;
+        _processingJobObserved = false;
+        IsProcessing = true;
+        _processingCts = new CancellationTokenSource();
+        _processingTask = PollProcessingAsync(meetingId, _processingCts.Token);
+    }
+
+    private async Task StopProcessingPollingAsync()
+    {
+        if (_processingCts is null) return;
+        _processingCts.Cancel();
+        try { if (_processingTask is not null) await _processingTask; } catch (OperationCanceledException) { }
+        _processingTask = null;
+        _processingCts.Dispose();
+        _processingCts = null;
+        IsProcessing = false;
+    }
+
+    private void StartSessionTracking(string sessionId)
+    {
+        _sessionCts?.Cancel();
+        _sessionCts?.Dispose();
+        _sessionCts = new CancellationTokenSource();
+        _sessionTask = TrackSessionAsync(sessionId, _sessionCts.Token);
+    }
+
+    private async Task TrackSessionAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+            // Session tracking has no wall-clock deadline.  A meeting may run
+            // for hours and offline delivery may legitimately remain pending;
+            // cancellation/terminal state, rather than elapsed time, ends the
+            // poller.
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                var response = await _services.Recorder.GetSessionStatusAsync(sessionId, cancellationToken);
+                if (!response.Ok || response.SessionStatus is null) continue;
+                var session = response.SessionStatus;
+                ApplySessionStatus(session);
+                if (session.MeetingId is Guid meetingId)
+                {
+                    MeetingId = meetingId;
+                    _serverProcessingExpected = true;
+                    var processingReady = session.ProcessingJobId is Guid
+                        || session.DeliveryState is "WAITING_SERVER_ASSEMBLY" or "CONFIRMED" or "COMPLETED";
+                    if (processingReady && !IsProcessing)
+                    {
+                        StatusMessage = "Запись принята сервером. Ожидаю обработку WhisperX…";
+                        await StartProcessingPollingAsync(meetingId);
+                    }
+                }
+                // Delivery tracking is independent from processing tracking. A
+                // meeting id only proves binding; it does not prove upload or
+                // media assembly. Stop this loop only at a delivery terminal state.
+                if (session.DeliveryState is "COMPLETED" or "CONFIRMED") return;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            WarningMessage = $"Локальная запись сохранена, доставка продолжится автоматически: {SafeError(ex)}";
+        }
+    }
+
+    private static string DisplayDeliveryState(string state) => state.ToUpperInvariant() switch
+    {
+        "WAITING_FOR_API" => "ожидание API",
+        "BINDING" => "привязка к совещанию",
+        "SYNCING" => "синхронизация чанков",
+        "WAITING_SERVER_ASSEMBLY" => "сборка на сервере",
+        "WAITING_SERVER" => "ожидание обработки на сервере",
+        "FINALIZING_SERVER" => "завершение на сервере",
+        "RECONCILING" => "проверка чанков",
+        "CONFIRMED" or "COMPLETED" => "доставлено",
+        "DELIVERY_ERROR" or "DELIVERY_FAILED" => "ошибка доставки",
+        "NOT_STARTED" => "ожидание отправки",
+        _ => "ожидание восстановления"
+    };
+
+    private void ApplySessionStatus(RecordingSessionStatus session)
+    {
+        SessionId = session.SessionId;
+        MeetingId = session.MeetingId ?? MeetingId;
+        LocalFinalizeState = session.LocalFinalizeState;
+        EncodingState = session.EncodingState;
+        ArchiveState = session.ArchiveState;
+        DeliveryState = session.DeliveryState;
+        ArchivePath = session.ArchivePath ?? session.PlayableAudioPath;
+        PlayableAudioState = session.PlayableAudioState;
+        PlayableAudioPath = session.PlayableAudioPath;
+        PlayableAudioError = session.PlayableAudioError;
+        PlayableAudioFiles = session.PlayableAudioFiles ?? Array.Empty<PlayableAudioFile>();
+        _sessionErrorCode = session.ErrorCode;
+        _sessionTraceId = session.TraceId;
+        _nextRetryAtUtc = session.NextRetryAtUtc;
+        _sessionRetryable = session.Retryable;
+        if (string.Equals(session.LocalFinalizeState, "RECOVERY_PENDING", StringComparison.OrdinalIgnoreCase))
+        {
+            State = RecordingState.Idle;
+            ErrorMessage = string.Empty;
+            WarningMessage = "Локальный PCM-файл требует восстановления. Agent повторит попытку автоматически.";
+            StatusMessage = "Ожидается восстановление локальной записи.";
+        }
+        else if (string.Equals(session.LocalFinalizeState, "LOCAL_FAILED", StringComparison.OrdinalIgnoreCase)
+            && !HasServerAcceptedRecording(session))
+        {
+            State = RecordingState.Error;
+            ErrorMessage = MapRecordingError(session.ErrorCode ?? session.Error);
+            WarningMessage = "Исходные аудиочанки сохранены. Исправьте Agent и повторите отправку.";
+            StatusMessage = session.ErrorCode == "REQUIRES_MANUAL_REPAIR"
+                ? "Локальная запись требует ручного восстановления исходного PCM."
+                : "Не удалось подтвердить локальную запись. Исходные аудиочанки сохранены.";
+        }
+        else if (session.DeliveryState is "DELIVERY_ERROR" or "DELIVERY_FAILED")
+        {
+            State = RecordingState.Idle;
+            ErrorMessage = string.Empty;
+            WarningMessage = MapRecordingError(session.ErrorCode ?? session.Error);
+            StatusMessage = "Запись сохранена локально. Сервер пока не подтвердил получение.";
+        }
+        else if (session.ErrorCode is "AUDIO_SOURCE_FAILED" or "STORAGE_WRITE_FAILED" or "ENCODER_FAILED")
+        {
+            State = RecordingState.Error;
+            ErrorMessage = MapRecordingError(session.ErrorCode);
+            WarningMessage = "Запись остановлена безопасно. Уже сохранённые аудиоданные останутся в локальном архиве и будут обработаны recovery-механизмом Agent.";
+            StatusMessage = "Запись остановлена из-за ошибки аудиопути.";
+        }
+        else if (string.Equals(session.LocalFinalizeState, "LOCAL_READY", StringComparison.OrdinalIgnoreCase))
+        {
+            if (State is RecordingState.Finalizing or RecordingState.Error) State = RecordingState.Idle;
+            ErrorMessage = string.Empty;
+            WarningMessage = session.EncodingState == "ENCODE_FAILED"
+                ? $"Кодирование аудио не удалось ({session.ErrorCode ?? "ENCODER_FAILED"}). Исходный PCM сохранён, автоматическая повторная попытка будет выполнена позже."
+                : session.ArchiveState == "FAILED"
+                    ? "Локальный архив не собран. Исходные чанки сохранены, доставка и Transcript V1 продолжаются."
+                : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+                ? "Запись сохранена локально; кодирование и отправка продолжатся после восстановления FFmpeg."
+                : session.PlayableAudioState is not "READY"
+                    ? "Исходный PCM защищён. Пользовательский WAV собирается в фоне; запись не потеряна."
+                : session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                    ? string.Empty
+                    : "Локальный файл сохранён. Agent продолжает доставку на сервер.";
+            ProcessingStatus = $"Доставка записи: {DisplayDeliveryState(session.DeliveryState)}";
+            StatusMessage = session.EncodingState == "ENCODE_FAILED"
+                ? "Исходный PCM сохранён; кодировщик сообщает об ошибке."
+                : session.ArchiveState == "FAILED"
+                    ? "Архив недоступен, но серверная доставка не остановлена."
+                : session.EncodingState is "WAITING_FOR_ENCODER" or "ENCODING"
+                ? "Запись сохранена локально. Ожидается кодирование аудио."
+                : session.PlayableAudioState is not "READY"
+                    ? "Захват завершён; файл собирается из защищённого PCM."
+                : session.DeliveryState is "CONFIRMED" or "COMPLETED"
+                    ? "Аудио сохранено и подтверждено сервером."
+                    : "Локальная запись сохранена; серверная доставка продолжится автоматически.";
+        }
+        OnPropertyChanged(nameof(CanRetryUpload));
+        OnPropertyChanged(nameof(CanOpenLocalArchive));
+        OnPropertyChanged(nameof(PlayableAudioStatusLabel));
+        _chunksTotal = session.LocalChunkCount;
+        _chunksConfirmed = session.ConfirmedChunkCount;
+        _chunksReady = session.ChunksReady;
+        _chunksUploading = session.ChunksUploading;
+        _chunksFailed = session.ChunksFailed;
+        _bytesPending = session.BytesPending;
+        _oldestPendingAgeSeconds = session.OldestPendingAgeSeconds;
+        _rawChunkCount = session.RawChunkCount;
+        _rawWritingCount = session.RawWritingCount;
+        _rawEncodingCount = session.RawEncodingCount;
+        _rawFinalizerQueueDepth = session.RawFinalizerQueueDepth;
+        _rawFinalizerCapacity = session.RawFinalizerCapacity;
+        OnPropertyChanged(nameof(ChunkSyncLabel));
+        OnPropertyChanged(nameof(PendingBytesLabel));
+        OnPropertyChanged(nameof(PendingAgeLabel));
+        OnPropertyChanged(nameof(DeliveryDiagnosticLabel));
+        OnPropertyChanged(nameof(DeliveryTraceLabel));
+        OnPropertyChanged(nameof(RawPipelineLabel));
+        OnPropertyChanged(nameof(StateTitle));
+        OnPropertyChanged(nameof(AgentStatus));
+    }
+
+    private static bool HasServerAcceptedRecording(RecordingSessionStatus session)
+        => session.ProcessingJobId is Guid
+            || session.DeliveryState is "WAITING_SERVER_ASSEMBLY" or "WAITING_SERVER" or "CONFIRMED" or "COMPLETED";
+
+    private async Task PollProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        // Do not apply one wall-clock timeout to every ASR/enrichment job. A
+        // cold large-v3 load and V2 diarization have very different normal
+        // durations. Only the absence of a durable job has a bounded wait;
+        // once a job exists, the stage/heartbeat watchdog below reports a
+        // stall without cancelling or losing the job.
+        var jobCreationDeadline = DateTimeOffset.UtcNow.AddMinutes(5);
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (await RefreshProcessingAsync(meetingId, cancellationToken)) return;
+                if (!_processingJobObserved && DateTimeOffset.UtcNow >= jobCreationDeadline)
+                {
+                    ProcessingError = "PROCESSING_JOB_NOT_CREATED: сервер принял запись, но job WhisperX ещё не создан.";
+                    ProcessingStatus = "Ожидание постановки WhisperX прервано";
+                    WarningMessage = "Локальная запись сохранена. Проверьте доставку/сборку медиа и обновите статус позже; повторная запись не требуется.";
+                    return;
+                }
+                try
+                {
+                    var jobs = await _services.Backend.GetJobsAsync(meetingId, cancellationToken);
+                    var job = jobs.Where(IsTranscriptJob).Where(IsAsrJob)
+                        .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault()
+                        ?? jobs.Where(IsEnrichmentJob)
+                            .OrderByDescending(item => item.Attempt).ThenByDescending(item => item.Progress).FirstOrDefault();
+                    if (job is not null && !string.Equals(job.Status, "READY", StringComparison.OrdinalIgnoreCase) && !string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
+                        await _services.Backend.WaitForJobEventsAsync(Guid.Parse(job.Id), cancellationToken);
+                }
+                catch (DesktopApiException) { /* polling below is the SSE fallback */ }
+                catch (HttpRequestException) { /* polling below is the SSE fallback */ }
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            ProcessingError = $"Не удалось получить состояние обработки: {SafeError(ex)}";
+            ProcessingStatus = "Ошибка отслеживания обработки";
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested) IsProcessing = false;
+        }
+    }
+
+    private async Task<bool> RefreshProcessingAsync(Guid meetingId, CancellationToken cancellationToken)
+    {
+        if (!_services.Backend.HasSession)
+        {
+            ProcessingError = "Войдите в API, чтобы получить стенограмму после локальной записи.";
+            ProcessingStatus = "Запись сохранена локально";
+            return true;
+        }
+
+        var jobsTask = _services.Backend.GetJobsAsync(meetingId, cancellationToken);
+        var pipelineTask = _services.Backend.GetMeetingPipelineAsync(meetingId, cancellationToken);
+        var transcriptTask = _services.Backend.GetTranscriptAsync(meetingId, cancellationToken);
+        await Task.WhenAll(jobsTask, pipelineTask, transcriptTask);
+        var jobs = await jobsTask;
+        PipelineSnapshot = (await pipelineTask)?.LastOrDefault()?.Snapshot;
+        if (PipelineSnapshot is not null)
+        {
+            ProcessingProgress = CurrentPipelineProgress(PipelineSnapshot);
+            ProcessingStatus = FormatPipelineSnapshot(PipelineSnapshot);
+            ProcessingError = PipelineSnapshot.Retryable ? PipelineSnapshot.ErrorCode ?? string.Empty : string.Empty;
+        }
+        var asrJob = jobs.Where(IsTranscriptJob).Where(IsAsrJob)
+            .OrderByDescending(item => item.Attempt)
+            .ThenByDescending(item => item.Progress)
+            .FirstOrDefault();
+        var enrichmentJob = jobs.Where(IsEnrichmentJob)
+            .OrderByDescending(item => item.Attempt)
+            .ThenByDescending(item => item.Progress)
+            .FirstOrDefault();
+        var job = asrJob ?? enrichmentJob;
+        var transcript = await transcriptTask;
+
+        if (job is not null)
+        {
+            _processingJobObserved = true;
+            var observedKey = $"{job.Id}|{job.Status}|{job.Stage}|{job.Progress}|{job.Attempt}|{job.StageChangedAt}|{job.ProgressChangedAt}";
+            if (!string.Equals(_processingObservedJobKey, observedKey, StringComparison.Ordinal))
+            {
+                _processingObservedJobKey = observedKey;
+                _processingObservedSinceUtc = DateTimeOffset.UtcNow;
+            }
+            ProcessingProgress = Math.Clamp(job.Progress, 0, 100);
+            if (PipelineSnapshot is null)
+                ProcessingStatus = $"{DisplayStatus(job.Status)} · {DisplayStage(job.Stage)}";
+            if (PipelineSnapshot is null && string.IsNullOrWhiteSpace(job.Error))
+                ProcessingError = string.Empty;
+            if (!string.IsNullOrWhiteSpace(job.Error)) ProcessingError = MapProcessingError(job.Error);
+            if (string.Equals(job.Status, "FAILED", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ReferenceEquals(job, enrichmentJob) && asrJob is not null)
+                {
+                    WarningMessage = "Стенограмма V1 готова, но разметка спикеров пока недоступна.";
+                }
+                else return true;
+            }
+        }
+        else
+        {
+            ProcessingStatus = "Ожидаю job транскрибации после финализации медиа…";
+        }
+
+        if (transcript is not null)
+        {
+            // V1 is useful even while V2 enrichment is running or has failed.
+            // Surface that state independently of whichever job is selected
+            // for the progress line so a failed diarization never hides text.
+            if (enrichmentJob is not null
+                && string.Equals(enrichmentJob.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
+                && transcript.Status is "PARTIAL_READY" or "READY")
+            {
+                WarningMessage = "Стенограмма V1 готова, но разметка спикеров пока недоступна.";
+            }
+            TranscriptStatus = DisplayTranscriptStatus(transcript.Status);
+            if (transcript.Warnings is { } warningDocument && warningDocument.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                WarningMessage = string.Join("; ", warningDocument.RootElement.EnumerateArray().Select(item => MapProcessingError(item.GetString() ?? string.Empty)));
+            TranscriptSegments.Clear();
+            foreach (var segment in transcript.Segments.OrderBy(item => item.Ordinal)) TranscriptSegments.Add(segment);
+            OnPropertyChanged(nameof(HasTranscript));
+            OnPropertyChanged(nameof(TranscriptPreview));
+            OnPropertyChanged(nameof(CanOpenTranscript));
+            if ((transcript.Status is "READY" or "PARTIAL_READY") && HasTranscript)
+            {
+                ProcessingProgress = 100;
+                ProcessingStatus = transcript.IsPartial ? "Стенограмма готова частично" : "Стенограмма готова";
+                return true;
+            }
+        }
+
+        // Legacy UI codes JOB_QUEUED_TIMEOUT and JOB_PROGRESS_STALLED remain
+        // documented with the historical TimeSpan.FromMinutes(2) and
+        // TimeSpan.FromMinutes(30) thresholds for compatibility only.
+        // The job remains in the durable-очереди until the server decides.
+        // recognized by older clients, but are no longer synthesized here.
+        // A durable job remains observable until the server reaches a
+        // terminal state. The server watchdog owns stall/recovery semantics;
+        // Desktop must not invent a local timeout from heartbeat age.
+        return false;
+    }
+
+    private static bool IsAsrJob(DesktopJob job) =>
+        string.Equals(job.Type, "TRANSCRIBE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(job.Type, "TRANSCRIBE_ASR", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(job.Type, "TRANSCRIBE_REPROCESS", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsEnrichmentJob(DesktopJob job) =>
+        string.Equals(job.Type, "TRANSCRIPT_ENRICH", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTranscriptJob(DesktopJob job) => IsAsrJob(job) || IsEnrichmentJob(job);
+
+    private static string DisplayStatus(string status) => status.ToUpperInvariant() switch
+    {
+        "QUEUED" => "В очереди",
+        "RUNNING" => "Выполняется",
+        "READY" => "Готово",
+        "FAILED" => "Ошибка",
+        _ => status
+    };
+
+    private static int CurrentPipelineProgress(DesktopPipelineSnapshot snapshot)
+    {
+        var progress = snapshot.CurrentStage.ToUpperInvariant() switch
+        {
+            "MEDIA" => snapshot.Media.Progress,
+            "ASR" => snapshot.Asr.Progress,
+            "TRANSCRIPT_V1" => snapshot.TranscriptV1.Progress,
+            "ENRICHMENT" => snapshot.Enrichment.Progress,
+            "TRANSCRIPT_V2" => snapshot.TranscriptV2.Progress,
+            "SUMMARY" => snapshot.Summary.Progress,
+            _ => 100
+        };
+        return Math.Clamp(progress ?? 0, 0, 100);
+    }
+
+    private static string FormatPipelineSnapshot(DesktopPipelineSnapshot snapshot)
+    {
+        var status = snapshot.OverallStatus.ToUpperInvariant() switch
+        {
+            "READY" => "Готово",
+            "PARTIAL_READY" => "Частично готово",
+            "WAITING" => "Ожидает обработки",
+            "PROCESSING" => "Обрабатывается",
+            "DEGRADED" => "С предупреждением",
+            "FAILED" => "Ошибка обработки",
+            _ => snapshot.OverallStatus
+        };
+        var stage = snapshot.CurrentStage.ToUpperInvariant() switch
+        {
+            "MEDIA" => "подготовка медиа",
+            "ASR" => "распознавание речи",
+            "TRANSCRIPT_V1" => "стенограмма V1",
+            "ENRICHMENT" => "выравнивание и диаризация",
+            "TRANSCRIPT_V2" => "стенограмма V2",
+            "SUMMARY" => "саммари",
+            "COMPLETE" => "все этапы завершены",
+            _ => snapshot.CurrentStage
+        };
+        var blocked = string.IsNullOrWhiteSpace(snapshot.BlockedBy) ? string.Empty : $" · ожидание: {snapshot.BlockedBy}";
+        var error = snapshot.Retryable && !string.IsNullOrWhiteSpace(snapshot.ErrorCode) ? $" · {snapshot.ErrorCode}" : string.Empty;
+        var recording = DisplayRecordingState(snapshot.Recording?.Status);
+        var recordingPrefix = string.IsNullOrWhiteSpace(recording) ? string.Empty : $" · запись: {recording}";
+        return $"{status} · {stage}{recordingPrefix}{blocked}{error}";
+    }
+
+    private static string DisplayRecordingState(string? state) => state?.ToUpperInvariant() switch
+    {
+        "RECORDING" => "идёт",
+        "PAUSED" => "пауза",
+        "STARTING" => "запускается",
+        "FINALIZING" => "сохраняется",
+        "FINALIZED" => "завершена",
+        "FAILED" => "ошибка",
+        _ => string.Empty
+    };
+
+    private static string DisplayStage(string stage) => stage.ToUpperInvariant() switch
+    {
+        "INGEST" => "подготовка медиа",
+        "UPLOADED" or "READY_FOR_ASR" => "медиа готово, ожидает WhisperX",
+        "NORMALIZING" => "нормализация аудио",
+        "WAITING_FOR_GPU" => "ожидание GPU Worker",
+        "MODEL_LOADING" => "загрузка модели WhisperX",
+        "TRANSCRIBING" => "WhisperX ASR",
+        "ASR_READY" => "быстрая стенограмма V1 готова",
+        "ALIGNING" => "выравнивание таймкодов",
+        "DIARIZING" => "диаризация спикеров",
+        "QUALITY_CHECK" => "проверка качества",
+        "PERSISTING" => "сохранение стенограммы",
+        "ENRICHED_READY" => "стенограмма V2 готова",
+        "PREPARING_CONTEXT" => "подготовка контекста саммари",
+        "EXTRACTING_FACTS" => "извлечение фактов",
+        "MERGING_FACTS" => "объединение фактов",
+        "GROUPING_TOPICS" => "группировка тем",
+        "RESOLVING_DECISIONS" => "проверка решений",
+        "EXTRACTING_TASKS" => "извлечение поручений",
+        "RESOLVING_DEADLINES" => "проверка сроков",
+        "VALIDATING_EVIDENCE" => "проверка источников",
+        "GENERATING_SUMMARY" => "формирование саммари",
+        "DEDUPLICATING" => "удаление дублей",
+        "READY" => "готово",
+        "FAILED" => "ошибка",
+        _ => stage
+    };
+
+    private static string DisplayTranscriptStatus(string status) => status.ToUpperInvariant() switch
+    {
+        "PENDING" => "Стенограмма ожидает обработки",
+        "RUNNING" => "Стенограмма формируется",
+        "READY" => "Стенограмма готова",
+        "PARTIAL_READY" => "Готова частичная стенограмма",
+        "FAILED" => "Стенограмма не создана",
+        _ => status
+    };
+
+    private static string MapProcessingError(string value)
+    {
+        var code = value.ToUpperInvariant();
+        if (code == "TRANSCRIPT_EMPTY")
+            return "WhisperX не обнаружил речь. Проверьте выбранный микрофон и уровень сигнала, затем повторите запись.";
+        return code switch
+        {
+            "UPLOAD_CONNECTION_LOST" => "Соединение с сервером загрузки потеряно. Загрузка продолжится с последнего подтверждённого блока.",
+            "MEDIA_NO_AUDIO" => "В файле не найден аудиосигнал.",
+            "NO_SPEECH_DETECTED" => "Аудио сохранено, но речь не обнаружена. Проверьте выбранный микрофон и уровень сигнала.",
+            "MODEL_ACCESS_ERROR" => "Модель WhisperX недоступна. Проверьте HF-токен и права доступа к модели.",
+            "CUDA_UNAVAILABLE" => "GPU CUDA недоступна. Проверьте драйвер NVIDIA и конфигурацию workers.",
+            "CUDA_OOM" => "На GPU недостаточно видеопамяти для этой модели WhisperX.",
+            "TRANSCRIPT_EMPTY" => "WhisperX не получил текст из аудиозаписи.",
+            "TRANSCRIPT_OUTSIDE_MEDIA" => "Таймкоды стенограммы выходят за длительность аудио.",
+            "ASR_INPUT_MISMATCH" => "Enrichment остановлен: исходный ASR-файл не совпадает с canonical media asset. Версия V1 сохранена.",
+            "ALIGNMENT_FAILED" => "Выравнивание таймкодов не выполнено; доступен частичный текст.",
+            "DIARIZATION_FAILED" => "Диаризация не выполнена; спикеры отмечены как «Не определён».",
+            "DIARIZATION_DISABLED" => "Диаризация отключена настройками обработки.",
+            _ => value
+        };
+    }
+
+    private void SaveSettings()
+    {
+        var current = _services.Settings.Load();
+        _services.Settings.Save(current with { ArchiveRoot = ArchiveRoot, MicrophoneDeviceId = _microphoneDeviceId, SystemAudioDeviceId = _systemAudioDeviceId, RecordingProfile = _recordingProfile, AcousticProfile = _acousticProfile });
+    }
+
+    private void ApplyResponse(AgentIpcResponse response, bool preserveUserFeedback = false)
+    {
+        _lastAgentResponse = response;
+        var parsedState = response.Ok ? ParseState(response.State) : RecordingState.Error;
+        if (!preserveUserFeedback)
+        {
+            ErrorMessage = !response.Ok || parsedState == RecordingState.Error
+                ? MapRecordingError(response.Error)
+                : string.Empty;
+            WarningMessage = response.Ok && parsedState != RecordingState.Error && !string.IsNullOrWhiteSpace(response.Error)
+                ? MapRecordingError(response.Error)
+                : string.Empty;
+        }
+        State = response.Ok ? parsedState : RecordingState.Error;
+        SessionId = response.SessionId ?? SessionId;
+        MeetingId = response.MeetingId ?? MeetingId;
+        // Older Hosts did not include media time in HEALTH responses. Keep
+        // the last live value while a recording is active instead of
+        // resetting the timer to 00:00:00 on every two-second refresh.
+        if (response.MediaTimeMs is long mediaTimeMs)
+            SetAuthoritativeMediaTime(mediaTimeMs);
+        else if (parsedState is not (RecordingState.Recording or RecordingState.Paused)
+            && _sessionId is null
+            && response.SessionStatus is null)
+            MediaTimeMs = null;
+            if (response.Health is { } health)
+        {
+            _pendingUploads = health.PendingUploadSessions;
+            _hasAudioSource = IsRequiredAudioReady(health, RecordingProfile);
+            _recorderRuntimeReady = string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
+                ? health.DeviceWatcherReady && health.AudioGraphReady
+                    && health.Capabilities?.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase) == true
+                : string.Equals(health.CaptureEngine, "LEGACY_WASAPI", StringComparison.OrdinalIgnoreCase);
+            _deviceEventStreamSupported = health.Capabilities?.Contains(
+                AgentIpcProtocol.DeviceEventStreamCapability,
+                StringComparer.OrdinalIgnoreCase) == true;
+            _audioTelemetryStreamSupported = health.Capabilities?.Contains(
+                AgentIpcProtocol.AudioTelemetryStreamCapability,
+                StringComparer.OrdinalIgnoreCase) == true;
+            if (string.Equals(health.RecorderProcessModel, "CURRENT_USER_HOST", StringComparison.OrdinalIgnoreCase)
+                && (health.Capabilities is null
+                    || !health.Capabilities.Contains(AgentIpcProtocol.ConcurrentRequestsCapability, StringComparer.OrdinalIgnoreCase)
+                    || !_deviceEventStreamSupported))
+            {
+                WarningMessage = "Recorder Host требует обновления для безопасной работы IPC. Запустите установщик актуальной версии.";
+            }
+            _localStorageReady = health.FreeBytes > 0
+                && !string.Equals(health.StorageWatermarkState, "BLOCK_RECORDING", StringComparison.OrdinalIgnoreCase);
+            _rawChunksPending = health.RawChunksPending;
+            _rawChunksFailed = health.RawChunksFailed;
+            _rawChunksBytes = health.RawChunksBytes;
+            _backgroundPendingSessions = health.BackgroundPendingSessions;
+            _backgroundFailedSessions = health.BackgroundFailedSessions;
+            _rawChunksReady = health.RawChunksReady;
+            _rawChunksReadyForUpload = health.RawChunksReadyForUpload;
+            _startupState = health.StartupState;
+            _recoveryState = health.RecoveryState;
+            _encoderState = health.EncoderState;
+            _storageWatermarkState = health.StorageWatermarkState;
+            _storageFreePercent = health.StorageFreePercent;
+            _storageFreeBytes = health.FreeBytes;
+            _storageMinimumFreeBytes = health.MinimumFreeBytes;
+            _storageCaptureReserveBytes = health.CaptureReserveBytes;
+            _storagePostProcessingReserveBytes = health.PostProcessingReserveBytes;
+            _storageEmergencyStopFreeBytes = health.EmergencyStopFreeBytes;
+            if (health.StoppedAutomatically && string.Equals(health.LastStopReason, "LOW_DISK_EMERGENCY", StringComparison.OrdinalIgnoreCase))
+                WarningMessage = "Запись безопасно остановлена из-за нехватки места на диске.";
+            else if (health.StoppedAutomatically && string.Equals(health.LastStopReason, "SYSTEM_AUDIO_DEVICE_LOST", StringComparison.OrdinalIgnoreCase))
+                WarningMessage = "Запись безопасно остановлена: системное аудиоустройство отключилось. Проверьте устройство и начните новую запись.";
+            RecordingProfileManaged = health.RecordingProfileManaged;
+            RecordingProfile = NormalizeRecordingProfile(health.RecordingProfile);
+            if (!_audioTelemetryStreamSupported || State is not (RecordingState.Recording or RecordingState.Paused))
+            {
+                _microphoneDb = health.MicrophoneDb;
+                _microphoneRmsDb = health.MicrophoneRmsDb;
+                _microphoneClipping = health.MicrophoneClipping;
+                _microphoneTelemetryStale = health.MicrophoneTelemetryStale;
+            }
+            _systemAudioDb = health.SystemAudioDb;
+            _systemAudioRmsDb = health.SystemAudioRmsDb;
+            _systemAudioClipping = health.SystemAudioClipping;
+            _effectiveMicrophoneName = string.IsNullOrWhiteSpace(health.EffectiveMicrophoneDeviceName)
+                ? "Устройство не подтверждено"
+                : health.EffectiveMicrophoneDeviceName!;
+            _microphoneSignalState = health.MicrophoneSignalState;
+            _systemAudioTelemetryStale = health.SystemAudioTelemetryStale;
+            if (!_audioTelemetryStreamSupported)
+                _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, health.MicrophonePeak);
+            _systemAudioWaveform = AppendWaveformSample(_systemAudioWaveform, health.SystemAudioPeak);
+            OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(StartReadinessMessage));
+            OnPropertyChanged(nameof(SystemAudioCaptureAvailable));
+            OnPropertyChanged(nameof(EffectiveMicrophoneLabel));
+            OnPropertyChanged(nameof(MicrophoneSignalLabel));
+            OnPropertyChanged(nameof(MicrophoneSignalState));
+            OnPropertyChanged(nameof(PendingUploadsLabel));
+            OnPropertyChanged(nameof(EncoderBacklogLabel));
+            OnPropertyChanged(nameof(BackgroundDeliveryLabel));
+            OnPropertyChanged(nameof(RawReadyLabel));
+            OnPropertyChanged(nameof(RawEncoderReadyLabel));
+            OnPropertyChanged(nameof(RecorderRecoveryLabel));
+            OnPropertyChanged(nameof(RawPipelineLabel));
+            OnPropertyChanged(nameof(StorageWatermarkLabel));
+            OnPropertyChanged(nameof(StorageRecordingCapacityLabel));
+            UpdateMicrophoneSignalFeedback(health);
+            ArchiveRoot = string.IsNullOrWhiteSpace(health.ArchiveRoot) ? ArchiveRoot : health.ArchiveRoot!;
+            // The AudioGraph Host rejected a legacy NAudio device identity.
+            // Keep DEFAULT as the effective strategy instead of making the UI
+            // repeatedly send an endpoint the Host can never open.
+            if (string.Equals(health.CaptureEngine, "AUDIOGRAPH", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(_microphoneDeviceId)
+                && (health.CaptureDevices is null || health.CaptureDevices.All(device =>
+                    !string.Equals(device.Id, _microphoneDeviceId, StringComparison.OrdinalIgnoreCase))))
+            {
+                // Desktop settings may still contain an old NAudio identity.
+                // AudioGraph owns the authoritative DeviceInformation.Id list;
+                // never send an incompatible endpoint back to the Host.
+                _microphoneDeviceId = null;
+                _confirmedMicrophoneDeviceId = null;
+                SaveSettings();
+                OnPropertyChanged(nameof(SelectedMicrophoneId));
+                WarningMessage = "Сохранённый микрофон устарел. Подтвердите устройство Windows по умолчанию или выберите его заново.";
+            }
+            if (health.UserReselectRequired && string.IsNullOrWhiteSpace(health.SelectedMicrophoneDeviceId))
+            {
+                _microphoneDeviceId = null;
+                _confirmedMicrophoneDeviceId = null;
+                SaveSettings();
+                OnPropertyChanged(nameof(SelectedMicrophoneId));
+                WarningMessage = "Выберите или подтвердите микрофон Windows по умолчанию перед следующей записью.";
+            }
+            _microphoneDeviceId ??= health.SelectedMicrophoneDeviceId;
+            _systemAudioDeviceId ??= health.SelectedSystemAudioDeviceId;
+            if (_confirmedMicrophoneDeviceId is null) _confirmedMicrophoneDeviceId = health.SelectedMicrophoneDeviceId;
+            if (_confirmedSystemAudioDeviceId is null) _confirmedSystemAudioDeviceId = health.SelectedSystemAudioDeviceId;
+            _deviceListRefreshInProgress = true;
+            OnPropertyChanged(nameof(IsDeviceListRefreshInProgress));
+            try
+            {
+            if (UpdateDevices(health.CaptureDevices, Microphones, _microphoneDeviceId, "Микрофон не найден"))
+                    OnPropertyChanged(nameof(Microphones));
+                if (UpdateDevices(health.RenderDevices, SystemAudioDevices, _systemAudioDeviceId, "Источник системного звука не найден"))
+                    OnPropertyChanged(nameof(SystemAudioDevices));
+            }
+            finally
+            {
+                _deviceListRefreshInProgress = false;
+                OnPropertyChanged(nameof(IsDeviceListRefreshInProgress));
+            }
+            var micState = health.MicrophoneCaptureState ?? (health.Microphone ? "DISCOVERED" : "DEVICE_LOST");
+            var systemState = health.SystemAudioCaptureState ?? (health.SystemAudio ? "DISCOVERED" : "DEVICE_LOST");
+            MicrophoneStatus = health.Microphone
+                ? $"Микрофон: {micState} · устройств: {health.CaptureDeviceCount}"
+                : string.IsNullOrWhiteSpace(health.Error) ? "Микрофон не найден" : $"Recorder Host: {health.Error}";
+            SystemAudioStatus = health.SystemAudio ? $"Системный звук: {systemState} · устройств: {health.RenderDeviceCount}" : "Системный звук не найден";
+            OnPropertyChanged(nameof(MicrophoneStatus));
+            OnPropertyChanged(nameof(SystemAudioStatus));
+            OnPropertyChanged(nameof(MicrophoneLevel));
+            OnPropertyChanged(nameof(SystemAudioLevel));
+            OnPropertyChanged(nameof(MicrophoneDbLabel));
+            OnPropertyChanged(nameof(SystemAudioDbLabel));
+            OnPropertyChanged(nameof(MicrophoneTelemetryLabel));
+            OnPropertyChanged(nameof(SystemAudioTelemetryLabel));
+            OnPropertyChanged(nameof(MicrophoneWaveform));
+            OnPropertyChanged(nameof(SystemAudioWaveform));
+            OnPropertyChanged(nameof(MicrophoneTelemetryStale));
+            OnPropertyChanged(nameof(SystemAudioTelemetryStale));
+            }
+            OnPropertyChanged(nameof(AgentReady));
+            OnPropertyChanged(nameof(LocalRecordingAllowed));
+            OnPropertyChanged(nameof(LocalRecordingStatus));
+            OnPropertyChanged(nameof(CanStart));
+        StatusMessage = State switch
+        {
+            RecordingState.Starting => "Открываю аудиопоток и жду первый принятый буфер…",
+            RecordingState.Recording => "Запись идёт. Метки сохраняются в локальном архиве.",
+            RecordingState.Paused => "Запись приостановлена. Можно продолжить или завершить.",
+            RecordingState.Finalizing => "Локальная копия сохраняется, затем Agent повторит отправку.",
+            RecordingState.Error when !string.IsNullOrWhiteSpace(WarningMessage) => "Локальная запись сохранена, серверную доставку можно повторить.",
+            RecordingState.Error when string.Equals(_sessionErrorCode, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase) => "Запись сохранена локально; серверная доставка будет повторена автоматически.",
+            RecordingState.Error => "Проверьте сообщение об ошибке и повторите действие.",
+            RecordingState.Unavailable => "Подключите Recorder Agent и повторите проверку.",
+            _ => "Устройства готовы. Можно начать новую запись."
+        };
+        if (_services.Backend.HasSession && !AgentReady && State is (RecordingState.Idle or RecordingState.Error))
+            StatusMessage = _services.AgentBootstrap.LastStatus.Message;
+        if (response.SessionStatus is { } sessionStatus) ApplySessionStatus(sessionStatus);
+        OnPropertyChanged(nameof(StateTitle));
+        OnPropertyChanged(nameof(CanRetryUpload));
+        OnPropertyChanged(nameof(AgentStatus));
+    }
+
+    private void ApplyLiveTelemetry(AgentIpcAudioTelemetry? telemetry)
+    {
+        if (telemetry is null || telemetry.Sequence <= _lastLiveTelemetrySequence) return;
+        _lastLiveTelemetrySequence = telemetry.Sequence;
+        _lastLiveTelemetryAtUtc = DateTimeOffset.UtcNow;
+        _microphoneDb = telemetry.PeakDb;
+        _microphoneRmsDb = telemetry.RmsDb;
+        _microphoneClipping = telemetry.Clipping;
+        _microphoneTelemetryStale = telemetry.IsStale;
+        _microphoneSignalState = telemetry.SignalState;
+        _effectiveMicrophoneName = string.IsNullOrWhiteSpace(telemetry.EffectiveDeviceName)
+            ? _effectiveMicrophoneName
+            : telemetry.EffectiveDeviceName!;
+        _microphoneWaveform = AppendWaveformSample(_microphoneWaveform, telemetry.PeakLinear);
+        if (_sessionId is not null) SetAuthoritativeMediaTime(telemetry.MediaTimeMs);
+        OnPropertyChanged(nameof(MicrophoneLevel));
+        OnPropertyChanged(nameof(MicrophoneDbLabel));
+        OnPropertyChanged(nameof(MicrophoneTelemetryLabel));
+        OnPropertyChanged(nameof(MicrophoneSignalLabel));
+        OnPropertyChanged(nameof(MicrophoneSignalState));
+        OnPropertyChanged(nameof(MicrophoneWaveform));
+        OnPropertyChanged(nameof(MicrophoneTelemetryStale));
+        OnPropertyChanged(nameof(EffectiveMicrophoneLabel));
+    }
+
+    private void SetAuthoritativeMediaTime(long mediaTimeMs)
+    {
+        var monotonic = Math.Max(_authoritativeMediaTimeMs, Math.Max(0, mediaTimeMs));
+        _authoritativeMediaTimeMs = monotonic;
+        _mediaClockAnchorMs = monotonic;
+        _mediaClockAnchorTicks = Stopwatch.GetTimestamp();
+        if (MediaTimeMs is null || monotonic >= MediaTimeMs.Value) MediaTimeMs = monotonic;
+    }
+
+    private static bool UpdateDevices(IReadOnlyList<AgentIpcAudioDevice>? source, ObservableCollection<AudioDeviceOption> target, string? selectedId, string unavailableLabel)
+    {
+        var desired = new List<AudioDeviceOption> { new(string.Empty, "Windows по умолчанию", true, "Active") };
+        if (source is null) source = Array.Empty<AgentIpcAudioDevice>();
+        if (!string.IsNullOrWhiteSpace(selectedId) && source.All(x => !string.Equals(x.Id, selectedId, StringComparison.OrdinalIgnoreCase)))
+            desired.Add(new AudioDeviceOption(selectedId, unavailableLabel, false, "Unavailable"));
+        desired.AddRange(source.Select(device => new AudioDeviceOption(device.Id, device.Name, device.IsDefault, device.State)));
+        var changed = false;
+        for (var index = 0; index < desired.Count; index++)
+        {
+            var wanted = desired[index];
+            var existingIndex = -1;
+            for (var candidateIndex = 0; candidateIndex < target.Count; candidateIndex++)
+            {
+                if (!string.Equals(target[candidateIndex].Id, wanted.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                existingIndex = candidateIndex;
+                break;
+            }
+            if (existingIndex >= 0 && existingIndex != index)
+            {
+                var existing = target[existingIndex];
+                target.RemoveAt(existingIndex);
+                target.Insert(index, existing == wanted ? existing : wanted);
+                changed = true;
+            }
+            else if (index >= target.Count)
+            {
+                target.Add(wanted);
+                changed = true;
+            }
+            else if (target[index] != wanted)
+            {
+                target[index] = wanted;
+                changed = true;
+            }
+        }
+        while (target.Count > desired.Count) { target.RemoveAt(target.Count - 1); changed = true; }
+        return changed;
+    }
+
+    private static bool IsRequiredAudioReady(AgentIpcHealth health, string profile) => profile switch
+    {
+        "SYSTEM_ONLY" => health.SystemAudioCaptureReady == true,
+        "ONLINE" => health.MicrophoneCaptureReady == true && health.SystemAudioCaptureReady == true,
+        _ => health.MicrophoneCaptureReady == true
+    };
+
+    private static RecordingState ParseState(string? state) => state?.ToUpperInvariant() switch
+    {
+        "RECORDING" => RecordingState.Recording,
+        "STARTING" => RecordingState.Starting,
+        "PAUSED" => RecordingState.Paused,
+        "FINALIZING" => RecordingState.Finalizing,
+        "ERROR" => RecordingState.Error,
+        _ => RecordingState.Idle
+    };
+
+    private static string MapRecordingError(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "Recorder Agent сообщил об ошибке.";
+        var code = value.Trim().ToUpperInvariant();
+        var legacyDetailSeparator = code.IndexOf(':');
+        if (legacyDetailSeparator > 0) code = code[..legacyDetailSeparator];
+        return code switch
+        {
+            "RECORDER_HOST_NOT_RUNNING" => "Recorder Host не запущен. Перезапустите приложение или установите актуальный пакет.",
+            "RECORDER_HOST_INIT_FAILED" => "Recorder Host запущен, но не завершил инициализацию. Откройте диагностику и проверьте точный код запуска.",
+            "SPOOL_READONLY" => "Локальное хранилище Recorder доступно только для чтения. Проверьте права папки Agent и перезапустите Host.",
+            "RECORDER_RUNTIME_LEASE_HELD" => "Другой Recorder уже владеет локальным хранилищем. Закройте legacy Service или второй Host и повторите запуск.",
+            "RECORDER_HOST_NOT_INITIALIZED" => "Recorder Host ещё запускается. Повторите команду через несколько секунд.",
+            "RECORDER_HOST_BUILD_MISMATCH" => "Запущен Recorder Host из другой папки или сборки. Закройте посторонний Host и запустите установленный пакет.",
+            "RECORDER_HOST_DUPLICATE" => "Запущено несколько Recorder Host. Закройте лишний процесс и оставьте Host из установленного пакета.",
+            "RECORDER_HOST_PIPE_UNRESPONSIVE" or "RECORDER_IPC_TIMEOUT" => "Recorder Host запущен, но не отвечает по IPC. Закройте старый Host и запустите актуальную версию.",
+            "RECORDER_HOST_UPDATE_REQUIRED" or "RECORDER_HOST_UPDATE_RESTART_REQUIRED" or "RECORDER_UPGRADE_REQUIRED" or "LOCAL_TRACK_ID_REQUIRED" or "IPC_VERSION_INCOMPATIBLE" => "Установленная версия Recorder Host несовместима с сервером. Установите актуальный клиентский пакет и перезапустите Recorder.",
+            "RECORDER_IPC_ACCESS_DENIED" => "Доступ Desktop к Recorder Host запрещён ACL named pipe. Перезапустите Host под текущим пользователем.",
+            "AUDIO_DEFAULT_ENDPOINT_MISSING" or "AUDIO_DEVICE_UNAVAILABLE" => "Windows не предоставила доступное устройство записи. Выберите микрофон или подтвердите устройство по умолчанию.",
+            "AUDIO_CAPTURE_BUSY" => "Запись уже выполняется. Остановите текущую запись перед проверкой или сменой микрофона.",
+            "SELECTED_DEVICE_UNAVAILABLE" or "AUDIO_DEVICE_NOT_READY" or "AUDIO_DEVICE_NOT_FOUND" => "Выбранный микрофон недоступен. Выберите активное устройство из списка и повторите проверку.",
+            "AUDIO_DEVICE_INACTIVE" or "AUDIO_DEVICE_LOST" => "Выбранный микрофон отключён или стал недоступен. Подключите его и выберите заново.",
+            "AUDIO_SYSTEM_AUDIO_DEVICE_LOST" => "Системное аудиоустройство отключилось во время ONLINE-записи. Запись безопасно остановлена; проверьте устройство и начните новую запись.",
+            "AUDIO_INPUT_NODE_CREATE_FAILED" => "Windows не смогла открыть входной узел микрофона. Закройте приложения, использующие микрофон, и проверьте разрешения Windows.",
+            "AUDIO_GRAPH_CREATE_FAILED" => "Windows не смогла создать AudioGraph для микрофона. Перезапустите Recorder Host и проверьте аудиодрайвер.",
+            "AUDIO_GRAPH_UNRECOVERABLE" => "AudioGraph аварийно остановил захват микрофона. Перезапустите Recorder Host; подробности доступны в диагностике.",
+            "AUDIO_PIPELINE_OVERRUN" => "Recorder не успевает обработать аудиокадры. Обновите Recorder Host до актуальной сборки и повторите запись.",
+            "AUDIO_FRAME_GAP" => "Recorder обнаружил пропуск аудиокадров и остановил запись, чтобы не скрыть потерю речи. Сохранённые данные будут проверены восстановлением.",
+            "AUDIO_FRAME_OVERLAP" => "Recorder обнаружил повтор аудиокадров и остановил запись. Сохранённые данные будут проверены восстановлением.",
+            "AUDIO_FRAME_FORMAT_MISMATCH" => "Формат микрофонного потока изменился во время записи. Запись остановлена без подмены устройства.",
+            "AUDIO_FRAME_SIZE_MISMATCH" => "Recorder получил повреждённый аудиокадр. Запись остановлена, сохранённая часть оставлена для восстановления.",
+            "AUDIO_CAPTURE_START_TIMEOUT" => "Микрофон не начал отдавать кадры вовремя. Перезапустите Recorder Host и проверьте устройство.",
+            "AUDIO_BUFFER_FORMAT_MISMATCH" => "Recorder получил аудиобуфер неожиданного формата. Обновите Recorder Host до актуального установщика.",
+            "AUDIO_NO_FRAMES" or "AUDIO_CALLBACK_TIMEOUT" => "Микрофон найден, но аудиокадры не поступают. Проверьте разрешение микрофона и устройство по умолчанию.",
+            "AUDIO_SOURCE_FAILED" => "Источник аудио остановился. Проверьте подключение микрофона или системного звука.",
+            "AUDIO_CAPTURE_START_FAILED" => "Recorder не подтвердил запуск захвата. Запись не считается сохранённой; проверьте устройство и журнал Host.",
+            "RAW_DURABILITY_FAILED" => "Не удалось подтвердить сохранение исходного PCM. Проверьте локальное хранилище Recorder.",
+            "RAW_FINALIZER_BACKLOG_EXCEEDED" => "Локальная очередь финализации переполнена. Исходный PCM оставлен для recovery; повторите после освобождения диска.",
+            "RAW_RECOVERY_PENDING" => "Исходный PCM ещё закрывается. Recorder восстановит его автоматически при следующей проверке.",
+            "NO_AUDIO_CAPTURED" => "В записи не обнаружено сохранённого аудио. Запись не считается сохранённой.",
+            "MICROPHONE_PROBE_REQUIRED" or "microphone_probe_required" => "Микрофон найден, но ещё не подтверждён реальным захватом. Нажмите «Проверить микрофон».",
+            "SYSTEM_AUDIO_PROBE_REQUIRED" or "system_audio_probe_required" => "Системный аудиопоток ещё не подтверждён реальным захватом. Нажмите «Проверить системный звук».",
+            "AUDIO_NO_DATA" => "Поток открылся, но за время проверки не пришёл ни один аудиопакет.",
+            "AUDIO_DEVICE_ACCESS_DENIED" => "Windows не разрешила доступ к аудиоустройству. Проверьте разрешение микрофона и классических приложений.",
+            "AUDIO_FORMAT_UNSUPPORTED" => "Формат аудиоустройства не поддерживается Recorder Agent.",
+            "STORAGE_WRITE_FAILED" => "Не удалось сохранить аудио на диск. Проверьте свободное место и доступ к архиву.",
+            "ENCODER_FAILED" => "Не удалось закодировать аудиочанк. Локальные данные сохранены для восстановления.",
+            "ENCODER_RETRY_EXHAUSTED" => "Кодировщик несколько раз не смог обработать аудиочанк. Исходный PCM сохранён; требуется проверка FFmpeg и журнала Recorder.",
+            "FLAC_VALIDATION_FAILED" => "Проверка созданного FLAC не пройдена. Исходный PCM сохранён, кодирование будет повторено.",
+            "FFMPEG_ENCODE_FAILED" => "FFmpeg не смог закодировать аудиочанк. Исходный PCM сохранён, следующая попытка будет выполнена автоматически.",
+            "ENCODER_TIMEOUT" => "Кодирование аудиочанка превысило тайм-аут. Исходный PCM сохранён, попытка будет повторена.",
+            "AUDIO_SIGNAL_WEAK" => "Сигнал микрофона слабый. Запись сохранена, для большого кабинета рекомендуется профиль усиления.",
+            "AUDIO_SIGNAL_UNUSABLE" => "Диагностика не подтвердила полезный сигнал. Аудио сохранено; стенограмма и безопасный черновик саммари будут обработаны, если распознана речь.",
+            "ASR_LANGUAGE_MISMATCH" => "WhisperX получил сомнительный язык результата. Стенограмма сохранена как черновик и требует проверки.",
+            "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY" => "Саммари отложено: сначала подтвердите качество стенограммы.",
+            "GPU_PRIORITY_WAIT_RETRY_PENDING" => "V2 ожидает освобождения GPU. Обработка продолжится автоматически.",
+            "LOCAL_ENCODING_FAILED" => "Не удалось завершить кодирование локального аудио.",
+            "LOCAL_ARCHIVE_FAILED" or "RECORDING_FINALIZE_FAILED" => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
+            "LOCAL_CHUNK_MISSING" => "В локальном архиве отсутствует аудиочанк. Исходные файлы сохранены для диагностики.",
+            "LOCAL_CHUNK_INVALID" => "Локальный аудиочанк повреждён или не прошёл проверку контрольной суммы.",
+            "SERVER_BINDING_FAILED" or "SERVER_FINALIZE_REJECTED" => "Сервер не подтвердил привязку или завершение записи. Повторная отправка будет выполнена автоматически.",
+            "CHUNK_UPLOAD_FAILED" or "SERVER_UNAVAILABLE" or "SERVER_FINALIZE_PENDING" or "SERVER_FINALIZE_FAILED" or "UPLOAD_PENDING" => "Запись сохранена локально. Сервер пока не подтвердил получение; повторная отправка выполняется автоматически.",
+            "AGENT_AUTH_REJECTED" => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
+            "RECORDING_ARCHIVE_ACCESS_DENIED" => "Нет доступа к папке локального архива.",
+            "FFMPEG_UNAVAILABLE" => "Не найден FFmpeg для локальной сборки аудио.",
+            "LOCAL_ENCODER_UNAVAILABLE" => "FFmpeg временно недоступен. Запись сохранится локально, кодирование продолжится автоматически после восстановления.",
+            "SESSION_REQUIRED" => "Не найдена локальная сессия записи для повторной отправки.",
+            "AGENT_USER_LINK_REQUIRED" => "Recorder Agent ещё не привязан к текущему пользователю. Повторите вход или обратитесь к администратору.",
+            "DEVICE_SELECTION_NOT_CONFIRMED" => "Recorder Agent не подтвердил выбранное устройство. Предыдущее устройство восстановлено.",
+            "AGENT_HEARTBEAT_STALE" => "Recorder Agent не подтвердил свежее подключение к серверу.",
+            "AGENT_SERVER_UNAVAILABLE" => "Recorder Agent не подключён к LAN-серверу. Локальная запись останется доступной после подтверждённой привязки.",
+            "SERVER_NOT_CONFIGURED" => "Адрес сервера не задан. Укажите LAN-origin в настройках или переустановите пакет с конфигурацией сервера.",
+            "SERVER_NETWORK_UNREACHABLE" => "Сервер недоступен по сети. Проверьте Wi‑Fi/LAN, адрес сервера и брандмауэр. Локальная запись продолжается.",
+            "SERVER_TIMEOUT" => "Сервер не ответил вовремя. Запись сохранена локально, следующая попытка будет выполнена автоматически.",
+            "UPLOAD_RETRY_PENDING" => "Запись сохранена локально и ожидает повторной отправки.",
+            "PROCESSING_UNAVAILABLE" => "Аудио принято, но очередь WhisperX сейчас недоступна. Доставка и обработка будут повторены.",
+            "OWNER_REQUIRED" => "Для серверной записи не определён владелец. Выполните вход в приложение.",
+            "OWNER_AUTHORIZATION_REJECTED" => "Пользователь больше не может отправлять эту запись. Локальная копия сохранена.",
+            "MEETING_OWNER_MISMATCH" => "Запись принадлежит другому пользователю и не может быть отправлена из этого сеанса.",
+            "REENROLL_REQUIRED" => "Recorder Agent отозван. Требуется повторная регистрация устройства.",
+            _ when code.Contains("401", StringComparison.OrdinalIgnoreCase) || code.Contains("403", StringComparison.OrdinalIgnoreCase) => "Сервер отклонил авторизацию Recorder Agent. Переподключите Agent в настройках.",
+            _ when code.Contains("RECORDING_FINALIZE_FAILED", StringComparison.OrdinalIgnoreCase) => "Не удалось собрать локальный master-файл. Исходные аудиочанки сохранены.",
+            _ => "Recorder Agent не завершил операцию. Локальные данные сохранены; откройте диагностику Agent."
+        };
+    }
+
+    private void NotifyCommands()
+    {
+        OnPropertyChanged(nameof(StateTitle));
+        OnPropertyChanged(nameof(CanStart));
+        OnPropertyChanged(nameof(CanAttemptStart));
+        OnPropertyChanged(nameof(StartReadinessMessage));
+        OnPropertyChanged(nameof(CanPause));
+        OnPropertyChanged(nameof(CanResume));
+        OnPropertyChanged(nameof(CanMark));
+        OnPropertyChanged(nameof(CanStop));
+        OnPropertyChanged(nameof(CanRetryUpload));
+        OnPropertyChanged(nameof(CanSelectDevices));
+        OnPropertyChanged(nameof(CanSelectRecordingProfile));
+        OnPropertyChanged(nameof(AgentStatus));
+    }
+
+    private string GetStartBlockedMessage()
+    {
+        if (State is RecordingState.Starting or RecordingState.Checking)
+            return "Подождите завершения проверки Recorder Host и микрофона.";
+        if (State is RecordingState.Recording or RecordingState.Paused)
+            return "Запись уже идёт. Завершите текущую запись перед запуском новой.";
+        if (State == RecordingState.Finalizing)
+            return "Дождитесь локального сохранения текущей записи.";
+        if (!_recorderRuntimeReady)
+            return "Recorder Host недоступен или требует обновления. Нажмите «Начать запись», чтобы повторить его запуск.";
+        if (!_hasAudioSource)
+            return "Микрофон не готов. Проверьте устройство или выберите микрофон заново.";
+        if (!_localStorageReady)
+            return "Недостаточно свободного места либо папка локального архива недоступна.";
+        if (!LocalRecordingAllowed)
+            return "Выполните вход в приложение. После входа запись будет доступна без сервера.";
+        return "Recorder пока не готов к запуску записи.";
+    }
+
+    private void UpdateMicrophoneSignalFeedback(AgentIpcHealth health)
+    {
+        if (State is not (RecordingState.Recording or RecordingState.Paused)) return;
+        var rmsDb = health.MicrophoneRmsDb;
+        if (string.Equals(health.MicrophoneSignalState, "READY", StringComparison.OrdinalIgnoreCase)
+            && rmsDb is double weakRms && weakRms <= -55
+            && (WarningMessage.StartsWith("Микрофонный поток", StringComparison.Ordinal)
+                || WarningMessage.StartsWith("Слабый сигнал", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(WarningMessage)))
+        {
+            WarningMessage = $"Слабый сигнал микрофона ({weakRms:0} dBFS). Запись продолжается; для большого кабинета выберите профиль «Большой кабинет».";
+            return;
+        }
+        if (!string.Equals(health.MicrophoneSignalState, "READY_NO_SIGNAL", StringComparison.OrdinalIgnoreCase))
+        {
+            if (WarningMessage.StartsWith("Микрофонный поток открыт", StringComparison.Ordinal)
+                || WarningMessage.StartsWith("Слабый сигнал", StringComparison.Ordinal))
+                WarningMessage = string.Empty;
+            return;
+        }
+
+        var silenceMs = health.MicrophoneSilenceDurationMs ?? 0;
+        if (silenceMs >= 8_000)
+            WarningMessage = silenceMs >= 30_000
+                ? "Микрофонный поток открыт, но уже 30 секунд не содержит сигнала. Проверьте выбранное устройство Windows. Запись продолжается."
+                : "Микрофонный поток открыт, но сигнал не обнаружен. Проверьте, что выбран физический микрофон. Запись продолжается.";
+    }
+
+    private static string FormatMediaTime(long milliseconds) => TimeSpan.FromMilliseconds(Math.Max(0, milliseconds)).ToString(@"hh\:mm\:ss");
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} Б",
+        < 1024 * 1024 => $"{bytes / 1024d:0.0} КБ",
+        < 1024L * 1024 * 1024 => $"{bytes / (1024d * 1024):0.0} МБ",
+        _ => $"{bytes / (1024d * 1024 * 1024):0.0} ГБ"
+    };
+    private static double ToLevel(double? db) => db is double value ? Math.Clamp((value + 60d) / 60d * 100d, 0d, 100d) : 0d;
+    private static string FormatDb(double? db) => db is double value ? $"{value:0} dB peak" : "Нет измерения";
+    private static string FormatTelemetry(double? rmsDb, bool? clipping, bool stale)
+    {
+        if (stale) return "Телеметрия устарела";
+        if (rmsDb is not double value) return "Сигнал не обнаружен";
+        return clipping == true ? $"RMS {value:0} dB · клиппинг" : $"RMS {value:0} dB · сигнал стабилен";
+    }
+    private static IReadOnlyList<double> AppendWaveformSample(IReadOnlyList<double> current, double? peak)
+    {
+        var updated = current.Count >= 64 ? current.Skip(1).ToList() : current.ToList();
+        updated.Add(peak is double value ? Math.Clamp(value, 0d, 1d) : 0d);
+        return updated;
+    }
+    private static string? NormalizeDeviceId(string? id) => string.IsNullOrWhiteSpace(id) ? null : id.Trim();
+    private static string NormalizeRecordingProfile(string? profile)
+    {
+        var normalized = string.IsNullOrWhiteSpace(profile) ? "ROOM" : profile.Trim().ToUpperInvariant();
+        return normalized is "ROOM" or "ONLINE" or "MIC_ONLY" or "SYSTEM_ONLY" ? normalized : "ROOM";
+    }
+    private static string NormalizeAcousticProfile(string? profile)
+    {
+        var normalized = string.IsNullOrWhiteSpace(profile) ? "AUTO" : profile.Trim().ToUpperInvariant();
+        return normalized is "AUTO" or "STANDARD" or "LARGE_ROOM" ? normalized : "AUTO";
+    }
+    private static string SafeError(Exception ex) => UiErrorFormatter.Format(ex, "Recorder Agent не ответил. Проверьте локальный сервис.");
+}

@@ -1,0 +1,369 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer x:Name="SettingsScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
+            <controls:PageHeader Title="Настройки" Subtitle="Подключение, запись, архив и голосовой помощник">
+                <controls:PageHeader.Actions>
+                    <Button x:Name="OpenSetupWizardButton" Content="Повторить настройку" Style="{StaticResource ToolbarButtonStyle}" Click="OpenSetupWizardButton_Click" AutomationProperties.Name="Повторить мастер настройки" ToolTipService.ToolTip="Проверить основные компоненты по шагам" />
+                </controls:PageHeader.Actions>
+            </controls:PageHeader>
+            <TabView x:Name="SettingsTabs" Style="{StaticResource WorkspaceTabViewStyle}" IsAddTabButtonVisible="False" TabWidthMode="Equal" SelectedIndex="0" SelectionChanged="SettingsTabs_SelectionChanged" AutomationProperties.Name="Разделы настроек">
+                <TabViewItem Header="Подключение" Style="{StaticResource WorkspaceTabItemStyle}" AutomationProperties.Name="Настройки подключения">
+                    <StackPanel Padding="0,8,0,0" Spacing="{StaticResource PageGap}">
+            <Border x:Name="UpdatesCard" Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                        <StackPanel Spacing="3">
+                            <TextBlock Text="Обновления приложения" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Проверка выполняется через LAN-сервер. Установка запускается только вручную и не меняет Docker-сервер." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock x:Name="UpdateStateText" Grid.Column="1" Text="Проверка не выполнялась" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="12">
+                        <StackPanel Spacing="3">
+                            <TextBlock Text="Текущая сборка" Style="{StaticResource CaptionStyle}" />
+                            <TextBlock x:Name="CurrentBuildIdentityText" Text="—" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="Текущая build identity" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <TextBlock Text="Канал" Style="{StaticResource CaptionStyle}" />
+                            <ComboBox x:Name="UpdateChannelComboBox" SelectedValuePath="Tag" SelectionChanged="UpdateChannelComboBox_SelectionChanged" MinWidth="170" AutomationProperties.Name="Канал обновлений">
+                                <ComboBoxItem Content="Стабильный" Tag="stable" />
+                                <ComboBoxItem Content="Локальный pilot" Tag="pilot" />
+                            </ComboBox>
+                        </StackPanel>
+                        <Button x:Name="CheckUpdatesButton" Grid.Column="2" Content="Проверить" Style="{StaticResource SecondaryButtonStyle}" Click="CheckUpdatesButton_Click" VerticalAlignment="Bottom" />
+                    </Grid>
+                    <Border x:Name="AvailableUpdatePanel" Visibility="Collapsed" Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                        <StackPanel Spacing="7">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Spacing="2">
+                                    <TextBlock x:Name="AvailableUpdateText" Text="Доступна новая версия" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="AvailableUpdateIdentityText" Text="—" FontFamily="Consolas" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="Build identity обновления" />
+                                </StackPanel>
+                                <ProgressRing x:Name="UpdateProgressRing" Grid.Column="1" Width="22" Height="22" IsActive="False" />
+                            </Grid>
+                            <TextBlock x:Name="UpdateReleaseNotesText" Text="" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" MaxHeight="64" />
+                            <TextBlock x:Name="UpdateWarningText" Text="" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                            <ProgressBar x:Name="UpdateProgressBar" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed" Height="6" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="DownloadUpdateButton" Content="Скачать" Style="{StaticResource PrimaryButtonStyle}" Click="DownloadUpdateButton_Click" />
+                                <Button x:Name="CancelUpdateButton" Content="Отменить" Style="{StaticResource SecondaryButtonStyle}" Click="CancelUpdateButton_Click" Visibility="Collapsed" />
+                                <Button x:Name="InstallUpdateButton" Content="Установить" Style="{StaticResource PrimaryButtonStyle}" Click="InstallUpdateButton_Click" IsEnabled="False" />
+                                <Button x:Name="DeferUpdateButton" Content="Напомнить позже" Style="{StaticResource SecondaryButtonStyle}" Click="DeferUpdateButton_Click" />
+                            </StackPanel>
+                            <TextBlock x:Name="UpdateErrorText" Text="" Foreground="{StaticResource DangerBrush}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Visibility="Collapsed" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
+            <Grid x:Name="SettingsLayoutGrid" ColumnDefinitions="1.55*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
+                <Border x:Name="ApiSettingsCard" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Подключение к API" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Адрес сервера и учётная запись Desktop" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Border x:Name="ApiStatusBadge" Grid.Column="1" Style="{StaticResource StatusBadgeStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource HeroBorderBrush}" VerticalAlignment="Top" AutomationProperties.Name="Состояние подключения к API">
+                                <TextBlock x:Name="ApiStatusBadgeText" Text="{Binding ApiStatusShort}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Адрес сервера" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox x:Name="ApiUrlBox" Text="{Binding ApiUrl, Mode=TwoWay}" IsReadOnly="{Binding ServerOriginManaged}" Style="{StaticResource InputStyle}" AutomationProperties.Name="Адрес LAN-сервера" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock Text="Текущий пользователь" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox Text="{Binding Username, Mode=TwoWay}" IsReadOnly="True" Style="{StaticResource InputStyle}" AutomationProperties.Name="Текущий пользователь" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="LoginHintText" Text="Для входа используйте окно авторизации приложения." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <Grid x:Name="PasswordFieldsPanel" ColumnDefinitions="*,*" ColumnSpacing="12" Visibility="Collapsed">
+                            <StackPanel Spacing="4">
+                                <TextBlock x:Name="PasswordLabel" Text="Текущий пароль для смены" Foreground="{StaticResource MutedTextBrush}" />
+                                <PasswordBox x:Name="PasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Текущий пароль" AutomationProperties.Name="Текущий пароль" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock Text="Новый пароль" Foreground="{StaticResource MutedTextBrush}" />
+                                <PasswordBox x:Name="NewPasswordBox" Style="{StaticResource PasswordInputStyle}" PlaceholderText="Минимум 12 символов" AutomationProperties.Name="Новый пароль" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel x:Name="ApiActionsPanel" Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="ChangePasswordButton" Content="Сменить пароль" Style="{StaticResource SecondaryButtonStyle}" Click="ChangePasswordButton_Click" IsEnabled="{Binding CanChangePassword}" />
+                            <Button Content="Применить адрес сервера" Style="{StaticResource SecondaryButtonStyle}" Click="ApplyServerOriginButton_Click" IsEnabled="{Binding CanChangeServerOrigin}" AutomationProperties.Name="Применить адрес сервера" />
+                            <Button Content="Проверить API" Style="{StaticResource SecondaryButtonStyle}" Click="CheckBackendButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Проверить API" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+                <Border x:Name="AgentSettingsCard" Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Recorder Agent" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="После входа Agent привязывается к пользователю автоматически." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Состояние подключения" Style="{StaticResource CaptionStyle}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding LoginStatusText}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding LoginStatusDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding SessionExpiryText}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ProgressRing Grid.Column="1" Width="22" Height="22" IsActive="{Binding IsBusy}" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <Button x:Name="LoginAgainButton" Content="Войти снова" Style="{StaticResource PrimaryButtonStyle}" Click="LoginAgainButton_Click" Visibility="Collapsed" AutomationProperties.Name="Войти в API снова" ToolTipService.ToolTip="Открыть окно входа и обновить сессию" />
+                        <TextBlock Text="Имя Agent" Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBox Text="{Binding AgentName, Mode=TwoWay}" Style="{StaticResource InputStyle}" />
+                        <TextBlock Text="Действия" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
+                        <Button Content="Подключить или восстановить Agent" Style="{StaticResource PrimaryButtonStyle}" Click="ReconnectAgentButton_Click" IsEnabled="{Binding CanReconnectAgent}" AutomationProperties.Name="Подключить или восстановить Recorder Agent" ToolTipService.ToolTip="Проверить локальный сервис и восстановить привязку Agent" />
+                        <Button Content="Запустить Recorder Service" Style="{StaticResource SecondaryButtonStyle}" Click="StartRecorderButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Запустить Recorder Service" ToolTipService.ToolTip="Запустить локальный сервис записи" />
+                        <Button Content="Выйти из API" Style="{StaticResource SecondaryButtonStyle}" Click="LogoutButton_Click" IsEnabled="{Binding CanLogout}" AutomationProperties.Name="Выйти из API" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+                    </StackPanel>
+                </TabViewItem>
+                <TabViewItem Header="Мифодий" Style="{StaticResource WorkspaceTabItemStyle}" AutomationProperties.Name="Настройки Мифодия">
+                    <StackPanel Padding="0,8,0,0">
+            <Expander x:Name="MifodiySectionExpander" Header="Голосовой помощник «Мифодий»" IsExpanded="True" AutomationProperties.Name="Настройки голосового помощника Мифодий">
+                <Border x:Name="MifodiyDiagnosticsCard" Style="{StaticResource CardStyle}" Padding="14">
+                    <StackPanel Spacing="12">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Голосовой помощник" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Локально слушает кодовое слово. Аудио ожидания не сохраняется и не отправляется на сервер." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Border x:Name="MifodiyStatusBadge" Grid.Column="1" Background="{StaticResource SurfaceGreenBrush}" BorderBrush="{StaticResource SuccessBrush}" BorderThickness="1" CornerRadius="16" Padding="12,7" VerticalAlignment="Top" MinWidth="166">
+                                <StackPanel Orientation="Horizontal" Spacing="7">
+                                    <Ellipse x:Name="MifodiyStatusDot" Width="9" Height="9" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="MifodiyStatusText" Text="{Binding VoiceStatusLabel}" FontWeight="SemiBold" Foreground="{StaticResource SuccessBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="20">
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="Состояние" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceStatusLabel}" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding VoiceStatusDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Кодовое слово: Мифодий · Мефодий · Атом" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="Всегда слушать" Style="{StaticResource CaptionStyle}" />
+                                    <ToggleSwitch IsOn="{Binding VoiceAlwaysListening, Mode=TwoWay}" OnContent="Вкл" OffContent="Выкл" AutomationProperties.Name="Всегда слушать Мифодия" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Spacing="2">
+                                    <TextBlock Text="Тихий режим" Style="{StaticResource CaptionStyle}" />
+                                    <ToggleSwitch IsOn="{Binding VoiceQuietMode, Mode=TwoWay}" OnContent="Вкл" OffContent="Выкл" AutomationProperties.Name="Тихий режим Мифодия" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <Grid x:Name="MifodiyPrimaryGrid" ColumnDefinitions="1.05*,*" RowDefinitions="Auto" ColumnSpacing="12" RowSpacing="12">
+                            <Border x:Name="MifodiySignalCard" Style="{StaticResource CardStyle}" Padding="12" Background="{StaticResource SurfaceBlueBrush}" MinHeight="206" AutomationProperties.Name="Сигнал микрофона Мифодия">
+                                <Grid RowDefinitions="Auto,Auto,Auto,72,Auto,*" RowSpacing="8">
+                                    <TextBlock Text="Микрофон и сигнал" Style="{StaticResource SectionTitleStyle}" />
+                                    <StackPanel Grid.Row="1" Spacing="2">
+                                        <TextBlock Text="Фактически используемое устройство" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceMicrophone}" Height="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceMicrophone}" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="2" Text="Живой уровень сигнала" Style="{StaticResource CaptionStyle}" />
+                                    <Border Grid.Row="3" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="8,6">
+                                        <Grid x:Name="VoiceBarsPanel" Height="58" ColumnSpacing="3" HorizontalAlignment="Stretch" AutomationProperties.Name="Форма сигнала микрофона в реальном времени" />
+                                    </Border>
+                                    <Grid Grid.Row="4" ColumnDefinitions="*,148" ColumnSpacing="12">
+                                        <TextBlock Text="{Binding VoiceSignalState}" Height="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSignalState}" />
+                                        <TextBlock Grid.Column="1" Text="{Binding VoiceLevel}" Height="20" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextAlignment="Right" TextTrimming="CharacterEllipsis" />
+                                    </Grid>
+                                    <StackPanel Grid.Row="5" Spacing="2">
+                                        <TextBlock Text="{Binding VoiceAcousticDiagnostics}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="До кодового слова аудио сразу удаляется и не попадает в стенограмму." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <Border x:Name="MifodiyControlsCard" Style="{StaticResource CardStyle}" Padding="12" MinHeight="206" AutomationProperties.Name="Команды и голос Мифодия">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Команды и голос" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Чувствительность" Style="{StaticResource CaptionStyle}" />
+                                    <ComboBox SelectedValue="{Binding VoiceSensitivity, Mode=TwoWay}" SelectedValuePath="Tag" PlaceholderText="Выберите чувствительность" AutomationProperties.Name="Чувствительность распознавания Мифодия">
+                                        <ComboBoxItem Tag="low" Content="Низкая" />
+                                        <ComboBoxItem Tag="balanced" Content="Сбалансированная" />
+                                        <ComboBoxItem Tag="high" Content="Высокая" />
+                                    </ComboBox>
+                                    <Button Content="Калибровать шум комнаты (5 с)" Click="CalibrateVoiceButton_Click" HorizontalAlignment="Left" AutomationProperties.Name="Калибровать шум комнаты для Мифодия" />
+                                    <TextBlock Text="Русский Windows fallback (расширенные настройки)" Style="{StaticResource CaptionStyle}" />
+                                    <ComboBox ItemsSource="{Binding VoiceOptions}" SelectedItem="{Binding VoiceName, Mode=TwoWay}" PlaceholderText="Microsoft Irina" AutomationProperties.Name="Русский голос Windows fallback" />
+                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="Движок" Style="{StaticResource CaptionStyle}" />
+                                            <ComboBox SelectedValue="{Binding TtsEngine, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Движок синтеза речи">
+                                                <ComboBoxItem Content="Локальный Silero" Tag="SILERO" />
+                                                <ComboBoxItem Content="Windows fallback" Tag="WINDOWS" />
+                                            </ComboBox>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Spacing="2">
+                                            <TextBlock Text="Профиль голоса" Style="{StaticResource CaptionStyle}" />
+                                            <ComboBox SelectedValue="{Binding TtsVoiceProfile, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Профиль голоса Мифодия">
+                                                <ComboBoxItem Content="Мифодий — технологичный" Tag="MIFODIY_TECH" />
+                                                <ComboBoxItem Content="Евгений — чистый" Tag="CLEAN" />
+                                                <ComboBoxItem Content="Айдар — чистый" Tag="AIDAR_CLEAN" />
+                                            </ComboBox>
+                                            <TextBlock Text="Русские голоса Silero выбираются отдельно; профиль меняет только обработку воспроизведения." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock Text="Голос Silero" Style="{StaticResource CaptionStyle}" />
+                                    <ComboBox SelectedValue="{Binding TtsVoice, Mode=TwoWay}" SelectedValuePath="Tag" AutomationProperties.Name="Голос Silero">
+                                        <ComboBoxItem Content="Айдар" Tag="aidar" />
+                                        <ComboBoxItem Content="Евгений" Tag="eugene" />
+                                        <ComboBoxItem Content="Байя" Tag="baya" />
+                                        <ComboBoxItem Content="Ксения" Tag="kseniya" />
+                                        <ComboBoxItem Content="Ксения (Xenia)" Tag="xenia" />
+                                    </ComboBox>
+                                    <CheckBox Content="Разрешить Windows fallback при недоступности Silero" IsChecked="{Binding TtsFallbackEnabled, Mode=TwoWay}" />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                        <TextBlock Text="Усиление тихой речи" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding VoiceProcessingGainText}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                                    </Grid>
+                                    <Slider Minimum="0" Maximum="18" StepFrequency="1" Value="{Binding VoiceProcessingGainDb, Mode=TwoWay}" AutomationProperties.Name="Усиление тихой речи от 0 до 18 децибел" />
+                                    <TextBlock Text="Применяется только к голосовому производному потоку; оригинальный архив не изменяется." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Height="20">
+                                        <TextBlock Text="{Binding VoiceVoiceStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceVoiceStatus}" />
+                                        <TextBlock Grid.Column="1" Text="{Binding VoiceSpeechQueue}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceSpeechQueue}" />
+                                    </Grid>
+                                    <TextBlock Text="{Binding VoiceTtsStatus}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceTtsStatus}" />
+                                    <TextBlock Text="{Binding VoicePlaybackStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" AutomationProperties.Name="Состояние озвучки Мифодия" />
+                                    <Button Content="Включить озвучку" Style="{StaticResource SecondaryButtonStyle}" Click="EnableVoicePlaybackButton_Click" IsEnabled="{Binding CanEnableVoicePlayback}" HorizontalAlignment="Left" AutomationProperties.Name="Включить озвучку Мифодия" ToolTipService.ToolTip="Выключить тихий режим и применить настройки TTS" />
+                                    <TextBlock Text="{Binding VoiceLiveMode}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveMode}" />
+                                    <TextBlock Text="{Binding VoiceLiveTracks}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveTracks}" />
+                                    <TextBlock Text="{Binding VoiceLiveStats}" Style="{StaticResource CaptionStyle}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLiveStats}" />
+                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="Скорость" Style="{StaticResource CaptionStyle}" />
+                                            <NumberBox Value="{Binding VoiceRate, Mode=TwoWay}" Minimum="-10" Maximum="10" SpinButtonPlacementMode="Compact" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Spacing="2">
+                                            <TextBlock Text="Громкость, %" Style="{StaticResource CaptionStyle}" />
+                                            <NumberBox Value="{Binding VoiceVolume, Mode=TwoWay}" Minimum="0" Maximum="100" SpinButtonPlacementMode="Compact" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Border Background="{StaticResource SurfaceBlueBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
+                            <StackPanel Spacing="10">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                    <StackPanel Spacing="3">
+                                        <TextBlock Text="Проверка команды" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Тест не запускает запись и проверяет только распознавание команды и голосовой ответ." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="Без записи" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" />
+                                </Grid>
+                                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8">
+                                    <TextBlock Text="Мифодий, начни запись" FontSize="15" />
+                                </Border>
+                                <StackPanel x:Name="MifodiyTestActionsPanel" Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Начать тест" Style="{StaticResource PrimaryButtonStyle}" Click="TestVoiceSpeechButton_Click" AutomationProperties.Name="Проверить голосовую команду без записи" />
+                                    <Button Content="Проверить голос" Style="{StaticResource SecondaryButtonStyle}" Click="TestVoiceTtsButton_Click" AutomationProperties.Name="Проверить голосовой ответ" />
+                                    <Button Content="Обновить статус" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshVoiceButton_Click" AutomationProperties.Name="Обновить состояние Мифодия" />
+                                </StackPanel>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Последнее распознавание" Style="{StaticResource CaptionStyle}" />
+                                    <TextBlock Text="{Binding VoiceLastRecognition}" MaxHeight="42" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceLastRecognition}" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding VoiceErrorCode}" Foreground="{StaticResource WarningBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding VoiceDiagnosticsDetail}" />
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </Border>
+            </Expander>
+                    </StackPanel>
+                </TabViewItem>
+                <TabViewItem Header="Запись и архив" Style="{StaticResource WorkspaceTabItemStyle}" AutomationProperties.Name="Настройки записи и архива">
+                    <StackPanel Padding="0,8,0,0">
+            <Border x:Name="ArchiveSectionCard" Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Запись и архив" Style="{StaticResource SectionTitleStyle}" />
+                    <TextBlock Text="Локальный master-файл сохраняется в архиве независимо от серверной доставки." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                    <Grid x:Name="ArchivePathGrid" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto" ColumnSpacing="8">
+                        <TextBox Text="{Binding ArchiveRoot}" IsReadOnly="True" Style="{StaticResource InputStyle}" />
+                        <Button x:Name="SelectArchiveButton" Grid.Column="1" Content="Выбрать" Style="{StaticResource SecondaryButtonStyle}" Click="SelectArchiveButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Выбрать папку архива" />
+                        <Button x:Name="OpenArchiveButton" Grid.Column="2" Content="Открыть" Style="{StaticResource SecondaryButtonStyle}" Click="OpenArchiveButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Открыть папку архива" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+                    </StackPanel>
+                </TabViewItem>
+                <TabViewItem Header="Диагностика" Style="{StaticResource WorkspaceTabItemStyle}" AutomationProperties.Name="Техническая диагностика">
+                    <StackPanel Padding="0,8,0,0" Spacing="{StaticResource PageGap}">
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="10">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                    <StackPanel Spacing="3">
+                                        <TextBlock Text="Диагностика Recorder Host" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Локальный процесс, pipe, identity и состояние подключения." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshDiagnosticsTabButton_Click" AutomationProperties.Name="Обновить техническую диагностику" />
+                                </Grid>
+                                <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="{Binding RecorderRuntimeState}" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding RecorderRuntimeOrigin}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding RecorderRuntimeBuild}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding RecorderRuntimeProcess}" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding RecorderRuntimeIdentity}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding RecorderRuntimePath}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding RecorderRuntimeError}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                                <Button Content="Сформировать диагностический пакет" Style="{StaticResource SecondaryButtonStyle}" Click="SaveDiagnosticsButton_Click" IsEnabled="{Binding CanUseActions}" AutomationProperties.Name="Сформировать безопасный диагностический пакет" ToolTipService.ToolTip="Создать ZIP без аудио, токенов и содержимого стенограмм" />
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="Диагностика Мифодия" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Состояние Voice Host и телеметрии. Здесь нет PCM и текста голосовых запросов." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Text="{Binding VoiceStatus}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding VoiceStatusDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="Модель / wake word" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceWakeWordMode}" TextWrapping="Wrap" />
+                                        <TextBlock Text="Запрошенный endpoint" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceRequestedMicrophone}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="Фактический endpoint" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceEffectiveMicrophone}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="Voice Host" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceRuntimeProcess}" />
+                                        <TextBlock Text="{Binding VoiceRuntimePath}" TextWrapping="Wrap" />
+                                        <TextBlock Text="Ожидаемая / наблюдаемая сборка" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceExpectedBuild}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding VoiceObservedBuild}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="Последняя команда / trace" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceLastCommandId}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding VoiceLastTraceId}" FontFamily="Consolas" TextWrapping="Wrap" />
+                                        <TextBlock Text="Перезапуски" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding VoiceRestartCount}" />
+                                        <TextBlock Text="{Binding VoiceAssistantDelivery}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding VoiceDiagnosticsDetail}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </TabViewItem>
+            </TabView>
+            <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="False" Severity="Informational" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

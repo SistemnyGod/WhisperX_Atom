@@ -1,0 +1,4020 @@
+using System.Security.Cryptography;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
+using Npgsql;
+using NpgsqlTypes;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
+builder.Services.AddSingleton<Database>();
+builder.Services.AddSingleton<UnifiedProductStore>();
+builder.Services.AddSingleton<AssistantModeResolver>();
+builder.Services.AddHostedService<OperationalRecoveryService>();
+builder.Services.AddHostedService<StorageDeletionService>();
+builder.Services.AddHttpClient("nats-readiness", client => client.Timeout = TimeSpan.FromSeconds(2));
+static bool IsUnsafeSecret(string? value) => string.IsNullOrWhiteSpace(value)
+    || value.StartsWith("generate-", StringComparison.OrdinalIgnoreCase)
+    || value.StartsWith("replace-with", StringComparison.OrdinalIgnoreCase)
+    || value.StartsWith("change-me", StringComparison.OrdinalIgnoreCase)
+    || value.Equals("password", StringComparison.OrdinalIgnoreCase)
+    || value.Equals("changeme", StringComparison.OrdinalIgnoreCase);
+
+static bool IsPrivateLanOrigin(string? value)
+{
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp || uri.IsLoopback || uri.Port <= 0)
+        return false;
+    if (!System.Net.IPAddress.TryParse(uri.Host, out var address) || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        return false;
+    var bytes = address.GetAddressBytes();
+    return bytes[0] == 10
+        || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+        || (bytes[0] == 192 && bytes[1] == 168);
+}
+
+if (builder.Environment.IsProduction())
+{
+    if (string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("PRODUCTION_COOKIE_SECURE_REQUIRED");
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "SUPERVISOR_HEALTH_TOKEN" })
+        if (IsUnsafeSecret(builder.Configuration[name])) throw new InvalidOperationException($"PRODUCTION_SECRET_INVALID:{name}");
+}
+else if (builder.Environment.IsEnvironment("Lan"))
+{
+    if (!string.Equals(builder.Configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(builder.Configuration["ALLOW_INSECURE_LAN_HTTP"], "true", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("LAN_HTTP_EXPLICIT_REQUIRED");
+    if (!IsPrivateLanOrigin(builder.Configuration["SERVER_ORIGIN"]))
+        throw new InvalidOperationException("LAN_SERVER_ORIGIN_INVALID");
+    foreach (var name in new[] { "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "TUS_HOOK_SECRET", "IMPORT_WORKER_TOKEN", "AGENT_ENROLLMENT_SECRET", "SUPERVISOR_HEALTH_TOKEN" })
+    {
+        var value = builder.Configuration[name];
+        if (IsUnsafeSecret(value) || value!.Length < 16) throw new InvalidOperationException($"LAN_SECRET_INVALID:{name}");
+    }
+}
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        var route = path.StartsWith("/api/auth/login", StringComparison.OrdinalIgnoreCase) ? "login" :
+            path.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase) ? "refresh" :
+            path.StartsWith("/api/v1/agents/enroll", StringComparison.OrdinalIgnoreCase) ? "enrollment" :
+            path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) ? "summary-rebuild" :
+            path.StartsWith("/api/meetings/", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/pipeline/repair", StringComparison.OrdinalIgnoreCase) ? "pipeline-repair" :
+            path.StartsWith("/api/assistant", StringComparison.OrdinalIgnoreCase) ? "assistant" :
+            path.StartsWith("/api/client-updates", StringComparison.OrdinalIgnoreCase) ? "client-updates" : null;
+        if (route is null) return RateLimitPartition.GetNoLimiter("unlimited");
+        var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var limit = route is "login" or "refresh" or "enrollment" ? 20 : 30;
+        return RateLimitPartition.GetFixedWindowLimiter($"{route}:{ip}", _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = limit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+    });
+});
+var allowedOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? string.Empty)
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
+{
+    if (allowedOrigins.Length > 0)
+        policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+}));
+
+var app = builder.Build();
+app.UseCors();
+app.UseRateLimiter();
+
+app.Use(async (context, next) =>
+{
+    var started = Stopwatch.GetTimestamp();
+    var suppliedTraceId = context.Request.Headers["X-Trace-Id"].ToString();
+    var traceId = suppliedTraceId.Length is > 0 and <= 128 && suppliedTraceId.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_')
+        ? suppliedTraceId
+        : Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
+    context.Response.Headers["X-Trace-Id"] = traceId;
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "http_request_failed trace_id={TraceId} method={Method} path={Path}", traceId, context.Request.Method, context.Request.Path.Value);
+        if (!context.Response.HasStarted)
+        {
+            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = "INTERNAL_SERVER_ERROR",
+                retryable = true,
+                traceId
+            });
+        }
+        else
+        {
+            throw;
+        }
+    }
+    finally
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        var routineProbe = path is "/ready" or "/health"
+            || (path.StartsWith("/api/v1/agents/", StringComparison.OrdinalIgnoreCase)
+                && path.EndsWith("/heartbeat", StringComparison.OrdinalIgnoreCase));
+        if (routineProbe && context.Response.StatusCode < 400)
+            app.Logger.LogDebug(
+                "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
+                traceId, context.Request.Method, path, context.Response.StatusCode, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        else
+            app.Logger.LogInformation(
+                "http_request trace_id={TraceId} method={Method} path={Path} status_code={StatusCode} elapsed_ms={ElapsedMs}",
+                traceId, context.Request.Method, path, context.Response.StatusCode, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    }
+});
+
+var db = app.Services.GetRequiredService<Database>();
+var unified = app.Services.GetRequiredService<UnifiedProductStore>();
+await db.InitializeAsync();
+// Release orchestration can run additive migrations as an isolated one-shot
+// container before replacing the API. This path deliberately performs no
+// HTTP serving and therefore cannot expose a half-started runtime.
+if (string.Equals(builder.Configuration["WHISPERX_MIGRATION_ONLY"], "true", StringComparison.OrdinalIgnoreCase))
+{
+    app.Logger.LogInformation("WHISPERX_MIGRATION_ONLY completed with build identity {BuildIdentity}", builder.Configuration["WHISPERX_BUILD_IDENTITY"] ?? builder.Configuration["WHISPERX_RELEASE_VERSION"] ?? "dev");
+    return;
+}
+
+async Task IssueAuthCookiesAsync(HttpContext http, IConfiguration configuration, UserRow user)
+{
+    var accessToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+    await db.CreateSessionAsync(user.Id, accessToken);
+    await db.CreateRefreshSessionAsync(user.Id, refreshToken, Guid.NewGuid());
+    AppendAuthCookies(http, configuration, accessToken, refreshToken);
+}
+
+void AppendAuthCookies(HttpContext http, IConfiguration configuration, string accessToken, string refreshToken)
+{
+    var secure = !string.Equals(configuration["COOKIE_SECURE"], "false", StringComparison.OrdinalIgnoreCase);
+    http.Response.Cookies.Append("wa_session", accessToken, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = secure,
+        SameSite = SameSiteMode.Lax,
+        IsEssential = true,
+        MaxAge = TimeSpan.FromHours(12),
+    });
+    http.Response.Cookies.Append("wa_refresh", refreshToken, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = secure,
+        SameSite = SameSiteMode.Lax,
+        IsEssential = true,
+        MaxAge = TimeSpan.FromDays(30),
+    });
+}
+
+void DeleteAuthCookies(HttpContext http)
+{
+    http.Response.Cookies.Delete("wa_session");
+    http.Response.Cookies.Delete("wa_refresh");
+}
+
+async Task<int> QueueRecorderCancellationAsync(UnifiedProductStore store, IReadOnlyList<AgentSessionCancellationTarget> sessions, bool discardTransport)
+{
+    var queued = 0;
+    foreach (var session in sessions.Distinct())
+    {
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            serverSessionId = session.ServerSessionId,
+            discardTransport,
+        }));
+        await store.CreateCommandAsync(session.AgentId, "CANCEL_SERVER_SESSION", payload);
+        queued++;
+    }
+    return queued;
+}
+
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api/v1/agents/enroll"))
+    {
+        var expectedEnrollment = builder.Configuration["AGENT_ENROLLMENT_SECRET"] ?? "";
+        var suppliedEnrollment = context.Request.Headers["X-Agent-Enrollment-Secret"].ToString();
+        var expectedBytes = Encoding.UTF8.GetBytes(expectedEnrollment);
+        var suppliedBytes = Encoding.UTF8.GetBytes(suppliedEnrollment);
+        if (expectedBytes.Length == 0 || !CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { error = "agent_enrollment_required" });
+            return;
+        }
+        await next();
+        return;
+    }
+
+    if (context.Request.Path.StartsWithSegments("/api/v1/agents") || context.Request.Path.StartsWithSegments("/api/v1/recording-sessions"))
+    {
+        var agentIdText = context.Request.Headers["X-Agent-Id"].ToString();
+        var authorization = context.Request.Headers.Authorization.ToString();
+        var token = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? authorization[7..].Trim() : "";
+        if (!Guid.TryParse(agentIdText, out var agentId) || string.IsNullOrWhiteSpace(token) || await unified.AuthenticateAgentAsync(agentId, token) is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { error = "AUTH_REJECTED" });
+            return;
+        }
+        context.Items["agent_id"] = agentId;
+        await next();
+        return;
+    }
+
+    if (context.Request.Path.StartsWithSegments("/api/assistant/queries"))
+    {
+        var expectedVoiceToken = builder.Configuration["VOICE_HOST_TOKEN"] ?? string.Empty;
+        var suppliedVoiceToken = context.Request.Headers["X-Voice-Host-Token"].ToString();
+        // The API is published on host loopback in the desktop deployment.
+        // Docker Desktop forwards that request through its bridge network, so
+        // the container cannot reliably observe the original loopback address.
+        if (!string.IsNullOrWhiteSpace(expectedVoiceToken) && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedVoiceToken), Encoding.UTF8.GetBytes(suppliedVoiceToken)))
+        {
+            context.Items["voice_host"] = true;
+            await next();
+            return;
+        }
+        // Fall through to the regular cookie session path for Desktop UI users.
+
+    }
+
+    if (context.Request.Path.StartsWithSegments("/api/auth/change-password"))
+    {
+        // This endpoint is authenticated below and is also allowed for Reader
+        // users who have been provisioned with a temporary password.
+    }
+
+    if (context.Request.Path.Equals("/api/internal/runtime/readiness") ||
+        context.Request.Path.StartsWithSegments("/health") ||
+        context.Request.Path.StartsWithSegments("/ready") ||
+        context.Request.Path.StartsWithSegments("/api/system/version") ||
+        context.Request.Path.StartsWithSegments("/api/client-updates") ||
+        context.Request.Path.StartsWithSegments("/api/auth/login") ||
+        context.Request.Path.StartsWithSegments("/api/auth/refresh") ||
+        context.Request.Path.StartsWithSegments("/api/auth/logout") ||
+        context.Request.Path.StartsWithSegments("/api/uploads/complete") ||
+        context.Request.Path.StartsWithSegments("/api/internal/tusd/hooks") ||
+        context.Request.Path.StartsWithSegments("/api/internal/imports"))
+    {
+        await next();
+        return;
+    }
+
+    if (!context.Request.Cookies.TryGetValue("wa_session", out var session))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { error = "authentication_required" });
+        return;
+    }
+
+    var user = await db.GetUserForSessionAsync(session);
+    if (user is null) { context.Response.StatusCode = StatusCodes.Status401Unauthorized; await context.Response.WriteAsJsonAsync(new { error = "authentication_required" }); return; }
+    if (user.MustChangePassword && !context.Request.Path.StartsWithSegments("/api/auth/change-password")
+        && !context.Request.Path.StartsWithSegments("/api/auth/me")
+        && !context.Request.Path.StartsWithSegments("/api/auth/logout"))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { error = "PASSWORD_CHANGE_REQUIRED" });
+        return;
+    }
+    if (!RoleAllows(user.Role, context.Request.Method, context.Request.Path)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "insufficient_role" }); return; }
+    context.Items["user_id"] = user.Id;
+    context.Items["user_role"] = user.Role;
+
+    await next();
+});
+
+app.MapGet("/health/live", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
+app.MapGet("/health", () => Results.Ok(new { ok = true, service = "whisperx-atom-api", serverTimeUtc = DateTimeOffset.UtcNow }));
+app.MapGet("/health/ready", async (IHttpClientFactory httpClientFactory) =>
+{
+    var postgres = true;
+    var nats = true;
+    var storage = true;
+    try { await db.PingAsync(); } catch { postgres = false; }
+    try
+    {
+        var natsUrl = builder.Configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
+        var http = httpClientFactory.CreateClient("nats-readiness");
+        nats = (await http.GetAsync(natsUrl)).IsSuccessStatusCode;
+    }
+    catch { nats = false; }
+    try
+    {
+        var root = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+        Directory.CreateDirectory(root);
+        var probe = Path.Combine(root, $".ready-probe-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(probe, "ready");
+        }
+        finally
+        {
+            try { File.Delete(probe); } catch { }
+        }
+    }
+    catch { storage = false; }
+    var ready = postgres && nats && storage;
+    return Results.Json(new { ready, postgres, nats, storage, serverTimeUtc = DateTimeOffset.UtcNow }, statusCode: ready ? 200 : 503);
+});
+app.MapGet("/ready", async () =>
+{
+    try
+    {
+        await db.PingAsync();
+        return Results.Ok(new { ready = true, postgres = true, serverTimeUtc = DateTimeOffset.UtcNow });
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Readiness check failed");
+        return Results.Json(new { ready = false, postgres = false, serverTimeUtc = DateTimeOffset.UtcNow }, statusCode: 503);
+    }
+});
+
+app.MapGet("/api/system/version", (IConfiguration configuration) => Results.Ok(new
+{
+    product = "WhisperX Atom",
+    apiVersion = 1,
+    releaseVersion = configuration["WHISPERX_RELEASE_VERSION"] ?? "dev",
+    buildIdentity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev",
+    minDesktopVersion = configuration["WHISPERX_MIN_DESKTOP_VERSION"] ?? "0.1.0",
+    minRecorderVersion = configuration["WHISPERX_MIN_RECORDER_VERSION"] ?? "0.1.0",
+    serverTimeUtc = DateTimeOffset.UtcNow
+}));
+
+// Client update metadata and packages are intentionally anonymous.  A client
+// may need to update before it can authenticate, while SHA256 and
+// Authenticode validation remain mandatory on the Desktop side.  The update
+// root is a read-only bind mount in release Compose and is never shared with
+// media, spool or credentials.
+app.MapGet("/api/client-updates/latest", (HttpRequest request, IConfiguration configuration) =>
+{
+    var root = GetClientUpdateRoot(configuration);
+    var manifestPath = Path.Combine(root, "client-update.json");
+    if (!File.Exists(manifestPath)) return Results.NoContent();
+
+    try
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var manifest = document.RootElement;
+        if (manifest.ValueKind != JsonValueKind.Object
+            || !string.Equals(manifest.TryGetString("product"), "WhisperX Atom", StringComparison.Ordinal))
+            return Results.NoContent();
+
+        var requestedChannel = request.Query["channel"].ToString();
+        var channel = manifest.TryGetString("channel") ?? "stable";
+        if (!string.IsNullOrWhiteSpace(requestedChannel)
+            && !string.Equals(requestedChannel, channel, StringComparison.OrdinalIgnoreCase))
+            return Results.NoContent();
+
+        var currentVersion = request.Query["currentVersion"].ToString();
+        var currentBuild = request.Query["currentBuildIdentity"].ToString();
+        var manifestVersion = manifest.TryGetString("version");
+        var manifestBuild = manifest.TryGetString("buildIdentity");
+        if (!IsClientUpdateCandidate(channel, currentVersion, currentBuild, manifestVersion, manifestBuild))
+            return Results.NoContent();
+
+        if (!manifest.TryGetProperty("package", out var package)
+            || package.ValueKind != JsonValueKind.Object
+            || !IsSha256(package.TryGetString("packageId"))
+            || !IsSha256(package.TryGetString("sha256"))
+            || !string.Equals(package.TryGetString("packageId"), package.TryGetString("sha256"), StringComparison.OrdinalIgnoreCase))
+            return Results.NoContent();
+
+        var packageId = package.TryGetString("packageId")!;
+        var packageFile = Path.Combine(root, "packages", packageId + ".exe");
+        if (!File.Exists(packageFile)) return Results.NoContent();
+        return Results.Json(manifest.Clone(), statusCode: StatusCodes.Status200OK);
+    }
+    catch (JsonException) { return Results.NoContent(); }
+    catch (IOException) { return Results.NoContent(); }
+});
+
+app.MapGet("/api/client-updates/packages/{packageId}", (string packageId, HttpResponse response, IConfiguration configuration) =>
+{
+    if (!IsSha256(packageId)) return Results.NotFound();
+    var root = GetClientUpdateRoot(configuration);
+    var manifestPath = Path.Combine(root, "client-update.json");
+    if (!File.Exists(manifestPath)) return Results.NotFound();
+
+    try
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var manifest = document.RootElement;
+        if (!manifest.TryGetProperty("package", out var package)
+            || !string.Equals(package.TryGetString("packageId"), packageId, StringComparison.OrdinalIgnoreCase))
+            return Results.NotFound();
+        var fileName = package.TryGetString("fileName");
+        if (string.IsNullOrWhiteSpace(fileName) || !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+            return Results.NotFound();
+
+        var path = Path.Combine(root, "packages", packageId + ".exe");
+        if (!File.Exists(path)) return Results.NotFound();
+        var etag = $"\"{packageId.ToLowerInvariant()}\"";
+        response.Headers.ETag = etag;
+        response.Headers.CacheControl = "no-cache";
+        if (string.Equals(response.HttpContext.Request.Headers.IfNoneMatch.ToString(), etag, StringComparison.Ordinal))
+            return Results.StatusCode(StatusCodes.Status304NotModified);
+        return Results.File(path, "application/vnd.microsoft.portable-executable", fileName, enableRangeProcessing: true);
+    }
+    catch (JsonException) { return Results.NotFound(); }
+    catch (IOException) { return Results.NotFound(); }
+});
+
+app.MapGet("/api/system/readiness", async (UnifiedProductStore store, IConfiguration configuration, IHttpClientFactory httpClientFactory) =>
+{
+    var checkedAt = DateTimeOffset.UtcNow;
+    var expectedBuildIdentity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev";
+    var releaseIdentityValid = !string.IsNullOrWhiteSpace(expectedBuildIdentity)
+        && !expectedBuildIdentity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+        && !expectedBuildIdentity.Contains("dirty", StringComparison.OrdinalIgnoreCase)
+        && expectedBuildIdentity.Contains('+', StringComparison.Ordinal)
+        && expectedBuildIdentity[(expectedBuildIdentity.IndexOf('+') + 1)..].Length >= 40;
+    var mediaRoot = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+    // Match /health/ready: a bind mount may be created lazily by Docker, so a
+    // Directory.Exists-only check can report a false storage outage. Probe the
+    // actual write/delete path used by media ingestion instead.
+    var storage = false;
+    try
+    {
+        Directory.CreateDirectory(mediaRoot);
+        var probe = Path.Combine(mediaRoot, $".readiness-probe-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(probe, "ready");
+        File.Delete(probe);
+        storage = true;
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "System readiness media storage probe failed");
+    }
+    var postgres = true;
+    try { await db.PingAsync(); }
+    catch (Exception ex)
+    {
+        postgres = false;
+        app.Logger.LogWarning(ex, "System readiness PostgreSQL check failed");
+    }
+
+    var nats = false;
+    var natsUrl = configuration["NATS_MONITORING_URL"] ?? "http://nats:8222/healthz";
+    try
+    {
+        var http = httpClientFactory.CreateClient("nats-readiness");
+        using var response = await http.GetAsync(natsUrl);
+        nats = response.IsSuccessStatusCode;
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogDebug(ex, "System readiness NATS check failed");
+    }
+
+    IReadOnlyList<WorkerRuntimeRow> workers = Array.Empty<WorkerRuntimeRow>();
+    OperationsSnapshot? operations = null;
+    LlmRuntimeSnapshot? llmRuntime = null;
+    MemoryCoverageSnapshot? memoryCoverage = null;
+    if (postgres)
+    {
+        try
+        {
+            workers = await store.ListWorkerRuntimeAsync();
+            operations = await store.GetOperationsSnapshotAsync();
+            llmRuntime = await store.GetLlmRuntimeSnapshotAsync();
+            memoryCoverage = await store.GetMemoryCoverageAsync(Guid.Empty, includeAll: true, readScope: "DEPLOYMENT");
+        }
+        catch (Exception ex)
+        {
+            postgres = false;
+            app.Logger.LogWarning(ex, "System readiness worker or operations query failed");
+        }
+    }
+    var fresh = workers
+        .GroupBy(item => item.WorkerName, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.LastSeenAt).First(), StringComparer.OrdinalIgnoreCase);
+    static bool IsActiveWorker(WorkerRuntimeRow worker) =>
+        string.Equals(worker.Status, "READY", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(worker.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(worker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase);
+    static bool IsFreshWorker(WorkerRuntimeRow worker, DateTimeOffset now)
+    {
+        var age = now.UtcDateTime - worker.LastSeenAt.ToUniversalTime();
+        return age >= TimeSpan.Zero && age <= TimeSpan.FromSeconds(60);
+    }
+    static bool IsIdentityMatch(WorkerRuntimeRow worker, string expected)
+        => string.Equals(expected, "dev", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(worker.Version, expected, StringComparison.Ordinal);
+    // Core media processing is always required. The optional LLM worker is
+    // evaluated independently below, so a Qwen outage cannot make recording
+    // or WhisperX/ASR readiness look unhealthy.
+    var autoSummaryEnabled = string.Equals(configuration["AUTO_SUMMARY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+    var assistantEnabled = configuration.GetValue("ASSISTANT_ENABLED", true);
+    var memoryEnabled = !string.Equals(configuration["MEETING_MEMORY_ENABLED"], "false", StringComparison.OrdinalIgnoreCase);
+    var qwenEnabled = autoSummaryEnabled || assistantEnabled;
+    var qwenMode = autoSummaryEnabled
+        ? "AUTO_SUMMARY_ENABLED"
+        : assistantEnabled ? "ASSISTANT_ONLY" : "DISABLED";
+    // Core processing readiness must not depend on the optional Qwen/Summary
+    // runtime.  A stale Summary worker should make qwen=DEGRADED, while
+    // WhisperX/CUDA remains accurately available for recording and ASR.
+    var requiredWorkerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "outbox-relay", "import-worker", "media-worker", "gpu-worker"
+    };
+
+    var workerReady = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    var identityMismatch = false;
+    foreach (var name in new[] { "outbox-relay", "import-worker", "media-worker", "gpu-worker", "summary-worker", "memory-worker" })
+    {
+        var required = requiredWorkerNames.Contains(name);
+        if (!fresh.TryGetValue(name, out var item) || !IsFreshWorker(item, checkedAt))
+        {
+            workerReady[name] = new { status = "UNAVAILABLE", required, lastSeenAt = fresh.TryGetValue(name, out var stale) ? stale.LastSeenAt : (DateTime?)null };
+            continue;
+        }
+        var matches = IsIdentityMatch(item, expectedBuildIdentity);
+        identityMismatch |= required && !matches;
+        workerReady[name] = new { status = matches ? item.Status : "IDENTITY_MISMATCH", required, lastSeenAt = item.LastSeenAt, version = item.Version, expectedBuildIdentity, currentJobId = item.CurrentJobId, capabilities = item.Capabilities, lastErrorCode = matches ? item.LastErrorCode : "WORKER_BUILD_IDENTITY_MISMATCH" };
+    }
+
+    var gpu = fresh.TryGetValue("gpu-worker", out var gpuWorker)
+        && IsFreshWorker(gpuWorker, checkedAt)
+        && IsActiveWorker(gpuWorker);
+    var gpuCapabilities = gpuWorker?.Capabilities.RootElement;
+    var cuda = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("cudaAvailable", out var cudaValue) && cudaValue.ValueKind == JsonValueKind.True;
+    var hf = gpu && gpuCapabilities.HasValue && gpuCapabilities.Value.TryGetProperty("diarization", out var diarizationValue) && diarizationValue.ValueKind == JsonValueKind.String
+        ? diarizationValue.GetString() ?? "DEGRADED"
+        : "DEGRADED";
+    var requiredWorkersReady = requiredWorkerNames.All(name =>
+        fresh.TryGetValue(name, out var worker) &&
+        IsFreshWorker(worker, checkedAt) &&
+        IsActiveWorker(worker) &&
+        IsIdentityMatch(worker, expectedBuildIdentity));
+    object qwen;
+    if (!qwenEnabled)
+    {
+        qwen = new { status = "DISABLED", reason = "assistant_and_auto_summary_disabled", mode = qwenMode };
+    }
+    else if (!nats)
+    {
+        qwen = new { status = "DEGRADED", reason = "nats_unavailable", mode = qwenMode };
+    }
+    else if (!fresh.TryGetValue("summary-worker", out var summaryWorker) || !IsFreshWorker(summaryWorker, checkedAt))
+    {
+        qwen = new { status = "DEGRADED", reason = "summary_worker_stale", mode = qwenMode };
+    }
+    else if (!IsIdentityMatch(summaryWorker, expectedBuildIdentity))
+    {
+        qwen = new { status = "DEGRADED", reason = "summary_worker_identity_mismatch", mode = qwenMode };
+    }
+    else if (operations is not null && operations.OrphanedGpuJobs > 0)
+    {
+        // A durable RUNNING job without a fresh matching worker owner is an
+        // ownership conflict, not a healthy busy GPU.  Keep Qwen visibly
+        // recoverable instead of advertising READY or waiting for 30 minutes.
+        qwen = new { status = "DEGRADED", reason = "gpu_job_orphaned", mode = qwenMode };
+    }
+    else
+    {
+        var capabilities = summaryWorker.Capabilities.RootElement;
+        var modelAvailable = capabilities.TryGetProperty("modelAvailable", out var model) && model.ValueKind == JsonValueKind.True;
+        var manifestAvailable = capabilities.TryGetProperty("modelManifestAvailable", out var manifest) && manifest.ValueKind == JsonValueKind.True;
+        var manifestValid = capabilities.TryGetProperty("modelManifestValid", out var validManifest) && validManifest.ValueKind == JsonValueKind.True;
+        var llamaAvailable = capabilities.TryGetProperty("llamaRuntimeAvailable", out var llama) && llama.ValueKind == JsonValueKind.True;
+        var llamaResident = capabilities.TryGetProperty("llamaResidentEnabled", out var resident) && resident.ValueKind == JsonValueKind.True;
+        var llamaRuntimeState = capabilities.TryGetProperty("llamaRuntimeState", out var runtimeState) && runtimeState.ValueKind == JsonValueKind.String
+            ? runtimeState.GetString()
+            : null;
+        var llamaRuntimeFailed = llamaResident && string.Equals(llamaRuntimeState, "FAILED", StringComparison.OrdinalIgnoreCase);
+        var llamaRuntimeStarting = llamaResident && string.Equals(llamaRuntimeState, "STARTING", StringComparison.OrdinalIgnoreCase);
+        var gpuBusy = gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
+        var asrBusy = operations is not null && (operations.HealthyGpuJobs > 0 || operations.QueuedAsrJobs > 0);
+        var summaryBusy = summaryWorker.CurrentJobId is not null || string.Equals(summaryWorker.Status, "BUSY", StringComparison.OrdinalIgnoreCase);
+        qwen = !modelAvailable ? new { status = "UNAVAILABLE", reason = "model_missing", mode = qwenMode }
+            : !manifestAvailable ? new { status = "DEGRADED", reason = "model_manifest_missing", mode = qwenMode }
+            : !manifestValid ? new { status = "UNAVAILABLE", reason = "model_manifest_mismatch", mode = qwenMode }
+            : !llamaAvailable ? new { status = "UNAVAILABLE", reason = "llama_runtime_missing", mode = qwenMode }
+            : llamaRuntimeFailed ? new { status = "UNAVAILABLE", reason = "llama_runtime_failed", mode = qwenMode }
+            : llamaRuntimeStarting ? new { status = "DEGRADED", reason = "llama_runtime_starting", mode = qwenMode }
+            : !IsActiveWorker(summaryWorker) ? new { status = "DEGRADED", reason = string.Equals(summaryWorker.Status, "STARTING", StringComparison.OrdinalIgnoreCase) ? "summary_worker_starting" : "summary_worker_not_ready", mode = qwenMode }
+            : string.Equals(summaryWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase) ? new { status = "UNAVAILABLE", reason = summaryWorker.LastErrorCode ?? "summary_worker_unavailable", mode = qwenMode }
+            : string.Equals(summaryWorker.Status, "DEGRADED", StringComparison.OrdinalIgnoreCase) ? new { status = "DEGRADED", reason = summaryWorker.LastErrorCode ?? "summary_worker_degraded", mode = qwenMode }
+            : summaryBusy || asrBusy || gpuBusy ? new { status = "BUSY", reason = summaryBusy ? "summary_processing" : asrBusy ? "gpu_asr_active" : "gpu_lease_busy", mode = qwenMode }
+            : new { status = "READY", reason = "summary_worker_ready", mode = qwenMode };
+    }
+    var memoryWorker = fresh.TryGetValue("memory-worker", out var memoryWorkerItem) && IsFreshWorker(memoryWorkerItem, checkedAt);
+    var memory = !memoryEnabled
+        ? new { status = "DISABLED", reason = "meeting_memory_disabled" }
+        : !memoryWorker
+            ? new { status = "DEGRADED", reason = "memory_worker_stale" }
+            : !IsIdentityMatch(memoryWorkerItem!, expectedBuildIdentity)
+                ? new { status = "DEGRADED", reason = "memory_worker_identity_mismatch" }
+                : string.Equals(memoryWorkerItem!.Status, "READY", StringComparison.OrdinalIgnoreCase)
+                    ? new { status = "READY", reason = "memory_worker_ready" }
+                    : new { status = "DEGRADED", reason = memoryWorkerItem.LastErrorCode ?? "memory_worker_not_ready" };
+    var qwenProductReady = !qwenEnabled || (
+        fresh.TryGetValue("summary-worker", out var productSummaryWorker)
+        && IsFreshWorker(productSummaryWorker, checkedAt)
+        && IsIdentityMatch(productSummaryWorker, expectedBuildIdentity)
+        && IsActiveWorker(productSummaryWorker)
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("modelAvailable", out var productModel)
+        && productModel.ValueKind == JsonValueKind.True
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("modelManifestValid", out var productManifest)
+        && productManifest.ValueKind == JsonValueKind.True
+        && productSummaryWorker.Capabilities.RootElement.TryGetProperty("llamaRuntimeAvailable", out var productLlama)
+        && productLlama.ValueKind == JsonValueKind.True);
+    var gpuWorkerFailed = gpuWorker is null
+        || string.Equals(gpuWorker.Status, "FAILED", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(gpuWorker.Status, "UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
+    var gpuStatus = !cuda || gpuWorkerFailed
+        ? "UNAVAILABLE"
+        : operations is not null && operations.OrphanedGpuJobs > 0
+            ? "DEGRADED"
+        : gpuWorker?.CurrentJobId is not null || string.Equals(gpuWorker?.Status, "BUSY", StringComparison.OrdinalIgnoreCase)
+            ? "BUSY"
+            : "READY";
+    var ready = postgres && nats && storage && requiredWorkersReady && cuda && !identityMismatch && releaseIdentityValid;
+    if (operations is not null && operations.OrphanedGpuJobs > 0)
+        ready = false;
+    var readinessReasons = new List<string>();
+    if (operations is not null && operations.OrphanedGpuJobs > 0) readinessReasons.Add("gpu_job_orphaned");
+    if (operations is not null && operations.HealthyGpuJobs > 0) readinessReasons.Add("gpu_asr_active");
+    if (operations is not null && operations.QueuedAssistantQueries > 0 && (operations.HealthyGpuJobs > 0 || operations.QueuedAsrJobs > 0)) readinessReasons.Add("assistant_waiting_for_gpu");
+    var productBlockers = new List<string>();
+    if (!ready) productBlockers.Add("core_runtime_not_ready");
+    if (!string.Equals(hf, "READY", StringComparison.OrdinalIgnoreCase)) productBlockers.Add("diarization_not_ready");
+    if (qwenEnabled && !qwenProductReady) productBlockers.Add("qwen_not_ready");
+    if (memoryEnabled && (!memoryWorker || memoryCoverage is null)) productBlockers.Add("memory_worker_not_ready");
+    else if (memoryEnabled && memoryCoverage!.MissingProjectionCount > 0) productBlockers.Add("memory_projection_incomplete");
+    else if (memoryEnabled && memoryCoverage!.FailedJobCount > 0) productBlockers.Add("memory_jobs_failed");
+    var productReady = productBlockers.Count == 0;
+
+    return Results.Ok(new
+    {
+        ready,
+        productReady,
+        productBlockers,
+        buildIdentity = expectedBuildIdentity,
+        releaseIdentityValid,
+        identityMismatch,
+        reasons = readinessReasons,
+        checkedAt,
+        components = new
+        {
+            gateway = new { status = "READY", checkedAt },
+            postgres = new { status = postgres ? "READY" : "UNAVAILABLE" },
+            nats = new { status = nats ? "READY" : "UNAVAILABLE" },
+            storage = new { status = storage ? "READY" : "UNAVAILABLE", root = mediaRoot },
+            recordingIngress = new { status = postgres && storage ? "READY" : "UNAVAILABLE", database = postgres ? "READY" : "UNAVAILABLE", storage = storage ? "READY" : "UNAVAILABLE" },
+            workers = workerReady,
+            cuda = new { status = gpuStatus },
+            whisperx = new
+            {
+                status = operations is not null && operations.OrphanedGpuJobs > 0
+                    ? "DEGRADED"
+                    : gpuStatus == "BUSY" ? "BUSY" : requiredWorkersReady && cuda ? "READY" : "UNAVAILABLE",
+                gpu = gpuStatus
+            },
+            hfDiarization = new { status = hf },
+            memory,
+            memoryCoverage,
+            recorder = new { status = "OPTIONAL" },
+            qwen,
+            // Optional diagnostics are sourced from the same summary-worker
+            // heartbeat that owns the resident runtime. They are additive and
+            // contain no prompt, answer or model secret.
+            qwenRuntime = fresh.TryGetValue("summary-worker", out var qwenWorkerDiagnostics)
+                ? qwenWorkerDiagnostics.Capabilities
+                : (JsonDocument?)null
+        },
+        queue = operations is null ? null : new
+        {
+            queuedJobs = operations.QueuedJobs,
+            runningJobs = operations.RunningJobs,
+            staleLeases = operations.StaleLeases,
+            pendingOutbox = operations.PendingOutbox,
+            activeGpuJobs = operations.ActiveGpuJobs,
+            failedJobs24h = operations.FailedJobs24h,
+            staleRecordingSessions = operations.StaleRecordingSessions,
+            healthyGpuJobs = operations.HealthyGpuJobs,
+            orphanedGpuJobs = operations.OrphanedGpuJobs,
+            activeInboxLeases = operations.ActiveInboxLeases,
+            oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
+                queuedAssistantQueries = operations.QueuedAssistantQueries,
+                queuedAsrJobs = operations.QueuedAsrJobs,
+                queuedMemoryJobs = operations.QueuedMemoryJobs,
+                failedMemoryJobs24h = operations.FailedMemoryJobs24h
+        },
+        llmRuntime = llmRuntime is null ? null : new
+        {
+            llmOwner = llmRuntime.Owner,
+            llmOwnerHeartbeatAgeSeconds = llmRuntime.OwnerHeartbeatAt is null
+                ? (double?)null
+                : Math.Max(0, (DateTimeOffset.UtcNow - llmRuntime.OwnerHeartbeatAt.Value).TotalSeconds),
+            llmActive = llmRuntime.Active,
+            llmActiveWorkload = llmRuntime.ActiveWorkload,
+            llmActiveRequestId = llmRuntime.ActiveRequestId
+        }
+    });
+});
+
+app.MapGet("/api/internal/runtime/readiness", async (HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    var expected = configuration["SUPERVISOR_HEALTH_TOKEN"] ?? string.Empty;
+    var supplied = context.Request.Headers["X-WhisperX-Supervisor-Token"].ToString();
+    var expectedBytes = Encoding.UTF8.GetBytes(expected);
+    var suppliedBytes = Encoding.UTF8.GetBytes(supplied);
+    if (expectedBytes.Length < 32 || !CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes))
+        return Results.Json(new { error = "SUPERVISOR_TOKEN_INVALID" }, statusCode: StatusCodes.Status401Unauthorized);
+
+    try
+    {
+        var workers = await store.ListWorkerRuntimeAsync();
+        var operations = await store.GetOperationsSnapshotAsync();
+        var llm = await store.GetLlmRuntimeSnapshotAsync();
+        var identity = configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"] ?? "dev";
+        var releaseIdentityValid = !string.IsNullOrWhiteSpace(identity)
+            && !identity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+            && !identity.Contains("dirty", StringComparison.OrdinalIgnoreCase)
+            && identity.Contains('+', StringComparison.Ordinal)
+            && identity[(identity.IndexOf('+') + 1)..].Length >= 40;
+        return Results.Ok(new
+        {
+            buildIdentity = identity,
+            releaseIdentityValid,
+            checkedAt = DateTimeOffset.UtcNow,
+            workers = workers.Select(worker => new
+            {
+                name = worker.WorkerName,
+                status = worker.Status,
+                version = worker.Version,
+                currentJobId = worker.CurrentJobId,
+                lastSeenAt = worker.LastSeenAt,
+                lastErrorCode = worker.LastErrorCode,
+                // Safe model attestation only: worker capabilities contain
+                // revisions, paths and hashes, never HF tokens or user data.
+                capabilities = worker.Capabilities
+            }),
+            queue = new
+            {
+                orphanedGpuJobs = operations.OrphanedGpuJobs,
+                healthyGpuJobs = operations.HealthyGpuJobs,
+                activeInboxLeases = operations.ActiveInboxLeases,
+                oldestGpuProgressAgeSeconds = operations.OldestGpuProgressAgeSeconds,
+                queuedAssistantQueries = operations.QueuedAssistantQueries,
+                queuedAsrJobs = operations.QueuedAsrJobs,
+                queuedMemoryJobs = operations.QueuedMemoryJobs,
+                failedMemoryJobs24h = operations.FailedMemoryJobs24h,
+                pendingOutbox = operations.PendingOutbox
+            },
+            qwen = llm is null ? null : new
+            {
+                llmOwner = llm.Owner,
+                llmOwnerHeartbeatAt = llm.OwnerHeartbeatAt,
+                llm.Active,
+                llm.ActiveWorkload,
+                llm.ActiveRequestId
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "Internal supervisor readiness query failed");
+        return Results.Json(new { error = "SUPERVISOR_READINESS_UNAVAILABLE" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapGet("/api/system/status", async () =>
+{
+    try
+    {
+        await db.PingAsync();
+        var root = Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data";
+        var path = Path.GetPathRoot(Path.GetFullPath(root)) ?? Path.DirectorySeparatorChar.ToString();
+        var drive = new DriveInfo(path);
+        return Results.Ok(new { ready = true, postgres = true, freeBytes = drive.AvailableFreeSpace, totalBytes = drive.TotalSize, checkedAt = DateTimeOffset.UtcNow });
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "System status check failed");
+        return Results.Ok(new { ready = false, postgres = false, freeBytes = 0L, totalBytes = 0L, checkedAt = DateTimeOffset.UtcNow });
+    }
+});
+
+app.MapGet("/api/admin/operations", async (HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    return Results.Ok(await store.GetOperationsSnapshotAsync());
+});
+
+app.MapGet("/api/admin/audit", async (Guid? meetingId, string? eventType, int? limit, int? offset, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    var normalizedEventType = string.IsNullOrWhiteSpace(eventType) ? null : eventType.Trim();
+    if (normalizedEventType is not null && normalizedEventType.Length > 80)
+        return Results.BadRequest(new { error = "event_type_too_long" });
+    return Results.Ok(await store.ListAuditEventsAsync(
+        meetingId,
+        normalizedEventType,
+        Math.Clamp(limit ?? 100, 1, 200),
+        Math.Max(offset ?? 0, 0)));
+});
+app.MapGet("/api/admin/meetings/{id:guid}/diagnostics", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var meeting = await db.GetMeetingAsync(id, null, true);
+    if (meeting is null) return Results.NotFound();
+    var jobs = await db.ListJobsAsync(id);
+    var media = await db.ListMediaAsync(id);
+    var recordingTracks = await store.ListRecordingTracksAsync(id);
+    var recordingCorrelation = await store.ListRecordingCorrelationAsync(id);
+    var transcript = await db.GetTranscriptAsync(id);
+    var summary = await store.GetLatestSummaryAsync(id);
+    var traceId = context.Request.Headers["X-Trace-Id"].ToString();
+    return Results.Ok(new
+    {
+        meeting = new { meeting.Id, meeting.Status, meeting.CreatedAt },
+        media = media.Select(item => new { item.Id, item.Status, item.DurationMs, item.SizeBytes }),
+        recordingTracks = recordingTracks.Select(track => new { track.Id, track.SessionId, track.TrackType, track.DeviceId, track.DeviceName, track.SelectionMode, track.RecordingProfile, track.SampleRate, track.Channels, track.Encoding, track.BitsPerSample, track.SourceEncoding, track.SourceSubFormat, track.ValidBitsPerSample }),
+        jobs = jobs.Select(item => new { item.Id, item.Type, item.Status, item.Stage, item.Progress, item.Attempt, item.Error }),
+        transcript = transcript is null ? null : new
+        {
+            transcript.Id,
+            transcript.Status,
+            segmentCount = transcript.Segments.Count,
+            transcript.IsPartial,
+            transcript.QualityScore,
+            warnings = transcript.Warnings
+        },
+        summary = summary is null ? null : new { summary.Id, summary.Status, summary.Version, summary.ModelName, summary.PromptVersion, summary.CreatedAt },
+        correlation = new
+        {
+            meetingId = id,
+            localServerSessions = recordingCorrelation.Select(item => new { item.LocalSessionId, serverSessionId = item.ServerSessionId, item.PipelineCorrelationId }),
+            mediaAssetIds = media.Select(item => item.Id),
+            processingJobIds = jobs.Select(item => item.Id),
+            transcriptId = transcript?.Id,
+            summaryId = summary?.Id,
+            requestTraceId = string.IsNullOrWhiteSpace(traceId) ? null : traceId
+        },
+        timings = recordingCorrelation.Select(item => new { serverSessionId = item.ServerSessionId, item.PipelineCorrelationId, stages = item.Timings.RootElement })
+    });
+});
+
+app.MapPost("/api/auth/login", async (LoginRequest request, HttpContext http, IConfiguration configuration) =>
+{
+    var username = request.Username?.Trim();
+    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(request.Password))
+        return Results.Json(new { error = "INVALID_LOGIN_REQUEST", retryable = false }, statusCode: StatusCodes.Status400BadRequest);
+
+    var user = await db.FindUserAsync(username);
+    if (user is null || !PasswordService.Verify(request.Password, user.PasswordHash))
+        return Results.Json(new { error = "INVALID_CREDENTIALS", retryable = false }, statusCode: StatusCodes.Status401Unauthorized);
+
+    await IssueAuthCookiesAsync(http, configuration, user);
+    return Results.Ok(new { user = new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = user.MustChangePassword } });
+});
+
+app.MapPost("/api/auth/change-password", async (ChangePasswordRequest request, HttpContext http, IConfiguration configuration) =>
+{
+    if (CurrentUserId(http) is not Guid userId) return Results.Unauthorized();
+    var currentSession = http.Request.Cookies["wa_session"];
+    if (string.IsNullOrWhiteSpace(request.NewPassword) || request.NewPassword.Length < 12)
+        return Results.BadRequest(new { error = "password_minimum_length_12" });
+    if (!await db.ChangePasswordAsync(userId, request.CurrentPassword, request.NewPassword, currentSession))
+        return Results.BadRequest(new { error = "password_change_rejected" });
+    var user = await db.GetUserForSessionAsync(currentSession ?? string.Empty);
+    if (user is null) return Results.Unauthorized();
+    await IssueAuthCookiesAsync(http, configuration, user);
+    if (!string.IsNullOrWhiteSpace(currentSession)) await db.RevokeSessionAsync(currentSession);
+    return Results.Ok(new { changed = true, user = new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = false } });
+});
+
+app.MapPost("/api/auth/refresh", async (HttpContext http, IConfiguration configuration) =>
+{
+    if (!http.Request.Cookies.TryGetValue("wa_refresh", out var currentRefresh) || string.IsNullOrWhiteSpace(currentRefresh))
+        return Results.Unauthorized();
+
+    var accessToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var refreshToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+    var rotated = await db.RotateRefreshSessionAsync(currentRefresh, refreshToken);
+    if (rotated is null)
+    {
+        DeleteAuthCookies(http);
+        return Results.Unauthorized();
+    }
+
+    await db.CreateSessionAsync(rotated.User.Id, accessToken);
+    AppendAuthCookies(http, configuration, accessToken, refreshToken);
+    return Results.Ok(new { user = new { id = rotated.User.Id, username = rotated.User.Username, role = rotated.User.Role } });
+});
+
+app.MapPost("/api/auth/logout", async (HttpContext http) =>
+{
+    if (http.Request.Cookies.TryGetValue("wa_session", out var token))
+        await db.RevokeSessionAsync(token);
+    if (http.Request.Cookies.TryGetValue("wa_refresh", out var refreshToken))
+        await db.RevokeRefreshSessionAsync(refreshToken);
+    http.Response.Cookies.Delete("wa_session");
+    http.Response.Cookies.Delete("wa_refresh");
+    return Results.Ok(new { ok = true });
+});
+
+app.MapGet("/api/auth/me", async (HttpContext http) =>
+{
+    var user = await db.GetUserForSessionAsync(http.Request.Cookies["wa_session"]!);
+    return user is null
+        ? Results.Unauthorized()
+        : Results.Ok(new { id = user.Id, username = user.Username, role = user.Role, mustChangePassword = user.MustChangePassword });
+});
+
+app.MapGet("/api/admin/users", async (HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return Results.Ok(await db.ListUsersAsync());
+});
+
+app.MapPost("/api/admin/users", async (AdminUserCreateRequest request, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var username = request.Username?.Trim();
+    var role = request.Role?.Trim();
+    if (string.IsNullOrWhiteSpace(username) || username.Length > 160 || role is not ("Administrator" or "Operator" or "Editor" or "Reader"))
+        return Results.BadRequest(new { error = "invalid_user" });
+    var temporaryPassword = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+    var user = await db.CreateUserAsync(username, role, temporaryPassword);
+    return user is null ? Results.Conflict(new { error = "user_exists" }) : Results.Created($"/api/admin/users/{user.Id}", new { user, temporaryPassword });
+});
+
+app.MapPatch("/api/admin/users/{userId:guid}", async (Guid userId, AdminUserUpdateRequest request, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    if (request.Role is not null && request.Role is not ("Administrator" or "Operator" or "Editor" or "Reader"))
+        return Results.BadRequest(new { error = "invalid_role" });
+    return await db.UpdateUserAsync(userId, request.Role, request.IsActive) ? Results.Ok(new { updated = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/reset-password", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var temporaryPassword = await db.ResetPasswordAsync(userId);
+    return temporaryPassword is null ? Results.NotFound() : Results.Ok(new { userId, temporaryPassword });
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/disable", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var updated = await db.UpdateUserAsync(userId, null, false);
+    if (updated) await db.RevokeUserSessionsAsync(userId);
+    return updated ? Results.Ok(new { userId, isActive = false }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/enable", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return await db.UpdateUserAsync(userId, null, true) ? Results.Ok(new { userId, isActive = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/revoke-sessions", async (Guid userId, HttpContext context) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return await db.RevokeUserSessionsAsync(userId) ? Results.Ok(new { userId, revoked = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/meetings", async (MeetingCreateRequest request, HttpContext context) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Title))
+        return Results.BadRequest(new { error = "title_required" });
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
+
+    var meeting = await db.CreateMeetingAsync(userId, request.Title.Trim(), request.Description);
+    return Results.Created("/api/meetings/" + meeting.Id, meeting);
+});
+
+app.MapGet("/api/meetings", async (int? limit, int? offset, HttpContext context) =>
+{
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    return Results.Ok(await db.ListMeetingsAsync(Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), userId, includeAll));
+});
+
+app.MapGet("/api/transcripts", async (int? limit, int? offset, string? search, string? status, DateTime? dateFrom, DateTime? dateTo, HttpContext context) =>
+{
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    if (search?.Length > 200 || status?.Length > 80) return Results.BadRequest(new { error = "invalid_registry_filter" });
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    var rows = await db.ListTranscriptRegistryAsync(
+        Math.Clamp(limit ?? 50, 1, 200), Math.Max(offset ?? 0, 0), search?.Trim(), status?.Trim(), dateFrom, dateTo, userId, includeAll);
+    return Results.Ok(rows);
+});
+
+app.MapGet("/api/search", async (string? q, Guid? meetingId, int? limit, int? offset, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is not Guid userId)
+        return Results.Unauthorized();
+    var query = q?.Trim();
+    if (string.IsNullOrWhiteSpace(query))
+        return Results.BadRequest(new { error = "query_required" });
+    if (query.Length > 200)
+        return Results.BadRequest(new { error = "query_too_long" });
+    if (meetingId is Guid selectedMeeting && !await CanReadMeetingAsync(context, selectedMeeting))
+        return Results.NotFound();
+
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+
+    return Results.Ok(await store.SearchAsync(
+        query,
+        meetingId,
+        userId,
+        includeAll,
+        Math.Clamp(limit ?? 50, 1, 200),
+        Math.Max(offset ?? 0, 0)));
+});
+
+app.MapGet("/api/meetings/{id:guid}", async (Guid id, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    var meeting = await db.GetMeetingAsync(id, CurrentUserId(context), includeAll);
+    return meeting is null ? Results.NotFound() : Results.Ok(meeting);
+});
+
+app.MapPost("/api/meetings/{id:guid}/cancel", async (Guid id, MeetingCancelRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    var result = await db.CancelMeetingAsync(id, request?.Force == true);
+    if (result is null) return Results.NotFound();
+    if (result.RecordingMustStop) return Results.Conflict(new { error = "recording_must_stop_before_cancellation" });
+    var commands = await QueueRecorderCancellationAsync(store, result.AgentSessions, discardTransport: false);
+    return Results.Ok(new { result.MeetingId, result.Status, result.CancelledJobs, agentCommandsQueued = commands });
+});
+
+app.MapDelete("/api/meetings/{id:guid}", async (Guid id, bool? force, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    var result = await db.DeleteMeetingAsync(id, force == true);
+    if (result is null) return Results.NotFound();
+    if (result.RecordingMustStop) return Results.Conflict(new { error = "recording_must_stop_before_deletion" });
+    var commands = await QueueRecorderCancellationAsync(store, result.AgentSessions, discardTransport: true);
+    // Physical deletion is durable and retried by StorageDeletionService. Do
+    // not perform unbounded File.Delete work in the request or lose an object
+    // when antivirus/Explorer temporarily holds it.
+    var queued = result.StorageKeys.Count;
+    return Results.Ok(new
+    {
+        result.MeetingId,
+        result.CancelledJobs,
+        agentCommandsQueued = commands,
+        filesDeleted = 0,
+        fileDeleteFailures = Array.Empty<string>(),
+        filesDeletionQueued = queued,
+        physicalCleanup = queued > 0 ? "PENDING" : "COMPLETE"
+    });
+});
+
+app.MapPost("/api/meetings/{id:guid}/uploads", async (Guid id, UploadReservationRequest request, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, id))
+        return Results.NotFound();
+    if (string.IsNullOrWhiteSpace(request.FileName) ||
+        !MediaPolicy.IsAllowedExtension(request.FileName) ||
+        request.SizeBytes <= 0 || request.SizeBytes > MediaPolicy.MaxUploadBytes)
+        return Results.BadRequest(new { error = "unsupported_or_oversized_media" });
+
+    var uploadId = Guid.NewGuid();
+    await db.CreateUploadReservationAsync(id, uploadId, request.FileName, request.SizeBytes);
+    return Results.Ok(new
+    {
+        uploadId,
+        uploadUrl = "/files/" + uploadId,
+        tusVersion = "1.0.0",
+        maxSizeBytes = 8L * 1024 * 1024 * 1024,
+    });
+});
+
+app.MapPost("/api/uploads/complete", async (HttpRequest request, UploadCompleteRequest payload, IConfiguration configuration) =>
+{
+    var expectedSecret = configuration["TUS_HOOK_SECRET"];
+    var suppliedSecret = request.Headers["X-Tus-Hook-Secret"].ToString();
+    if (string.IsNullOrWhiteSpace(expectedSecret) || string.IsNullOrWhiteSpace(suppliedSecret) ||
+        !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedSecret), Encoding.UTF8.GetBytes(suppliedSecret)))
+        return Results.Unauthorized();
+
+    var job = await db.CompleteUploadAsync(payload);
+    return job is null ? Results.NotFound() : Results.Accepted("/api/jobs/" + job.Id, job);
+});
+
+app.MapPost("/api/internal/tusd/hooks", async (JsonElement payload, HttpRequest request, IConfiguration configuration) =>
+{
+    if (!SecretMatches(request, configuration["TUS_HOOK_SECRET"]))
+        return Results.Unauthorized();
+    var eventType = JsonValue(payload, "Type") ?? JsonValue(payload, "Event", "Type") ?? JsonValue(payload, "Event", "TypeName");
+    if (!string.Equals(eventType, "post-finish", StringComparison.OrdinalIgnoreCase))
+        return Results.Ok(new { ignored = true, eventType });
+    var upload = JsonObject(payload, "Event", "Upload") ?? JsonObject(payload, "Upload") ?? payload;
+    var uploadIdText = JsonValue(upload, "ID") ?? JsonValue(upload, "Id");
+    var metadata = JsonObject(upload, "MetaData") ?? JsonObject(upload, "Metadata");
+    var reservationText = metadata.HasValue ? (JsonValue(metadata.Value, "reservationId") ?? JsonValue(metadata.Value, "reservation_id")) : null;
+    if (!Guid.TryParse(reservationText ?? uploadIdText, out var reservationId))
+        return Results.BadRequest(new { error = "reservation_id_required" });
+    var uploadId = uploadIdText ?? reservationId.ToString();
+    var originalName = metadata.HasValue ? (JsonValue(metadata.Value, "filename") ?? JsonValue(metadata.Value, "name")) : null;
+    originalName ??= "upload-" + uploadId;
+    var size = JsonLong(upload, "Size") ?? JsonLong(upload, "size") ?? 0;
+    if (!MediaPolicy.IsAllowedExtension(originalName))
+        return Results.BadRequest(new { error = "unsupported_audio_format" });
+    if (size <= 0 || size > 8L * 1024 * 1024 * 1024)
+        return Results.BadRequest(new { error = "media_size_limit" });
+    var storageKey = "/data/uploads/" + uploadId;
+    var uploadedPath = StorageHelpers.StoragePath(storageKey);
+    if (!File.Exists(uploadedPath))
+        return Results.Conflict(new { error = "upload_file_not_ready" });
+    var actualSize = new FileInfo(uploadedPath).Length;
+    if (size > 0 && actualSize != size)
+        return Results.BadRequest(new { error = "upload_size_mismatch" });
+    var sha256 = await StorageHelpers.ComputeSha256Async(uploadedPath);
+    var job = await db.CompleteUploadAsync(new UploadCompleteRequest(reservationId, storageKey, sha256, actualSize, 0));
+    return job is null ? Results.NotFound(new { error = "upload_reservation_not_found" }) : Results.Accepted("/api/jobs/" + job.Id, job);
+});
+
+app.MapPost("/api/internal/imports", async (ImportRequest request, HttpRequest http, IConfiguration configuration) =>
+{
+    var expected = configuration["IMPORT_WORKER_TOKEN"];
+    var supplied = http.Headers["X-Import-Worker-Token"].ToString();
+    if (string.IsNullOrWhiteSpace(expected) || !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(supplied)))
+        return Results.Unauthorized();
+    if (!MediaPolicy.IsAllowedExtension(request.OriginalName) || string.IsNullOrWhiteSpace(request.SourceType) || request.SourceType.Length > 80 || !System.Text.RegularExpressions.Regex.IsMatch(request.Sha256 ?? string.Empty, "^[0-9a-fA-F]{64}$") || request.SizeBytes <= 0 || request.SizeBytes > 8L * 1024 * 1024 * 1024)
+        return Results.BadRequest(new { error = "unsupported_or_oversized_audio" });
+    string sourcePath;
+    try { sourcePath = StorageHelpers.StoragePath(request.StorageKey); }
+    catch (InvalidOperationException) { return Results.BadRequest(new { error = "invalid_import_storage_key" }); }
+    if (!File.Exists(sourcePath)) return Results.Conflict(new { error = "import_file_not_ready" });
+    var actualSize = new FileInfo(sourcePath).Length;
+    if (actualSize != request.SizeBytes) return Results.BadRequest(new { error = "import_size_mismatch" });
+    var actualSha256 = await StorageHelpers.ComputeSha256Async(sourcePath);
+    if (!string.Equals(actualSha256, request.Sha256, StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new { error = "import_checksum_mismatch" });
+    var job = await db.RegisterImportAsync(request);
+    return Results.Accepted("/api/jobs/" + job.Id, job);
+});
+
+static bool AgentMatches(HttpContext context, Guid agentId) => context.Items.TryGetValue("agent_id", out var item) && item is Guid authenticated && authenticated == agentId;
+
+static Guid? CurrentUserId(HttpContext context) => context.Items.TryGetValue("user_id", out var item) && item is Guid userId ? userId : null;
+
+static bool IsPrivileged(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
+    (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase));
+
+static bool IsAdministrator(HttpContext context) => context.Items.TryGetValue("user_role", out var item) && item is string role &&
+    string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase);
+
+// DEPLOYMENT was the original name used by the LAN pilot. ORGANIZATION is the
+// public additive name; both values intentionally mean read-only sharing of
+// canonical meeting data while mutations remain owner/privileged-only.
+static bool IsSharedMeetingReadScope(IConfiguration configuration)
+{
+    var value = configuration["MEETING_READ_SCOPE"]?.Trim();
+    return string.Equals(value, "DEPLOYMENT", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(value, "ORGANIZATION", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsValidEmbeddingJson(JsonDocument? document)
+{
+    if (document is null || document.RootElement.ValueKind != JsonValueKind.Array)
+        return document is null;
+    var length = document.RootElement.GetArrayLength();
+    if (length is < 1 or > 2048) return false;
+    foreach (var item in document.RootElement.EnumerateArray())
+        if (item.ValueKind != JsonValueKind.Number || !item.TryGetDouble(out var value) || double.IsNaN(value) || double.IsInfinity(value)) return false;
+    return true;
+}
+
+async Task<bool> CanAccessMeetingAsync(HttpContext context, Guid meetingId)
+{
+    // Assistant access is always evaluated against the authenticated Desktop
+    // user. The legacy Voice Host token is intentionally not an ownership
+    // bypass; managed Voice Host requests arrive through the Desktop broker.
+    // context.Items.ContainsKey("voice_host") is therefore diagnostic-only,
+    // never an authorization decision.
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    return userId.HasValue && await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
+
+async Task<bool> CanAccessAssistantMeetingAsync(HttpContext context, Guid meetingId)
+{
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    if (!userId.HasValue) return false;
+    if (IsSharedMeetingReadScope(builder.Configuration))
+        return true;
+    return await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
+
+async Task<bool> CanReadMeetingAsync(HttpContext context, Guid meetingId)
+{
+    if (IsPrivileged(context)) return true;
+    var userId = CurrentUserId(context);
+    if (!userId.HasValue) return false;
+    if (IsSharedMeetingReadScope(builder.Configuration))
+        return true;
+    return await db.UserOwnsMeetingAsync(meetingId, userId.Value);
+}
+
+static bool RoleAllows(string role, string method, PathString path)
+{
+    if (string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "Operator", StringComparison.OrdinalIgnoreCase)) return true;
+    if (path.StartsWithSegments("/api/auth/change-password")) return true;
+    if (path.StartsWithSegments("/api/agents/bootstrap")) return HttpMethods.IsPost(method);
+    if (HttpMethods.IsGet(method) || HttpMethods.IsHead(method)) return true;
+    if (!string.Equals(role, "Editor", StringComparison.OrdinalIgnoreCase)) return false;
+    if (HttpMethods.IsPatch(method)) return true;
+    if (HttpMethods.IsDelete(method) && path.StartsWithSegments("/api/assistant/conversations")) return true;
+    return HttpMethods.IsPost(method) &&
+        (path == "/api/meetings" ||
+         (path.StartsWithSegments("/api/meetings/") && path.Value?.EndsWith("/uploads", StringComparison.OrdinalIgnoreCase) == true) ||
+         path.StartsWithSegments("/api/assistant/queries") || path.StartsWithSegments("/api/assistant/requests") || path.StartsWithSegments("/api/assistant/conversations") ||
+         path.StartsWithSegments("/api/assistant/live-segments") ||
+         path == "/api/speaker-profiles" || path.StartsWithSegments("/api/speaker-profiles/") ||
+         path.Value?.Contains("/speakers/merge", StringComparison.OrdinalIgnoreCase) == true ||
+         path.Value?.EndsWith("/summary/rebuild", StringComparison.OrdinalIgnoreCase) == true ||
+         path.Value?.EndsWith("/transcript/reprocess", StringComparison.OrdinalIgnoreCase) == true);
+}
+
+static bool SecretMatches(HttpRequest request, string? expected)
+{
+    if (string.IsNullOrWhiteSpace(expected)) return false;
+    var supplied = request.Query["secret"].ToString();
+    if (string.IsNullOrWhiteSpace(supplied)) supplied = request.Headers["X-Tus-Hook-Secret"].ToString();
+    return CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(supplied));
+}
+
+static JsonElement? JsonObject(JsonElement value, params string[] path)
+{
+    var current = value;
+    foreach (var name in path)
+    {
+        if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(name, out current)) return null;
+    }
+    return current;
+}
+
+static string? JsonValue(JsonElement value, params string[] path)
+{
+    var obj = JsonObject(value, path);
+    return obj.HasValue && obj.Value.ValueKind == JsonValueKind.String ? obj.Value.GetString() : null;
+}
+
+static long? JsonLong(JsonElement value, params string[] path)
+{
+    var obj = JsonObject(value, path);
+    if (!obj.HasValue) return null;
+    if (obj.Value.ValueKind == JsonValueKind.Number && obj.Value.TryGetInt64(out var number)) return number;
+    return obj.Value.ValueKind == JsonValueKind.String && long.TryParse(obj.Value.GetString(), out number) ? number : null;
+}
+
+static string GetClientUpdateRoot(IConfiguration configuration)
+{
+    var configured = configuration["CLIENT_UPDATE_ROOT"];
+    return Path.GetFullPath(string.IsNullOrWhiteSpace(configured) ? "/updates" : configured);
+}
+
+static bool IsSha256(string? value)
+    => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+
+static bool IsClientUpdateCandidate(string channel, string? currentVersion, string? currentBuildIdentity, string? candidateVersion, string? candidateBuildIdentity)
+{
+    if (string.IsNullOrWhiteSpace(candidateVersion) || string.IsNullOrWhiteSpace(candidateBuildIdentity)) return false;
+    if (candidateBuildIdentity.Contains("dev", StringComparison.OrdinalIgnoreCase)
+        || candidateBuildIdentity.Contains("dirty", StringComparison.OrdinalIgnoreCase)) return false;
+
+    static bool TrySemanticVersion(string? value, out Version version)
+    {
+        var normalized = (value ?? "0.0.0").Trim();
+        var separator = normalized.IndexOfAny(['+', '-']);
+        if (separator >= 0) normalized = normalized[..separator];
+        if (Version.TryParse(normalized, out var parsed))
+        {
+            version = parsed;
+            return true;
+        }
+        version = new Version(0, 0);
+        return false;
+    }
+
+    if (!TrySemanticVersion(candidateVersion, out var candidate)
+        || !TrySemanticVersion(currentVersion, out var current)) return false;
+
+    var comparison = candidate.CompareTo(current);
+    if (comparison > 0) return true;
+    return comparison == 0
+        && string.Equals(channel, "pilot", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(currentBuildIdentity, candidateBuildIdentity, StringComparison.Ordinal);
+}
+
+app.MapPost("/api/v1/agents/enroll", async (AgentEnrollRequest request, HttpRequest http, UnifiedProductStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Name)) return Results.BadRequest(new { error = "agent_name_required" });
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var agent = await store.EnrollAgentAsync(request.Name, request.RoomId, token, request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"));
+    return Results.Ok(new { agentId = agent.Id, agent, token });
+});
+
+app.MapPost("/api/v1/agents/{agentId:guid}/heartbeat", async (Guid agentId, AgentHeartbeatRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!AgentMatches(context, agentId)) return Results.Unauthorized();
+    return await store.HeartbeatAsync(agentId, request.Status ?? "ONLINE", request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"))
+        ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.MapGet("/api/v1/agents/{agentId:guid}/commands/events", async (Guid agentId, long? after, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    if (!AgentMatches(context, agentId)) { response.StatusCode = 401; return; }
+    response.Headers.ContentType = "text/event-stream"; response.Headers.CacheControl = "no-cache";
+    var cursor = after ?? 0;
+    for (var i = 0; i < 60 && !cancellationToken.IsCancellationRequested; i++)
+    {
+        var commands = await store.PendingCommandsAsync(agentId, cursor);
+        foreach (var command in commands)
+        {
+            cursor = Math.Max(cursor, command.Cursor);
+            await response.WriteAsync($"id: {command.Cursor}\nevent: command\ndata: {JsonSerializer.Serialize(command)}\n\n", cancellationToken);
+        }
+        await response.Body.FlushAsync(cancellationToken);
+        if (commands.Count > 0) return;
+        await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+    }
+});
+
+app.MapPost("/api/v1/agents/{agentId:guid}/commands/{commandId:guid}/result", async (Guid agentId, Guid commandId, AgentCommandResultRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!AgentMatches(context, agentId)) return Results.Unauthorized();
+    return await store.CompleteCommandAsync(agentId, commandId, request.Status ?? "COMPLETED", request.Result ?? JsonDocument.Parse("{}")) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.MapGet("/api/agents", async (UnifiedProductStore store) => Results.Ok(await store.ListAgentsAsync()));
+
+app.MapPost("/api/agents/{agentId:guid}/rotate-token", async (Guid agentId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    return await store.ReplaceAgentTokenAsync(agentId, token)
+        ? Results.Ok(new { agentId, token }) // plaintext is intentionally returned only by this one-time response.
+        : Results.NotFound();
+});
+
+app.MapPost("/api/agents/{agentId:guid}/revoke", async (Guid agentId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    return await store.RevokeAgentTokenAsync(agentId) ? Results.Ok(new { agentId, revoked = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/agents/{agentId:guid}/reenroll", async (Guid agentId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    return await store.ReplaceAgentTokenAsync(agentId, token)
+        ? Results.Ok(new { agentId, token })
+        : Results.NotFound();
+});
+
+app.MapPost("/api/agents/link-local", async (AgentLinkLocalRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsAdministrator(context)) return Results.Forbid();
+    if (request.InstallationId == Guid.Empty) return Results.BadRequest(new { error = "installation_id_required" });
+    if (string.IsNullOrWhiteSpace(request.Name)) return Results.BadRequest(new { error = "agent_name_required" });
+
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var agent = await store.LinkLocalAgentAsync(
+        request.InstallationId,
+        request.AgentId,
+        request.Name,
+        request.RoomId,
+        token,
+        request.Version ?? "0.1.0",
+        request.Capabilities ?? JsonDocument.Parse("{}"));
+    return Results.Ok(new { agentId = agent.Id, agent, token });
+});
+
+app.MapPost("/api/agents/bootstrap", async (AgentBootstrapRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    if (request.InstallationId == Guid.Empty) return Results.BadRequest(new { error = "installation_id_required" });
+    var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    var result = await store.BootstrapAgentAsync(request.InstallationId, userId, string.IsNullOrWhiteSpace(request.Name) ? "WhisperX Atom Recorder" : request.Name.Trim(), request.AgentId, token, request.Version ?? "0.1.0", request.Capabilities ?? JsonDocument.Parse("{}"));
+    if (result is null) return Results.BadRequest(new { error = "agent_bootstrap_rejected" });
+    if (result.ReenrollRequired)
+        return Results.Conflict(new { error = "REENROLL_REQUIRED", state = "REENROLL_REQUIRED", linked = false, reenrollRequired = true, agentId = result.Agent.Id });
+    return Results.Ok(new
+    {
+        state = result.Linked ? "AGENT_READY" : "AGENT_LINK_PENDING",
+        agentId = result.Agent.Id,
+        agent = result.Agent,
+        linked = result.Linked,
+        reenrollRequired = false,
+        token = result.Token
+    });
+});
+
+app.MapPost("/api/v1/recording-sessions", async (CreateRecordingSessionRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var correlationId = request.PipelineCorrelationId ?? context.Request.Headers["X-Correlation-Id"].ToString();
+    var result = await store.CreateRecordingSessionWithResultAsync(request.MeetingId, agentId, request.OwnerUserId, request.Title, request.StartedAt, correlationId, request.LocalSessionId, request.AcousticProfile);
+    if (result.Session is null)
+    {
+        var status = result.ErrorCode switch
+        {
+            "MEETING_NOT_FOUND" => StatusCodes.Status404NotFound,
+            "OWNER_REQUIRED" => StatusCodes.Status422UnprocessableEntity,
+            "AGENT_USER_LINK_REQUIRED" => StatusCodes.Status403Forbidden,
+            "MEETING_OWNER_MISMATCH" or "MEETING_CANCELLED" or "MEETING_BINDING_CONFLICT" => StatusCodes.Status409Conflict,
+            "AGENT_AUTH_REJECTED" => StatusCodes.Status401Unauthorized,
+            _ => StatusCodes.Status503ServiceUnavailable
+        };
+        return Results.Json(new { error = result.ErrorCode ?? "SERVER_STORAGE_ERROR", retryable = result.Retryable, traceId = context.Response.Headers["X-Trace-Id"].ToString() }, statusCode: status);
+    }
+    var payload = new { result.Session.Id, result.Session.MeetingId, result.Session.AgentId, result.Session.State, result.Session.StartedAt, result.Session.FinishedAt, result.Session.PipelineCorrelationId, result.Session.LocalSessionId, created = result.Created };
+    return result.Created
+        ? Results.Created($"/api/v1/recording-sessions/{result.Session.Id}", payload)
+        : Results.Ok(payload);
+});
+
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/tracks", async (Guid sessionId, CreateTrackRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (!await store.AgentSupportsStableTrackBindingAsync(agentId))
+        return Results.Json(new { error = "RECORDER_UPGRADE_REQUIRED", requiredCapability = "STABLE_TRACK_BINDING_V1", retryable = false }, statusCode: StatusCodes.Status426UpgradeRequired);
+    if (request.TrackType is not ("room-microphone" or "system-audio"))
+        return Results.BadRequest(new { error = "recording_track_type_invalid" });
+    if (request.SampleRate is < 8000 or > 192000 || request.Channels is < 1 or > 8)
+        return Results.BadRequest(new { error = "recording_track_format_invalid" });
+    if (request.BitsPerSample is not null and not (8 or 16 or 24 or 32))
+        return Results.BadRequest(new { error = "recording_track_bits_invalid" });
+    if (request.ValidBitsPerSample is not null && (request.ValidBitsPerSample < 1 || request.ValidBitsPerSample > request.BitsPerSample.GetValueOrDefault(32)))
+        return Results.BadRequest(new { error = "recording_track_valid_bits_invalid" });
+    var localTrackId = string.IsNullOrWhiteSpace(request.LocalTrackId) ? null : request.LocalTrackId.Trim();
+    if (localTrackId is null)
+        return Results.BadRequest(new { error = "LOCAL_TRACK_ID_REQUIRED", requiredCapability = "STABLE_TRACK_BINDING_V1" });
+    if (localTrackId is not null && localTrackId.Length > 200)
+        return Results.BadRequest(new { error = "recording_track_local_id_invalid" });
+    var track = await store.CreateRecordingTrackAsync(agentId, sessionId, request.TrackType, request.DeviceId, request.DeviceName, request.SelectionMode, request.RecordingProfile, request.SampleRate, request.Channels, request.Encoding, request.BitsPerSample, request.SourceEncoding, request.SourceSubFormat, request.ValidBitsPerSample, localTrackId);
+    return track is null ? Results.NotFound() : Results.Created($"/api/v1/recording-sessions/{sessionId}/tracks/{track.Id}", track);
+});
+
+app.MapPut("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/chunks/{sequence:int}", async (Guid sessionId, Guid trackId, int sequence, HttpRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (!await store.AgentOwnsTrackAsync(agentId, sessionId, trackId)) return Results.NotFound();
+    if (request.ContentLength is > 134217728) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    if (sequence < 0) return Results.BadRequest(new { error = "chunk_sequence_invalid" });
+    var key = $"/data/recordings/{sessionId:N}/{trackId:N}/{sequence:D8}.flac";
+    var path = StorageHelpers.StoragePath(key);
+    var partPath = path + "." + Guid.NewGuid().ToString("N") + ".part";
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    try
+    {
+        long size;
+        await using (var output = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            size = await CopyRequestBodyWithLimitAsync(request, output, 128L * 1024 * 1024, context.RequestAborted);
+        if (size <= 0)
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_empty" });
+        }
+        var sha = await StorageHelpers.ComputeSha256Async(partPath);
+        var expectedSha = request.Headers["X-Chunk-SHA256"].ToString();
+        if (!string.IsNullOrWhiteSpace(expectedSha) && !System.Text.RegularExpressions.Regex.IsMatch(expectedSha, "^[0-9a-fA-F]{64}$"))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_checksum_invalid" });
+        }
+        if (!string.IsNullOrWhiteSpace(expectedSha) && !string.Equals(expectedSha, sha, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_checksum_mismatch" });
+        }
+        var startHeader = request.Headers["X-Start-Sample"].ToString();
+        var countHeader = request.Headers["X-Sample-Count"].ToString();
+        if ((!string.IsNullOrWhiteSpace(startHeader) && !long.TryParse(startHeader, out _))
+            || (!string.IsNullOrWhiteSpace(countHeader) && !long.TryParse(countHeader, out _)))
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_sample_metadata_invalid" });
+        }
+        var startSample = long.TryParse(startHeader, out var parsedStart) ? parsedStart : 0;
+        var sampleCount = long.TryParse(countHeader, out var parsedCount) ? parsedCount : 0;
+        // A non-empty FLAC without a positive sample timeline is not a valid
+        // raw-first chunk.  Accepting an omitted/zero count lets a legacy or
+        // malformed client reach finalize, where the failure becomes an
+        // opaque media/timeline error instead of an actionable upload error.
+        if (!long.TryParse(countHeader, out parsedCount) || parsedCount <= 0 || startSample < 0)
+        {
+            File.Delete(partPath);
+            return Results.BadRequest(new { error = "chunk_sample_metadata_invalid" });
+        }
+        sampleCount = parsedCount;
+        if (File.Exists(path))
+        {
+            var existingSha = await StorageHelpers.ComputeSha256Async(path);
+            File.Delete(partPath);
+            if (!string.Equals(existingSha, sha, StringComparison.OrdinalIgnoreCase))
+                return Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+            var repaired = await store.ConfirmChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, new FileInfo(path).Length, existingSha);
+            return repaired
+                ? Results.Ok(new { sequence, storageKey = key, sizeBytes = new FileInfo(path).Length, sha256 = existingSha, idempotent = true })
+                : Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+        }
+        var staged = await store.StageChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        if (!staged)
+        {
+            File.Delete(partPath);
+            return Results.Conflict(new { error = "chunk_sequence_hash_conflict" });
+        }
+        File.Move(partPath, path, true);
+        var stored = await store.ConfirmChunkAsync(agentId, sessionId, trackId, sequence, key, startSample, sampleCount, size, sha);
+        if (!stored)
+        {
+            return Results.Json(new { error = "chunk_confirmation_pending" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        return Results.Ok(new { sequence, storageKey = key, sizeBytes = size, sha256 = sha });
+    }
+    catch (RequestBodyTooLargeException)
+    {
+        if (File.Exists(partPath)) File.Delete(partPath);
+        return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    }
+    catch
+    {
+        if (File.Exists(partPath)) File.Delete(partPath);
+        throw;
+    }
+});
+
+static async Task<long> CopyRequestBodyWithLimitAsync(HttpRequest request, Stream destination, long maxBytes, CancellationToken cancellationToken)
+{
+    var buffer = new byte[1024 * 1024];
+    long total = 0;
+    while (true)
+    {
+        var read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);
+        if (read == 0) break;
+        total += read;
+        if (total > maxBytes) throw new RequestBodyTooLargeException();
+        await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+    }
+    await destination.FlushAsync(cancellationToken);
+    return total;
+}
+
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/tracks/{trackId:guid}/missing-chunks", async (Guid sessionId, Guid trackId, int expectedCount, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var missing = await store.MissingChunksAsync(agentId, sessionId, trackId, Math.Clamp(expectedCount, 0, 100000));
+    return missing is null
+        ? Results.NotFound(new { error = "RECORDING_SESSION_NOT_FOUND", retryable = false })
+        : Results.Ok(new { missing });
+});
+
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/finalize", async (Guid sessionId, FinalizeRecordingRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var result = await store.FinalizeRecordingAsync(agentId, sessionId, request?.Manifest);
+    if (!result.Found) return Results.NotFound(new { error = result.ErrorCode });
+    if (!result.Accepted) return Results.Conflict(new { error = result.ErrorCode, missing = result.Missing });
+    return Results.Accepted($"/api/jobs/{result.JobId}", new { result.JobId, result.MediaAssetId, result.MeetingId, sessionId, state = "ASSEMBLY_QUEUED" });
+});
+
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/status", async (Guid sessionId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var status = await store.GetRecordingSessionStatusAsync(agentId, sessionId);
+    return status is null ? Results.NotFound(new { error = "recording_session_not_found" }) : Results.Ok(status);
+});
+
+app.MapGet("/api/v1/recording-sessions/{sessionId:guid}/pipeline", async (Guid sessionId, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    var chain = await store.GetRecordingPipelineChainAsync(agentId, sessionId);
+    return chain is null
+        ? Results.NotFound(new { error = "recording_pipeline_not_found" })
+        : Results.Ok(await AddPipelineReadinessAsync(chain, store, configuration));
+});
+
+app.MapPost("/api/v1/recording-sessions/{sessionId:guid}/events/batch", async (Guid sessionId, RecordingEventBatchRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!context.Items.TryGetValue("agent_id", out var item) || item is not Guid agentId) return Results.Unauthorized();
+    if (request.Events is null || request.Events.Count > 1000) return Results.BadRequest(new { error = "events_invalid" });
+    var accepted = await store.RegisterRecordingEventsAsync(agentId, sessionId, request.Events);
+    return accepted is null ? Results.NotFound() : Results.Ok(new { accepted });
+});
+
+app.MapPost("/api/meetings/{id:guid}/recording-commands", async (Guid id, RecordingCommandRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (request.AgentId == Guid.Empty) return Results.BadRequest(new { error = "agent_id_required" });
+    if (string.IsNullOrWhiteSpace(request.CommandType) || request.CommandType.Length > 80)
+        return Results.BadRequest(new { error = "command_type_required" });
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (!await store.AgentExistsAsync(request.AgentId)) return Results.NotFound(new { error = "agent_not_found" });
+    var commandId = await store.CreateCommandAsync(request.AgentId, request.CommandType.Trim(), request.Payload ?? JsonDocument.Parse("{}"));
+    return Results.Accepted($"/api/agents/{request.AgentId}", new { commandId });
+});
+
+app.MapGet("/api/meetings/{id:guid}/summary", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.GetLatestSummaryAsync(id));
+});
+app.MapGet("/api/assistant/memory/status", async (HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(configuration);
+    var configuredScope = configuration["MEETING_READ_SCOPE"]?.Trim().ToUpperInvariant();
+    return Results.Ok(await store.GetMemoryCoverageAsync(userId, includeAll, configuredScope));
+});
+app.MapPost("/api/admin/memory/rebuild", async (MemoryRebuildRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    if (CurrentUserId(context) is not Guid userId) return Results.Unauthorized();
+    var mode = string.IsNullOrWhiteSpace(request?.Mode) ? "PREVIEW" : request!.Mode.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "memory_rebuild_mode_invalid" });
+    Guid? cursor = null;
+    if (!string.IsNullOrWhiteSpace(request?.Cursor) && !Guid.TryParse(request.Cursor, out var parsedCursor))
+        return Results.BadRequest(new { error = "memory_rebuild_cursor_invalid" });
+    if (!string.IsNullOrWhiteSpace(request?.Cursor)) cursor = Guid.Parse(request!.Cursor);
+    var limit = Math.Clamp(request?.Limit ?? 500, 1, 500);
+    return Results.Ok(await store.RebuildMemoryAsync(userId, includeAll: true, apply: mode == "APPLY", limit, cursor, request?.RebuildExisting == true));
+});
+// Home uses this bounded aggregate to avoid the historical jobs/summary/tasks
+// N+1 refresh.  Each meeting is scope-checked before any child resource is
+// returned; the legacy per-meeting endpoints remain available for rolling
+// clients and detail views.
+app.MapGet("/api/meetings/metrics", async (string? ids, HttpContext context, UnifiedProductStore store, Database db) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var meetingIds = (ids ?? string.Empty)
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty)
+        .Where(id => id != Guid.Empty)
+        .Distinct()
+        .Take(50)
+        .ToArray();
+    if (meetingIds.Length == 0) return Results.BadRequest(new { error = "meeting_ids_required" });
+
+    var includeAll = IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration);
+    async Task<object?> Load(Guid meetingId)
+    {
+        if (await db.GetMeetingAsync(meetingId, userId, includeAll) is null) return null;
+        var jobsTask = db.ListJobsAsync(meetingId);
+        var summaryTask = store.GetLatestSummaryAsync(meetingId);
+        var tasksTask = store.ListActionItemsAsync(meetingId);
+        var pipelineTask = store.GetMeetingPipelineChainsAsync(meetingId);
+        await Task.WhenAll(jobsTask, summaryTask, tasksTask, pipelineTask);
+        var tasks = await tasksTask;
+        return new
+        {
+            meetingId,
+            jobs = await jobsTask,
+            summary = await summaryTask,
+            openTasks = tasks.Where(task => !task.Status.Equals("DONE", StringComparison.OrdinalIgnoreCase)
+                && !task.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase)).ToArray(),
+            pipeline = await pipelineTask
+        };
+    }
+
+    var items = (await Task.WhenAll(meetingIds.Select(Load))).Where(item => item is not null).ToArray();
+    return Results.Ok(new { items });
+});
+app.MapGet("/api/meetings/{id:guid}/pipeline", async (Guid id, HttpContext context, UnifiedProductStore store, IConfiguration configuration) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    var chains = await store.GetMeetingPipelineChainsAsync(id);
+    var readiness = await TryGetPipelineReadinessAsync(store, configuration);
+    return Results.Ok(chains.Select(chain => chain with { SnapshotOverride = RecordingPipelineSnapshotResolver.Resolve(chain, readiness) }).ToList());
+});
+app.MapPost("/api/meetings/{id:guid}/summary/rebuild", async (Guid id, SummaryRebuildRequest? request, HttpContext context, UnifiedProductStore store, Database database) =>
+{
+    if (!await CanAccessMeetingAsync(context, id)) return Results.NotFound();
+    if (request?.Profile is { Length: > 40 } || request?.PromptVersion is { Length: > 120 } || request?.Reason is { Length: > 500 })
+        return Results.BadRequest(new { error = "summary_options_too_long" });
+    var eligibility = await store.GetSummaryEligibilityAsync(id, request?.TranscriptVersion);
+    if (!eligibility.HasTranscript) return Results.Conflict(new { error = "transcript_required" });
+    if (!eligibility.Allowed)
+        return Results.Conflict(new { error = "SUMMARY_BLOCKED_BY_TRANSCRIPT_QUALITY", reason = eligibility.Reason });
+    var jobId = await store.QueueSummaryAsync(id, CurrentUserId(context), request);
+    if (jobId is null) return Results.Conflict(new { error = "transcript_required" });
+
+    // The Desktop job tracker requires the same durable contract as transcript
+    // reprocessing.  Returning only { jobId } made it treat a queued summary
+    // as an incomplete object and never observe its terminal state.
+    var job = await database.GetJobAsync(jobId.Value);
+    return job is null
+        ? Results.Conflict(new { error = "summary_job_not_found" })
+        : Results.Accepted($"/api/jobs/{job.Id}", job);
+});
+app.MapPost("/api/meetings/{id:guid}/pipeline/repair", async (Guid id, PipelineRepairRequest? request, HttpContext context, UnifiedProductStore store) =>
+{
+    // Repair can enqueue durable work and is intentionally reserved for an
+    // operator/administrator. Preview is subject to the same restriction: it
+    // exposes pipeline diagnostics that normal meeting readers do not need.
+    if (!IsPrivileged(context)) return Results.Forbid();
+    var mode = string.IsNullOrWhiteSpace(request?.Mode) ? "PREVIEW" : request!.Mode!.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "pipeline_repair_mode_invalid" });
+    var result = await store.RepairMeetingPipelineAsync(id, CurrentUserId(context), mode == "APPLY");
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+app.MapPost("/api/admin/historical-imports", async (HistoricalImportRequest? request, HttpContext context, Database database) =>
+{
+    if (!IsPrivileged(context)) return Results.Forbid();
+    if (CurrentUserId(context) is not Guid ownerId) return Results.Unauthorized();
+    if (request is null) return Results.BadRequest(new { error = "historical_import_request_required" });
+    var mode = string.IsNullOrWhiteSpace(request.Mode) ? "PREVIEW" : request.Mode.Trim().ToUpperInvariant();
+    if (mode is not ("PREVIEW" or "APPLY")) return Results.BadRequest(new { error = "historical_import_mode_invalid" });
+    var result = await database.ImportHistoricalTranscriptAsync(ownerId, request with { Mode = mode }, mode == "APPLY");
+    return result.ErrorCode is not null ? Results.BadRequest(result) : Results.Ok(result);
+});
+app.MapGet("/api/meetings/{id:guid}/decisions", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.ListDecisionsAsync(id));
+});
+app.MapGet("/api/meetings/{id:guid}/tasks", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await store.ListActionItemsAsync(id));
+});
+// Paginated registries avoid walking every meeting and issuing one detail
+// request per row.  The store applies the user scope before filtering/counting.
+app.MapGet("/api/summaries", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSummaryRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
+});
+app.MapGet("/api/speakers", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSpeakerRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
+});
+app.MapGet("/api/speaker-profiles", async (int? page, int? pageSize, string? search, string? status, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListSpeakerProfilesAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
+});
+app.MapPost("/api/speaker-profiles", async (SpeakerProfileCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (!IsValidEmbeddingJson(request.EmbeddingCentroid)) return Results.BadRequest(new { error = "invalid_speaker_embedding" });
+    var profile = await store.CreateSpeakerProfileAsync(userId.Value, request.DisplayName ?? string.Empty, request.EmbeddingCentroid, request.EmbeddingModel);
+    return profile is null ? Results.BadRequest(new { error = "invalid_speaker_profile" }) : Results.Created($"/api/speaker-profiles/{profile.Id}", profile);
+});
+app.MapPatch("/api/speaker-profiles/{id:guid}", async (Guid id, SpeakerProfileRenameRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(request.DisplayName)) return Results.BadRequest(new { error = "display_name_required" });
+    var updated = await store.RenameSpeakerProfileAsync(id, userId.Value, IsPrivileged(context), request.DisplayName);
+    return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapPost("/api/speaker-profiles/{id:guid}/enroll", async (Guid id, SpeakerProfileEnrollRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    if (request.Embedding is null || !IsValidEmbeddingJson(request.Embedding)) return Results.BadRequest(new { error = "invalid_speaker_embedding" });
+    var updated = await store.EnrollSpeakerProfileAsync(id, userId.Value, IsPrivileged(context), request.Embedding, request.DurationMs);
+    return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapGet("/api/action-items", async (int? page, int? pageSize, string? search, string? status, Guid? meetingId, string? sort, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context); if (userId is null) return Results.Unauthorized();
+    return Results.Ok(await store.ListActionItemRegistryPageAsync(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 50, 1, 200), search, status, meetingId, sort, userId.Value, IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration)));
+});
+app.MapPatch("/api/tasks/{id:guid}", async (Guid id, UpdateTaskRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var meetingId = await store.GetActionItemMeetingIdAsync(id);
+    if (meetingId is null || !await CanAccessMeetingAsync(context, meetingId.Value)) return Results.NotFound();
+    var task = request.Task?.Trim();
+    var status = request.Status?.Trim().ToUpperInvariant();
+    if (string.IsNullOrWhiteSpace(task) || task.Length > 4000)
+        return Results.BadRequest(new { error = "task_required" });
+    if (status is not ("NEEDS_REVIEW" or "OPEN" or "DONE" or "CANCELLED"))
+        return Results.BadRequest(new { error = "invalid_task_status" });
+    return (await store.UpdateActionItemAsync(id, task, request.Responsible?.Trim(), request.Deadline, status, CurrentUserId(context))) switch
+    {
+        ActionItemUpdateResult.Updated => Results.Ok(new { ok = true }),
+        ActionItemUpdateResult.InvalidTransition => Results.Conflict(new { error = "invalid_task_transition" }),
+        _ => Results.NotFound()
+    };
+});
+app.MapGet("/api/assistant/conversations", async (HttpContext context, UnifiedProductStore store, bool? includeArchived) =>
+{
+    var userId = CurrentUserId(context);
+    return userId is null
+        ? Results.Unauthorized()
+        : Results.Ok(await store.ListAssistantConversationsAsync(userId.Value, includeArchived == true));
+});
+// Provisional ASR ingress for the active recording. This is intentionally
+// separate from transcript V1/V2: it is text-only and accepted while a
+// matching recording session is active or draining its FINALIZING tail. Rows
+// remain available through STOP until V1 is usable, with a bounded deadline.
+app.MapPost("/api/assistant/live-segments/{meetingId:guid}", async (Guid meetingId, LiveMeetingSegmentsRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    var result = await store.AppendLiveMeetingSegmentsAsync(
+        meetingId,
+        userId.Value,
+        IsPrivileged(context),
+        request.RecordingSessionId,
+        request.Segments ?? Array.Empty<LiveMeetingSegmentRequest>());
+    return result is null
+        ? Results.Conflict(new { error = "LIVE_MEETING_NOT_ACTIVE", status = "LIVE_ASR_NOT_READY" })
+        : Results.Accepted($"/api/assistant/live-segments/{meetingId}", new
+        {
+            recordingSessionId = result.RecordingSessionId,
+            acceptedCount = result.AcceptedCount,
+            expiresInSeconds = 7 * 24 * 60 * 60,
+            retentionPolicy = "UNTIL_V1_READY"
+        });
+});
+app.MapGet("/api/assistant/live-context/{meetingId:guid}", async (Guid meetingId, HttpContext context, UnifiedProductStore store) =>
+{
+    if (CurrentUserId(context) is null) return Results.Unauthorized();
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    return Results.Ok(new { meetingId, ready = await store.HasLiveMeetingContextAsync(meetingId), mode = "LIVE_MEETING", canonicalTranscript = false });
+});
+app.MapPost("/api/assistant/conversations", async (AssistantConversationCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var scope = request.ScopeType?.Trim().ToUpperInvariant();
+    if (scope == "GLOBAL" && !IsPrivileged(context)
+        && request.AssistantMode?.Trim().ToUpperInvariant() is not ("MEETING_MEMORY" or "MEETING_HISTORY")) return Results.Forbid();
+    if (scope == "MEETING" && (!request.MeetingId.HasValue || !await CanAccessAssistantMeetingAsync(context, request.MeetingId.Value))) return Results.NotFound();
+    if (scope is not ("MEETING" or "GLOBAL" or "GENERAL")) return Results.BadRequest(new { error = "invalid_assistant_scope" });
+    var conversation = await store.CreateAssistantConversationAsync(userId.Value, request.Title, scope, request.MeetingId, request.AssistantMode);
+    return conversation is null ? Results.BadRequest(new { error = "assistant_context_not_ready" }) : Results.Created($"/api/assistant/conversations/{conversation.Id}", conversation);
+});
+app.MapGet("/api/assistant/conversations/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    var conversation = userId is null ? null : await store.GetAssistantConversationAsync(id, userId.Value);
+    return conversation is null ? Results.NotFound() : Results.Ok(conversation);
+});
+app.MapPatch("/api/assistant/conversations/{id:guid}", async (Guid id, AssistantConversationUpdateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    return await store.UpdateAssistantConversationAsync(id, userId.Value, request.Title, request.Archived) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapDelete("/api/assistant/conversations/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    return await store.DeleteAssistantConversationAsync(id, userId.Value) ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+app.MapGet("/api/assistant/conversations/{id:guid}/messages", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    if (await store.GetAssistantConversationAsync(id, userId.Value) is null) return Results.NotFound();
+    return Results.Ok(await store.ListAssistantMessagesAsync(id, userId.Value));
+});
+app.MapPost("/api/assistant/conversations/{id:guid}/messages", async (Guid id, AssistantMessageCreateRequest request, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var existing = await store.GetAssistantConversationAsync(id, userId.Value);
+    if (existing is null) return Results.NotFound(new { error = "assistant_conversation_not_found" });
+
+    // A Desktop user can change the selected mode/context while an older chat
+    // remains open. Never silently reuse that chat with a different factual
+    // scope: create a new conversation and keep the old history immutable.
+    var scopedConversation = existing;
+    var scopeChanged = false;
+    var requestedMode = request.RequestedMode?.Trim().ToUpperInvariant();
+    if (!string.IsNullOrWhiteSpace(requestedMode) && requestedMode != "AUTO")
+    {
+        var normalizedMode = requestedMode == "MEETING_HISTORY" ? "MEETING_MEMORY" : requestedMode;
+        if (normalizedMode is not ("GENERAL_CHAT" or "MEETING_MEMORY" or "CURRENT_MEETING" or "LIVE_MEETING"))
+            return Results.BadRequest(new { error = "ASSISTANT_MODE_INVALID" });
+        var expectedMeeting = normalizedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? request.ActiveMeetingId : null;
+        if (normalizedMode is "CURRENT_MEETING" or "LIVE_MEETING" && expectedMeeting is null)
+            return Results.BadRequest(new { error = "ASSISTANT_MEETING_REQUIRED" });
+        if (expectedMeeting is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
+            return Results.NotFound();
+        var expectedScope = normalizedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
+        if (!string.Equals(existing.AssistantMode, normalizedMode, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase)
+            || existing.MeetingId != expectedMeeting)
+        {
+            scopedConversation = await store.CreateAssistantConversationAsync(
+                userId.Value,
+                "Мифодий",
+                expectedScope,
+                expectedMeeting,
+                normalizedMode);
+            if (scopedConversation is null)
+                return Results.Conflict(new { error = "assistant_context_not_ready" });
+            scopeChanged = true;
+            id = scopedConversation.Id;
+        }
+    }
+
+    var result = await store.CreateAssistantMessageAsync(id, userId.Value, request.Content ?? string.Empty, request.RetryOf);
+    if (result is null) return Results.BadRequest(new { error = "assistant_conversation_not_ready" });
+    return Results.Accepted($"/api/assistant/conversations/{id}/messages/{result.AssistantMessage.Id}/events", new
+    {
+        result.UserMessage,
+        result.AssistantMessage,
+        result.QueryId,
+        conversationId = id,
+        conversation = scopedConversation,
+        scopeChanged,
+        requestedMode = requestedMode ?? existing.AssistantMode,
+        resolvedMode = scopedConversation.AssistantMode,
+        resolvedMeetingId = scopedConversation.MeetingId,
+        routingReason = scopeChanged ? "conversation_scope_changed" : "conversation_scope_unchanged"
+    });
+});
+app.MapGet("/api/assistant/conversations/{conversationId:guid}/messages/{messageId:guid}/events", async (Guid conversationId, Guid messageId, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+    var userId = CurrentUserId(context);
+    if (userId is null) { response.StatusCode = StatusCodes.Status401Unauthorized; return; }
+    if (await store.GetAssistantConversationAsync(conversationId, userId.Value) is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
+    try
+    {
+        for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+        {
+            var messages = await store.ListAssistantMessagesAsync(conversationId, userId.Value);
+            var message = messages.FirstOrDefault(item => item.Id == messageId);
+            if (message is null) { response.StatusCode = StatusCodes.Status404NotFound; return; }
+            await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(message)}\n\n", cancellationToken);
+            await response.Body.FlushAsync(cancellationToken);
+            if (message.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
+});
+// Unified entry point used by Desktop text chat and the managed Voice Host.
+// Voice never receives a server token: the Desktop broker forwards this call
+// with the user's authenticated API session and its active meeting context.
+app.MapPost("/api/assistant/requests", async (AssistantRequestRequest request, HttpContext context, UnifiedProductStore store, AssistantModeResolver modeResolver, CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var assistantEnabled = context.RequestServices.GetRequiredService<IConfiguration>().GetValue("ASSISTANT_ENABLED", true);
+    if (!assistantEnabled)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    var question = request.Question?.Trim() ?? string.Empty;
+    if (question.Length is 0 or > 2000) return Results.BadRequest(new { error = "assistant_query_invalid" });
+    var source = string.Equals(request.Source, "VOICE", StringComparison.OrdinalIgnoreCase) ? "VOICE" : "DESKTOP";
+    var requestUserId = userId.Value;
+    if (source == "VOICE" && !string.IsNullOrWhiteSpace(request.CommandId))
+    {
+        var replay = await store.GetAssistantQueryByCommandAsync(request.CommandId, requestUserId);
+        if (replay is not null)
+        {
+            if (!string.Equals(replay.Query, question, StringComparison.Ordinal))
+                return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+            return Results.Accepted($"/api/assistant/queries/{replay.Id}", new
+            {
+                queryId = replay.Id,
+                conversationId = replay.ConversationId,
+                resolvedMode = replay.AssistantMode,
+                meetingId = replay.MeetingId,
+                status = replay.Status,
+                source = replay.Source,
+                routerConfidence = replay.RouterConfidence,
+                requestedMode = replay.RequestedMode ?? "AUTO",
+                routingReason = "IDEMPOTENT_REPLAY",
+                confidence = replay.RouterConfidence,
+                acceptedAt = replay.CreatedAt,
+                processingStage = replay.ProcessingStage ?? "QUEUED",
+                traceId = replay.TraceId,
+                commandId = replay.CommandId ?? request.CommandId,
+                replayed = true,
+                pollUrl = $"/api/assistant/queries/{replay.Id}",
+                eventsUrl = $"/api/assistant/queries/{replay.Id}/events"
+            });
+        }
+    }
+    if (request.ActiveMeetingId is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
+        return Results.NotFound();
+
+    var route = await modeResolver.ResolveAsync(new AssistantModeResolutionRequest(
+        question,
+        request.RequestedMode,
+        userId,
+        request.ActiveMeetingId,
+        request.RecordingSessionId,
+        request.CaptureState,
+        request.ConversationId,
+        request.PreviousResolvedMode,
+        IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration),
+        request.TimeZone), cancellationToken);
+    // The resolver may recover a meeting scope from a persisted conversation
+    // after Desktop restart. Re-apply the HTTP RBAC check to that resolved
+    // id; checking only ActiveMeetingId would allow a stale conversation to
+    // create a query for a meeting the user no longer can access.
+    if (route.MeetingId is Guid resolvedMeetingForAccess && !await CanAccessAssistantMeetingAsync(context, resolvedMeetingForAccess))
+        return Results.NotFound();
+    if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
+    if (string.Equals(route.ErrorCode, "ASSISTANT_MEETING_SELECTION_REQUIRED", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "MEETING_SELECTION_REQUIRED", spokenText = route.Clarification, meetings = route.MeetingCandidates ?? Array.Empty<AssistantMeetingCandidate>() });
+    if (!string.IsNullOrWhiteSpace(route.ErrorCode))
+        return Results.BadRequest(new { error = route.ErrorCode, status = "CLARIFICATION_REQUIRED", spokenText = route.Clarification });
+    if (route.ResolvedMode == "LIVE_MEETING")
+    {
+        if (route.MeetingId is null)
+            return Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." });
+    }
+
+    // Conversations are bound to a scope. Never reuse a user-owned chat for
+    // another meeting or for general chat; create a fresh scoped conversation.
+    if (request.ConversationId is Guid suppliedConversation)
+    {
+        var existing = await store.GetAssistantConversationAsync(suppliedConversation, userId.Value);
+        var expectedMeeting = route.ResolvedMode is "CURRENT_MEETING" or "LIVE_MEETING" ? route.MeetingId : null;
+        var expectedScope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : expectedMeeting.HasValue ? "MEETING" : "GLOBAL";
+        if (existing is null || !string.Equals(existing.ScopeType, expectedScope, StringComparison.OrdinalIgnoreCase) || existing.MeetingId != expectedMeeting)
+            request = request with { ConversationId = null };
+    }
+
+    var resolvedMeetingId = route.MeetingId;
+    // Keep voice and text requests in the same scoped conversation. A caller
+    // may provide an existing conversation; otherwise create one atomically
+    // in the resolved scope so follow-up questions retain context.
+    var conversationId = request.ConversationId;
+    if (conversationId is null)
+    {
+        var scope = route.ResolvedMode == "GENERAL_CHAT" ? "GENERAL" : resolvedMeetingId.HasValue ? "MEETING" : "GLOBAL";
+        var conversation = await store.CreateAssistantConversationAsync(userId.Value, "Мифодий", scope, resolvedMeetingId, route.ResolvedMode);
+        conversationId = conversation?.Id;
+    }
+    var requestedMode = string.IsNullOrWhiteSpace(request.RequestedMode) ? "AUTO" : request.RequestedMode.Trim().ToUpperInvariant();
+    AssistantQueryRow? query;
+    try
+    {
+        query = await store.CreateAssistantQueryAsync(resolvedMeetingId, question, userId, requestedMode, source, conversationId, route.Confidence, request.CommandId, request.TraceId);
+    }
+    catch (AssistantIdempotencyConflictException)
+    {
+        return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+    }
+    catch (PostgresException exception) when (source == "VOICE" && !string.IsNullOrWhiteSpace(request.CommandId) && exception.SqlState == PostgresErrorCodes.UniqueViolation)
+    {
+        var replay = await store.GetAssistantQueryByCommandAsync(request.CommandId, userId.Value);
+        if (replay is null) throw;
+        if (!string.Equals(replay.Query, question, StringComparison.Ordinal))
+            return Results.Conflict(new { error = "ASSISTANT_IDEMPOTENCY_CONFLICT", commandId = request.CommandId });
+        return Results.Accepted($"/api/assistant/queries/{replay.Id}", new { queryId = replay.Id, conversationId = replay.ConversationId, resolvedMode = replay.AssistantMode, meetingId = replay.MeetingId, status = replay.Status, source = replay.Source, requestedMode = replay.RequestedMode ?? "AUTO", acceptedAt = replay.CreatedAt, processingStage = replay.ProcessingStage ?? "QUEUED", traceId = replay.TraceId, commandId = replay.CommandId ?? request.CommandId, replayed = true, pollUrl = $"/api/assistant/queries/{replay.Id}", eventsUrl = $"/api/assistant/queries/{replay.Id}/events" });
+    }
+    if (query is null)
+        return route.ResolvedMode == "LIVE_MEETING"
+            ? Results.Conflict(new { error = "LIVE_MEETING_NOT_READY", status = "LIVE_ASR_NOT_READY", spokenText = "Пока нет свежего фрагмента текущего совещания для ответа." })
+            : Results.Conflict(new { error = "assistant_context_not_ready", status = "TRANSCRIPT_NOT_READY" });
+    return Results.Accepted($"/api/assistant/queries/{query.Id}", new
+    {
+        queryId = query.Id,
+        conversationId,
+        resolvedMode = query.AssistantMode,
+        meetingId = query.MeetingId,
+        status = query.Status,
+        source = query.Source,
+        routerConfidence = route.Confidence,
+        requestedMode,
+        routingReason = route.Reason,
+        confidence = route.Confidence,
+        acceptedAt = query.CreatedAt,
+        processingStage = "QUEUED",
+        traceId = request.TraceId,
+        commandId = request.CommandId,
+        replayed = false,
+        pollUrl = $"/api/assistant/queries/{query.Id}",
+        eventsUrl = $"/api/assistant/queries/{query.Id}/events"
+    });
+});
+app.MapGet("/api/assistant/requests/by-command/{commandId}", async (string commandId, HttpContext context, UnifiedProductStore store) =>
+{
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var query = await store.GetAssistantQueryByCommandAsync(commandId, userId.Value);
+    return query is null ? Results.NotFound(new { error = "assistant_request_not_found" }) : Results.Ok(new
+    {
+        queryId = query.Id,
+        conversationId = query.ConversationId,
+        resolvedMode = query.AssistantMode,
+        meetingId = query.MeetingId,
+        status = query.Status,
+        source = query.Source,
+        routerConfidence = query.RouterConfidence ?? 0d,
+        requestedMode = query.RequestedMode ?? "AUTO",
+        confidence = query.RouterConfidence,
+        routingReason = "IDEMPOTENCY_LOOKUP",
+        acceptedAt = query.CreatedAt,
+        processingStage = query.ProcessingStage ?? query.Status,
+        traceId = query.TraceId,
+        commandId = query.CommandId ?? commandId,
+        pollUrl = $"/api/assistant/queries/{query.Id}",
+        eventsUrl = $"/api/assistant/queries/{query.Id}/events"
+    });
+});
+app.MapPost("/api/assistant/queries", async (AssistantQueryRequest request, HttpContext context, UnifiedProductStore store, AssistantModeResolver modeResolver, CancellationToken cancellationToken) =>
+{
+    if (request.MeetingId is Guid meetingId && !await CanAccessAssistantMeetingAsync(context, meetingId))
+        return Results.NotFound();
+    var userId = CurrentUserId(context);
+    if (userId is null) return Results.Unauthorized();
+    var route = await modeResolver.ResolveAsync(new AssistantModeResolutionRequest(
+        request.Query,
+        request.AssistantMode ?? "AUTO",
+        userId,
+        request.MeetingId,
+        null,
+        null,
+        null,
+        null,
+        IsPrivileged(context) || IsSharedMeetingReadScope(builder.Configuration),
+        null), cancellationToken);
+    if (route.MeetingId is Guid queryMeetingForAccess && !await CanAccessAssistantMeetingAsync(context, queryMeetingForAccess))
+        return Results.NotFound();
+    if (string.Equals(route.ErrorCode, "LIVE_MEETING_NOT_READY", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "LIVE_ASR_NOT_READY", spokenText = route.Clarification });
+    if (string.Equals(route.ErrorCode, "ASSISTANT_MEETING_SELECTION_REQUIRED", StringComparison.Ordinal))
+        return Results.Conflict(new { error = route.ErrorCode, status = "MEETING_SELECTION_REQUIRED", spokenText = route.Clarification, meetings = route.MeetingCandidates ?? Array.Empty<AssistantMeetingCandidate>() });
+    if (!string.IsNullOrWhiteSpace(route.ErrorCode))
+        return Results.BadRequest(new { error = route.ErrorCode, spokenText = route.Clarification });
+    var requestedMode = string.IsNullOrWhiteSpace(request.AssistantMode) ? "AUTO" : request.AssistantMode.Trim().ToUpperInvariant();
+    var query = await store.CreateAssistantQueryAsync(route.MeetingId, request.Query, userId, requestedMode);
+    return query is null
+        ? Results.BadRequest(new { error = "assistant_context_not_ready", routingReason = route.Reason })
+        : Results.Accepted($"/api/assistant/queries/{query.Id}", query);
+});
+app.MapGet("/api/assistant/queries/{id:guid}", async (Guid id, HttpContext context, UnifiedProductStore store) =>
+{
+    var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context));
+    return query is null ? Results.NotFound() : Results.Ok(query);
+});
+app.MapGet("/api/assistant/queries/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, UnifiedProductStore store, CancellationToken cancellationToken) =>
+{
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+    for (var attempt = 0; attempt < 120 && !cancellationToken.IsCancellationRequested; attempt++)
+    {
+        var query = await store.GetAssistantQueryAsync(id, CurrentUserId(context), IsPrivileged(context));
+        if (query is null) { response.StatusCode = 404; return; }
+        await response.WriteAsync($"event: status\ndata: {JsonSerializer.Serialize(query)}\n\n", cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
+        if (query.Status is "READY" or "ANSWERED" or "ANSWERED_WITH_WARNING" or "FAILED" or "NEEDS_REVIEW" or "NO_EVIDENCE" or "GROUNDING_REJECTED" or "LLM_UNAVAILABLE") return;
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+});
+app.MapGet("/api/meetings/{id:guid}/jobs", async (Guid id, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListJobsAsync(id));
+});
+
+app.MapGet("/api/meetings/{id:guid}/media", async (Guid id, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListMediaAsync(id));
+});
+
+app.MapGet("/api/meetings/{id:guid}/speakers", async (Guid id, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListSpeakersAsync(id));
+});
+
+app.MapGet("/api/media/{id:guid}/preview", async (Guid id, HttpContext context) =>
+{
+    var media = await db.GetMediaAsync(id);
+    if (media is null || !await CanReadMeetingAsync(context, media.MeetingId) || string.IsNullOrWhiteSpace(media.PreviewStorageKey)) return Results.NotFound();
+    var path = StorageHelpers.StoragePath(media.PreviewStorageKey);
+    if (!File.Exists(path)) return Results.NotFound();
+    return Results.File(File.OpenRead(path), "audio/ogg", enableRangeProcessing: true);
+});
+
+// The permanent archive is the download source.  The original storage key is
+// retained as a recovery fallback for assets whose media derivatives have not
+// been built yet; access is still checked against the meeting before the path
+// is resolved.
+app.MapGet("/api/media/{id:guid}/download", async (Guid id, string? variant, HttpContext context) =>
+{
+    var media = await db.GetMediaAsync(id);
+    if (media is null || !await CanReadMeetingAsync(context, media.MeetingId)) return Results.NotFound();
+
+    // Imported video has two intentionally distinct assets: the untouched
+    // source and the derived FLAC archive. Never return a FLAC payload using
+    // the original .mp4/.mkv filename.
+    var requestedVariant = string.IsNullOrWhiteSpace(variant) ? "archive" : variant.Trim().ToLowerInvariant();
+    if (requestedVariant is not ("archive" or "original"))
+        return Results.BadRequest(new { error = "invalid_media_download_variant" });
+    var original = requestedVariant == "original";
+    if (!original && string.IsNullOrWhiteSpace(media.ArchiveStorageKey) && MediaPolicy.IsVideoExtension(media.OriginalName))
+        return Results.NotFound();
+    var storageKey = original ? media.StorageKey : media.ArchiveStorageKey ?? media.StorageKey;
+    if (string.IsNullOrWhiteSpace(storageKey)) return Results.NotFound();
+
+    string path;
+    try { path = StorageHelpers.StoragePath(storageKey); }
+    catch (InvalidOperationException) { return Results.NotFound(); }
+    if (!File.Exists(path)) return Results.NotFound();
+
+    var extension = original ? Path.GetExtension(media.OriginalName) : Path.GetExtension(storageKey);
+    if (string.IsNullOrWhiteSpace(extension)) extension = Path.GetExtension(storageKey);
+    if (string.IsNullOrWhiteSpace(extension)) extension = original ? ".bin" : ".flac";
+    var contentType = extension.ToLowerInvariant() switch
+    {
+        ".flac" => "audio/flac",
+        ".wav" => "audio/wav",
+        ".mp3" => "audio/mpeg",
+        ".m4a" => "audio/mp4",
+        ".ogg" or ".opus" => "audio/ogg",
+        ".mp4" => "video/mp4",
+        ".mkv" => "video/x-matroska",
+        ".mov" => "video/quicktime",
+        ".webm" => "video/webm",
+        ".avi" => "video/x-msvideo",
+        _ => "application/octet-stream"
+    };
+    var originalBaseName = Path.GetFileNameWithoutExtension(media.OriginalName);
+    var downloadName = original
+        ? Path.GetFileName(media.OriginalName)
+        : string.IsNullOrWhiteSpace(originalBaseName) ? $"meeting-{id:N}{extension}" : originalBaseName + extension;
+    if (string.IsNullOrWhiteSpace(downloadName)) downloadName = $"meeting-{id:N}{extension}";
+    return Results.File(File.OpenRead(path), contentType, downloadName, enableRangeProcessing: true);
+});
+
+app.MapGet("/api/jobs/{id:guid}", async (Guid id, HttpContext context) =>
+{
+    var job = await db.GetJobAsync(id);
+    return job is null || !await CanReadMeetingAsync(context, job.MeetingId) ? Results.NotFound() : Results.Ok(job);
+});
+
+app.MapPost("/api/jobs/{id:guid}/retry", async (Guid id, HttpContext context) =>
+{
+    var current = await db.GetJobAsync(id);
+    if (current is null || !await CanAccessMeetingAsync(context, current.MeetingId)) return Results.NotFound();
+    if (current.Status is not ("FAILED" or "CANCELLED"))
+        return Results.Conflict(new { error = "job_not_retryable", status = current.Status });
+    var job = await db.RetryJobAsync(id);
+    return job is null ? Results.Conflict(new { error = "job_retry_conflict" }) : Results.Accepted("/api/jobs/" + id, job);
+});
+
+app.MapGet("/api/jobs/{id:guid}/events", async (Guid id, HttpContext context, HttpResponse response, CancellationToken cancellationToken) =>
+{
+    var initialJob = await db.GetJobAsync(id);
+    if (initialJob is null || !await CanReadMeetingAsync(context, initialJob.MeetingId)) { response.StatusCode = 404; return; }
+    response.Headers.ContentType = "text/event-stream";
+    response.Headers.CacheControl = "no-cache";
+    for (var i = 0; i < 120 && !cancellationToken.IsCancellationRequested; i++)
+    {
+        var job = await db.GetJobAsync(id);
+        if (job is null)
+        {
+            response.StatusCode = 404;
+            return;
+        }
+
+        await response.WriteAsync("event: progress\ndata: " + JsonSerializer.Serialize(job) + "\n\n", cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
+        if (job.Status is "READY" or "FAILED" or "CANCELLED")
+            return;
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+});
+
+app.MapGet("/api/meetings/{id:guid}/transcript", async (Guid id, int? version, bool? includeWords, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    var transcript = await db.GetTranscriptAsync(id, version, includeWords == true);
+    return Results.Ok(new
+    {
+        id = transcript.Id,
+        meetingId = transcript.MeetingId,
+        status = transcript.Status,
+        isPartial = transcript.IsPartial,
+        warnings = transcript.Warnings,
+        qualityWarnings = transcript.Warnings,
+        quality = transcript.Quality,
+        qualityScore = transcript.QualityScore,
+        segments = transcript.Segments
+    });
+});
+
+app.MapGet("/api/meetings/{id:guid}/transcript/versions", async (Guid id, HttpContext context) =>
+{
+    if (!await CanReadMeetingAsync(context, id)) return Results.NotFound();
+    return Results.Ok(await db.ListTranscriptVersionsAsync(id));
+});
+
+app.MapPatch("/api/meetings/{meetingId:guid}/transcript/segments/{segmentId:guid}",
+    async (Guid meetingId, Guid segmentId, TranscriptSegmentEditRequest request, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    if (string.IsNullOrWhiteSpace(request.Text) || request.Text.Trim().Length > 8000) return Results.BadRequest(new { error = "invalid_segment_text" });
+    var version = await db.CreateEditedTranscriptVersionAsync(meetingId, segmentId, request.Text, CurrentUserId(context));
+    return version is null ? Results.NotFound() : Results.Ok(version);
+});
+
+app.MapPost("/api/meetings/{meetingId:guid}/transcript/reprocess", async (Guid meetingId, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    var job = await db.QueueTranscriptReprocessAsync(meetingId, CurrentUserId(context));
+    return job is null ? Results.Conflict(new { error = "transcript_reprocess_unavailable" }) : Results.Accepted($"/api/jobs/{job.Id}", job);
+});
+
+app.MapPatch("/api/meetings/{meetingId:guid}/speakers/{speakerId:guid}",
+    async (Guid meetingId, Guid speakerId, SpeakerRenameRequest request, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    var updated = await db.RenameSpeakerAsync(meetingId, speakerId, request.DisplayName, CurrentUserId(context));
+    return updated ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.MapPost("/api/meetings/{meetingId:guid}/speakers/merge",
+    async (Guid meetingId, SpeakerMergeRequest request, HttpContext context) =>
+{
+    if (!await CanAccessMeetingAsync(context, meetingId)) return Results.NotFound();
+    var merged = await db.MergeSpeakersAsync(meetingId, request.SourceSpeakerId, request.TargetSpeakerId, CurrentUserId(context));
+    return merged ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+app.Run();
+
+static async Task<RecordingPipelineChain> AddPipelineReadinessAsync(
+    RecordingPipelineChain chain,
+    UnifiedProductStore store,
+    IConfiguration configuration)
+{
+    var readiness = await TryGetPipelineReadinessAsync(store, configuration);
+    return chain with { SnapshotOverride = RecordingPipelineSnapshotResolver.Resolve(chain, readiness) };
+}
+
+static async Task<IReadOnlyDictionary<string, bool>?> TryGetPipelineReadinessAsync(
+    UnifiedProductStore store,
+    IConfiguration configuration)
+{
+    try
+    {
+        return await store.GetPipelineWorkerReadinessAsync(
+            configuration["WHISPERX_BUILD_IDENTITY"] ?? configuration["WHISPERX_RELEASE_VERSION"]);
+    }
+    catch
+    {
+        // Lineage remains useful during a heartbeat table outage; a null
+        // readiness map makes the resolver rely on durable stage rows.
+        return null;
+    }
+}
+
+internal static class ClientUpdateJsonExtensions
+{
+    public static string? TryGetString(this JsonElement value, string property)
+        => value.ValueKind == JsonValueKind.Object
+            && value.TryGetProperty(property, out var element)
+            && element.ValueKind == JsonValueKind.String
+            ? element.GetString()
+            : null;
+}
+
+public record AgentEnrollRequest(string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
+public record AgentLinkLocalRequest(Guid InstallationId, Guid? AgentId, string Name, Guid? RoomId, string? Version, JsonDocument? Capabilities);
+public record AgentBootstrapRequest(Guid InstallationId, Guid? AgentId, string? Name, string? Version, JsonDocument? Capabilities);
+public record AgentHeartbeatRequest(string? Status, string? Version, JsonDocument? Capabilities);
+public record AgentCommandResultRequest(string? Status, JsonDocument? Result);
+public record CreateRecordingSessionRequest(Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string? PipelineCorrelationId = null, string? LocalSessionId = null, Guid? OwnerUserId = null, string? AcousticProfile = "AUTO");
+public record CreateTrackRequest(string TrackType, string? DeviceId, string? DeviceName = null, string? SelectionMode = null, string? RecordingProfile = null, int SampleRate = 48000, int Channels = 1, string? Encoding = null, int? BitsPerSample = null, string? SourceEncoding = null, string? SourceSubFormat = null, int? ValidBitsPerSample = null, string? LocalTrackId = null);
+public record RecordingCommandRequest(Guid AgentId, string CommandType, JsonDocument? Payload);
+public record UpdateTaskRequest(string Task, string? Responsible, DateTime? Deadline, string Status);
+public record AssistantQueryRequest(string Query, Guid? MeetingId, string? AssistantMode = null);
+public record AssistantRequestRequest(
+    string Question,
+    string? RequestedMode = "AUTO",
+    Guid? ActiveMeetingId = null,
+    Guid? ConversationId = null,
+    string? Source = "DESKTOP",
+    string? CommandId = null,
+    string? TraceId = null,
+    Guid? RecordingSessionId = null,
+    string? CaptureState = null,
+    string? PreviousResolvedMode = null,
+    string? TimeZone = null);
+public sealed record LiveMeetingSegmentRequest(Guid Id, long StartMs, long EndMs, string Text, double? Confidence = null, int Revision = 0,
+    string? SourceTrackType = null, string? SourceTrackId = null, string? ChannelRole = null, string? QualityFlags = null, Guid? MeetingId = null);
+public sealed record LiveMeetingSegmentsRequest(Guid? RecordingSessionId, IReadOnlyList<LiveMeetingSegmentRequest> Segments);
+public record AssistantConversationCreateRequest(string? Title, string? ScopeType, Guid? MeetingId, string? AssistantMode = null);
+public record AssistantConversationUpdateRequest(string? Title, bool? Archived);
+public record AssistantMessageCreateRequest(
+    string? Content,
+    Guid? RetryOf,
+    string? RequestedMode = null,
+    Guid? ActiveMeetingId = null,
+    string? TimeZone = null,
+    string? PreviousResolvedMode = null);
+public record SummaryRebuildRequest(string? Profile, int? TranscriptVersion, string? PromptVersion, string? Reason, JsonDocument? MeetingContext);
+public record PipelineRepairRequest(string? Mode);
+public record MemoryRebuildRequest(string? Mode, int? Limit = null, string? Cursor = null, bool RebuildExisting = false);
+public sealed record HistoricalImportSegmentRequest(int Ordinal, long StartMs, long EndMs, string Text, string? Speaker = null);
+public sealed record HistoricalImportRequest(
+    string Mode,
+    string SourceName,
+    string SourceFormat,
+    string SourceSha256,
+    string CanonicalContentSha256,
+    string? Title,
+    string? MeetingDate,
+    string DatePrecision,
+    string ParserVersion,
+    string TimingQuality,
+    int WordCount,
+    IReadOnlyList<HistoricalImportSegmentRequest> Segments);
+public sealed record HistoricalImportResult(
+    string Mode,
+    string Decision,
+    Guid? ImportId = null,
+    Guid? MeetingId = null,
+    Guid? TranscriptId = null,
+    Guid? MemoryJobId = null,
+    bool Created = false,
+    bool Duplicate = false,
+    string? ErrorCode = null,
+    IReadOnlyList<string>? Warnings = null);
+public record RecordingEventRequest(Guid Id, string EventType, long? MediaTimeMs, JsonDocument? Payload, DateTimeOffset? CreatedAt);
+public record RecordingEventBatchRequest(IReadOnlyList<RecordingEventRequest> Events);
+
+public sealed class RequestBodyTooLargeException : Exception { }
+
+public record LoginRequest(string? Username, string? Password);
+public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+public record AdminUserCreateRequest(string Username, string Role = "Reader");
+public record AdminUserUpdateRequest(string? Role, bool? IsActive);
+public record MeetingCreateRequest(string Title, string? Description);
+public record MeetingCancelRequest(bool Force = false);
+public record UploadReservationRequest(string FileName, long SizeBytes);
+public record UploadCompleteRequest(Guid UploadId, string StorageKey, string Sha256, long SizeBytes, long DurationMs);
+public record ImportRequest(
+    [property: JsonPropertyName("original_name")] string OriginalName,
+    [property: JsonPropertyName("source_type")] string SourceType,
+    [property: JsonPropertyName("source_path")] string SourcePath,
+    [property: JsonPropertyName("storage_key")] string StorageKey,
+    [property: JsonPropertyName("size_bytes")] long SizeBytes,
+    [property: JsonPropertyName("sha256")] string Sha256);
+public sealed record MediaAssetRow(Guid Id, Guid MeetingId, string OriginalName, string? StorageKey, string? Sha256, long SizeBytes, long? DurationMs, string Status, string? ArchiveStorageKey, string? PreviewStorageKey, string? AsrStorageKey);
+public sealed record SpeakerRow(Guid Id, string StableKey, string DisplayName, Guid? ProfileId = null, double? ProfileConfidence = null, string ProfileMatchStatus = "UNMATCHED", string? ProfileMatchReason = null, string? ProfileSuggestionName = null);
+public record SpeakerRenameRequest(string DisplayName);
+public record SpeakerMergeRequest(Guid SourceSpeakerId, Guid TargetSpeakerId);
+public record SpeakerProfileCreateRequest(string DisplayName, JsonDocument? EmbeddingCentroid = null, string? EmbeddingModel = null);
+public record SpeakerProfileRenameRequest(string DisplayName);
+public record SpeakerProfileEnrollRequest(JsonDocument Embedding, long DurationMs = 0);
+public record TranscriptSegmentEditRequest(string Text, string? Reason = null);
+public sealed record TranscriptVersionRow(Guid Id, Guid MeetingId, int Version, string Status, string VersionKind, Guid? SourceTranscriptId, DateTime CreatedAt, string? EditReason);
+public sealed record TranscriptRegistryRow(Guid TranscriptId, Guid MeetingId, string MeetingTitle, DateTime MeetingCreatedAt, int TranscriptVersion, string Status, bool IsPartial, double? QualityScore, long DurationMs, int SegmentCount, int SpeakerCount, DateTime CreatedAt);
+
+public sealed record UserRow(Guid Id, string Username, string PasswordHash, string Role, bool MustChangePassword = false);
+public sealed record AdminUserRow(Guid Id, string Username, string Role, bool IsActive, bool MustChangePassword, DateTime CreatedAt);
+public sealed record TemporaryPasswordResult(AdminUserRow User, string TemporaryPassword);
+public sealed record RefreshRotation(UserRow User, string RefreshToken);
+public sealed record MeetingRow(Guid Id, string Title, string? Description, string Status, DateTime CreatedAt, DateTime? OccurredAt = null);
+public sealed record JobRow(
+    Guid Id,
+    Guid MeetingId,
+    string Type,
+    string Status,
+    string Stage,
+    int Progress,
+    int Attempt,
+    string? Error,
+    string? ErrorCode = null,
+    string? PipelineCorrelationId = null,
+    DateTime? LastHeartbeat = null,
+    DateTime? UpdatedAt = null,
+    DateTime? StageChangedAt = null,
+    DateTime? ProgressChangedAt = null,
+    DateTime? NotBefore = null,
+    string? ScheduledReason = null,
+    DateTime? QueueEnteredAt = null,
+    DateTime? WorkerClaimedAt = null,
+    string? DispatchState = null);
+public sealed record AgentSessionCancellationTarget(Guid AgentId, Guid ServerSessionId);
+public sealed record MeetingCancellationResult(Guid MeetingId, string Status, int CancelledJobs, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
+public sealed record MeetingDeletionResult(Guid MeetingId, int CancelledJobs, IReadOnlyList<string> StorageKeys, IReadOnlyList<AgentSessionCancellationTarget> AgentSessions, bool RecordingMustStop = false);
+public sealed record TranscriptSegmentRow(Guid Id, int Ordinal, long StartMs, long EndMs, string? Speaker, string Text, double? Confidence, JsonDocument? Words, string SegmentKind = "SPEECH", bool IsHidden = false);
+public sealed record TranscriptRow(Guid Id, Guid MeetingId, string Status, IReadOnlyList<TranscriptSegmentRow> Segments, bool IsPartial = false, JsonDocument? Warnings = null, JsonDocument? Quality = null, double? QualityScore = null);
+public sealed record CorrelationContext(Guid? MeetingId = null, string? LocalSessionId = null, Guid? ServerSessionId = null, Guid? MediaAssetId = null, Guid? ProcessingJobId = null, Guid? TranscriptId = null, Guid? SummaryJobId = null, Guid? SummaryId = null, string? TraceId = null);
+
+public static class StorageHelpers
+{
+    public static async Task<string> ComputeSha256Async(string path)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    public static string StoragePath(string storageKey)
+    {
+        var normalized = (storageKey ?? string.Empty).Replace("\\", "/").Trim();
+        if (normalized.StartsWith("data/", StringComparison.Ordinal)) normalized = "/" + normalized;
+        if (!normalized.StartsWith("/data/", StringComparison.Ordinal) && !string.Equals(normalized, "/data", StringComparison.Ordinal))
+            throw new InvalidOperationException("invalid_storage_key");
+
+        var root = Path.GetFullPath(Environment.GetEnvironmentVariable("MEDIA_ROOT") ?? "/data")
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relative = normalized.Length == "/data".Length ? string.Empty : normalized["/data/".Length..];
+        var full = Path.GetFullPath(Path.Combine(root, relative));
+        if (!string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
+            && !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("invalid_storage_key");
+        return full;
+    }
+}
+
+public static class MediaPolicy
+{
+    public const long MaxUploadBytes = 8L * 1024 * 1024 * 1024;
+    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4", ".mkv", ".mov", ".webm", ".avi" };
+    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".mkv", ".mov", ".webm", ".avi" };
+    public static bool IsAllowedExtension(string name) => Extensions.Contains(Path.GetExtension(name));
+    public static bool IsVideoExtension(string name) => VideoExtensions.Contains(Path.GetExtension(name));
+}
+
+public sealed class PasswordService
+{
+    public static string Hash(string password)
+    {
+        var salt = RandomNumberGenerator.GetBytes(16);
+        var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, 120_000, HashAlgorithmName.SHA256, 32);
+        return "pbkdf2-sha256$120000$" + Convert.ToBase64String(salt) + "$" + Convert.ToBase64String(hash);
+    }
+
+    public static bool Verify(string password, string encoded)
+    {
+        try
+        {
+            var parts = encoded.Split('$');
+            if (parts.Length != 4 || parts[0] != "pbkdf2-sha256")
+                return false;
+            var salt = Convert.FromBase64String(parts[2]);
+            var expected = Convert.FromBase64String(parts[3]);
+            var actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, int.Parse(parts[1]), HashAlgorithmName.SHA256, expected.Length);
+            return CryptographicOperations.FixedTimeEquals(actual, expected);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+public sealed class OperationalRecoveryService(
+    Database database,
+    ILogger<OperationalRecoveryService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(1));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await timer.WaitForNextTickAsync(stoppingToken);
+                await database.ReconcileInterruptedWorkAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "operational_recovery_failed");
+            }
+        }
+    }
+}
+
+public sealed record StorageDeletionBatchResult(int Completed, int Retried);
+
+public sealed class StorageDeletionService(
+    Database database,
+    ILogger<StorageDeletionService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await database.ProcessStorageDeletionQueueAsync(stoppingToken);
+                if (result.Completed > 0 || result.Retried > 0)
+                    logger.LogInformation("storage_deletion_queue_processed completed={Completed} retried={Retried}", result.Completed, result.Retried);
+                await timer.WaitForNextTickAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "storage_deletion_queue_failed");
+                try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
+        }
+    }
+}
+
+public sealed class Database(IConfiguration configuration)
+{
+    private readonly string _connectionString =
+        configuration.GetConnectionString("Postgres") ??
+        configuration["POSTGRES_CONNECTION"] ??
+        "Host=localhost;Port=5432;Database=whisperx_atom;Username=whisperx;Password=whisperx";
+
+    public async Task InitializeAsync()
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await ApplyMigrationsAsync(connection);
+
+        var username = configuration["BOOTSTRAP_ADMIN_USERNAME"] ?? "admin";
+        var password = configuration["BOOTSTRAP_ADMIN_PASSWORD"];
+        if (!string.IsNullOrWhiteSpace(password))
+        {
+            await using var check = new NpgsqlCommand("SELECT COUNT(*) FROM users WHERE username=@username", connection);
+            check.Parameters.AddWithValue("username", username);
+            if (Convert.ToInt64(await check.ExecuteScalarAsync()) == 0)
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO users(id, username, password_hash, role) VALUES(@id,@username,@hash,'Administrator')", connection);
+                insert.Parameters.AddWithValue("id", Guid.NewGuid());
+                insert.Parameters.AddWithValue("username", username);
+                insert.Parameters.AddWithValue("hash", PasswordService.Hash(password));
+                await insert.ExecuteNonQueryAsync();
+            }
+        }
+
+        // Reopen only interrupted, bounded work after an API restart. Terminal
+        // jobs and READY assets remain terminal; the client/server spool and
+        // outbox continue to provide durable idempotency for recovery.
+        await RecoverInterruptedWorkAsync(connection);
+    }
+
+    public async Task ReconcileInterruptedWorkAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await RecoverInterruptedWorkAsync(connection, cancellationToken);
+    }
+
+    public async Task<StorageDeletionBatchResult> ProcessStorageDeletionQueueAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var rows = new List<(long Id, string StorageKey, int Attempt)>();
+        await using (var select = new NpgsqlCommand("""
+            SELECT id, storage_key, attempt
+            FROM storage_deletion_queue
+            WHERE completed_at IS NULL AND next_retry_at <= now()
+            ORDER BY created_at
+            LIMIT 32
+            FOR UPDATE SKIP LOCKED
+            """, connection, transaction))
+        await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+                rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2)));
+        }
+
+        var completed = 0;
+        var retried = 0;
+        foreach (var row in rows)
+        {
+            try
+            {
+                var path = StorageHelpers.StoragePath(row.StorageKey);
+                if (File.Exists(path)) File.Delete(path);
+                await using var markComplete = new NpgsqlCommand("UPDATE storage_deletion_queue SET completed_at=now(), last_error=NULL WHERE id=@id", connection, transaction);
+                markComplete.Parameters.AddWithValue("id", row.Id);
+                await markComplete.ExecuteNonQueryAsync(cancellationToken);
+                completed++;
+            }
+            catch (Exception exception)
+            {
+                // Keep the tombstone forever with bounded exponential retry;
+                // a locked file or a temporarily unavailable disk must not
+                // become an orphan merely because the DELETE request ended.
+                var delaySeconds = Math.Min(3600, 5 * Math.Pow(2, Math.Min(row.Attempt, 9)));
+                await using var markRetry = new NpgsqlCommand("""
+                    UPDATE storage_deletion_queue
+                    SET attempt=attempt+1,
+                        next_retry_at=now() + (@delay_seconds * interval '1 second'),
+                        last_error=@error
+                    WHERE id=@id
+                    """, connection, transaction);
+                markRetry.Parameters.AddWithValue("delay_seconds", (int)delaySeconds);
+                markRetry.Parameters.AddWithValue("error", exception.Message.Length > 1000 ? exception.Message[..1000] : exception.Message);
+                markRetry.Parameters.AddWithValue("id", row.Id);
+                await markRetry.ExecuteNonQueryAsync(cancellationToken);
+                retried++;
+            }
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return new StorageDeletionBatchResult(completed, retried);
+    }
+
+    private static async Task RecoverInterruptedWorkAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var jobs = new NpgsqlCommand("""
+            UPDATE jobs
+            SET status='QUEUED',
+                stage=CASE
+                    WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY'
+                    WHEN stage IN ('READY_FOR_ASR','TRANSCRIBING','ALIGNING','DIARIZING','QUALITY_CHECK','PERSISTING') THEN 'READY_FOR_ASR'
+                    ELSE 'UPLOADED'
+                END,
+                worker_id=NULL,
+                lease_expires_at=NULL,
+                last_heartbeat=now(),
+                error_code='WORKER_RESTART_RECOVERY',
+                updated_at=now()
+            WHERE status='RUNNING'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+              AND attempt < 1
+            """, connection, transaction))
+        {
+            await jobs.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var exhausted = new NpgsqlCommand("""
+            UPDATE jobs
+            SET status='FAILED', stage='FAILED', worker_id=NULL,
+                lease_expires_at=NULL, last_heartbeat=now(),
+                error_code='RETRY_LIMIT_EXCEEDED',
+                error_message=COALESCE(error_message,'Worker lease expired after retry limit'),
+                updated_at=now()
+            WHERE status='RUNNING'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+              AND attempt >= 1
+            """, connection, transaction))
+        {
+            await exhausted.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var failedMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status='FAILED'
+            FROM jobs AS job
+            WHERE job.meeting_id=meeting.id
+              AND (job.type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS')
+                   OR job.type IN ('TRANSCRIBE_ASR','TRANSCRIPT_ENRICH'))
+              AND job.status='FAILED'
+              AND meeting.status IN ('INGESTING','MEDIA_PROCESSING','TRANSCRIBING','ALIGNING','DIARIZING')
+              AND NOT EXISTS (
+                  SELECT 1 FROM transcripts AS transcript
+                  WHERE transcript.meeting_id=meeting.id
+                    AND transcript.status IN ('READY','PARTIAL_READY')
+              )
+            """, connection, transaction))
+        {
+            await failedMeetings.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var sessions = new NpgsqlCommand("""
+            -- Recovered rows use session.state='AWAITING_AGENT_RECONNECT'
+            -- unless the zero-sample START is already safe to quarantine.
+            -- Do not trust the materialized total_samples alone: a finalize
+            -- race can leave it at zero after CONFIRMED chunks are present.
+            WITH confirmed AS (
+                SELECT session_id, COALESCE(MAX(start_sample + sample_count), 0) AS confirmed_samples
+                FROM recording_chunks
+                WHERE status='CONFIRMED'
+                GROUP BY session_id
+            ), candidates AS (
+                SELECT session.id, COALESCE(confirmed.confirmed_samples, 0) AS confirmed_samples
+                FROM recording_sessions AS session
+                JOIN recorder_agents AS agent ON session.agent_id=agent.id
+                LEFT JOIN confirmed ON confirmed.session_id=session.id
+                WHERE session.state='RECORDING'
+                  AND (session.local_session_id IS NULL
+                       OR COALESCE(agent.capabilities->'deviceHealth'->>'activeSessionId', '')
+                          <> session.local_session_id::text)
+                  AND (
+                        COALESCE(agent.last_seen_at, session.created_at) < now() - interval '5 minutes'
+                        OR (
+                          GREATEST(COALESCE(session.total_samples, 0), COALESCE(confirmed.confirmed_samples, 0)) = 0
+                          AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+                        )
+                      )
+            )
+            UPDATE recording_sessions AS session
+            SET total_samples=GREATEST(COALESCE(session.total_samples, 0), candidates.confirmed_samples),
+                state=CASE
+                        WHEN GREATEST(COALESCE(session.total_samples, 0), candidates.confirmed_samples) = 0
+                             AND COALESCE(session.started_at, session.created_at) < now() - interval '5 minutes'
+                          THEN 'ADMIN_REVIEW'
+                        ELSE 'AWAITING_AGENT_RECONNECT'
+                      END
+            FROM candidates
+            WHERE session.id=candidates.id
+            """, connection, transaction))
+        {
+            await sessions.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var interruptedMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status=CASE WHEN session.state='ADMIN_REVIEW' THEN 'ADMIN_REVIEW' ELSE 'RECORDING_INTERRUPTED' END
+            FROM recording_sessions AS session
+            WHERE session.meeting_id=meeting.id
+              AND session.state IN ('AWAITING_AGENT_RECONNECT','ADMIN_REVIEW')
+              AND meeting.status='RECORDING'
+            """, connection, transaction))
+        {
+            await interruptedMeetings.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var review = new NpgsqlCommand("""
+            UPDATE recording_sessions
+            SET state='ADMIN_REVIEW'
+            WHERE state='AWAITING_AGENT_RECONNECT'
+              AND created_at < now() - interval '24 hours'
+            """, connection, transaction))
+        {
+            await review.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var reviewMeetings = new NpgsqlCommand("""
+            UPDATE meetings AS meeting
+            SET status='ADMIN_REVIEW'
+            FROM recording_sessions AS session
+            WHERE session.meeting_id=meeting.id
+              AND session.state='ADMIN_REVIEW'
+              AND meeting.status IN ('RECORDING','RECORDING_INTERRUPTED')
+            """, connection, transaction))
+        {
+            await reviewMeetings.ExecuteNonQueryAsync(cancellationToken);
+        }
+        // LIVE_MEETING is provisional memory, never canonical transcript data.
+        // Keep it through STOP until a usable V1 exists. A seven-day expiry is
+        // only the safety deadline for a permanently stuck pipeline. Evidence
+        // snapshots keep their source rows so completed conversations remain
+        // auditable after the provisional context is retired.
+        await using (var liveMemory = new NpgsqlCommand("""
+            DELETE FROM live_meeting_segments AS segment
+            WHERE (
+                segment.expires_at <= now()
+                OR EXISTS (
+                    SELECT 1 FROM transcripts AS transcript
+                    WHERE transcript.meeting_id=segment.meeting_id
+                      AND transcript.version=1
+                      AND transcript.status IN ('READY','PARTIAL_READY')
+                )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM assistant_live_query_evidence AS evidence
+                  WHERE evidence.live_segment_id=segment.id
+              )
+            """, connection, transaction))
+        {
+            await liveMemory.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static async Task ApplyMigrationsAsync(NpgsqlConnection connection)
+    {
+        await using (var table = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())", connection))
+            await table.ExecuteNonQueryAsync();
+        await using (var checksums = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS schema_migration_checksums(version text PRIMARY KEY REFERENCES schema_migrations(version) ON DELETE CASCADE, sha256 text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now())", connection))
+            await checksums.ExecuteNonQueryAsync();
+        var directory = Path.Combine(AppContext.BaseDirectory, "Migrations");
+        if (!Directory.Exists(directory))
+            throw new DirectoryNotFoundException($"Migration directory not found: {directory}");
+        foreach (var file in Directory.GetFiles(directory, "*.sql").OrderBy(Path.GetFileName, StringComparer.Ordinal))
+        {
+            var version = Path.GetFileNameWithoutExtension(file);
+            var sql = await File.ReadAllTextAsync(file);
+            var checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
+            await using var check = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=@version)", connection);
+            check.Parameters.AddWithValue("version", version);
+            if ((bool)(await check.ExecuteScalarAsync())!)
+            {
+                await using var known = new NpgsqlCommand("SELECT sha256 FROM schema_migration_checksums WHERE version=@version", connection);
+                known.Parameters.AddWithValue("version", version);
+                var stored = await known.ExecuteScalarAsync();
+                if (stored is string knownChecksum &&
+                    !string.Equals(knownChecksum, checksum, StringComparison.OrdinalIgnoreCase) &&
+                    !IsLineEndingCompatibleChecksum(sql, knownChecksum) &&
+                    !IsKnownMixedLineEndingCompatibleChecksum(version, knownChecksum, checksum) &&
+                    !IsKnownRollingCompatibleChecksum(version, knownChecksum, checksum))
+                    throw new InvalidOperationException($"MIGRATION_CHECKSUM_MISMATCH:{version}");
+                if (stored is null or DBNull)
+                {
+                    await using var recordChecksum = new NpgsqlCommand("INSERT INTO schema_migration_checksums(version,sha256) VALUES(@version,@sha256) ON CONFLICT(version) DO NOTHING", connection);
+                    recordChecksum.Parameters.AddWithValue("version", version);
+                    recordChecksum.Parameters.AddWithValue("sha256", checksum);
+                    await recordChecksum.ExecuteNonQueryAsync();
+                }
+                continue;
+            }
+            await using var transaction = await connection.BeginTransactionAsync();
+            await using (var migration = new NpgsqlCommand(sql, connection, transaction))
+                await migration.ExecuteNonQueryAsync();
+            await using (var record = new NpgsqlCommand("INSERT INTO schema_migrations(version) VALUES(@version)", connection, transaction))
+            {
+                record.Parameters.AddWithValue("version", version);
+                await record.ExecuteNonQueryAsync();
+            }
+            await using (var recordChecksum = new NpgsqlCommand("INSERT INTO schema_migration_checksums(version,sha256) VALUES(@version,@sha256)", connection, transaction))
+            {
+                recordChecksum.Parameters.AddWithValue("version", version);
+                recordChecksum.Parameters.AddWithValue("sha256", checksum);
+                await recordChecksum.ExecuteNonQueryAsync();
+            }
+            await transaction.CommitAsync();
+        }
+    }
+
+    private static bool IsLineEndingCompatibleChecksum(string sql, string stored)
+    {
+        // Git checkouts on Windows may materialize SQL with CRLF while clean
+        // release worktrees and Linux images use LF. Accept only hashes that
+        // differ by line-ending representation; any SQL content drift remains
+        // fail-closed.
+        var lf = sql.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal);
+        var crlf = lf.Replace("\n", "\r\n", StringComparison.Ordinal);
+        return string.Equals(stored, MigrationChecksum(lf), StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(stored, MigrationChecksum(crlf), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string MigrationChecksum(string sql) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql))).ToLowerInvariant();
+
+    private static bool IsKnownMixedLineEndingCompatibleChecksum(string version, string stored, string current)
+    {
+        // Three early migrations were first applied from Windows working-tree
+        // files containing a mixture of CRLF and LF. A clean Git checkout uses
+        // LF throughout, so neither the all-LF nor all-CRLF checksum matches the
+        // recorded value. Keep the compatibility list limited to the verified
+        // old/new checksum pairs; arbitrary SQL drift must remain fail-closed.
+        return (version, stored.ToLowerInvariant(), current.ToLowerInvariant()) switch
+        {
+            ("001_initial", "d7378343a84da3e32c1abeb4cb38da5973afae32476832b11465067b6a70313d", "5191cf5807112d00e703590d6a986d603c25bc8e3b539136afc444940b22a603") => true,
+            ("006_recording_ownership", "16829310a21f7ecadfee1ec5c5548bc11f4102ef4a6d8090f8eb3748725c64d7", "ec0aefa00f10dab961ef246c14861668121c1f68c6efeeb22e1ad3685b43db77") => true,
+            ("008_backend_hardening", "bfe7b3079f4948010fdd6b9690feb27cf785efbccc5f4ff508a2f9d43d4b503d", "ba1a9f95e70bf746c9521a2420adba242aa66dfc6754c579d8561638809ba52c") => true,
+            _ => false
+        };
+    }
+
+    private static bool IsKnownRollingCompatibleChecksum(string version, string stored, string current)
+    {
+        // 033 changed comments only between the pre-rolling server bundle and
+        // the current source. The SQL schema is byte-for-byte equivalent, but
+        // strict checksum enforcement otherwise blocks every additive upgrade.
+        // Keep this allow-list deliberately narrow; all other migration drift
+        // remains fail-closed.
+        return string.Equals(version, "033_live_meeting_memory", StringComparison.Ordinal) &&
+               ((string.Equals(stored, "7bf4b7621cd400fd28935e237fb6e9e36888a7219e3ea360aaff224dcc73f1ac", StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(current, "fa20655e547bd80b14622a171352d2f6138a64d86c8ee9a609d126f4e633851e", StringComparison.OrdinalIgnoreCase)) ||
+                (string.Equals(stored, "fa20655e547bd80b14622a171352d2f6138a64d86c8ee9a609d126f4e633851e", StringComparison.OrdinalIgnoreCase) &&
+                 string.Equals(current, "7bf4b7621cd400fd28935e237fb6e9e36888a7219e3ea360aaff224dcc73f1ac", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    public async Task PingAsync()
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT 1", connection);
+        await command.ExecuteScalarAsync();
+    }
+
+    public async Task<UserRow?> FindUserAsync(string username)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT id, username, password_hash, role, must_change_password FROM users WHERE username=@username AND is_active", connection);
+        command.Parameters.AddWithValue("username", username);
+        await using var reader = await command.ExecuteReaderAsync();
+        return !await reader.ReadAsync() ? null :
+            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4));
+    }
+
+    public async Task<IReadOnlyList<AdminUserRow>> ListUsersAsync()
+    {
+        var result = new List<AdminUserRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,username,role,is_active,must_change_password,created_at FROM users ORDER BY username", connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AdminUserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetDateTime(5)));
+        return result;
+    }
+
+    public async Task<AdminUserRow?> CreateUserAsync(string username, string role, string temporaryPassword)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("INSERT INTO users(id,username,password_hash,role,must_change_password) VALUES(@id,@username,@hash,@role,true) RETURNING id,username,role,is_active,must_change_password,created_at", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("username", username.Trim());
+        command.Parameters.AddWithValue("hash", PasswordService.Hash(temporaryPassword));
+        command.Parameters.AddWithValue("role", role);
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync();
+            return !await reader.ReadAsync() ? null : new AdminUserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetDateTime(5));
+        }
+        catch (PostgresException ex) when (ex.SqlState == "23505") { return null; }
+    }
+
+    public async Task<bool> UpdateUserAsync(Guid userId, string? role, bool? isActive)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE users SET role=COALESCE(@role,role),is_active=COALESCE(@active,is_active) WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", userId);
+        command.Parameters.AddWithValue("role", (object?)role ?? DBNull.Value);
+        command.Parameters.AddWithValue("active", (object?)isActive ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    public async Task<string?> ResetPasswordAsync(Guid userId)
+    {
+        var password = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE users SET password_hash=@hash,must_change_password=true,password_changed_at=NULL WHERE id=@id", connection);
+        command.Parameters.AddWithValue("id", userId);
+        command.Parameters.AddWithValue("hash", PasswordService.Hash(password));
+        return await command.ExecuteNonQueryAsync() > 0 ? password : null;
+    }
+
+    public async Task<bool> RevokeUserSessionsAsync(Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var sessions = new NpgsqlCommand("UPDATE sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        sessions.Parameters.AddWithValue("id", userId);
+        await sessions.ExecuteNonQueryAsync();
+        await using var refresh = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        refresh.Parameters.AddWithValue("id", userId);
+        var changed = await refresh.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return changed >= 0;
+    }
+
+    public async Task<bool> ChangePasswordAsync(Guid userId, string currentPassword, string newPassword, string? currentSessionToken = null)
+    {
+        if (newPassword.Length < 12) return false;
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var select = new NpgsqlCommand("SELECT password_hash FROM users WHERE id=@id AND is_active FOR UPDATE", connection, transaction);
+        select.Parameters.AddWithValue("id", userId);
+        var hash = await select.ExecuteScalarAsync() as string;
+        if (hash is null || !PasswordService.Verify(currentPassword, hash)) { await transaction.RollbackAsync(); return false; }
+        await using var update = new NpgsqlCommand("UPDATE users SET password_hash=@hash,must_change_password=false,password_changed_at=now() WHERE id=@id", connection, transaction);
+        update.Parameters.AddWithValue("id", userId);
+        update.Parameters.AddWithValue("hash", PasswordService.Hash(newPassword));
+        await update.ExecuteNonQueryAsync();
+        await using var sessions = new NpgsqlCommand("UPDATE sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL AND (@current_hash IS NULL OR token_hash<>@current_hash)", connection, transaction);
+        sessions.Parameters.AddWithValue("id", userId);
+        sessions.Parameters.AddWithValue("current_hash", currentSessionToken is null ? DBNull.Value : SessionHash(currentSessionToken));
+        await sessions.ExecuteNonQueryAsync();
+        await using var refresh = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE user_id=@id AND revoked_at IS NULL", connection, transaction);
+        refresh.Parameters.AddWithValue("id", userId);
+        await refresh.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return true;
+    }
+
+    public async Task<UserRow?> GetUserForSessionAsync(string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT u.id, u.username, u.password_hash, u.role, u.must_change_password FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=@hash AND s.expires_at > now() AND s.revoked_at IS NULL AND u.is_active", connection);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await using var reader = await command.ExecuteReaderAsync();
+        return !await reader.ReadAsync() ? null :
+            new UserRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetBoolean(4));
+    }
+
+    public async Task<bool> IsSessionValidAsync(string token) => await GetUserForSessionAsync(token) is not null;
+
+    public async Task CreateSessionAsync(Guid userId, string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(@id,@uid,@hash,now()+interval '12 hours')", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("uid", userId);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task CreateRefreshSessionAsync(Guid userId, string token, Guid familyId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO refresh_sessions(id,user_id,family_id,token_hash,expires_at) VALUES(@id,@uid,@family,@hash,now()+interval '30 days')", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("uid", userId);
+        command.Parameters.AddWithValue("family", familyId);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<RefreshRotation?> RotateRefreshSessionAsync(string token, string replacementToken)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var select = new NpgsqlCommand(
+            "SELECT r.id,r.user_id,r.family_id,r.expires_at,r.revoked_at,r.replaced_by,u.id,u.username,u.password_hash,u.role,u.must_change_password FROM refresh_sessions r JOIN users u ON u.id=r.user_id WHERE r.token_hash=@hash FOR UPDATE", connection, transaction);
+        select.Parameters.AddWithValue("hash", SessionHash(token));
+        await using var reader = await select.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        var id = reader.GetGuid(0);
+        var user = new UserRow(reader.GetGuid(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), reader.GetBoolean(10));
+        var familyId = reader.GetGuid(2);
+        var expired = reader.GetDateTime(3) <= DateTime.UtcNow;
+        var revoked = !reader.IsDBNull(4);
+        var replaced = !reader.IsDBNull(5);
+        await reader.CloseAsync();
+
+        if (expired || !await UserIsActiveAsync(user.Id, connection, transaction))
+        {
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        if (revoked || replaced)
+        {
+            await using var revokeFamily = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE family_id=@family AND revoked_at IS NULL", connection, transaction);
+            revokeFamily.Parameters.AddWithValue("family", familyId);
+            await revokeFamily.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return null;
+        }
+
+        var replacementId = Guid.NewGuid();
+        await using var insert = new NpgsqlCommand(
+            "INSERT INTO refresh_sessions(id,user_id,family_id,token_hash,expires_at) VALUES(@id,@uid,@family,@hash,now()+interval '30 days')", connection, transaction);
+        insert.Parameters.AddWithValue("id", replacementId);
+        insert.Parameters.AddWithValue("uid", user.Id);
+        insert.Parameters.AddWithValue("family", familyId);
+        insert.Parameters.AddWithValue("hash", SessionHash(replacementToken));
+        await insert.ExecuteNonQueryAsync();
+
+        await using var replace = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now(),last_used_at=now(),replaced_by=@replacement WHERE id=@id", connection, transaction);
+        replace.Parameters.AddWithValue("replacement", replacementId);
+        replace.Parameters.AddWithValue("id", id);
+        await replace.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return new RefreshRotation(user, replacementToken);
+    }
+
+    private static async Task<bool> UserIsActiveAsync(Guid userId, NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        await using var command = new NpgsqlCommand("SELECT is_active FROM users WHERE id=@id", connection, transaction);
+        command.Parameters.AddWithValue("id", userId);
+        return (bool?)await command.ExecuteScalarAsync() == true;
+    }
+
+    public async Task RevokeRefreshSessionAsync(string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE refresh_sessions SET revoked_at=now() WHERE token_hash=@hash", connection);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task RevokeSessionAsync(string token)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE sessions SET revoked_at=now() WHERE token_hash=@hash", connection);
+        command.Parameters.AddWithValue("hash", SessionHash(token));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<MeetingRow> CreateMeetingAsync(Guid ownerId, string title, string? description)
+    {
+        var id = Guid.NewGuid();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO meetings(id,owner_id,title,description,status) VALUES(@id,@owner,@title,@description,'CREATED') RETURNING created_at", connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("owner", ownerId);
+        command.Parameters.AddWithValue("title", title);
+        command.Parameters.AddWithValue("description", (object?)description ?? DBNull.Value);
+        var created = (DateTime)(await command.ExecuteScalarAsync())!;
+        return new MeetingRow(id, title, description, "CREATED", created);
+    }
+
+    /// <summary>
+    /// Imports one already-reviewed historical transcript.  The source file
+    /// remains on the operator workstation; only hashes, metrics and segment
+    /// payloads are accepted here.  PREVIEW is read-only and APPLY is guarded
+    /// by an owner/content advisory lock plus the unique receipt constraint.
+    /// </summary>
+    public async Task<HistoricalImportResult> ImportHistoricalTranscriptAsync(Guid ownerId, HistoricalImportRequest request, bool apply)
+    {
+        var validationError = ValidateHistoricalImport(request);
+        if (validationError is not null)
+            return new HistoricalImportResult(request.Mode, "INVALID", ErrorCode: validationError);
+
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var lockCommand = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))", connection, transaction))
+        {
+            lockCommand.Parameters.AddWithValue("lock_key", $"historical-import:{ownerId:N}:{request.CanonicalContentSha256.ToLowerInvariant()}");
+            await lockCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var existing = new NpgsqlCommand("""
+            SELECT id,decision,meeting_id,transcript_id,memory_job_id
+              FROM historical_transcript_imports
+             WHERE owner_user_id=@owner AND canonical_content_sha256=@canonical
+             FOR UPDATE
+            """, connection, transaction))
+        {
+            existing.Parameters.AddWithValue("owner", ownerId);
+            existing.Parameters.AddWithValue("canonical", request.CanonicalContentSha256.ToLowerInvariant());
+            await using var reader = await existing.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var result = new HistoricalImportResult(
+                    request.Mode,
+                    reader.GetString(1),
+                    reader.GetGuid(0),
+                    reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                    reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                    reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                    Created: false,
+                    Duplicate: true,
+                    Warnings: new[] { "HISTORICAL_IMPORT_ALREADY_REGISTERED" });
+                await transaction.CommitAsync();
+                return result;
+            }
+        }
+
+        if (!apply)
+        {
+            await transaction.CommitAsync();
+            return new HistoricalImportResult("PREVIEW", "READY_FOR_APPLY", Warnings: new[] { "HISTORICAL_IMPORT_UNVERIFIED" });
+        }
+
+        var importId = Guid.NewGuid();
+        var meetingId = Guid.NewGuid();
+        var transcriptId = Guid.NewGuid();
+        var memoryJobId = Guid.NewGuid();
+        var title = string.IsNullOrWhiteSpace(request.Title) ? request.SourceName : request.Title.Trim();
+        var metadata = JsonSerializer.Serialize(new
+        {
+            source = "HISTORICAL_IMPORT",
+            sourceName = request.SourceName,
+            sourceFormat = request.SourceFormat.ToLowerInvariant(),
+            sourceSha256 = request.SourceSha256.ToLowerInvariant(),
+            canonicalContentSha256 = request.CanonicalContentSha256.ToLowerInvariant(),
+            parserVersion = request.ParserVersion,
+            meetingDate = request.MeetingDate,
+            datePrecision = request.DatePrecision.ToUpperInvariant(),
+            timingQuality = request.TimingQuality.ToUpperInvariant(),
+            wordCount = request.WordCount,
+            segmentCount = request.Segments.Count,
+            warning = "HISTORICAL_IMPORT_UNVERIFIED"
+        });
+        DateTimeOffset? importedOccurredAt = null;
+        var importedPrecision = request.DatePrecision.Trim().ToUpperInvariant();
+        if (importedPrecision == "DAY"
+            && DateOnly.TryParseExact(request.MeetingDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var importedDate))
+            importedOccurredAt = new DateTimeOffset(importedDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        else if (DateTimeOffset.TryParse(request.MeetingDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AllowWhiteSpaces, out var importedTimestamp))
+            importedOccurredAt = importedTimestamp.ToUniversalTime();
+        var storedOccurrencePrecision = importedOccurredAt is null
+            ? "UNKNOWN"
+            : importedPrecision == "DAY" ? "IMPORTED_DATE" : "IMPORTED_TIMESTAMP";
+        const string warnings = "[\"HISTORICAL_IMPORT_UNVERIFIED\"]";
+
+        await using (var meeting = new NpgsqlCommand("INSERT INTO meetings(id,owner_id,title,description,status,occurred_at,occurred_precision) VALUES(@id,@owner,@title,@description,'TRANSCRIBED',@occurred,@precision)", connection, transaction))
+        {
+            meeting.Parameters.AddWithValue("id", meetingId);
+            meeting.Parameters.AddWithValue("owner", ownerId);
+            meeting.Parameters.AddWithValue("title", title);
+            meeting.Parameters.AddWithValue("description", $"Исторический импорт; дата: {request.MeetingDate ?? "не указана"}");
+            meeting.Parameters.Add("occurred", NpgsqlDbType.TimestampTz).Value = (object?)importedOccurredAt ?? DBNull.Value;
+            meeting.Parameters.AddWithValue("precision", storedOccurrencePrecision);
+            await meeting.ExecuteNonQueryAsync();
+        }
+        await using (var transcript = new NpgsqlCommand("""
+            INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,version_kind)
+            VALUES(@id,@meeting,1,'PARTIAL_READY','ru','historical-import-v1',@warnings::jsonb,@metadata::jsonb,NULL,'HISTORICAL_IMPORT','HISTORICAL_IMPORT','HISTORICAL_IMPORT')
+            """, connection, transaction))
+        {
+            transcript.Parameters.AddWithValue("id", transcriptId);
+            transcript.Parameters.AddWithValue("meeting", meetingId);
+            transcript.Parameters.AddWithValue("warnings", warnings);
+            transcript.Parameters.AddWithValue("metadata", metadata);
+            await transcript.ExecuteNonQueryAsync();
+        }
+        foreach (var segment in request.Segments.OrderBy(item => item.Ordinal))
+        {
+            await using var insertSegment = new NpgsqlCommand("""
+                INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_label,text,confidence,words)
+                VALUES(@id,@transcript,@ordinal,@start,@end,@speaker,@text,NULL,NULL)
+                """, connection, transaction);
+            insertSegment.Parameters.AddWithValue("id", Guid.NewGuid());
+            insertSegment.Parameters.AddWithValue("transcript", transcriptId);
+            insertSegment.Parameters.AddWithValue("ordinal", segment.Ordinal);
+            insertSegment.Parameters.AddWithValue("start", segment.StartMs);
+            insertSegment.Parameters.AddWithValue("end", segment.EndMs);
+            insertSegment.Parameters.AddWithValue("speaker", (object?)segment.Speaker?.Trim() ?? DBNull.Value);
+            insertSegment.Parameters.AddWithValue("text", segment.Text.Trim());
+            await insertSegment.ExecuteNonQueryAsync();
+        }
+        await using (var memory = new NpgsqlCommand("""
+            INSERT INTO memory_jobs(id,owner_user_id,meeting_id,transcript_id,transcript_version,status,stage,progress,attempt)
+            VALUES(@id,@owner,@meeting,@transcript,1,'QUEUED','QUEUED',0,0)
+            ON CONFLICT(transcript_id,transcript_version) DO NOTHING
+            """, connection, transaction))
+        {
+            memory.Parameters.AddWithValue("id", memoryJobId);
+            memory.Parameters.AddWithValue("owner", ownerId);
+            memory.Parameters.AddWithValue("meeting", meetingId);
+            memory.Parameters.AddWithValue("transcript", transcriptId);
+            await memory.ExecuteNonQueryAsync();
+        }
+        var payload = JsonSerializer.Serialize(new
+        {
+            jobId = memoryJobId,
+            meetingId,
+            transcriptId,
+            transcriptVersion = 1,
+            ownerUserId = ownerId,
+            pipelineCorrelationId = (Guid?)null
+        });
+        await using (var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'memory.index',@payload::jsonb)", connection, transaction))
+        {
+            outbox.Parameters.AddWithValue("id", Guid.NewGuid());
+            outbox.Parameters.AddWithValue("payload", payload);
+            await outbox.ExecuteNonQueryAsync();
+        }
+        var receipt = JsonSerializer.Serialize(new { importId, meetingId, transcriptId, memoryJobId, meetingDate = request.MeetingDate, datePrecision = importedPrecision, decision = "IMPORTED" });
+        await using (var receiptCommand = new NpgsqlCommand("""
+            INSERT INTO historical_transcript_imports(id,owner_user_id,source_name,source_format,source_sha256,canonical_content_sha256,parser_version,decision,meeting_id,transcript_id,memory_job_id,receipt)
+            VALUES(@id,@owner,@name,@format,@source,@canonical,@parser,'IMPORTED',@meeting,@transcript,@memory,@receipt::jsonb)
+            """, connection, transaction))
+        {
+            receiptCommand.Parameters.AddWithValue("id", importId);
+            receiptCommand.Parameters.AddWithValue("owner", ownerId);
+            receiptCommand.Parameters.AddWithValue("name", request.SourceName);
+            receiptCommand.Parameters.AddWithValue("format", request.SourceFormat.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("source", request.SourceSha256.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("canonical", request.CanonicalContentSha256.ToLowerInvariant());
+            receiptCommand.Parameters.AddWithValue("parser", request.ParserVersion);
+            receiptCommand.Parameters.AddWithValue("meeting", meetingId);
+            receiptCommand.Parameters.AddWithValue("transcript", transcriptId);
+            receiptCommand.Parameters.AddWithValue("memory", memoryJobId);
+            receiptCommand.Parameters.AddWithValue("receipt", receipt);
+            await receiptCommand.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        return new HistoricalImportResult("APPLY", "IMPORTED", importId, meetingId, transcriptId, memoryJobId, Created: true, Warnings: new[] { "HISTORICAL_IMPORT_UNVERIFIED" });
+    }
+
+    private static string? ValidateHistoricalImport(HistoricalImportRequest request)
+    {
+        if (request.Mode is not ("PREVIEW" or "APPLY")) return "historical_import_mode_invalid";
+        if (string.IsNullOrWhiteSpace(request.SourceName) || request.SourceName.Length > 255 || request.SourceName.Contains('/') || request.SourceName.Contains('\\')) return "historical_import_source_name_invalid";
+        if (request.SourceFormat.ToLowerInvariant() is not ("txt" or "docx")) return "historical_import_format_invalid";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(request.SourceSha256 ?? string.Empty, "^[0-9a-fA-F]{64}$") || !System.Text.RegularExpressions.Regex.IsMatch(request.CanonicalContentSha256 ?? string.Empty, "^[0-9a-fA-F]{64}$")) return "historical_import_hash_invalid";
+        if (request.MeetingDate is null || request.DatePrecision.ToUpperInvariant() is not ("DAY" or "SECOND")) return "historical_import_date_required";
+        var datePrecision = request.DatePrecision.ToUpperInvariant();
+        var dateValid = datePrecision == "DAY"
+            ? DateOnly.TryParseExact(request.MeetingDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _)
+            : DateTimeOffset.TryParse(request.MeetingDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AllowWhiteSpaces, out _);
+        if (!dateValid) return "historical_import_date_invalid";
+        if (request.WordCount < 0 || request.WordCount > 2_000_000 || request.Segments is null || request.Segments.Count is < 1 or > 200_000) return "historical_import_segments_invalid";
+        var ordinals = request.Segments.Select(item => item.Ordinal).OrderBy(item => item).ToArray();
+        if (ordinals.Length == 0 || ordinals[0] != 0 || ordinals.Select((value, index) => value == index).Any(valid => !valid)) return "historical_import_ordinals_invalid";
+        if (request.Segments.Any(item => item.StartMs < 0 || item.EndMs < item.StartMs || string.IsNullOrWhiteSpace(item.Text) || item.Text.Length > 20_000)) return "historical_import_segment_invalid";
+        return null;
+    }
+
+    public async Task<bool> UserOwnsMeetingAsync(Guid meetingId, Guid userId)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM meetings WHERE id=@meeting AND owner_id=@owner)", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("owner", userId);
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    public async Task<IReadOnlyList<MeetingRow>> ListMeetingsAsync(int limit, int offset, Guid ownerId, bool includeAll)
+    {
+        var result = new List<MeetingRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT id,title,description,status,created_at,occurred_at FROM meetings WHERE @include_all OR owner_id=@owner ORDER BY COALESCE(occurred_at,created_at) DESC LIMIT @limit OFFSET @offset", connection);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        command.Parameters.AddWithValue("owner", ownerId);
+        command.Parameters.AddWithValue("limit", limit);
+        command.Parameters.AddWithValue("offset", offset);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4), reader.IsDBNull(5) ? null : reader.GetDateTime(5)));
+        return result;
+    }
+
+    public async Task<IReadOnlyList<TranscriptRegistryRow>> ListTranscriptRegistryAsync(int limit, int offset, string? search, string? status, DateTime? dateFrom, DateTime? dateTo, Guid ownerId, bool includeAll)
+    {
+        var result = new List<TranscriptRegistryRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT t.id,m.id,m.title,m.created_at,t.version,t.status,(t.status='PARTIAL_READY'),t.quality_score,
+                   COALESCE(MAX(s.end_ms),0),COUNT(s.id),COUNT(DISTINCT s.speaker_id),t.created_at
+            FROM meetings m
+            JOIN LATERAL (SELECT * FROM transcripts WHERE meeting_id=m.id ORDER BY version DESC LIMIT 1) t ON true
+            LEFT JOIN transcript_segments s ON s.transcript_id=t.id AND COALESCE(s.is_hidden,false)=false
+            WHERE (@include_all OR m.owner_id=@owner)
+              AND (@search IS NULL OR m.title ILIKE '%' || @search || '%')
+              AND (@status IS NULL OR t.status=@status)
+              AND (@date_from IS NULL OR COALESCE(m.occurred_at,m.created_at) >= @date_from)
+              AND (@date_to IS NULL OR COALESCE(m.occurred_at,m.created_at) < @date_to)
+            GROUP BY t.id,m.id,m.title,m.created_at,t.version,t.status,t.quality_score,t.created_at
+            ORDER BY COALESCE(m.occurred_at,m.created_at) DESC LIMIT @limit OFFSET @offset
+            """, connection);
+        // Explicit types are required for nullable filters. PostgreSQL cannot
+        // infer the type of a NULL parameter used in an `IS NULL` predicate,
+        // which previously made the default `/api/transcripts` request fail
+        // with 42P08 before the Desktop could render the registry.
+        command.Parameters.AddWithValue("include_all", includeAll); command.Parameters.AddWithValue("owner", ownerId);
+        command.Parameters.Add("search", NpgsqlDbType.Text).Value = (object?)search ?? DBNull.Value;
+        command.Parameters.Add("status", NpgsqlDbType.Text).Value = (object?)status?.ToUpperInvariant() ?? DBNull.Value;
+        command.Parameters.Add("date_from", NpgsqlDbType.TimestampTz).Value = (object?)dateFrom ?? DBNull.Value;
+        command.Parameters.Add("date_to", NpgsqlDbType.TimestampTz).Value = (object?)dateTo ?? DBNull.Value;
+        command.Parameters.AddWithValue("limit", limit); command.Parameters.AddWithValue("offset", offset);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(new TranscriptRegistryRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetDateTime(3), reader.GetInt32(4), reader.GetString(5), reader.GetBoolean(6), reader.IsDBNull(7) ? null : Convert.ToDouble(reader.GetValue(7)), reader.GetInt64(8), checked((int)reader.GetInt64(9)), checked((int)reader.GetInt64(10)), reader.GetDateTime(11)));
+        return result;
+    }
+
+    public async Task<MeetingRow?> GetMeetingAsync(Guid id, Guid? ownerId, bool includeAll)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,title,description,status,created_at,occurred_at FROM meetings WHERE id=@id AND (@include_all OR owner_id=@owner)", connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("owner", (object?)ownerId ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_all", includeAll);
+        await using var reader = await command.ExecuteReaderAsync();
+        return !await reader.ReadAsync() ? null :
+            new MeetingRow(reader.GetGuid(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetDateTime(4), reader.IsDBNull(5) ? null : reader.GetDateTime(5));
+    }
+
+    public async Task CreateUploadReservationAsync(Guid meetingId, Guid uploadId, string fileName, long sizeBytes)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO media_assets(id,meeting_id,upload_id,original_name,size_bytes,status) VALUES(@id,@meeting,@upload,@name,@size,'UPLOADING')", connection);
+        command.Parameters.AddWithValue("id", Guid.NewGuid());
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("upload", uploadId);
+        command.Parameters.AddWithValue("name", fileName);
+        command.Parameters.AddWithValue("size", sizeBytes);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<JobRow?> CompleteUploadAsync(UploadCompleteRequest payload)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+
+        var normalizedStorageKey = payload.StorageKey;
+        if (normalizedStorageKey.StartsWith("tusd:", StringComparison.OrdinalIgnoreCase))
+        {
+            var tusId = normalizedStorageKey[(normalizedStorageKey.LastIndexOf('/') + 1)..];
+            if (string.IsNullOrWhiteSpace(tusId))
+                return null;
+            normalizedStorageKey = "/data/uploads/" + tusId;
+        }
+
+        // Serialize completion of uploads with the same content hash. This avoids a
+        // race where two simultaneous finalizes both pass the duplicate check and
+        // one of them fails on ux_media_assets_sha256 with an HTTP 500.
+        await using (var hashLock = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended(@sha, 0))", connection, tx))
+        {
+            hashLock.Parameters.AddWithValue("sha", payload.Sha256);
+            await hashLock.ExecuteNonQueryAsync();
+        }
+
+        Guid? duplicateOf = null;
+        await using (var duplicate = new NpgsqlCommand(
+            "SELECT id FROM media_assets WHERE sha256=@sha AND upload_id IS DISTINCT FROM @upload ORDER BY created_at LIMIT 1",
+            connection, tx))
+        {
+            duplicate.Parameters.AddWithValue("sha", payload.Sha256);
+            duplicate.Parameters.AddWithValue("upload", payload.UploadId);
+            var value = await duplicate.ExecuteScalarAsync();
+            if (value is Guid id)
+                duplicateOf = id;
+        }
+
+        await using var asset = new NpgsqlCommand(
+            "UPDATE media_assets SET storage_key=@key, sha256=@sha, duplicate_of=@duplicate, size_bytes=@size, duration_ms=@duration, status=@status WHERE upload_id=@upload AND status='UPLOADING' RETURNING id,meeting_id",
+            connection, tx);
+        asset.Parameters.AddWithValue("key", normalizedStorageKey);
+        asset.Parameters.AddWithValue("sha", duplicateOf.HasValue ? DBNull.Value : payload.Sha256);
+        asset.Parameters.AddWithValue("duplicate", duplicateOf.HasValue ? duplicateOf.Value : DBNull.Value);
+        asset.Parameters.AddWithValue("size", payload.SizeBytes);
+        asset.Parameters.AddWithValue("duration", payload.DurationMs);
+        asset.Parameters.AddWithValue("status", duplicateOf.HasValue ? "UPLOADED_DUPLICATE" : "UPLOADED");
+        asset.Parameters.AddWithValue("upload", payload.UploadId);
+        await using var reader = await asset.ExecuteReaderAsync();
+
+        if (!await reader.ReadAsync())
+        {
+            await reader.CloseAsync();
+            await using var existing = new NpgsqlCommand(
+                "SELECT id,meeting_id,type,status,stage,progress,attempt,error_message FROM jobs WHERE media_asset_id=(SELECT id FROM media_assets WHERE upload_id=@upload) ORDER BY created_at DESC LIMIT 1",
+                connection, tx);
+            existing.Parameters.AddWithValue("upload", payload.UploadId);
+            await using var existingReader = await existing.ExecuteReaderAsync();
+            if (!await existingReader.ReadAsync())
+                return null;
+            var existingJob = ReadJob(existingReader);
+            await existingReader.CloseAsync();
+            await tx.CommitAsync();
+            return existingJob;
+        }
+
+        var mediaId = reader.GetGuid(0);
+        var meetingId = reader.GetGuid(1);
+        await reader.CloseAsync();
+
+        var jobId = Guid.NewGuid();
+        await using var job = new NpgsqlCommand(
+            "INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage) VALUES(@id,@meeting,@asset,'TRANSCRIBE','QUEUED','UPLOADED')", connection, tx);
+        job.Parameters.AddWithValue("id", jobId);
+        job.Parameters.AddWithValue("meeting", meetingId);
+        job.Parameters.AddWithValue("asset", mediaId);
+        await job.ExecuteNonQueryAsync();
+
+        var envelope = JsonSerializer.Serialize(new
+        {
+            message_id = Guid.NewGuid(),
+            job_id = jobId,
+            meeting_id = meetingId,
+            media_asset_id = mediaId,
+            stage = "UPLOADED",
+            attempt = 0,
+            storage_key = normalizedStorageKey,
+            duplicate_of = duplicateOf,
+        });
+        await using var outbox = new NpgsqlCommand(
+            "INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'media.ingest',@payload::jsonb)", connection, tx);
+        outbox.Parameters.AddWithValue("id", Guid.NewGuid());
+        outbox.Parameters.AddWithValue("payload", envelope);
+        await outbox.ExecuteNonQueryAsync();
+        await tx.CommitAsync();
+        return new JobRow(jobId, meetingId, "TRANSCRIBE", "QUEUED", "UPLOADED", 0, 0, null);
+    }
+    public async Task<JobRow> RegisterImportAsync(ImportRequest request)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using var duplicate = new NpgsqlCommand("SELECT j.id,j.meeting_id,j.type,j.status,j.stage,j.progress,j.attempt,j.error_message FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE a.sha256=@sha ORDER BY j.created_at DESC LIMIT 1", connection, tx);
+        duplicate.Parameters.AddWithValue("sha", request.Sha256);
+        await using var duplicateReader = await duplicate.ExecuteReaderAsync();
+        if (await duplicateReader.ReadAsync()) { var existing = ReadJob(duplicateReader); await duplicateReader.CloseAsync(); await tx.CommitAsync(); return existing; }
+        await duplicateReader.CloseAsync();
+        var meetingId = Guid.NewGuid();
+        var title = Path.GetFileNameWithoutExtension(request.OriginalName);
+        await using var meeting = new NpgsqlCommand("INSERT INTO meetings(id,title,status) VALUES(@id,@title,'CREATED')", connection, tx);
+        meeting.Parameters.AddWithValue("id", meetingId); meeting.Parameters.AddWithValue("title", string.IsNullOrWhiteSpace(title) ? "Безымянная запись" : title);
+        await meeting.ExecuteNonQueryAsync();
+        var assetId = Guid.NewGuid();
+        await using var asset = new NpgsqlCommand("INSERT INTO media_assets(id,meeting_id,original_name,storage_key,sha256,size_bytes,status,source_type) VALUES(@id,@meeting,@name,@key,@sha,@size,'UPLOADED',@source)", connection, tx);
+        asset.Parameters.AddWithValue("id", assetId); asset.Parameters.AddWithValue("meeting", meetingId); asset.Parameters.AddWithValue("name", request.OriginalName); asset.Parameters.AddWithValue("key", request.StorageKey); asset.Parameters.AddWithValue("sha", request.Sha256); asset.Parameters.AddWithValue("size", request.SizeBytes); asset.Parameters.AddWithValue("source", request.SourceType);
+        await asset.ExecuteNonQueryAsync();
+        var jobId = Guid.NewGuid();
+        await using var job = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage) VALUES(@id,@meeting,@asset,'TRANSCRIBE','QUEUED','UPLOADED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message", connection, tx);
+        job.Parameters.AddWithValue("id", jobId); job.Parameters.AddWithValue("meeting", meetingId); job.Parameters.AddWithValue("asset", assetId);
+        await using var jobReader = await job.ExecuteReaderAsync(); await jobReader.ReadAsync(); var result = ReadJob(jobReader); await jobReader.CloseAsync();
+        var envelope = JsonSerializer.Serialize(new { message_id = Guid.NewGuid(), job_id = result.Id, meeting_id = meetingId, media_asset_id = assetId, stage = "UPLOADED", attempt = 0, storage_key = request.StorageKey, source_type = request.SourceType });
+        await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'media.ingest',@payload::jsonb)", connection, tx); outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("payload", envelope); await outbox.ExecuteNonQueryAsync();
+        await tx.CommitAsync(); return result;
+    }
+
+    public async Task<MediaAssetRow?> GetMediaAsync(Guid id)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,original_name,storage_key,sha256,size_bytes,duration_ms,status,archive_storage_key,preview_storage_key,asr_storage_key FROM media_assets WHERE id=@id", connection); command.Parameters.AddWithValue("id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        return !await reader.ReadAsync() ? null : ReadMedia(reader);
+    }
+
+    public async Task<IReadOnlyList<SpeakerRow>> ListSpeakersAsync(Guid meetingId)
+    {
+        var result = new List<SpeakerRow>(); await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,stable_key,display_name,speaker_profile_id,profile_confidence,COALESCE(profile_match_status,'UNMATCHED'),profile_match_reason,profile_suggestion_name FROM meeting_speakers WHERE meeting_id=@id ORDER BY stable_key", connection); command.Parameters.AddWithValue("id", meetingId);
+        await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(new SpeakerRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetGuid(3), reader.IsDBNull(4) ? null : reader.GetDouble(4), reader.IsDBNull(5) ? "UNMATCHED" : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7))); return result;
+    }
+
+    public async Task<IReadOnlyList<MediaAssetRow>> ListMediaAsync(Guid meetingId)
+    {
+        var result = new List<MediaAssetRow>(); await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,original_name,storage_key,sha256,size_bytes,duration_ms,status,archive_storage_key,preview_storage_key,asr_storage_key FROM media_assets WHERE meeting_id=@id ORDER BY created_at", connection); command.Parameters.AddWithValue("id", meetingId);
+        await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) result.Add(ReadMedia(reader)); return result;
+    }
+
+    public async Task<JobRow?> GetJobAsync(Guid id)
+    {
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT j.id,j.meeting_id,j.type,j.status,j.stage,j.progress,j.attempt,j.error_message,j.error_code,j.pipeline_correlation_id,j.last_heartbeat,j.updated_at,j.stage_changed_at,j.progress_changed_at,j.not_before,j.scheduled_reason,j.queue_entered_at,j.worker_claimed_at,CASE WHEN j.status='QUEUED' AND j.not_before IS NOT NULL AND j.not_before > now() THEN 'SCHEDULED' WHEN j.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=j.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX' WHEN j.status='QUEUED' THEN 'WAITING_FOR_GPU' WHEN j.status='RUNNING' THEN 'PROCESSING' ELSE j.status END AS dispatch_state FROM jobs j WHERE j.id=@id", connection);
+        command.Parameters.AddWithValue("id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        return !await reader.ReadAsync() ? null : ReadJob(reader);
+    }
+
+    public async Task<IReadOnlyList<JobRow>> ListJobsAsync(Guid meetingId)
+    {
+        var result = new List<JobRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT j.id,j.meeting_id,j.type,j.status,j.stage,j.progress,j.attempt,j.error_message,j.error_code,j.pipeline_correlation_id,j.last_heartbeat,j.updated_at,j.stage_changed_at,j.progress_changed_at,j.not_before,j.scheduled_reason,j.queue_entered_at,j.worker_claimed_at,CASE WHEN j.status='QUEUED' AND j.not_before IS NOT NULL AND j.not_before > now() THEN 'SCHEDULED' WHEN j.status='QUEUED' AND EXISTS (SELECT 1 FROM outbox_messages o WHERE o.topic='ml.transcribe' AND o.payload->>'job_id'=j.id::text AND o.published_at IS NULL) THEN 'WAITING_FOR_OUTBOX' WHEN j.status='QUEUED' THEN 'WAITING_FOR_GPU' WHEN j.status='RUNNING' THEN 'PROCESSING' ELSE j.status END AS dispatch_state FROM jobs j WHERE j.meeting_id=@id ORDER BY j.created_at DESC", connection);
+        command.Parameters.AddWithValue("id", meetingId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadJob(reader));
+        return result;
+    }
+
+    public async Task<MeetingCancellationResult?> CancelMeetingAsync(Guid meetingId, bool force)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var meeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@meeting FOR UPDATE", connection, transaction);
+        meeting.Parameters.AddWithValue("meeting", meetingId);
+        var status = await meeting.ExecuteScalarAsync() as string;
+        if (status is null) return null;
+        if (status == "RECORDING" && !force)
+            return new MeetingCancellationResult(meetingId, status, 0, [], RecordingMustStop: true);
+
+        var agentSessions = await GetAgentSessionCancellationTargetsAsync(connection, transaction, meetingId);
+
+        await using (var cancelJobs = new NpgsqlCommand(
+            "UPDATE jobs SET status='CANCELLED',stage='CANCELLED',error_message='cancelled_by_user',error_code='CANCELLED_BY_USER',worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE meeting_id=@meeting AND status NOT IN ('READY','FAILED','CANCELLED')", connection, transaction))
+        {
+            cancelJobs.Parameters.AddWithValue("meeting", meetingId);
+            var cancelled = await cancelJobs.ExecuteNonQueryAsync();
+            await using var removeInbox = new NpgsqlCommand("DELETE FROM inbox_messages WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)", connection, transaction);
+            removeInbox.Parameters.AddWithValue("meeting", meetingId);
+            await removeInbox.ExecuteNonQueryAsync();
+            await using var removeOutbox = new NpgsqlCommand("DELETE FROM outbox_messages WHERE published_at IS NULL AND payload->>'meeting_id'=CAST(@meeting AS text)", connection, transaction);
+            removeOutbox.Parameters.AddWithValue("meeting", meetingId);
+            await removeOutbox.ExecuteNonQueryAsync();
+            // Close server-side recording sessions in the same transaction as
+            // the meeting cancellation. A late recorder finalize then sees
+            // the cancelled meeting and is rejected before creating/reusing a
+            // media job; the queued IPC command remains the local cleanup path.
+            await using var cancelSessions = new NpgsqlCommand("UPDATE recording_sessions SET state='CANCELLED',finished_at=COALESCE(finished_at,now()) WHERE meeting_id=@meeting AND state NOT IN ('CANCELLED','READY')", connection, transaction);
+            cancelSessions.Parameters.AddWithValue("meeting", meetingId);
+            await cancelSessions.ExecuteNonQueryAsync();
+            await using var updateMeeting = new NpgsqlCommand("UPDATE meetings SET status='CANCELLED',finished_at=COALESCE(finished_at,now()) WHERE id=@meeting", connection, transaction);
+            updateMeeting.Parameters.AddWithValue("meeting", meetingId);
+            await updateMeeting.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return new MeetingCancellationResult(meetingId, "CANCELLED", cancelled, agentSessions);
+        }
+    }
+
+    public async Task<MeetingDeletionResult?> DeleteMeetingAsync(Guid meetingId, bool force)
+    {
+        await using var connection = await OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var meeting = new NpgsqlCommand("SELECT status FROM meetings WHERE id=@meeting FOR UPDATE", connection, transaction);
+        meeting.Parameters.AddWithValue("meeting", meetingId);
+        var status = await meeting.ExecuteScalarAsync() as string;
+        if (status is null) return null;
+        if (status == "RECORDING" && !force)
+            return new MeetingDeletionResult(meetingId, 0, [], [], RecordingMustStop: true);
+
+        var agentSessions = await GetAgentSessionCancellationTargetsAsync(connection, transaction, meetingId);
+
+        var storageKeys = new HashSet<string>(StringComparer.Ordinal);
+        await using (var assets = new NpgsqlCommand("SELECT storage_key,archive_storage_key,preview_storage_key,asr_storage_key FROM media_assets WHERE meeting_id=@meeting", connection, transaction))
+        {
+            assets.Parameters.AddWithValue("meeting", meetingId);
+            await using var reader = await assets.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                for (var index = 0; index < reader.FieldCount; index++)
+                    if (!reader.IsDBNull(index) && !string.IsNullOrWhiteSpace(reader.GetString(index))) storageKeys.Add(reader.GetString(index));
+        }
+        await using (var chunks = new NpgsqlCommand("SELECT c.storage_key FROM recording_chunks c JOIN recording_sessions s ON s.id=c.session_id WHERE s.meeting_id=@meeting", connection, transaction))
+        {
+            chunks.Parameters.AddWithValue("meeting", meetingId);
+            await using var reader = await chunks.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) storageKeys.Add(reader.GetString(0));
+        }
+
+        var unsharedKeys = new List<string>();
+        foreach (var key in storageKeys)
+        {
+            await using var shared = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM media_assets WHERE meeting_id<>@meeting AND (storage_key=@key OR archive_storage_key=@key OR preview_storage_key=@key OR asr_storage_key=@key))", connection, transaction);
+            shared.Parameters.AddWithValue("meeting", meetingId);
+            shared.Parameters.AddWithValue("key", key);
+            if ((bool)(await shared.ExecuteScalarAsync())!) unsharedKeys.Add(key);
+        }
+        var keysToDelete = storageKeys.Except(unsharedKeys, StringComparer.Ordinal).ToArray();
+
+        await using var cancelJobs = new NpgsqlCommand("UPDATE jobs SET status='CANCELLED',stage='CANCELLED',error_message='deleted_by_user',error_code='CANCELLED_BY_USER',worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,updated_at=now() WHERE meeting_id=@meeting AND status NOT IN ('READY','FAILED','CANCELLED')", connection, transaction);
+        cancelJobs.Parameters.AddWithValue("meeting", meetingId);
+        var cancelledJobs = await cancelJobs.ExecuteNonQueryAsync();
+
+        foreach (var sql in new[]
+        {
+            "DELETE FROM outbox_messages WHERE payload->>'meeting_id'=CAST(@meeting AS text)",
+            "DELETE FROM inbox_messages WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)",
+            "DELETE FROM action_items WHERE meeting_id=@meeting",
+            "DELETE FROM decisions WHERE meeting_id=@meeting",
+            "DELETE FROM summary_evidence WHERE summary_id IN (SELECT id FROM summaries WHERE meeting_id=@meeting)",
+            "DELETE FROM summary_runs WHERE summary_id IN (SELECT id FROM summaries WHERE meeting_id=@meeting)",
+            "DELETE FROM summaries WHERE meeting_id=@meeting",
+            "DELETE FROM assistant_queries WHERE meeting_id=@meeting",
+            "DELETE FROM audit_events WHERE meeting_id=@meeting",
+            "DELETE FROM transcript_segments WHERE transcript_id IN (SELECT id FROM transcripts WHERE meeting_id=@meeting)",
+            "DELETE FROM meeting_speakers WHERE meeting_id=@meeting",
+            "DELETE FROM transcripts WHERE meeting_id=@meeting",
+            "DELETE FROM recording_events WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_chunks WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_tracks WHERE session_id IN (SELECT id FROM recording_sessions WHERE meeting_id=@meeting)",
+            "DELETE FROM recording_sessions WHERE meeting_id=@meeting",
+            "DELETE FROM job_attempts WHERE job_id IN (SELECT id FROM jobs WHERE meeting_id=@meeting)",
+            "DELETE FROM jobs WHERE meeting_id=@meeting",
+            "UPDATE media_assets SET duplicate_of=NULL WHERE meeting_id<>@meeting AND duplicate_of IN (SELECT id FROM media_assets WHERE meeting_id=@meeting)",
+            "DELETE FROM media_assets WHERE meeting_id=@meeting",
+            "DELETE FROM meetings WHERE id=@meeting",
+        })
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.Parameters.AddWithValue("meeting", meetingId);
+            await command.ExecuteNonQueryAsync();
+        }
+        if (keysToDelete.Length > 0)
+        {
+            await using var queue = new NpgsqlCommand("""
+                INSERT INTO storage_deletion_queue(storage_key, reason)
+                SELECT key, 'MEETING_DELETED'
+                FROM unnest(@keys::text[]) AS key
+                ON CONFLICT DO NOTHING
+                """, connection, transaction);
+            queue.Parameters.Add("keys", NpgsqlDbType.Array | NpgsqlDbType.Text).Value = keysToDelete;
+            await queue.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+        return new MeetingDeletionResult(meetingId, cancelledJobs, keysToDelete, agentSessions);
+    }
+
+    private static async Task<IReadOnlyList<AgentSessionCancellationTarget>> GetAgentSessionCancellationTargetsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid meetingId)
+    {
+        var result = new List<AgentSessionCancellationTarget>();
+        await using var command = new NpgsqlCommand(
+            "SELECT agent_id,id FROM recording_sessions WHERE meeting_id=@meeting AND agent_id IS NOT NULL", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new AgentSessionCancellationTarget(reader.GetGuid(0), reader.GetGuid(1)));
+        return result;
+    }
+
+    public async Task<JobRow?> RetryJobAsync(Guid id)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using var command = new NpgsqlCommand(
+            "UPDATE jobs SET status='QUEUED',stage=CASE WHEN type='SUMMARIZE' THEN 'TRANSCRIPT_READY' WHEN type IN ('TRANSCRIBE','TRANSCRIBE_REPROCESS') THEN 'READY_FOR_ASR' WHEN type IN ('TRANSCRIBE_ASR','TRANSCRIPT_ENRICH') THEN 'READY_FOR_ASR' ELSE 'UPLOADED' END,progress=0,error_message=NULL,error_code=NULL,worker_id=NULL,lease_expires_at=NULL,last_heartbeat=NULL,attempt=attempt+1,updated_at=now() WHERE id=@id AND status IN ('FAILED','CANCELLED') RETURNING id,meeting_id,type,status,stage,progress,attempt,error_message,error_code,pipeline_correlation_id", connection, tx);
+        command.Parameters.AddWithValue("id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        var job = ReadJob(reader);
+        await reader.CloseAsync();
+
+        await using (var meeting = new NpgsqlCommand(
+            "UPDATE meetings SET status=@status WHERE id=@meeting AND status <> 'CANCELLED'", connection, tx))
+        {
+            meeting.Parameters.AddWithValue("status", job.Type == "SUMMARIZE" ? "SUMMARIZING" : job.Type is "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" or "TRANSCRIBE_ASR" or "TRANSCRIPT_ENRICH" ? "TRANSCRIBING" : "INGESTING");
+            meeting.Parameters.AddWithValue("meeting", job.MeetingId);
+            await meeting.ExecuteNonQueryAsync();
+        }
+
+        var messageId = Guid.NewGuid();
+        await using var publish = job.Type switch
+        {
+            "SUMMARIZE" => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'llm.summarize',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'transcript_id',t.id,'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN LATERAL (SELECT id FROM transcripts WHERE meeting_id=j.meeting_id ORDER BY version DESC LIMIT 1) t ON true WHERE j.id=@id", connection, tx),
+            "TRANSCRIBE" or "TRANSCRIBE_REPROCESS" or "TRANSCRIBE_ASR" or "TRANSCRIPT_ENRICH" => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.asr_storage_key,'source_type',a.source_type,'language','ru','acousticProfile',COALESCE((SELECT acoustic_profile FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1),'AUTO'),'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+            _ => new NpgsqlCommand(
+                "INSERT INTO outbox_messages(id,topic,payload) SELECT @outbox,'media.ingest',jsonb_build_object('message_id',@message,'job_id',j.id,'meeting_id',j.meeting_id,'media_asset_id',j.media_asset_id,'stage',j.stage,'attempt',j.attempt,'storage_key',a.storage_key,'source_type',a.source_type,'language','ru','acousticProfile',COALESCE((SELECT acoustic_profile FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1),'AUTO'),'correlation_id',(SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=j.meeting_id ORDER BY created_at DESC LIMIT 1)) FROM jobs j JOIN media_assets a ON a.id=j.media_asset_id WHERE j.id=@id", connection, tx),
+        };
+        await using (publish)
+        {
+            publish.Parameters.AddWithValue("outbox", Guid.NewGuid());
+            publish.Parameters.AddWithValue("message", messageId);
+            publish.Parameters.AddWithValue("id", id);
+            await publish.ExecuteNonQueryAsync();
+        }
+        await tx.CommitAsync();
+        return job;
+    }
+    public async Task<TranscriptRow> GetTranscriptAsync(Guid meetingId, int? requestedVersion = null, bool includeWords = false)
+    {
+        var segments = new List<TranscriptSegmentRow>();
+        Guid transcriptId = Guid.Empty;
+        string status = "PENDING";
+        JsonDocument? warnings = null;
+        JsonDocument? quality = null;
+        double? qualityScore = null;
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT t.id,t.status,t.warnings,t.quality_metadata,t.quality_score,s.id,s.ordinal,s.start_ms,s.end_ms,COALESCE(ms.display_name,s.speaker_label),s.text,s.confidence,CASE WHEN @include_words THEN s.words ELSE NULL END,COALESCE(s.segment_kind,'SPEECH'),COALESCE(s.is_hidden,false) FROM transcripts t LEFT JOIN transcript_segments s ON s.transcript_id=t.id LEFT JOIN meeting_speakers ms ON ms.id=s.speaker_id WHERE t.meeting_id=@meeting AND t.version=COALESCE(@version,(SELECT MAX(version) FROM transcripts WHERE meeting_id=@meeting)) AND COALESCE(s.is_hidden,false)=false ORDER BY s.ordinal", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        command.Parameters.AddWithValue("version", (object?)requestedVersion ?? DBNull.Value);
+        command.Parameters.AddWithValue("include_words", includeWords);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            transcriptId = reader.GetGuid(0);
+            status = reader.GetString(1);
+            warnings ??= reader.IsDBNull(2) ? null : reader.GetFieldValue<JsonDocument>(2);
+            quality ??= reader.IsDBNull(3) ? null : reader.GetFieldValue<JsonDocument>(3);
+            qualityScore ??= reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4));
+            if (!reader.IsDBNull(5))
+                segments.Add(new TranscriptSegmentRow(reader.GetGuid(5), reader.GetInt32(6), reader.GetInt64(7), reader.GetInt64(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetDouble(11), reader.IsDBNull(12) ? null : reader.GetFieldValue<JsonDocument>(12), reader.GetString(13), reader.GetBoolean(14)));
+        }
+        return new TranscriptRow(transcriptId, meetingId, status, segments, string.Equals(status, "PARTIAL_READY", StringComparison.OrdinalIgnoreCase), warnings, quality, qualityScore);
+    }
+
+    public async Task<bool> RenameSpeakerAsync(Guid meetingId, Guid speakerId, string displayName, Guid? actorUserId = null)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using var command = new NpgsqlCommand("UPDATE meeting_speakers SET display_name=@name WHERE id=@speaker AND meeting_id=@meeting RETURNING display_name", connection, tx);
+        command.Parameters.AddWithValue("name", displayName.Trim());
+        command.Parameters.AddWithValue("speaker", speakerId);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        var previous = await command.ExecuteScalarAsync();
+        if (previous is not string) return false;
+        await AppendAuditAsync(connection, tx, actorUserId, meetingId, "SPEAKER", speakerId, "SPEAKER_RENAMED", JsonSerializer.Serialize(new { displayName = previous }), JsonSerializer.Serialize(new { displayName = displayName.Trim() }));
+        await tx.CommitAsync();
+        return true;
+    }
+
+    public async Task<bool> MergeSpeakersAsync(Guid meetingId, Guid source, Guid target, Guid? actorUserId = null)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using var update = new NpgsqlCommand(
+            "UPDATE transcript_segments SET speaker_id=@target WHERE speaker_id=@source AND transcript_id=(SELECT id FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1)", connection, tx);
+        update.Parameters.AddWithValue("target", target);
+        update.Parameters.AddWithValue("source", source);
+        update.Parameters.AddWithValue("meeting", meetingId);
+        var count = await update.ExecuteNonQueryAsync();
+        if (count > 0)
+            await AppendAuditAsync(connection, tx, actorUserId, meetingId, "SPEAKER", source, "SPEAKER_MERGED_CURRENT_TRANSCRIPT", JsonSerializer.Serialize(new { source, target }), JsonSerializer.Serialize(new { updatedSegments = count }));
+        await tx.CommitAsync();
+        return count > 0;
+    }
+
+    public async Task<IReadOnlyList<TranscriptVersionRow>> ListTranscriptVersionsAsync(Guid meetingId)
+    {
+        var result = new List<TranscriptVersionRow>();
+        await using var connection = await OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT id,meeting_id,version,status,COALESCE(version_kind,'GENERATED'),source_transcript_id,created_at,edit_reason FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC", connection);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(new TranscriptVersionRow(reader.GetGuid(0), reader.GetGuid(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetGuid(5), reader.GetDateTime(6), reader.IsDBNull(7) ? null : reader.GetString(7)));
+        return result;
+    }
+
+    public async Task<TranscriptVersionRow?> CreateEditedTranscriptVersionAsync(Guid meetingId, Guid segmentId, string text, Guid? actorUserId)
+    {
+        await using var connection = await OpenAsync();
+        await using var tx = await connection.BeginTransactionAsync();
+        await using var current = new NpgsqlCommand("SELECT id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass FROM transcripts WHERE meeting_id=@meeting ORDER BY version DESC LIMIT 1 FOR UPDATE", connection, tx);
+        current.Parameters.AddWithValue("meeting", meetingId);
+        await using var reader = await current.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        var sourceId = reader.GetGuid(0); var nextVersion = reader.GetInt32(1) + 1; var status = reader.GetString(2);
+        var language = reader.IsDBNull(3) ? null : reader.GetString(3); var model = reader.IsDBNull(4) ? null : reader.GetString(4);
+        var warnings = reader.IsDBNull(5) ? "[]" : reader.GetString(5); var quality = reader.IsDBNull(6) ? "{}" : reader.GetString(6);
+        var score = reader.IsDBNull(7) ? (object)DBNull.Value : reader.GetValue(7); var profile = reader.IsDBNull(8) ? null : reader.GetString(8); var pass = reader.IsDBNull(9) ? null : reader.GetString(9);
+        await reader.CloseAsync();
+        await using var sourceSegment = new NpgsqlCommand("SELECT ordinal FROM transcript_segments WHERE id=@segment AND transcript_id=@source", connection, tx);
+        sourceSegment.Parameters.AddWithValue("segment", segmentId); sourceSegment.Parameters.AddWithValue("source", sourceId);
+        if (await sourceSegment.ExecuteScalarAsync() is not int editedOrdinal) return null;
+        var newId = Guid.NewGuid();
+        await using (var create = new NpgsqlCommand("INSERT INTO transcripts(id,meeting_id,version,status,language,model_name,warnings,quality_metadata,quality_score,processing_profile,selected_asr_pass,source_transcript_id,version_kind,edited_by_user_id,edit_reason) VALUES(@id,@meeting,@version,@status,@language,@model,@warnings::jsonb,@quality::jsonb,@score,@profile,@pass,@source,'USER_EDITED',@actor,'MANUAL_SEGMENT_EDIT')", connection, tx))
+        {
+            create.Parameters.AddWithValue("id", newId); create.Parameters.AddWithValue("meeting", meetingId); create.Parameters.AddWithValue("version", nextVersion); create.Parameters.AddWithValue("status", status); create.Parameters.AddWithValue("language", (object?)language ?? DBNull.Value); create.Parameters.AddWithValue("model", (object?)model ?? DBNull.Value); create.Parameters.AddWithValue("warnings", warnings); create.Parameters.AddWithValue("quality", quality); create.Parameters.AddWithValue("score", score); create.Parameters.AddWithValue("profile", (object?)profile ?? DBNull.Value); create.Parameters.AddWithValue("pass", (object?)pass ?? DBNull.Value); create.Parameters.AddWithValue("source", sourceId); create.Parameters.AddWithValue("actor", (object?)actorUserId ?? DBNull.Value); await create.ExecuteNonQueryAsync();
+        }
+        await using (var copy = new NpgsqlCommand("INSERT INTO transcript_segments(id,transcript_id,ordinal,start_ms,end_ms,speaker_id,speaker_label,text,confidence,words,segment_kind,is_hidden) SELECT gen_random_uuid(),@target,ordinal,start_ms,end_ms,speaker_id,speaker_label,CASE WHEN ordinal=@ordinal THEN @text ELSE text END,confidence,words,segment_kind,is_hidden FROM transcript_segments WHERE transcript_id=@source", connection, tx))
+        { copy.Parameters.AddWithValue("target", newId); copy.Parameters.AddWithValue("source", sourceId); copy.Parameters.AddWithValue("ordinal", editedOrdinal); copy.Parameters.AddWithValue("text", text.Trim()); await copy.ExecuteNonQueryAsync(); }
+        await AppendAuditAsync(connection, tx, actorUserId, meetingId, "TRANSCRIPT", newId, "TRANSCRIPT_VERSION_USER_EDITED", JsonSerializer.Serialize(new { sourceId, segmentId }), JsonSerializer.Serialize(new { version = nextVersion, editedOrdinal }));
+        await tx.CommitAsync();
+        return new TranscriptVersionRow(newId, meetingId, nextVersion, status, "USER_EDITED", sourceId, DateTime.UtcNow, "MANUAL_SEGMENT_EDIT");
+    }
+
+    public async Task<JobRow?> QueueTranscriptReprocessAsync(Guid meetingId, Guid? actorUserId)
+    {
+        await using var connection = await OpenAsync(); await using var tx = await connection.BeginTransactionAsync();
+        await using var asset = new NpgsqlCommand("SELECT id,asr_storage_key FROM media_assets WHERE meeting_id=@meeting AND status='READY' AND asr_storage_key IS NOT NULL ORDER BY created_at DESC LIMIT 1", connection, tx);
+        asset.Parameters.AddWithValue("meeting", meetingId); await using var reader = await asset.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null; var assetId = reader.GetGuid(0); var storageKey = reader.GetString(1); await reader.CloseAsync();
+        var id = Guid.NewGuid();
+        var correlation = await GetPipelineCorrelationIdForMeetingAsync(connection, tx, meetingId);
+        await using var insert = new NpgsqlCommand("INSERT INTO jobs(id,meeting_id,media_asset_id,type,status,stage,progress,pipeline_correlation_id) VALUES(@id,@meeting,@asset,'TRANSCRIBE_REPROCESS','QUEUED','UPLOADED',0,@correlation)", connection, tx);
+        insert.Parameters.AddWithValue("id", id); insert.Parameters.AddWithValue("meeting", meetingId); insert.Parameters.AddWithValue("asset", assetId); insert.Parameters.AddWithValue("correlation", (object?)correlation ?? DBNull.Value); await insert.ExecuteNonQueryAsync();
+        var messageId = Guid.NewGuid();
+        await using var outbox = new NpgsqlCommand("INSERT INTO outbox_messages(id,topic,payload) VALUES(@id,'ml.transcribe',jsonb_build_object('message_id',@message,'job_id',@job,'meeting_id',@meeting,'media_asset_id',@asset,'stage','UPLOADED','storage_key',@storage,'reprocess',true,'correlation_id',@correlation))", connection, tx);
+        outbox.Parameters.AddWithValue("id", Guid.NewGuid()); outbox.Parameters.AddWithValue("message", messageId); outbox.Parameters.AddWithValue("job", id); outbox.Parameters.AddWithValue("meeting", meetingId); outbox.Parameters.AddWithValue("asset", assetId); outbox.Parameters.AddWithValue("storage", storageKey); outbox.Parameters.AddWithValue("correlation", (object?)correlation ?? DBNull.Value); await outbox.ExecuteNonQueryAsync();
+        await AppendAuditAsync(connection, tx, actorUserId, meetingId, "TRANSCRIPT", null, "TRANSCRIPT_REPROCESS_QUEUED", null, JsonSerializer.Serialize(new { id, assetId }));
+        await tx.CommitAsync(); return new JobRow(id, meetingId, "TRANSCRIBE_REPROCESS", "QUEUED", "UPLOADED", 0, 0, null);
+    }
+
+    private static async Task AppendAuditAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid? actorUserId, Guid meetingId, string entityType, Guid? entityId, string eventType, string? beforeState, string? afterState)
+    {
+        await using var audit = new NpgsqlCommand("INSERT INTO audit_events(id,actor_user_id,meeting_id,entity_type,entity_id,event_type,before_state,after_state) VALUES(gen_random_uuid(),@actor,@meeting,@type,@entity,@event,@before::jsonb,@after::jsonb)", connection, tx);
+        audit.Parameters.AddWithValue("actor", (object?)actorUserId ?? DBNull.Value); audit.Parameters.AddWithValue("meeting", meetingId); audit.Parameters.AddWithValue("type", entityType); audit.Parameters.AddWithValue("entity", (object?)entityId ?? DBNull.Value); audit.Parameters.AddWithValue("event", eventType); audit.Parameters.AddWithValue("before", (object?)beforeState ?? DBNull.Value); audit.Parameters.AddWithValue("after", (object?)afterState ?? DBNull.Value); await audit.ExecuteNonQueryAsync();
+    }
+
+    private async Task<NpgsqlConnection> OpenAsync()
+    {
+        var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        return connection;
+    }
+
+    private static async Task<string?> GetPipelineCorrelationIdForMeetingAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid meetingId)
+    {
+        await using var command = new NpgsqlCommand("SELECT pipeline_correlation_id FROM recording_sessions WHERE meeting_id=@meeting ORDER BY created_at DESC LIMIT 1", connection, transaction);
+        command.Parameters.AddWithValue("meeting", meetingId);
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    private static JobRow ReadJob(NpgsqlDataReader reader) =>
+        new(
+            reader.GetGuid(0),
+            reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.GetInt32(5),
+            reader.GetInt32(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.FieldCount > 8 && !reader.IsDBNull(8) ? reader.GetString(8) : null,
+            reader.FieldCount > 9 && !reader.IsDBNull(9) ? reader.GetString(9) : null,
+            reader.FieldCount > 10 && !reader.IsDBNull(10) ? reader.GetDateTime(10) : null,
+            reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetDateTime(11) : null,
+            reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetDateTime(12) : null,
+            reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetDateTime(13) : null,
+            reader.FieldCount > 14 && !reader.IsDBNull(14) ? reader.GetDateTime(14) : null,
+            reader.FieldCount > 15 && !reader.IsDBNull(15) ? reader.GetString(15) : null,
+            reader.FieldCount > 16 && !reader.IsDBNull(16) ? reader.GetDateTime(16) : null,
+            reader.FieldCount > 17 && !reader.IsDBNull(17) ? reader.GetDateTime(17) : null,
+            reader.FieldCount > 18 && !reader.IsDBNull(18) ? reader.GetString(18) : null);
+
+    private static MediaAssetRow ReadMedia(NpgsqlDataReader reader) =>
+        new(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10));
+
+    private static string SessionHash(string token) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+
+
+}

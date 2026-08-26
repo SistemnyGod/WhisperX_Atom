@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whisperx-atom-processing"
+version = "0.1.0"
+description = "Shared server-facing processing contracts for WhisperX Atom"
+requires-python = ">=3.12,<3.13"
+
+[tool.setuptools.packages.find]
+include = ["whisperx_atom*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "unit: fast deterministic unit tests",
+  "contract: source and API contract tests",
+  "integration: tests requiring PostgreSQL/NATS or other services",
+  "hardware: tests requiring CUDA, audio devices, or installed runtime",
+]
+

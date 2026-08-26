@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.SpeakersPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WhisperX_Atom_Desktop.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageGap}">
+            <controls:PageHeader Title="Спикеры" Subtitle="Реестр распознанных спикеров по доступным совещаниям">
+                <controls:PageHeader.Actions>
+                <StackPanel x:Name="ActionsPanel" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Открыть совещания" Style="{StaticResource SecondaryButtonStyle}" Click="OpenMeetingsButton_Click" />
+                    <Button x:Name="RefreshButton" Content="Обновить" Style="{StaticResource PrimaryButtonStyle}" Click="RefreshButton_Click" />
+                </StackPanel>
+                </controls:PageHeader.Actions>
+            </controls:PageHeader>
+
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left">
+                <InfoBar.ActionButton>
+                    <Button Content="Настройки подключения" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSettingsButton_Click" AutomationProperties.Name="Открыть настройки подключения к API" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+            <InfoBar x:Name="WarningInfoBar" IsOpen="False" Severity="Warning" IsClosable="False" MaxWidth="920" HorizontalAlignment="Left" />
+
+            <Grid x:Name="SummaryGrid" ColumnDefinitions="*,*" ColumnSpacing="14">
+                <Border Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" MinHeight="112">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="УНИКАЛЬНЫЕ СПИКЕРЫ" Style="{StaticResource EyebrowStyle}" />
+                        <TextBlock Text="{Binding SpeakerCountText}" FontSize="28" FontWeight="SemiBold" />
+                        <TextBlock Text="По ключу профиля из API" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}" MinHeight="112">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="СОВЕЩАНИЯ" Style="{StaticResource EyebrowStyle}" />
+                        <TextBlock Text="{Binding MeetingCountText}" FontSize="28" FontWeight="SemiBold" />
+                        <TextBlock Text="С доступными записями спикеров" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Grid x:Name="WorkspaceGrid" ColumnDefinitions="*,360" RowDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="16" MinHeight="500">
+                <Border x:Name="ListCard" Style="{StaticResource CardStyle}" Padding="0">
+                    <StackPanel>
+                        <Grid Padding="20,18" ColumnDefinitions="*,Auto">
+                            <StackPanel>
+                                <TextBlock Text="Реестр спикеров" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" Margin="0,4,0,0" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ProgressRing Grid.Column="1" x:Name="LoadingRing" Width="22" Height="22" IsActive="False" />
+                        </Grid>
+                        <TextBox x:Name="SearchBox" PlaceholderText="Поиск по имени, ключу или встрече" Margin="20,0,20,14" Style="{StaticResource InputStyle}" TextChanged="SearchBox_TextChanged" AutomationProperties.Name="Поиск спикеров" />
+                        <Grid Background="{StaticResource TableHeaderBrush}" Padding="20,10" ColumnDefinitions="1.2*,1.4*,150">
+                            <TextBlock Text="Спикер" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Grid.Column="1" Text="Совещание" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                            <TextBlock Grid.Column="2" Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                        </Grid>
+                        <ListView x:Name="SpeakersList" ItemsSource="{Binding FilteredItems}" SelectionMode="Single" BorderThickness="0" SelectionChanged="SpeakersList_SelectionChanged">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Padding="20,12" MinHeight="{StaticResource TableRowHeight}" ColumnDefinitions="1.2*,1.4*,150">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding StableKey}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding StableKey}" />
+                                            <TextBlock Text="{Binding MatchStatus}" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MatchReason}" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="{Binding MeetingTitle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding MeetingTitle}" />
+                                        <TextBlock Grid.Column="2" Text="{Binding MeetingDateText}" Foreground="{StaticResource MutedTextBrush}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <StackPanel x:Name="EmptyState" Padding="20,34" Spacing="8" HorizontalAlignment="Center" MaxWidth="520">
+                            <SymbolIcon Symbol="Contact" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                            <TextBlock x:Name="EmptyTitle" Text="Спикеры не найдены" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <TextBlock x:Name="EmptyDescription" Text="После обработки встречи распознанные спикеры появятся здесь." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" TextAlignment="Center" />
+                            <Button x:Name="EmptyRetryButton" Content="Повторить загрузку" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" HorizontalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Повторить загрузку спикеров" ToolTipService.ToolTip="Проверить API и повторить загрузку списка" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="DetailsCard" Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Карточка спикера" Style="{StaticResource SectionTitleStyle}" />
+                        <StackPanel x:Name="SpeakerDetails" Spacing="10">
+                            <TextBlock x:Name="DetailsName" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsName}" />
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Ключ профиля" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsKey" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsKey}" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Совещание" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsMeeting" TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsMeeting}" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsDate" />
+                            </StackPanel>
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Сопоставление профиля" Foreground="{StaticResource MutedTextBrush}" FontSize="{StaticResource CaptionTextSize}" />
+                                <TextBlock x:Name="DetailsMatch" TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=DetailsMatch}" />
+                            </StackPanel>
+                            <Button x:Name="OpenMeetingButton" Content="Открыть совещание" Style="{StaticResource SecondaryButtonStyle}" Click="OpenMeetingButton_Click" HorizontalAlignment="Stretch" />
+                        </StackPanel>
+                        <TextBlock x:Name="DetailsEmptyText" Text="Выберите спикера, чтобы увидеть источник записи." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

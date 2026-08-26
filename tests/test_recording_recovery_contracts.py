@@ -1,0 +1,461 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).parents[1]
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_archive_creation_is_single_flight_and_temps_are_attempt_scoped():
+    archive = read("apps/recorder-agent/LocalArchiveWriter.cs")
+    coordinator = read("apps/recorder-agent/SessionFinalizationCoordinator.cs")
+    assert "ConcurrentDictionary<string, Lazy<Task<string>>>" in archive
+    assert "LazyThreadSafetyMode.ExecutionAndPublication" in archive
+    assert "delivery.RunAsync" in read("apps/recorder-agent/Program.cs")
+    assert "delivery.RunAsync" in read("apps/recorder-agent/AgentPipeHost.cs")
+    assert ".concat.txt" in archive and "Guid.NewGuid().ToString(\"N\")" in archive
+    assert "SemaphoreSlim(1, 1)" in coordinator
+
+
+def test_local_archive_ffprobe_accepts_numeric_or_quoted_integer_fields_safely():
+    archive = read("apps/recorder-agent/LocalArchiveWriter.cs")
+    parser = archive.split("private static bool TryReadJsonInt", 1)[1].split("private static void ValidateTrack", 1)[0]
+    assert "candidate.ValueKind == JsonValueKind.Number" in parser
+    assert "candidate.ValueKind == JsonValueKind.String" in parser
+    assert "candidate.GetString()" in parser
+    assert parser.index("candidate.ValueKind == JsonValueKind.Number") < parser.index("candidate.TryGetInt32")
+
+
+def test_server_receipt_and_status_are_agent_scoped_before_spool_cleanup():
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    server = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    agent = read("apps/recorder-agent/AgentPipeHost.cs") + read("apps/recorder-agent/Program.cs") + read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "ServerFinalizeReceipt" in api
+    assert "SetServerReceiptAsync" in api
+    assert "/status" in server
+    assert "s.agent_id=@agent" in store
+    assert "GetServerMediaStatusAsync" in agent
+    assert "PurgeFinalizedSessionAsync" in agent
+    assert "WAITING_SERVER_ASSEMBLY" in agent
+
+
+def test_sqlite_persists_server_correlation_and_delivery_metrics():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    for field in ("media_asset_id", "processing_job_id", "trace_id", "server_accepted_at", "media_validated_at"):
+        assert field in spool
+    for field in ("MediaAssetId", "ProcessingJobId", "TraceId", "ChunksReady", "ChunksUploading", "BytesPending"):
+        assert field in protocol
+
+
+def test_active_recording_rebinds_before_background_upload():
+    worker = read("apps/recorder-agent/Program.cs")
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "EnsureActiveSessionBoundAsync" in worker
+    assert "await EnsureActiveSessionBoundAsync(stoppingToken)" in worker
+    assert "state.State is not (RecorderState.Recording or RecorderState.Paused)" in worker
+    assert "GetServerBindingAsync(localSessionId, track.TrackId" in worker
+    assert "upload will retry without losing local chunks" in worker
+    assert "_bindingGate" in api
+    assert "await _bindingGate.WaitAsync(cancellationToken)" in api
+
+
+def test_server_marks_chunk_confirmed_only_after_atomic_file_move():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    store = read("apps/server/WhisperX.Atom.Api/UnifiedProductStore.cs")
+    upload = api.split('app.MapPut("/api/v1/recording-sessions/', 1)[1].split('app.MapGet("/api/v1/recording-sessions/', 1)[0]
+    assert "StageChunkAsync" in store
+    assert "ConfirmChunkAsync" in store
+    assert "@sha,'STAGING',NULL" in store
+    assert "AND status='CONFIRMED'" in store
+    fresh_upload = upload.split("var staged =", 1)[1]
+    assert fresh_upload.index("File.Move(partPath, path, true)") < fresh_upload.index("ConfirmChunkAsync")
+    assert "chunk_confirmation_pending" in upload
+    assert "Guid.NewGuid().ToString(\"N\")" in upload
+
+
+def test_transport_spool_purge_requires_server_media_validation():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    purge = spool.split("PurgeFinalizedSessionAsync", 1)[1]
+    eligibility = spool.split("public async Task<IReadOnlyList<RetentionCandidate>> GetTransportPurgeCandidatesAsync", 1)[1].split("public async Task<IReadOnlyList<RetentionCandidate>> GetLocalArchivePurgeCandidatesAsync", 1)[0]
+    assert "s.media_validated_at IS NOT NULL" in eligibility
+    assert "s.transport_purge_after IS NOT NULL AND s.transport_purge_after <= $now" in eligibility
+    assert "s.delivery_state IN ('CONFIRMED','COMPLETED')" in eligibility
+    assert "pending.status<>'CONFIRMED'" in eligibility
+    assert "if (candidate is null) return 0;" in purge
+    assert purge.index('DELETE FROM recording_raw_chunks') < purge.index("UPDATE recording_sessions SET state='FINALIZED'")
+
+
+def test_retention_deadlines_are_persisted_and_master_zero_is_forever():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    worker = read("apps/recorder-agent/Program.cs")
+    assert "transport_purge_after" in spool
+    assert "raw_purge_after" in spool
+    assert "local_archive_purge_after" in spool
+    assert "now.Add(policy.TransportGrace)" in spool
+    assert "policy.LocalMasterRetention <= TimeSpan.Zero ? DBNull.Value" in spool
+    assert "PurgeEligibleLocalArchivesAsync" in worker
+    assert "PurgeEligibleRawRecoveryAsync" in worker
+
+
+def test_terminal_server_assembly_failure_does_not_retry_forever_or_purge_spool():
+    client = read("apps/recorder-agent/AgentApiClient.cs")
+    delivery = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "ServerMediaStatus" in client
+    assert "TerminalFailure" in client
+    assert '"SERVER_ASSEMBLY_FAILED"' in client
+    assert "GetServerMediaStatusAsync" in delivery
+    assert 'new FinalizationResult(false, "SERVER_ASSEMBLY"' in delivery
+    assert 'new FinalizationResult(true, "SERVER_FINALIZE"' in delivery
+
+
+def test_windows_reboot_gate_separates_pipe_names_from_commands():
+    script = read("scripts/e2e-windows-reboot-recovery.ps1")
+    assert "[string]$PipeName" in script
+    assert "[string]$Command" in script
+    assert "command = $Command" in script
+    assert "Invoke-PipeCommand -PipeName $recorderPipeName -Command \"HEALTH\"" in script
+    assert "Invoke-PipeCommand -PipeName $recorderPipeName -Command \"LIST_LOCAL_SESSIONS\"" in script
+    assert "Invoke-PipeCommand -PipeName $voicePipeName -Command \"STATUS\"" in script
+    assert "IPC_PIPE_OR_COMMAND_REQUIRED" in script
+    assert 'Invoke-PipeCommand "HEALTH"' not in script
+    assert 'Invoke-PipeCommand $voicePipeName @{}' not in script
+
+
+def test_vertical_gate_restarts_only_selected_gpu_mode_services():
+    script = read("scripts/e2e-vertical-pipeline.ps1")
+    assert '[ValidateSet("host", "container")][string]$GpuMode' in script
+    assert "stop-host-gpu-worker.ps1" in script and "start-host-gpu-worker.ps1" in script
+    assert "restart media-worker summary-worker" in script
+    assert "restart media-worker gpu-worker summary-worker" in script
+    assert "Patrol360" not in script
+    assert "down -v" not in script
+
+
+def test_duplicate_track_recovery_types_json_text_parameters():
+    recovery = read("workers/ml_worker/recording_recovery.py")
+    outbox = recovery.split("INSERT INTO outbox_messages", 1)[1].split("result[\"applied\"]", 1)[0]
+    assert "'message_id',%s::text" in outbox
+    assert "'session_id',%s::text" in outbox
+
+
+def test_media_to_asr_transition_starts_with_fresh_watchdog_backoff():
+    persistence = read("workers/media_worker/persistence.py")
+    transition = persistence.split("def mark_ready_for_asr_and_enqueue", 1)[1]
+    assert "stage='READY_FOR_ASR'" in transition
+    assert "watchdog_requeue_count=0" in transition
+    assert "last_watchdog_requeue_at=NULL" in transition
+
+
+def test_capture_write_failure_is_persisted_and_does_not_leave_recording_running():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    desktop = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    for code in ("AUDIO_SOURCE_FAILED", "STORAGE_WRITE_FAILED", "ENCODER_FAILED"):
+        assert code in coordinator
+        assert code in host
+        assert code in desktop
+    assert "ReportFailure(ClassifyWriteFailure(ex), ex)" in coordinator
+    assert "BeginStopTracks()" in coordinator
+    assert 'localFinalizeState: "FINALIZING_LOCAL"' in coordinator
+    assert "_state.Restore(RecorderState.Error, \"capture-failure\")" in coordinator
+    assert "BuildSessionStatusAsync(visible.SessionId!" in host
+
+
+def test_realtime_capture_handoff_does_not_hash_or_persist_on_callback():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    writer = coordinator.split("internal sealed class PcmFlacChunkWriter", 1)[1]
+    append = writer.split("public void Append", 1)[1].split("public void FlushCurrentChunk", 1)[0]
+    queue = writer.split("private void QueueCurrentChunk", 1)[1].split("private async Task ProcessQueueAsync", 1)[0]
+    assert "Channel.CreateBounded" in writer
+    assert "BoundedChannelFullMode.Wait" in writer
+    assert "ConcurrentQueue<PendingRawChunk>" not in writer
+    assert "FileStream RawStream" not in writer
+    for forbidden in ("FlacEncoder.ComputeSha256", "RegisterRawChunk", "Flush(true)", "FFmpeg", "WaitAsync"):
+        assert forbidden not in append + queue
+    assert "raw.Dispose()" in queue
+    assert "File.Move(rawPartPath, durableRawPath, true)" in queue
+    assert "RawChunkFileName.Create(sequence, startSample, sampleCount)" in queue
+    assert queue.index("File.Move(rawPartPath, durableRawPath, true)") < queue.index("_pending.Writer.TryWrite(descriptor)")
+    process = writer.split("private async Task ProcessChunkAsync", 1)[1]
+    assert "RegisterRawChunk" in process
+    assert "FlacEncoder.ComputeSha256" in process
+    assert "Flush(true)" in process
+    assert "while (true)" in writer
+    assert "ProcessDiscoveredChunksAsync" in writer
+
+
+def test_raw_writer_has_periodic_durable_checkpoint_outside_capture_callback():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    writer = coordinator.split("internal sealed class PcmFlacChunkWriter", 1)[1]
+    append = writer.split("public void Append", 1)[1].split("public void FlushCurrentChunk", 1)[0]
+    process = writer.split("private async Task ProcessQueueAsync", 1)[1].split("private async Task ProcessDiscoveredChunksAsync", 1)[0]
+    assert 'ATOM_RAW_DURABILITY_CHECKPOINT_SECONDS' in writer
+    assert 'ReadDurabilityCheckpointInterval' in writer
+    assert 'CheckpointOpenRawIfDueAsync' in process
+    assert 'Flush(flushToDisk: true)' in writer
+    assert 'Flush(flushToDisk: true)' not in append
+    assert 'Math.Clamp(seconds, 1d, 60d)' in writer
+
+
+def test_disk_backed_overflow_is_bounded_and_restart_recoverable():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    writer = coordinator.split("internal sealed class PcmFlacChunkWriter", 1)[1]
+    assert "Math.Clamp(value, 1, 64)" in writer  # capacity=1 is a supported stress setting
+    assert "_overflow" not in writer
+    assert 'Directory.EnumerateFiles(directory, "*.pcm")' in writer
+    assert "RawChunkExistsAsync" in writer and "RawChunkExistsAsync" in spool
+    assert 'EnumerateFiles(recordingsRoot, "*.pcm", SearchOption.AllDirectories)' in recovery
+    assert 'EnumerateFiles(recordingsRoot, "*.pcm.part", SearchOption.AllDirectories)' in recovery
+    assert "GetUnregisteredClosedRawBacklogAsync" in spool
+    assert "RawChunkFileName.TryParse(rawPath" in coordinator
+    assert "RawChunkFileName.TryParse(rawPath" in recovery
+    assert "RAW_CHUNK_LEGACY_TIMELINE_INFERRED" in recovery
+
+
+def test_irrecoverable_raw_chunks_become_terminal_and_recovery_is_fair():
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert 'error: "raw_chunk_missing"' in recovery
+    assert '"DISCARDED"' in recovery
+    assert "ORDER BY updated_at,session_id,track_id,sequence" in spool
+
+
+def test_upload_queue_prioritizes_active_sessions_and_persists_chunk_backoff():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    api = read("apps/recorder-agent/AgentApiClient.cs")
+    assert "ROW_NUMBER() OVER (PARTITION BY c.session_id" in spool
+    assert "s.state IN ('RECORDING','PAUSED') THEN 0" in spool
+    assert "s.state IN ('FINALIZING','FINALIZE_ACCEPTED') THEN 1" in spool
+    for column in ("last_attempt_at", "next_attempt_at", "last_error_code"):
+        assert column in spool
+    assert "TryBeginChunkUploadAsync" in api
+    assert "MarkUploadFailedAsync" in api
+    assert "CHUNK_UPLOAD_FAILED" in api
+    assert "await Task.WhenAll(uploads)" in api
+
+
+def test_upload_recovery_resets_stale_chunks_and_blocks_terminal_errors():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "UploadStaleAfterSeconds = 300" in spool
+    assert "RecoverStaleUploadingChunksAsync" in spool
+    assert "RECORDER_CRASH_DURING_UPLOAD" in spool
+    assert "status NOT IN ('CONFIRMED','CANCELLED','BLOCKED','UPLOADING')" in spool
+    assert "status IN ('UPLOADING','READY','FAILED')" in spool
+    assert "status=$status" in spool and "BLOCKED" in spool
+    assert "next_attempt_at=$next" in spool
+    assert "UnblockTerminalUploadsAsync" in spool
+    assert "GetBlockedChunkErrorAsync" in spool
+    assert "blockedChunkError" in coordinator
+    assert "Chunk delivery is blocked" in coordinator
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    assert "configureSessionId" in host
+    assert "UnblockTerminalUploadsAsync(configureSessionId, cancellationToken)" in host
+
+
+def test_server_chunk_ingress_enforces_limit_even_without_content_length():
+    api = read("apps/server/WhisperX.Atom.Api/Program.cs")
+    assert "CopyRequestBodyWithLimitAsync" in api
+    assert "RequestBodyTooLargeException" in api
+    assert "128L * 1024 * 1024" in api
+    assert "StatusCodes.Status413PayloadTooLarge" in api
+
+
+def test_failed_sessions_need_explicit_retry_marker_for_startup_recovery():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert "state<>'FAILED' OR (last_error_retryable=1 AND next_retry_at IS NOT NULL" in spool
+    assert "next_retry_at IS NULL AND state='FAILED'" not in spool
+
+
+def test_retry_upload_is_queued_and_deduplicated_over_ipc():
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    retry = host.split('case "RETRY_UPLOAD":', 1)[1].split('case "START":', 1)[0]
+    assert "QueueFinalization(retrySessionId)" in retry
+    assert "new AgentIpcResponse(true, RecorderState.Finalizing.ToString()" in retry
+    assert "FinalizeAsync(retrySessionId, cancellationToken)" not in retry
+    assert "TaskCompletionSource<FinalizationResult>" in host
+    assert "if (_finalizations.ContainsKey(sessionId)) return;" in host
+
+
+def test_active_capture_has_priority_over_background_delivery_error_in_status():
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    visible = host.split("private (RecorderState State, string? SessionId, string? Error) VisibleStatus()", 1)[1]
+    assert "active capture is authoritative" in visible
+    assert visible.index("state.State is RecorderState.Recording") < visible.index("_finalizationErrors")
+    assert "backgroundPendingSessions" not in visible  # internal details stay out of primary status
+
+
+def test_ipc_health_separates_active_capture_from_background_delivery():
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    for field in ("ActiveSessionId", "BackgroundPendingSessions", "BackgroundFailedSessions"):
+        assert field in protocol
+    assert "BackgroundPendingUploadSessionCountAsync" in spool
+    assert "BackgroundFailedSessionCountAsync" in spool
+    assert "activeSessionId = state.State is RecorderState.Recording or RecorderState.Paused" in host
+    assert "backgroundPendingSessions = await spool.BackgroundPendingUploadSessionCountAsync" in host
+    assert "backgroundFailedSessions = await spool.BackgroundFailedSessionCountAsync" in host
+
+
+def test_orphan_pcm_part_is_registered_for_restart_recovery():
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert "EnumerateFiles(recordingsRoot, \"*.pcm.part\"" in recovery
+    assert "GetTrackInfoAsync" in recovery and "RegisterRawChunk" in recovery
+    assert "GetNextTrackStartSampleAsync" in recovery
+    assert "encoding" in spool and "bits_per_sample" in spool
+
+
+def test_writing_raw_chunk_promotes_pcm_part_before_discarding_it():
+    recovery = read("apps/recorder-agent/RawChunkRecovery.cs")
+    writing = recovery.split('if (string.Equals(raw.Status, "WRITING"', 1)[1]
+    writing = writing.split('else if (!File.Exists(raw.RawPath)', 1)[0]
+    assert 'File.Exists(raw.RawPath + ".part")' in writing
+    assert 'File.Move(raw.RawPath + ".part", raw.RawPath, true)' in writing
+    assert writing.index('File.Move(raw.RawPath + ".part"') < writing.index('raw_chunk_was_not_closed')
+
+
+def test_normal_encoder_dispose_removes_only_empty_open_pcm_part():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    assert "string? emptyRawPart = null;" in coordinator
+    assert "_raw is not null && _sampleCount == 0" in coordinator
+    assert "File.Exists(emptyRawPart)" in coordinator
+
+
+def test_recorder_restart_event_is_structured_and_idempotent():
+    program = read("apps/recorder-agent/Program.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    assert "RECORDER_RECOVERED_AFTER_RESTART" in program
+    assert "previousLocalFinalizeState" in program and "previousDeliveryState" in program
+    assert "AddEventIfMissingAsync" in program and "AddEventIfMissingAsync" in spool
+
+
+def test_startup_does_not_requeue_legacy_archive_failure():
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    program = read("apps/recorder-agent/Program.cs")
+    assert "includeLegacyArchiveFailures" not in spool
+    assert "LOCAL_ENCODING_FAILED','LOCAL_ARCHIVE_FAILED" not in spool
+    assert "includeLegacyArchiveFailures" not in program
+    assert "FAILED/CANCELLED sessions" in program
+
+
+def test_recording_ui_renders_real_peak_history_as_waveform():
+    control = read("apps/desktop/WhisperX.Atom.Desktop/Controls/AudioWaveformMonitor.xaml.cs")
+    page = read("apps/desktop/WhisperX.Atom.Desktop/Pages/RecordingPage.xaml")
+    view_model = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "SamplesProperty" in control and "SignalStateProperty" in control
+    assert "barCount = 24" in control and "WaveformCanvas.Children.Add" in control
+    assert "MicrophoneWaveform" in page
+    assert "AppendWaveformSample" in view_model
+    assert "MicrophonePeak" in view_model and "SystemAudioPeak" in view_model
+
+
+def test_audio_telemetry_includes_rms_clipping_and_stale_window():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    for field in ("Rms", "RmsDb", "Clipping", "LastAudioAtUtc", "SilenceDurationMs", "TelemetryStale"):
+        assert field in coordinator
+    assert "TimeSpan.FromMilliseconds(750)" in coordinator
+    for field in ("MicrophoneRms", "MicrophoneClipping", "MicrophoneTelemetryStale", "RawBacklogHealth"):
+        assert field in protocol
+    assert "peaks.MicrophoneRms" in host
+
+
+def test_live_audio_telemetry_stream_is_additive_and_short_windowed():
+    protocol = read("apps/recorder-agent/AgentIpcProtocol.cs")
+    engine = read("apps/recorder-host/AudioGraphCaptureEngine.cs")
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    desktop = read("apps/desktop/WhisperX.Atom.Desktop/ViewModels/RecordingViewModel.cs")
+    assert "AudioTelemetryStreamCapability" in protocol
+    assert "AgentIpcAudioTelemetry" in protocol
+    assert "LiveTelemetryWindow = TimeSpan.FromMilliseconds(75)" in engine
+    assert "SUBSCRIBE_AUDIO_TELEMETRY" in runtime
+    assert "MediaClockLoopAsync" in desktop
+    assert "TimeSpan.FromMilliseconds(500)" in desktop
+
+
+def test_active_recording_uploads_completed_chunks_without_finalizing():
+    runtime = read("apps/recorder-host/RecorderHostRuntime.cs")
+    reconcile = runtime.split("public async Task ReconcileBackgroundAsync", 1)[1].split(
+        "public async Task<RecordingSessionStatus>", 1
+    )[0]
+    assert "UploadActiveSessionAsync(" in reconcile
+    assert "UploadPendingChunksAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "new SemaphoreSlim(activeSession is null ? 2 : 1" in reconcile
+    assert "EnsureActiveSessionBoundAsync(activeSession" in reconcile
+    assert "UploadPendingEventsAsync(spool, localSessionId" in read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+
+
+def test_transcript_fallback_does_not_retry_only_missing_word_timestamps_and_cleans_alternate_temp():
+    quality = read("whisperx_atom/transcript_quality.py")
+    pipeline = read("app/transcription_pipeline.py")
+    assert '"WORD_TIMESTAMPS_MISSING"' not in quality.split("retryable_reasons =", 1)[1].split("\n", 1)[0]
+    assert "temp_paths" in pipeline
+    assert "register_temp" in pipeline
+    assert "alternate_path = self._preprocess_audio_profile" in pipeline
+    cache_key = pipeline.split("def _asr_key", 1)[1].split("def get_asr_model", 1)[0]
+    assert "(self, model: str, device: str, compute_type: str, backend: str) -> tuple" in cache_key
+    assert "return (backend, model, device, compute_type)" in cache_key
+
+
+def test_delivery_pipeline_is_shared_by_ipc_and_background_worker():
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    program = read("apps/recorder-agent/Program.cs")
+    host = read("apps/recorder-agent/AgentPipeHost.cs")
+    assert "class RecordingDeliveryCoordinator" in coordinator
+    for operation in ("archive.CreateAsync", "UploadPendingChunksAsync", "FinalizeServerSessionAsync", "PurgeFinalizedSessionAsync"):
+        assert operation in coordinator
+    assert "delivery.RunAsync" in program
+    assert "delivery.RunAsync" in host
+    assert "finalizationCoordinator.RunAsync" not in program
+    assert "finalizationCoordinator.RunAsync" not in host
+
+
+def test_session_finalization_uploads_only_its_own_chunks():
+    client = read("apps/recorder-agent/AgentApiClient.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    coordinator = read("apps/recorder-agent/RecordingDeliveryCoordinator.cs")
+    assert "UploadPendingChunksAsync(spool, localSessionId, cancellationToken)" in coordinator
+    assert "UploadPendingChunksAsync(SpoolStore spool, string? localSessionId" in client
+    assert "PendingChunksWithUploadContextAsync(localSessionId, 200, cancellationToken)" in client
+    assert "AND ($session IS NULL OR c.session_id=$session)" in spool
+
+
+def test_recording_profiles_preserve_track_metadata_and_use_controlled_mix():
+    coordinator = read("apps/recorder-agent/RecordingCoordinator.cs")
+    spool = read("apps/recorder-agent/SpoolStore.cs")
+    client = read("apps/recorder-agent/AgentApiClient.cs")
+    assembly = read("workers/media_worker/recording_assembly.py")
+    worker = read("workers/media_worker/worker.py")
+    for profile in ("ROOM", "ONLINE", "MIC_ONLY", "SYSTEM_ONLY"):
+        assert profile in coordinator
+    for field in ("EndpointId", "DeviceFriendlyName", "SelectionMode", "Profile"):
+        assert field in spool and field in client
+    assert "normalize=1" in assembly
+    assert "alimiter=limit=0.95" in assembly
+    assert '"DERIVED_MIX_NO_AEC"' in assembly
+    assert '"master_kind"' in assembly
+    assert "ASSEMBLING" in worker and "ASSEMBLED" in worker and "MEDIA_READY" in worker
+    settings = read("apps/recorder-agent/AgentStorageSettings.cs")
+    contract = read("recording-profile-contract.json")
+    assert '_recordingProfile = NormalizeRecordingProfile' in settings
+    assert ', "ROOM")' in assembly
+    assert '?? "ROOM"' in read("apps/recorder-agent/LocalArchiveWriter.cs")
+    assert "adelay=" in assembly and "AUDIO_TRACK_DRIFT_HIGH" in assembly
+    assert "originalTracksPreserved" in contract
+
+
+def test_media_quality_report_is_emitted_with_ready_for_asr_payload():
+    media = read("workers/media_worker/media_worker.py")
+    worker = read("workers/media_worker/worker.py")
+    assert "audio-quality.json" in media
+    assert "quality_report" in media
+    assert '"audio_quality"' in worker

@@ -1,0 +1,19 @@
+﻿{
+  auto_https off
+}
+
+:80 {
+  @api path /api/* /health /ready
+  handle @api {
+    reverse_proxy api:8080
+  }
+
+  handle /files/* {
+    reverse_proxy tusd:1080
+  }
+
+  handle {
+    reverse_proxy web:80
+  }
+}
+

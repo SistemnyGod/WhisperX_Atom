@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "captureHost": "Windows",
+  "endpoint": "REDACTED_LOCAL_ENDPOINT",
+  "format": {
+    "sampleRate": 48000,
+    "channels": 1,
+    "sampleFormat": "PCM16"
+  },
+  "windowsGainDb": null,
+  "enhancements": [],
+  "room": "REDACTED",
+  "distanceMeters": null,
+  "deviceIdSha256": "REDACTED_LOCAL_ONLY"
+}

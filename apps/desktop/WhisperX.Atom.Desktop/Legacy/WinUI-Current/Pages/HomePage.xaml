@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="WhisperX_Atom_Desktop.Pages.HomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="28,24,28,32" Spacing="18">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel>
+                    <TextBlock Text="Главная" FontSize="30" FontWeight="SemiBold" />
+                    <TextBlock Text="Операционный центр записи и локального архива" Foreground="{StaticResource MutedTextBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <Button Grid.Column="1" Content="Обновить" Style="{StaticResource SecondaryButtonStyle}" Click="RefreshButton_Click" />
+            </Grid>
+
+            <Grid ColumnDefinitions="2.1*,1*" ColumnSpacing="16">
+                <Border Style="{StaticResource CardStyle}" Background="{StaticResource SurfaceBlueBrush}" BorderBrush="#C8DCFF" Padding="24">
+                    <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="12">
+                        <TextBlock Text="ТЕКУЩАЯ ЗАПИСЬ" Style="{StaticResource EyebrowStyle}" />
+                        <TextBlock Grid.Row="1" Text="{Binding RecordingStatus}" FontSize="26" FontWeight="SemiBold" />
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="10">
+                            <Ellipse Width="12" Height="12" Fill="{StaticResource AccentBrush}" />
+                            <TextBlock Text="{Binding AgentStatus}" Foreground="{StaticResource MutedTextBrush}" />
+                        </StackPanel>
+                        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="22">
+                            <StackPanel>
+                                <TextBlock Text="Локальный архив" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="{Binding ArchiveText}" TextWrapping="Wrap" MaxWidth="520" />
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock Text="Ожидает отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                                <TextBlock Text="{Binding PendingUploadsText}" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Быстрые действия" Style="{StaticResource SectionTitleStyle}" />
+                        <Button Content="Начать запись" Style="{StaticResource PrimaryButtonStyle}" Click="StartRecordingButton_Click" />
+                        <Button Content="Загрузить файл" Style="{StaticResource CardButtonStyle}" Click="ImportButton_Click" />
+                        <Button Content="Настройки" Style="{StaticResource CardButtonStyle}" Click="SettingsButton_Click" />
+                        <TextBlock Text="Команды записи используют текущий Recorder Agent и сохраняют локальный архив." Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="12">
+                <Border Style="{StaticResource CardStyle}" Padding="16">
+                    <StackPanel Spacing="7">
+                        <TextBlock Text="Recorder Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="{Binding AgentStatus}" FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding RecordingStatus}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}" Padding="16">
+                    <StackPanel Spacing="7">
+                        <TextBlock Text="API" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="{Binding ApiStatus}" FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Совещания доступны только после входа" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16">
+                    <StackPanel Spacing="7">
+                        <TextBlock Text="Свободное место" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="{Binding StorageText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock Text="Данные только из health-ответа Agent" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="3" Style="{StaticResource CardStyle}" Padding="16">
+                    <StackPanel Spacing="7">
+                        <TextBlock Text="Очередь отправки" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Text="{Binding PendingUploadsText}" FontSize="24" FontWeight="SemiBold" />
+                        <TextBlock Text="сессий ожидают подтверждения" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Style="{StaticResource CardStyle}" Padding="0">
+                <StackPanel>
+                    <Grid Padding="20,18" ColumnDefinitions="*,Auto">
+                        <TextBlock Text="Последние совещания" Style="{StaticResource SectionTitleStyle}" />
+                        <Button Grid.Column="1" Content="Открыть раздел записи →" Style="{StaticResource CardButtonStyle}" Click="StartRecordingButton_Click" />
+                    </Grid>
+                    <Grid Background="#F0F4F9" Padding="20,10" ColumnDefinitions="170,*,160,190">
+                        <TextBlock Text="Дата" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="1" Text="Название" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="2" Text="Статус" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                        <TextBlock Grid.Column="3" Text="Описание" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                    </Grid>
+                    <ListView x:Name="MeetingsList" ItemsSource="{Binding RecentMeetings}" BorderThickness="0" SelectionMode="None" MinHeight="120" MaxHeight="310">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Padding="20,12" ColumnDefinitions="170,*,160,190">
+                                    <TextBlock Text="{Binding CreatedAt}" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" />
+                                    <TextBlock Grid.Column="3" Text="{Binding Description}" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel x:Name="MeetingsEmptyState" HorizontalAlignment="Center" Spacing="6" Padding="20,20,20,26">
+                        <SymbolIcon Symbol="Calendar" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" />
+                        <TextBlock x:Name="MeetingsEmptyText" Text="{Binding MeetingsMessage}" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                        <TextBlock Text="Импортируйте аудиофайл или выполните вход в API." Foreground="{StaticResource MutedTextBrush}" FontSize="12" HorizontalAlignment="Center" />
+                        <Button Content="Загрузить файл" Style="{StaticResource PrimaryButtonStyle}" Click="ImportButton_Click" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" IsClosable="False" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

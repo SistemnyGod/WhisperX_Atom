@@ -1,0 +1,19 @@
+﻿{
+    "schemaVersion":  1,
+    "product":  "ffmpeg",
+    "platform":  "windows-x64",
+    "version":  "8.1-essentials_build-www.gyan.dev",
+    "files":  [
+                  {
+                      "file":  "ffmpeg.exe",
+                      "size":  101060096,
+                      "sha256":  "1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705"
+                  },
+                  {
+                      "file":  "ffprobe.exe",
+                      "size":  100853248,
+                      "sha256":  "54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c"
+                  }
+              ],
+    "stagedAtUtc":  "\/Date(1786598198036)\/"
+}

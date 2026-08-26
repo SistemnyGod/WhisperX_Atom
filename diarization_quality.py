@@ -8,6 +8,13 @@ from typing import Any
 UNKNOWN_SPEAKERS = {"", "UNKNOWN", "None", "none", "null"}
 
 
+def normalize_speaker_label(value: Any) -> str | None:
+    label = str(value or "").strip()
+    if label.upper() in {"", "UNKNOWN", "NULL", "NONE", "НЕ ОПРЕДЕЛЁН", "НЕ ОПРЕДЕЛЕН"}:
+        return None
+    return label
+
+
 @dataclass(frozen=True)
 class DiarizationScore:
     profile: str

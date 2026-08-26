@@ -1,0 +1,107 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using WhisperX.Atom.Recorder;
+using WhisperX.Atom.Recorder.Host;
+
+// The AudioGraph Host is a per-user runtime.  Its credentials and installation
+// identity are protected in the interactive user's DPAPI scope; falling back
+// to ProgramData here silently attaches the Host to the legacy Service Agent.
+// Keep an explicit environment override for diagnostics and test harnesses.
+if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH")))
+{
+    var userConfigPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WhisperXAtom", "Agent", "agent-config.json");
+    Environment.SetEnvironmentVariable("ATOM_AGENT_CONFIG_PATH", userConfigPath);
+}
+
+using var processGuard = RecorderHostProcessGuard.TryAcquire()
+    ?? throw new InvalidOperationException("RECORDER_HOST_ALREADY_RUNNING");
+
+var builder = Host.CreateApplicationBuilder(args);
+// A current-user Recorder Host normally has no Event Log write privilege.
+// Keep diagnostics from becoming a capture failure by using console output,
+// which the development launcher captures and Windows can safely discard for
+// the hidden installed process.
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "O ";
+});
+var hostLogPath = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+    "WhisperXAtom", "logs", "recorder-host.log");
+builder.Logging.AddProvider(new RecorderHostFileLoggerProvider(hostLogPath));
+var dataRoot = Environment.GetEnvironmentVariable("ATOM_AGENT_DATA_ROOT")
+    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
+
+builder.Services.AddSingleton<AgentStorageSettings>();
+builder.Services.AddSingleton(new SpoolStore(dataRoot));
+builder.Services.AddSingleton<AgentApiClient>();
+builder.Services.AddSingleton<LocalArchiveWriter>();
+builder.Services.AddSingleton<LocalPlayableAudioWriter>();
+builder.Services.AddSingleton<DeliveryWakeSignal>();
+builder.Services.AddSingleton<PlayableAudioWakeSignal>();
+builder.Services.AddSingleton<RawChunkRecovery>();
+builder.Services.AddSingleton<SessionFinalizationCoordinator>();
+builder.Services.AddSingleton<RecordingDeliveryCoordinator>();
+builder.Services.AddSingleton<AudioGraphDeviceCatalog>();
+builder.Services.AddSingleton<IAudioDeviceCatalog>(services => services.GetRequiredService<AudioGraphDeviceCatalog>());
+builder.Services.AddSingleton<AudioGraphCaptureEngine>();
+builder.Services.AddSingleton<IAudioCaptureEngine>(services => services.GetRequiredService<AudioGraphCaptureEngine>());
+builder.Services.AddSingleton<SystemAudioDeviceCatalog>();
+builder.Services.AddSingleton<SystemAudioCaptureEngine>();
+builder.Services.AddSingleton<WasapiRawDiagnosticCaptureEngine>();
+builder.Services.AddSingleton<WasapiSharedNativeDiagnosticCaptureEngine>();
+builder.Services.AddSingleton<IAudioDeviceProbe, AudioGraphDeviceProbe>();
+builder.Services.AddSingleton<IAudioCaptureEngineFactory, AudioGraphCaptureEngineFactory>();
+builder.Services.AddSingleton<RecorderHostRuntime>();
+builder.Services.AddSingleton<RawEncoderWakeSignal>();
+builder.Services.AddSingleton<RawEncoderRuntimeState>();
+builder.Services.AddSingleton<RawFinalizerQueueMetrics>();
+builder.Services.AddSingleton<StorageRetentionMetrics>();
+builder.Services.AddSingleton<LiveAudioBroadcaster>();
+builder.Services.AddHostedService<RecorderHostPipeServer>();
+builder.Services.AddHostedService<LiveAudioPipeServer>();
+builder.Services.AddHostedService<GlobalRawEncoderWorker>();
+builder.Services.AddHostedService<PlayableAudioWorker>();
+builder.Services.AddHostedService<StorageRetentionWorker>();
+builder.Services.AddHostedService<StorageCaptureWatchdog>();
+builder.Services.AddHostedService<RecorderHostWorker>();
+
+await builder.Build().RunAsync();
+
+public sealed class RecorderHostWorker(RecorderHostRuntime runtime, DeliveryWakeSignal deliveryWake, ILogger<RecorderHostWorker> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Recovery is intentionally deferred until after the pipe listener is
+        // live.  A bounded first pass must not delay HEALTH/START availability.
+        try
+        {
+            await runtime.WaitForInitializationAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            // The pipe remains available and reports the stable startup code;
+            // recovery must not spin against an unavailable SQLite/device
+            // runtime or hide the original failure in repeated warnings.
+            logger.LogWarning(ex, "Recorder Host background recovery disabled because startup failed.");
+            return;
+        }
+        await Task.Delay(TimeSpan.FromMilliseconds(100), stoppingToken).ConfigureAwait(false);
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try { await runtime.ReconcileBackgroundAsync(stoppingToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            catch (Exception ex) { logger.LogWarning(ex, "Recorder Host background worker failed; local spool remains authoritative."); }
+            await deliveryWake.WaitAsync(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+        }
+    }
+}

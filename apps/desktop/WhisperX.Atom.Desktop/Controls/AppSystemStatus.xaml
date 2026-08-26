@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="WhisperX_Atom_Desktop.Controls.AppSystemStatus"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Button x:Name="SummaryButton"
+            Style="{StaticResource GhostButtonStyle}"
+            Padding="10,5"
+            Width="220"
+            MinHeight="34"
+            HorizontalContentAlignment="Left"
+            AutomationProperties.Name="Сводное состояние системы">
+        <Button.Content>
+            <StackPanel Orientation="Horizontal" Spacing="7">
+                <Ellipse x:Name="SummaryIndicator" Width="8" Height="8" Fill="{StaticResource NeutralStatusBrush}" VerticalAlignment="Center" />
+                <TextBlock x:Name="SummaryText" Text="Система проверяется" Style="{StaticResource TopStatusStyle}" Width="178" />
+            </StackPanel>
+        </Button.Content>
+        <Button.Flyout>
+            <Flyout Placement="Bottom">
+                <StackPanel MinWidth="300" MaxWidth="380" Spacing="10" Padding="4">
+                    <TextBlock Text="Состояние системы" Style="{StaticResource SectionTitleStyle}" />
+                    <TextBlock x:Name="SummaryDescription" Text="Проверяем компоненты…" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                    <Border Background="{StaticResource InfoSurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                        <StackPanel Spacing="6">
+                            <TextBlock x:Name="RecorderText" Text="Recorder · проверка" TextWrapping="Wrap" />
+                            <TextBlock x:Name="MicrophoneText" Text="Микрофон · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="StorageText" Text="Локальное место · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+                        <StackPanel Spacing="6">
+                            <TextBlock x:Name="ServerText" Text="Сервер · проверка" TextWrapping="Wrap" />
+                            <TextBlock x:Name="WhisperText" Text="WhisperX · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="VoiceText" Text="Мифодий · проверка" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="QwenText" Text="Qwen · состояние уточняется" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                    <Button Content="Открыть состояние системы" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSystemStatusButton_Click" AutomationProperties.Name="Открыть состояние системы" />
+                </StackPanel>
+            </Flyout>
+        </Button.Flyout>
+    </Button>
+</UserControl>

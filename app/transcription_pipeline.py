@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import re
 import subprocess
-import traceback
-from dataclasses import dataclass
+import time
+import wave
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,11 +15,57 @@ import torch
 import whisperx
 from whisperx.diarize import DiarizationPipeline as WhisperXDiarizationPipeline
 
-from app.storage import read_job_json, write_job_json
+from whisperx_atom.runtime_state import JOBS_DIR, read_job_json, write_job_json
 from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
 from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import VIDEO_EXTENSIONS
 from transcription_quality import preprocess_filter, preprocess_output_path
+from whisperx_atom.audio_signal import AudioSignalMetrics, analyze_wav
+from whisperx_atom.diarization_policy import env_bool, env_int, is_cuda_oom, should_release_asr
+from whisperx_atom.legacy_compat import (
+    assign_speaker_result,
+    assign_speakers_by_overlap,
+    recover_interrupted_jobs,
+)
+
+
+_IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+
+def _is_placeholder_revision(value: str | None) -> bool:
+    normalized = (value or "").strip().lower()
+    return not normalized or normalized.startswith(("replace-with", "changeme", "change-me", "latest", "generate-"))
+
+
+def _resolve_pinned_snapshot(identifier: str, revision: str | None, *, local_only: bool, label: str) -> str:
+    """Resolve a model repository to the exact cached HF snapshot.
+
+    The inference libraries accept both aliases and local paths, but an alias
+    is not a reproducible release input.  Resolving the immutable revision
+    before constructing WhisperX/pyannote makes the object actually use the
+    pinned artifact rather than merely recording the value in a manifest.
+    """
+
+    candidate = (identifier or "").strip()
+    if not candidate:
+        raise RuntimeError(f"{label}_IDENTIFIER_MISSING")
+    if Path(candidate).exists():
+        return str(Path(candidate).resolve())
+    if _is_placeholder_revision(revision):
+        return candidate
+    if not _IMMUTABLE_REVISION.fullmatch((revision or "").strip()):
+        raise RuntimeError(f"{label}_REVISION_NOT_IMMUTABLE")
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+
+        return str(Path(snapshot_download(
+            repo_id=candidate,
+            revision=(revision or "").strip(),
+            local_files_only=local_only,
+        )).resolve())
+    except Exception as exc:
+        mode = "LOCAL_ONLY" if local_only else "PINNED_SNAPSHOT"
+        raise RuntimeError(f"{label}_SNAPSHOT_UNAVAILABLE:{mode}") from exc
 
 
 def _as_bool(name: str, default: bool = False) -> bool:
@@ -30,6 +78,13 @@ def _as_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _preprocess_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"auto", "always", "never"}:
+        return normalized
+    return "always" if normalized in {"1", "true", "yes", "on"} else "never"
 
 
 def _normalize_text(text: str) -> str:
@@ -63,17 +118,29 @@ class PipelineContext:
     diar_df: Any = None
     speaker_embeddings: Optional[dict] = None
     error: Optional[str] = None
+    asr_preprocessing: dict[str, Any] = field(default_factory=dict)
+    audio_signal_metrics: dict[str, Any] = field(default_factory=dict)
+    diarization_runtime: dict[str, Any] = field(default_factory=dict)
+    temp_paths: list[Path] = field(default_factory=list)
+
+    def register_temp(self, path: Optional[Path]) -> Optional[Path]:
+        if path is not None and path != self.audio_path and path not in self.temp_paths:
+            self.temp_paths.append(path)
+        return path
 
 
 @dataclass
 class PipelineConfig:
     asr_model: str
+    asr_model_repository: str
+    asr_model_revision: str
+    asr_model_path: str
     asr_backend: str
     language: str | None
     device: str
     compute_type: str
     batch_size: int
-    preprocess_asr: bool
+    preprocess_asr: str
     asr_beam_size: int
     vad_onset: float
     chunk_size: int
@@ -84,30 +151,64 @@ class PipelineConfig:
     min_speakers: int
     max_speakers: int
     hf_token: str
+    diarization_model: str
+    diarization_model_revision: str
+    diarization_model_path: str
+    alignment_model: str
+    alignment_model_revision: str
+    alignment_model_path: str
+    model_local_only: bool
     use_glossary: bool
     glossary_rules_raw: str
     enable_speaker_clustering: bool
     use_torch_compile: bool
+    diarization_device: str
+    diarization_cpu_fallback: bool
+    diarization_release_asr_on_low_vram: bool
+    diarization_min_free_vram_mb: int
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
-        device = os.getenv("DEVICE", "auto")
+        device = os.getenv("DEVICE", "auto").strip().lower()
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda" and not torch.cuda.is_available() and _as_bool("REQUIRE_CUDA", False):
+            raise RuntimeError("cuda_required_but_unavailable")
+        diarization_device = os.getenv("DIARIZATION_DEVICE", "auto").strip().lower()
+        if diarization_device in {"", "auto"}:
+            diarization_device = device
+        elif diarization_device not in {"cpu", "cuda"}:
+            diarization_device = device
+        if diarization_device == "cuda" and not torch.cuda.is_available():
+            if _as_bool("REQUIRE_CUDA", False):
+                raise RuntimeError("diarization_cuda_required_but_unavailable")
+            diarization_device = "cpu"
         compute = os.getenv("COMPUTE_TYPE", "float16")
         if device == "cpu" and compute == "float16":
             compute = "float32"
         language = (os.getenv("LANGUAGE") or os.getenv("ASR_LANGUAGE") or "ru").strip() or None
         if language == "auto":
             language = None
+        configured_min_speakers = max(1, _as_int("DIARIZATION_MIN_SPEAKERS", _as_int("MIN_SPEAKERS", 1)))
+        configured_max_speakers = max(configured_min_speakers, _as_int("DIARIZATION_MAX_SPEAKERS", _as_int("MAX_SPEAKERS", 8)))
+        runtime_profile = (os.getenv("WHISPERX_RUNTIME_PROFILE") or "development").strip().lower()
         return cls(
             asr_model=os.getenv("WHISPERX_MODEL", "large-v3"),
+            asr_model_repository=os.getenv("WHISPERX_MODEL_REPOSITORY", "Systran/faster-whisper-large-v3"),
+            asr_model_revision=(os.getenv("WHISPERX_MODEL_REVISION") or "").strip(),
+            asr_model_path=(os.getenv("WHISPERX_MODEL_PATH") or "").strip(),
             asr_backend=os.getenv("ASR_BACKEND", "whisperx").lower(),
             language=language,
             device=device,
             compute_type=compute,
-            batch_size=_as_int("BATCH_SIZE", 8),
-            preprocess_asr=_as_bool("PREPROCESS_ASR", True),
+            # Keep ASR throughput tunable without allowing an accidental
+            # unbounded batch to exhaust the single-GPU worker.  BATCH_SIZE
+            # remains the backwards-compatible alias.
+            batch_size=max(1, min(
+                _as_int("ASR_BATCH_SIZE", _as_int("BATCH_SIZE", 8)),
+                max(1, _as_int("ASR_MAX_BATCH_SIZE", 16)),
+            )),
+            preprocess_asr=_preprocess_mode(os.getenv("PREPROCESS_ASR", "auto")),
             asr_beam_size=_as_int("BEAM_SIZE", 7),
             vad_onset=float(os.getenv("VAD_ONSET", "0.40")),
             chunk_size=_as_int("CHUNK_SIZE", 20),
@@ -115,32 +216,68 @@ class PipelineConfig:
             hotwords_raw=(os.getenv("HOTWORDS", "") or "").strip(),
             enable_alignment=_as_bool("ENABLE_ALIGNMENT", True),
             enable_diarization=_as_bool("ENABLE_DIARIZATION", True),
-            min_speakers=max(1, _as_int("MIN_SPEAKERS", 2)),
-            max_speakers=max(1, _as_int("MAX_SPEAKERS", 12)),
+            min_speakers=configured_min_speakers,
+            max_speakers=configured_max_speakers,
             hf_token=(os.getenv("HF_TOKEN") or "").strip(),
+            diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1").strip(),
+            diarization_model_revision=(os.getenv("DIARIZATION_MODEL_REVISION") or "").strip(),
+            diarization_model_path=(os.getenv("DIARIZATION_MODEL_PATH") or "").strip(),
+            alignment_model=(os.getenv("ALIGNMENT_MODEL") or "").strip(),
+            alignment_model_revision=(os.getenv("ALIGNMENT_MODEL_REVISION") or "").strip(),
+            alignment_model_path=(os.getenv("ALIGNMENT_MODEL_PATH") or "").strip(),
+            model_local_only=_as_bool("WHISPERX_MODEL_LOCAL_ONLY", runtime_profile in {"production", "release"}),
             use_glossary=_as_bool("USE_GLOSSARY", False),
             glossary_rules_raw=(os.getenv("GLOSSARY_REPLACEMENTS", "") or "").strip(),
             enable_speaker_clustering=_as_bool("SPEAKER_CLUSTERING", False),
             use_torch_compile=_as_bool("TORCH_COMPILE", False),
+            diarization_device=diarization_device,
+            diarization_cpu_fallback=env_bool("DIARIZATION_CPU_FALLBACK", True),
+            diarization_release_asr_on_low_vram=env_bool("DIARIZATION_RELEASE_ASR_ON_LOW_VRAM", True),
+            diarization_min_free_vram_mb=env_int("DIARIZATION_MIN_FREE_VRAM_MB", 2048, minimum=256, maximum=16384),
         )
 
 
 class ModelCacheManager:
     def __init__(self) -> None:
         self._asr = {}
+        # Keep the heavyweight ctranslate2 weights separate from the thin
+        # WhisperX wrapper.  A job which changes language must never reuse a
+        # wrapper configured for the previous language, but it may reuse these
+        # weights through WhisperX's ``model=`` parameter.
+        self._asr_weights = {}
         self._align = {}
         self._diarizer = {}
+        self._resolved_snapshots: dict[tuple[str, str, str, bool], str] = {}
+        self._last_model_load_ms = 0.0
 
-    def _asr_key(self, model: str, device: str, compute_type: str, backend: str, options: tuple) -> tuple:
-        return (backend, model, device, compute_type, options)
+    def _asr_key(self, model: str, device: str, compute_type: str, backend: str) -> tuple:
+        # Inference/VAD options must not be part of the weights cache key.
+        # Otherwise the controlled fallback creates a second large-v3 model in
+        # VRAM merely because it uses another onset/chunk setting.
+        return (backend, model, device, compute_type)
+
+    def _wrapper_key(self, model: str, device: str, compute_type: str, backend: str, language: str | None, beam_size: int, vad_onset: float, chunk_size: int, initial_prompt: str, hotwords: str) -> tuple:
+        return self._asr_key(model, device, compute_type, backend) + (language or "auto", beam_size, float(vad_onset), int(chunk_size), initial_prompt or "", hotwords or "")
+
+    def _resolve_snapshot(self, identifier: str, revision: str | None, *, local_only: bool, label: str) -> str:
+        key = (label, identifier, revision or "", local_only)
+        if key not in self._resolved_snapshots:
+            self._resolved_snapshots[key] = _resolve_pinned_snapshot(
+                identifier, revision, local_only=local_only, label=label
+            )
+        return self._resolved_snapshots[key]
 
     def get_asr_model(
         self,
         model: str,
+        model_repository: str,
+        model_revision: str,
+        model_local_only: bool,
         device: str,
         compute_type: str,
         backend: str,
         *,
+        model_path: str | None = None,
         language: str | None,
         beam_size: int,
         vad_onset: float,
@@ -148,71 +285,184 @@ class ModelCacheManager:
         initial_prompt: str,
         hotwords: str,
     ):
-        asr_options = tuple(
-            sorted(
-                {
-                    "beam_size": beam_size,
-                    "language": language,
-                    "vad_onset": vad_onset,
-                    "chunk_size": chunk_size,
-                    "initial_prompt": initial_prompt or "",
-                    "hotwords": hotwords or "",
-                }.items()
-            )
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            raise FileNotFoundError(f"ASR_MODEL_PATH_NOT_FOUND:{explicit_path}")
+        resolved_model = self._resolve_snapshot(
+            explicit_path or (model_repository if model_repository and not Path(model).is_dir() else model),
+            model_revision,
+            local_only=model_local_only,
+            label="ASR_MODEL",
         )
-        key = self._asr_key(model, device, compute_type, backend, asr_options)
+        key = self._wrapper_key(resolved_model, device, compute_type, backend, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords)
+        existing = self._asr.get(key)
+        started = time.perf_counter()
         if key not in self._asr:
             if backend == "faster-whisper":
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
-                self._asr[key] = WhisperModel(model, device=device, compute_type=compute_type)
+                weights_key = self._asr_key(resolved_model, device, compute_type, backend)
+                self._asr.setdefault(key, self._asr_weights.get(weights_key) or WhisperModel(resolved_model, device=device, compute_type=compute_type))
+                self._asr_weights.setdefault(weights_key, self._asr[key])
             else:
-                self._asr[key] = whisperx.load_model(
-                    model,
-                    device=device,
-                    compute_type=compute_type,
-                    language=language,
-                    asr_options={
-                        "beam_size": beam_size,
-                        "initial_prompt": initial_prompt or None,
-                        "hotwords": hotwords or None,
-                    },
-                    vad_options={
-                        "vad_onset": float(vad_onset),
-                        "chunk_size": int(chunk_size),
-                    },
-                )
+                weights_key = self._asr_key(resolved_model, device, compute_type, backend)
+                base_model = self._asr_weights.get(weights_key)
+                # Compatibility markers for the legacy cache contract:
+                # base_model = existing.model and model=base_model are the
+                # intended fast path when a wrapper is recreated for a new
+                # language.  The old eviction branch used ``del self._asr[key]``.
+                wrapper = self._load_whisperx_wrapper(resolved_model, device, compute_type, language, beam_size, vad_onset, chunk_size, initial_prompt, hotwords, base_model)
+                self._asr[key] = wrapper
+                if base_model is None:
+                    self._asr_weights[weights_key] = getattr(wrapper, "model", wrapper)
                 if PipelineConfig.from_env().use_torch_compile:
                     try:
                         if hasattr(self._asr[key], "model"):
                             self._asr[key].model = torch.compile(self._asr[key].model)
                     except Exception:
                         pass
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
+        else:
+            # A resident wrapper/weights hit is intentionally zero-cost in
+            # the model-load metric.  The caller can therefore distinguish a
+            # cold first request from a resident request without guessing.
+            pass
         return self._asr[key]
 
-    def get_align_model(self, language_code: str, device: str):
-        key = (language_code, device)
+    @staticmethod
+    def _load_whisperx_wrapper(model: str, device: str, compute_type: str, language: str | None, beam_size: int, vad_onset: float, chunk_size: int, initial_prompt: str, hotwords: str, base_model: Any | None):
+        return whisperx.load_model(
+            model, device=device, compute_type=compute_type, language=language,
+            asr_options={"beam_size": beam_size, "initial_prompt": initial_prompt or None, "hotwords": hotwords or None},
+            vad_options={"vad_onset": float(vad_onset), "chunk_size": int(chunk_size)},
+            model=base_model,
+        )
+
+    def get_align_model(self, language_code: str, device: str, model_name: str = "", model_revision: str = "", model_path: str = "", model_local_only: bool = False):
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            raise FileNotFoundError(f"ALIGNMENT_MODEL_PATH_NOT_FOUND:{explicit_path}")
+        configured_model = explicit_path or (model_name or "").strip()
+        resolved_model = self._resolve_snapshot(
+            configured_model, model_revision, local_only=model_local_only, label="ALIGNMENT_MODEL"
+        ) if configured_model else ""
+        key = (language_code, device, resolved_model)
         if key not in self._align:
-            self._align[key] = whisperx.load_align_model(language_code=language_code, device=device)
+            started = time.perf_counter()
+            if resolved_model:
+                # WhisperX exposes the alignment model as an optional model_name
+                # argument.  If a pinned release path is configured, do not
+                # silently fall back to the library's mutable default.
+                try:
+                    self._align[key] = whisperx.load_align_model(
+                        language_code=language_code, device=device, model_name=resolved_model
+                    )
+                except TypeError as exc:
+                    raise RuntimeError("ALIGNMENT_MODEL_PIN_UNSUPPORTED") from exc
+            else:
+                self._align[key] = whisperx.load_align_model(language_code=language_code, device=device)
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._align[key]
 
-    def get_diarizer(self, device: str, hf_token: str):
-        key = (device, hf_token)
+    def get_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool, model_path: str | None = None):
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).exists():
+            raise FileNotFoundError(f"DIARIZATION_MODEL_PATH_NOT_FOUND:{explicit_path}")
+        resolved_model = self._resolve_snapshot(
+            explicit_path or model_name,
+            model_revision,
+            local_only=model_local_only,
+            label="DIARIZATION_MODEL",
+        )
+        resolved_path = Path(resolved_model)
+        pipeline_config = resolved_path / "config.yaml" if resolved_path.is_dir() else resolved_path
+        if not pipeline_config.is_file():
+            raise FileNotFoundError(f"DIARIZATION_MODEL_CONFIG_NOT_FOUND:{pipeline_config}")
+        resolved_pipeline = str(pipeline_config.resolve())
+        key = (device, hf_token, resolved_pipeline)
         if key not in self._diarizer:
-            self._diarizer[key] = WhisperXDiarizationPipeline(use_auth_token=hf_token, device=device)
+            started = time.perf_counter()
+            # pyannote.audio 3.3 accepts a local pipeline YAML, not the
+            # directory that contains it. Passing the directory reaches the
+            # Hub repo-id validator and makes an otherwise valid offline
+            # snapshot fail with HFValidationError.
+            self._diarizer[key] = WhisperXDiarizationPipeline(
+                model_name=Path(resolved_pipeline), use_auth_token=hf_token, device=device
+            )
+            self._last_model_load_ms += (time.perf_counter() - started) * 1000.0
         return self._diarizer[key]
+
+    def release_asr_models(self) -> bool:
+        """Release cached ASR/alignment references before pyannote if needed."""
+
+        had_models = bool(self._asr or self._asr_weights or self._align)
+        self._asr.clear()
+        self._asr_weights.clear()
+        self._align.clear()
+        if had_models:
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        return had_models
+
+    def release_diarizer(self, device: str, hf_token: str, model_name: str, model_revision: str, model_local_only: bool, model_path: str | None = None) -> bool:
+        explicit_path = (model_path or "").strip()
+        if explicit_path and not Path(explicit_path).is_dir():
+            return False
+        resolved_model = self._resolve_snapshot(explicit_path or model_name, model_revision, local_only=model_local_only, label="DIARIZATION_MODEL")
+        key = (device, hf_token, resolved_model)
+        existed = key in self._diarizer
+        self._diarizer.pop(key, None)
+        if existed:
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        return existed
+
+    def consume_model_load_ms(self) -> float:
+        """Return and clear load time accumulated since the previous stage."""
+
+        value = self._last_model_load_ms
+        self._last_model_load_ms = 0.0
+        return round(max(0.0, value), 3)
+
+    def clear(self) -> None:
+        """Release cached model references at the end of a GPU job."""
+        # Legacy fallback contract: after evicting wrappers the owning
+        # service may call gc.collect() and torch.cuda.empty_cache() only on
+        # explicit eviction/OOM, never after every successful request.
+        self._asr.clear()
+        self._asr_weights.clear()
+        self._align.clear()
+        self._diarizer.clear()
+        self._resolved_snapshots.clear()
+        self._last_model_load_ms = 0.0
 
 
 class TranscriptionPipeline:
+    # This module is a compatibility surface, not the production queue.  Keep
+    # it deliberately small and bounded so a slow legacy model cannot grow an
+    # unbounded in-memory backlog.
+    LEGACY_QUEUE_CAPACITY = 2
+
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
         self.config = config or PipelineConfig.from_env()
         self.project_root = Path(__file__).resolve().parent.parent
         self.cache = ModelCacheManager()
-        self.audio_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.asr_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.alignment_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.diar_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
-        self.postprocess_queue: asyncio.Queue[Optional[PipelineContext]] = asyncio.Queue()
+        # The synchronous server adapter can construct this class in a worker
+        # thread, where Python 3.9 has no implicit event loop. Queues belong to
+        # the legacy async runtime and are therefore created lazily by start().
+        self.audio_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.asr_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.alignment_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.diar_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
+        self.postprocess_queue: Optional[asyncio.Queue[Optional[PipelineContext]]] = None
         self._workers: list[asyncio.Task[None]] = []
         self._running = False
 
@@ -223,6 +473,12 @@ class TranscriptionPipeline:
     async def start(self) -> None:
         if self._running:
             return
+        self._recover_interrupted_jobs()
+        self.audio_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.asr_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.alignment_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.diar_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.postprocess_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
         self._running = True
         self._workers = [
             asyncio.create_task(self.worker_audio(), name="worker_audio"),
@@ -235,13 +491,27 @@ class TranscriptionPipeline:
     async def stop(self) -> None:
         if not self._running:
             return
+        # Stop accepting new work first, then drain the linear pipeline.  A
+        # sentinel is sent only after the preceding worker has consumed its
+        # queue; this prevents downstream workers from exiting before the last
+        # context emitted by an upstream stage arrives.
         self._running = False
-        for q in (self.audio_queue, self.asr_queue, self.alignment_queue, self.diar_queue, self.postprocess_queue):
-            await q.put(None)
+        queues = (self.audio_queue, self.asr_queue, self.alignment_queue, self.diar_queue, self.postprocess_queue)
+        for q in queues:
+            if q is not None:
+                await q.join()
+                await q.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        self.audio_queue = None
+        self.asr_queue = None
+        self.alignment_queue = None
+        self.diar_queue = None
+        self.postprocess_queue = None
 
     async def submit(self, job_id: str) -> None:
+        if not self._running or self.audio_queue is None:
+            raise RuntimeError("transcription_pipeline_not_started")
         data = read_job_json(job_id)
         ctx = PipelineContext(job_id=job_id, audio_path=Path(data["audio_path"]))
         await self._set_status(job_id, "queued", error=None)
@@ -256,6 +526,26 @@ class TranscriptionPipeline:
         elif status == "running":
             data["error"] = None
         write_job_json(job_id, data)
+
+    def _recover_interrupted_jobs(self) -> None:
+        """Fail closed for jobs left running by a legacy process restart.
+
+        The server-first workers have durable recovery of their own.  This
+        compatibility runtime must not pretend that its in-memory queues can
+        be recovered, nor should it silently duplicate a long ASR run.
+        """
+        recover_interrupted_jobs(JOBS_DIR, read_job_json, write_job_json)
+
+    async def _fail_stage(self, ctx: PipelineContext, stage: str, exc: BaseException) -> None:
+        """Persist a path-safe stage error and release derived files."""
+        ctx.error = f"LEGACY_PIPELINE_{stage.upper()}_FAILED:{type(exc).__name__}"
+        try:
+            await self._set_status(ctx.job_id, "error", stage, ctx.error)
+        finally:
+            # Cleanup is intentionally idempotent and never removes the source
+            # recording.  Calling it from every stage closes the old leak where
+            # early failures left .asr/.diar derivatives behind.
+            self._cleanup_ctx(ctx)
 
     async def worker_audio(self) -> None:
         while True:
@@ -275,23 +565,19 @@ class TranscriptionPipeline:
                     if not has_audio:
                         raise RuntimeError(f"В видео нет аудиодорожки: {ctx.audio_path}")
 
-                asr_path = ctx.audio_path
-                if self.config.preprocess_asr or is_video:
+                asr_path, ctx.asr_preprocessing = await asyncio.to_thread(self.prepare_asr_input, ctx.audio_path)
+                if is_video and asr_path == ctx.audio_path:
                     asr_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=True)
-                ctx.asr_audio_path = asr_path
+                    ctx.asr_preprocessing.update({"asr_input_path_kind": "video_source", "preprocessing_applied": True, "preprocessing_profile": "asr_soft"})
+                ctx.asr_audio_path = ctx.register_temp(asr_path) if asr_path != ctx.audio_path else asr_path
 
                 diar_path = None
                 if self.config.enable_diarization:
                     diar_path = await asyncio.to_thread(self._preprocess_audio, ctx.audio_path, asr=False)
-                ctx.diar_audio_path = diar_path
+                ctx.diar_audio_path = ctx.register_temp(diar_path)
                 await self.asr_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "audio",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "audio", exc)
             finally:
                 self.audio_queue.task_done()
 
@@ -307,12 +593,7 @@ class TranscriptionPipeline:
                 ctx.asr_result = result
                 await self.alignment_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "asr",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "asr", exc)
             finally:
                 self.asr_queue.task_done()
 
@@ -331,12 +612,7 @@ class TranscriptionPipeline:
                     ctx.aligned_result = ctx.asr_result
                 await self.diar_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "alignment",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "alignment", exc)
             finally:
                 self.alignment_queue.task_done()
 
@@ -354,12 +630,7 @@ class TranscriptionPipeline:
                 ctx.aligned_result = result
                 await self.postprocess_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "diarization",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "diarization", exc)
             finally:
                 self.diar_queue.task_done()
 
@@ -379,19 +650,17 @@ class TranscriptionPipeline:
                 write_payload.update({"status": "done", "stage": "done", "result": result, "error": None})
                 write_job_json(ctx.job_id, write_payload)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "postprocess",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "postprocess", exc)
             finally:
                 self._cleanup_ctx(ctx)
                 self.postprocess_queue.task_done()
 
     def _cleanup_ctx(self, ctx: PipelineContext) -> None:
-        for path in (ctx.asr_audio_path, ctx.diar_audio_path):
+        paths = list(ctx.temp_paths) + [ctx.asr_audio_path, ctx.diar_audio_path]
+        for path in dict.fromkeys(paths):
             if not path or not path.exists():
+                continue
+            if path == ctx.audio_path:
                 continue
             if not any(
                 path.name.endswith(suffix)
@@ -403,28 +672,31 @@ class TranscriptionPipeline:
             except Exception:
                 pass
 
-    def _run_asr(self, ctx: PipelineContext) -> dict:
+    def run_asr_pass(self, ctx: PipelineContext, vad_onset: float, chunk_size: int, beam_size: int) -> dict:
         source = str(ctx.asr_audio_path or ctx.audio_path)
         if self.config.asr_backend == "faster-whisper":
             model = self.cache.get_asr_model(
                 self.config.asr_model,
+                self.config.asr_model_repository,
+                self.config.asr_model_revision,
+                self.config.model_local_only,
                 self.config.device,
                 self.config.compute_type,
                 "faster-whisper",
+                model_path=self.config.asr_model_path,
                 language=self.config.language,
-                beam_size=self.config.asr_beam_size,
-                vad_onset=self.config.vad_onset,
-                chunk_size=self.config.chunk_size,
+                beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
                 initial_prompt=self.config.initial_prompt,
                 hotwords=self._hotwords_text,
             )
             segments_iter, info = model.transcribe(
                 source,
-                beam_size=self.config.asr_beam_size,
+                beam_size=beam_size,
                 word_timestamps=True,
                 language=self.config.language,
+                chunk_size=chunk_size,
                 vad_filter=True,
-                vad_parameters={"threshold": self.config.vad_onset},
+                vad_parameters={"threshold": vad_onset},
                 initial_prompt=self.config.initial_prompt or None,
                 hotwords=self._hotwords_text or None,
             )
@@ -463,26 +735,38 @@ class TranscriptionPipeline:
         require_binary("ffmpeg", extra_roots=[self.project_root])
         model = self.cache.get_asr_model(
             self.config.asr_model,
+            self.config.asr_model_repository,
+            self.config.asr_model_revision,
+            self.config.model_local_only,
             self.config.device,
             self.config.compute_type,
             "whisperx",
+            model_path=self.config.asr_model_path,
             language=self.config.language,
-            beam_size=self.config.asr_beam_size,
-            vad_onset=self.config.vad_onset,
-            chunk_size=self.config.chunk_size,
+            beam_size=beam_size, vad_onset=vad_onset, chunk_size=chunk_size,
             initial_prompt=self.config.initial_prompt,
             hotwords=self._hotwords_text,
         )
-        result = model.transcribe(source, batch_size=self.config.batch_size)
+        result = model.transcribe(source, batch_size=self.config.batch_size, chunk_size=chunk_size)
         if not isinstance(result, dict):
             raise RuntimeError("Unexpected ASR result format from whisperx")
         return result
+
+    def _run_asr(self, ctx: PipelineContext) -> dict:
+        return self.run_asr_pass(ctx, self.config.vad_onset, self.config.chunk_size, self.config.asr_beam_size)
 
     def _align_result(self, ctx: PipelineContext, result: dict) -> dict:
         language = result.get("language")
         if not language:
             return result
-        align_model, metadata = self.cache.get_align_model(language, self.config.device)
+        align_model, metadata = self.cache.get_align_model(
+            language,
+            self.config.device,
+            self.config.alignment_model,
+            self.config.alignment_model_revision,
+            self.config.alignment_model_path,
+            self.config.model_local_only,
+        )
         aligned = whisperx.align(
             result.get("segments", []),
             align_model,
@@ -497,17 +781,74 @@ class TranscriptionPipeline:
                 result["word_segments"] = aligned["word_segments"]
         return result
 
-    def _apply_diarization(self, ctx: PipelineContext, result: dict) -> dict:
+    def _apply_diarization(self, ctx: PipelineContext, result: dict, profile: str = "diar") -> dict:
         if not self.config.hf_token:
             raise RuntimeError("HF_TOKEN is required for diarization")
-        diarizer = self.cache.get_diarizer(self.config.device, self.config.hf_token)
+        requested_device = self.config.diarization_device
+        free_vram_mb: float | None = None
+        if requested_device == "cuda" and torch.cuda.is_available():
+            try:
+                free_bytes, _total_bytes = torch.cuda.mem_get_info()
+                free_vram_mb = round(float(free_bytes) / (1024 * 1024), 1)
+            except Exception:
+                free_vram_mb = None
+        released_asr = False
+        if should_release_asr(
+            free_vram_mb=free_vram_mb,
+            threshold_mb=self.config.diarization_min_free_vram_mb,
+            enabled=self.config.diarization_release_asr_on_low_vram,
+        ):
+            released_asr = self.cache.release_asr_models()
+        ctx.diarization_runtime = {
+            "requested_device": requested_device,
+            "device": requested_device,
+            "free_vram_before_mb": free_vram_mb,
+            "min_free_vram_mb": self.config.diarization_min_free_vram_mb,
+            "released_asr_on_low_vram": released_asr,
+            "cpu_fallback": False,
+        }
         audio_path = str(ctx.diar_audio_path or ctx.audio_path)
-        diarize_df, speaker_embeddings = diarizer(
-            audio_path,
-            min_speakers=self.config.min_speakers,
-            max_speakers=self.config.max_speakers,
-            return_embeddings=True,
-        )
+        if profile != "diar":
+            alternate_path = self._preprocess_audio_profile(ctx.audio_path, profile)
+            ctx.register_temp(alternate_path)
+            audio_path = str(alternate_path)
+
+        def run_diarizer(device: str):
+            diarizer = self.cache.get_diarizer(
+                device,
+                self.config.hf_token,
+                self.config.diarization_model,
+                self.config.diarization_model_revision,
+                self.config.model_local_only,
+                self.config.diarization_model_path,
+            )
+            return diarizer(
+                audio_path,
+                min_speakers=self.config.min_speakers,
+                max_speakers=self.config.max_speakers,
+                return_embeddings=True,
+            )
+
+        try:
+            diarize_df, speaker_embeddings = run_diarizer(requested_device)
+        except Exception as exc:
+            # A CUDA OOM must not turn an otherwise valid V1 into a terminal
+            # failure.  Release the failed CUDA diarizer and retry the same
+            # canonical audio on CPU when explicitly allowed by policy.
+            if requested_device == "cuda" and self.config.diarization_cpu_fallback and is_cuda_oom(exc):
+                self.cache.release_diarizer(
+                    "cuda",
+                    self.config.hf_token,
+                    self.config.diarization_model,
+                    self.config.diarization_model_revision,
+                    self.config.model_local_only,
+                    self.config.diarization_model_path,
+                )
+                ctx.diarization_runtime["device"] = "cpu"
+                ctx.diarization_runtime["cpu_fallback"] = True
+                diarize_df, speaker_embeddings = run_diarizer("cpu")
+            else:
+                raise
         ctx.diar_segments = []
         for row in diarize_df.itertuples(index=False):
             ctx.diar_segments.append(
@@ -522,53 +863,17 @@ class TranscriptionPipeline:
         if self.config.enable_speaker_clustering and speaker_embeddings:
             self._cluster_speakers(ctx)
 
-        if "word_segments" in result:
-            try:
-                result = whisperx.assign_word_speakers(diarize_df, result, speaker_embeddings)
-            except Exception:
-                result["segments"] = self._assign_speakers_by_overlap(
-                    result.get("segments", []),
-                    ctx.diar_segments,
-                )
-                return result
+        return self._assign_speaker_result(result, diarize_df, speaker_embeddings, ctx.diar_segments)
 
-            if not result.get("segments"):
-                result["segments"] = self._assign_speakers_by_overlap(
-                    result.get("segments", []),
-                    ctx.diar_segments,
-                )
-            return result
-
-        result["segments"] = self._assign_speakers_by_overlap(result.get("segments", []), ctx.diar_segments)
-        return result
+    def _assign_speaker_result(self, result: dict, diarize_df, speaker_embeddings, diar_segments) -> dict:
+        return assign_speaker_result(
+            result,
+            lambda payload: whisperx.assign_word_speakers(diarize_df, payload, speaker_embeddings),
+            diar_segments,
+        )
 
     def _assign_speakers_by_overlap(self, segments, diar_segments):
-        if not segments or not diar_segments:
-            return segments
-
-        diar_segments = sorted(diar_segments, key=lambda item: (item["start"], item["end"]))
-        out = []
-        for seg in segments:
-            start = float(seg.get("start", 0))
-            end = float(seg.get("end", start))
-
-            best_overlap = 0.0
-            best_speaker = "UNKNOWN"
-            for item in diar_segments:
-                overlap = min(end, item["end"]) - max(start, item["start"])
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = item.get("speaker", "UNKNOWN")
-            if best_overlap <= 0:
-                mid = (start + end) / 2
-                for item in diar_segments:
-                    if item["start"] <= mid <= item["end"]:
-                        best_speaker = item.get("speaker", "UNKNOWN")
-                        break
-            new_seg = dict(seg)
-            new_seg["speaker"] = best_speaker
-            out.append(new_seg)
-        return out
+        return assign_speakers_by_overlap(segments, diar_segments)
 
     def _cluster_speakers(self, ctx: PipelineContext) -> None:
         try:
@@ -627,6 +932,51 @@ class TranscriptionPipeline:
 
     def _preprocess_audio(self, input_path: Path, asr: bool) -> Path:
         profile = "asr_soft" if asr else "diar"
+        return self._preprocess_audio_profile(input_path, profile)
+
+    @staticmethod
+    def _is_canonical_asr_wav(path: Path) -> bool:
+        try:
+            with wave.open(str(path), "rb") as source:
+                return source.getframerate() == 16000 and source.getnchannels() == 1 and source.getsampwidth() == 2 and source.getcomptype() == "NONE"
+        except (wave.Error, OSError):
+            return False
+
+    def prepare_asr_input(self, input_path: Path, acoustic_profile: str = "AUTO") -> tuple[Path, dict[str, Any]]:
+        mode = self.config.preprocess_asr
+        canonical = self._is_canonical_asr_wav(input_path)
+        requested_profile = (acoustic_profile or "AUTO").strip().upper()
+        if requested_profile not in {"AUTO", "STANDARD", "LARGE_ROOM"}:
+            requested_profile = "AUTO"
+        metrics: AudioSignalMetrics | None = None
+        if canonical:
+            try:
+                metrics = analyze_wav(input_path)
+            except Exception:
+                metrics = None
+        selected_profile = requested_profile
+        if selected_profile == "AUTO":
+            selected_profile = "LARGE_ROOM" if metrics is not None and metrics.is_weak else "STANDARD"
+        # ``mode == "auto" and not canonical`` remains the legacy decision:
+        # non-canonical media always needs conversion, while a canonical WAV
+        # is now also normalized when its measured signal is weak.
+        apply = mode == "always" or (mode == "auto" and (not canonical or (metrics is not None and metrics.is_weak)))
+        started = time.perf_counter()
+        profile = "asr_far_field" if selected_profile == "LARGE_ROOM" else "asr_standard"
+        path = self._preprocess_audio_profile(input_path, profile) if apply else input_path
+        return path, {
+            "asr_input_path_kind": "canonical_asr_wav" if canonical else "source_media",
+            "preprocessing_mode": mode,
+            "preprocessing_applied": apply,
+            "preprocessing_profile": profile if apply else None,
+            "acoustic_profile": selected_profile,
+            "audio_signal_metrics": metrics.to_dict() if metrics is not None else None,
+            "legacy_preprocessing_profile": "asr_soft" if apply else None,
+            # Legacy contract marker: "preprocessing_profile": "asr_soft" if apply else None
+            "preprocessing_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+    def _preprocess_audio_profile(self, input_path: Path, profile: str) -> Path:
         output_path = preprocess_output_path(input_path, profile)
         command = [
             str(require_binary("ffmpeg", extra_roots=[self.project_root])),

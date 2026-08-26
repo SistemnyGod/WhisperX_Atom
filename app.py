@@ -2209,39 +2209,33 @@ class WhisperXApp:
         recorder = SoundDeviceChunkRecorder()
         registry = SpeakerRegistry(session.speaker_registry)
         chunk_queue: Queue[LiveChunk | None] = Queue()
-        recording_started = time.monotonic()
 
         def record_loop():
             try:
-                while not cancel.is_set() and not self.live_stop_event.is_set():
-                    if self.live_pause_event.is_set():
-                        self.live_store.set_status(session, LiveStatus.PAUSED)
-                        self.root.after(0, lambda: self._update_live_view(session))
-                        time.sleep(0.2)
-                        continue
-                    self.live_store.set_status(session, LiveStatus.RECORDING)
-                    offset_sec = max(0.0, time.monotonic() - recording_started)
+                def on_chunk_ready(path: Path, start_sample: int, _sample_count: int) -> None:
+                    # The offset is derived from recorded samples, not wall
+                    # clock.  Paused time therefore never shifts the live
+                    # transcript relative to the final concatenated WAV.
+                    offset_sec = max(0.0, start_sample / recorder.sample_rate)
                     chunk = self.live_store.create_chunk(session, global_offset_sec=offset_sec)
+                    self.live_store.update_chunk(
+                        session,
+                        chunk,
+                        audio_path=str(path),
+                        status=LiveChunkStatus.QUEUED,
+                        finished_at=now_iso(),
+                    )
+                    chunk_queue.put(chunk)
                     self.root.after(0, lambda: self._update_live_view(session))
-                    try:
-                        recorder.record_chunk(Path(chunk.audio_path), self.live_chunk_seconds)
-                        self.live_store.update_chunk(
-                            session,
-                            chunk,
-                            status=LiveChunkStatus.QUEUED,
-                            finished_at=now_iso(),
-                        )
-                        chunk_queue.put(chunk)
-                    except Exception as exc:
-                        self.live_store.update_chunk(
-                            session,
-                            chunk,
-                            status=LiveChunkStatus.FAILED,
-                            finished_at=now_iso(),
-                            error=str(exc),
-                        )
-                        self.root.after(0, lambda: self._update_live_view(session))
-                        raise
+
+                recorder.record_session(
+                    self.live_store.chunks_dir(session),
+                    self.live_chunk_seconds,
+                    stop_event=self.live_stop_event,
+                    pause_event=self.live_pause_event,
+                    cancel_event=cancel,
+                    on_chunk_ready=on_chunk_ready,
+                )
             finally:
                 chunk_queue.put(None)
 

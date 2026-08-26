@@ -1,0 +1,314 @@
+using WhisperX.Atom.Recorder;
+using WhisperX.Atom.Desktop;
+using WhisperX_Atom_Desktop;
+
+namespace WhisperX_Atom_Desktop.Services;
+
+public sealed record AgentBootstrapStatus(
+    bool Ready,
+    bool RecorderAvailable,
+    bool OfflineEligible,
+    string Code,
+    string Message)
+{
+    public bool Authenticated { get; init; }
+    public bool PipeReachable { get; init; }
+    public bool InstallationIdPresent { get; init; }
+    public bool AgentConfigured { get; init; }
+    public bool UserLinked { get; init; }
+    public bool ServerConnected { get; init; }
+    public bool HeartbeatFresh { get; init; }
+    public Guid? AgentId { get; init; }
+    public Guid? InstallationId { get; init; }
+
+    public bool RequiresReenroll => string.Equals(Code, "REENROLL_REQUIRED", StringComparison.OrdinalIgnoreCase);
+    public bool IsTransient => string.Equals(Code, "RECORDER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Code, "SERVER_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Code, "SERVER_NETWORK_UNREACHABLE", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Code, "SERVER_TIMEOUT", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// The single Desktop path that links the current user to the local Recorder Agent.
+/// It does not rotate a healthy Agent token. If the local Host has retained its
+/// installation identity but lost the DPAPI-protected Agent credentials, an
+/// authenticated administrator may recover them through the server re-enroll
+/// endpoint.
+/// </summary>
+public sealed class AgentBootstrapCoordinator(FrontendServices services)
+{
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private DateTimeOffset _nextCredentialRecoveryAtUtc = DateTimeOffset.MinValue;
+    private AgentBootstrapStatus _lastStatus = new(false, false, false, "AGENT_LINK_PENDING", "Recorder Agent ещё не привязан к пользователю.");
+
+    public event Action? StatusChanged;
+    public AgentBootstrapStatus LastStatus => _lastStatus;
+    public bool IsReady => _lastStatus.Ready;
+
+    public async Task<AgentBootstrapStatus> EnsureAgentReadyAsync(CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var result = await EnsureAgentReadyCoreAsync(cancellationToken);
+            _lastStatus = result;
+            StatusChanged?.Invoke();
+            return result;
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task<AgentBootstrapStatus> EnsureAgentReadyCoreAsync(CancellationToken cancellationToken)
+    {
+        // Capture permission survives an expired session and a temporary LAN
+        // outage. AgentBootstrapConfirmed is delivery state, not a local
+        // microphone safety prerequisite.
+        // Keep the legacy CanUseOffline reference for older contract clients;
+        // both properties now describe the cached local-capture entitlement.
+        var offlineEligible = services.Backend.CanRecordLocally || services.Backend.CanUseOffline;
+        var settings = services.Settings.Load();
+
+        // Local capture is a prerequisite, not a consequence, of a successful
+        // network round trip. Start/verify the current-user Host before asking
+        // the API for the cached user so a temporary LAN outage cannot make a
+        // durable local recorder disappear from the product.
+        RecorderServiceSnapshot? host = null;
+        if (RecorderRuntimeMode.IsAudioGraph)
+        {
+            host = await services.RecorderService.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (!host.PipeReachable)
+                return new(false, false, offlineEligible, host.Error ?? "RECORDER_HOST_UNAVAILABLE",
+                    "Recorder Host AudioGraph не запущен или Named Pipe недоступен.")
+                { Authenticated = services.Backend.HasSession };
+        }
+
+        // Do not issue another network request during an offline restart. A
+        // previously confirmed user can use the local recorder immediately;
+        // only the local pipe must be checked before publishing that state.
+        if (services.Backend.AuthState == DesktopAuthState.Offline)
+        {
+            var pipeReachable = host?.PipeReachable == true;
+            if (!pipeReachable)
+            {
+                try { pipeReachable = (await services.Recorder.GetHealthAsync(cancellationToken).ConfigureAwait(false)).IsReachable; }
+                catch { }
+            }
+
+            if (offlineEligible)
+                return new(false, pipeReachable, true, "SERVER_UNAVAILABLE",
+                    pipeReachable
+                        ? "LAN server is unavailable; Recorder is ready for local capture."
+                        : "LAN server is unavailable; Recorder must be started before capture.")
+                { Authenticated = true, PipeReachable = pipeReachable };
+
+            return new(false, pipeReachable, false, "SERVER_UNAVAILABLE",
+                "LAN server is unavailable and the local Agent link is not confirmed.")
+            { Authenticated = false, PipeReachable = pipeReachable };
+        }
+
+        var user = await services.Backend.GetCurrentUserAsync(cancellationToken);
+        if (user is null && services.Backend.AuthState == DesktopAuthState.Offline
+            && offlineEligible && host?.PipeReachable == true)
+            return new(false, true, true, "SERVER_UNAVAILABLE",
+                "LAN-сервер временно недоступен; Recorder Host готов к локальной записи.")
+            { Authenticated = true, PipeReachable = true };
+        if (user is null && services.Backend.AuthState == DesktopAuthState.Offline)
+            return new(false, host?.PipeReachable == true, offlineEligible, "SERVER_UNAVAILABLE", offlineEligible
+                ? "LAN-сервер временно недоступен; ранее подтверждённая локальная запись может продолжиться."
+                : "LAN-сервер недоступен, а локальная привязка Agent ещё не подтверждена.");
+        if (user is null)
+            return new(false, false, false, "AUTH_REQUIRED", "Требуется вход в сервер.") { Authenticated = false };
+
+        AgentIpcResponse health;
+        try
+        {
+            health = await services.Recorder.GetHealthAsync(cancellationToken);
+        }
+        catch (RecorderIpcException exception)
+        {
+            var message = exception.ErrorCode is "RECORDER_IPC_TIMEOUT" or "RECORDER_IPC_UNAVAILABLE"
+                ? "Recorder Service не запущен или Named Pipe недоступен. Запустите службу Recorder и повторите проверку."
+                : "Recorder Service не подтвердил состояние. Повторите проверку позже.";
+            return new(false, false, offlineEligible, "RECORDER_UNAVAILABLE", message) { Authenticated = true };
+        }
+        catch (Exception)
+        {
+            return new(false, false, offlineEligible, "RECORDER_UNAVAILABLE", "Recorder Service недоступен. Проверьте локальную службу и Named Pipe.") { Authenticated = true };
+        }
+
+        if (!health.IsReachable || health.Health is null)
+            return new(false, false, offlineEligible, "RECORDER_UNAVAILABLE", "Recorder Service не запущен или Named Pipe недоступен.") { Authenticated = true };
+
+        var agentHealth = health.Health;
+        var installationId = agentHealth.InstallationId;
+        if (installationId is null || installationId == Guid.Empty)
+            return new(false, true, offlineEligible, "INSTALLATION_ID_MISSING", "Recorder Agent не сообщил постоянный InstallationId.")
+            {
+                Authenticated = true,
+                PipeReachable = true,
+                AgentConfigured = health.Health is not null
+            };
+
+        DesktopAgentBootstrapResult enrollment;
+        try
+        {
+            enrollment = await services.Backend.BootstrapLocalAgentAsync(
+                installationId.Value,
+                agentHealth.AgentId,
+                "WhisperX Atom Desktop",
+                cancellationToken);
+        }
+        catch (DesktopApiException exception)
+        {
+            return new(false, true, offlineEligible,
+                exception.Retryable ? "SERVER_UNAVAILABLE" : exception.ErrorCode,
+                exception.Retryable
+                    ? "LAN-сервер временно недоступен. Локальная запись останется доступной после подтверждённой привязки."
+                    : $"Сервер отклонил привязку Recorder Agent: {exception.ErrorCode}.")
+            { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId };
+        }
+        catch (HttpRequestException)
+        {
+            return new(false, true, offlineEligible, "SERVER_UNAVAILABLE",
+                "LAN-сервер недоступен. Повторите синхронизацию после восстановления сети.")
+            { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId };
+        }
+
+        Guid.TryParse(enrollment.AgentId, out var enrollmentAgentId);
+        if (enrollment.ReenrollRequired)
+            return new(false, true, false, "REENROLL_REQUIRED", "Recorder Agent требует повторной регистрации.")
+            { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = enrollmentAgentId == Guid.Empty ? null : enrollmentAgentId };
+
+        if (!enrollment.Linked)
+            return new(false, true, offlineEligible, "AGENT_LINK_PENDING", "Recorder Agent ещё не привязан к текущему пользователю.")
+            { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId };
+
+        if (enrollmentAgentId == Guid.Empty)
+            return new(false, true, false, "AGENT_BOOTSTRAP_INVALID", "Сервер вернул некорректный Agent ID.")
+            { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId };
+        var agentId = enrollmentAgentId;
+
+        // The server intentionally omits the token for an existing Agent so a
+        // normal bootstrap cannot rotate a working credential. A reinstalled
+        // or reset current-user Host, however, can still retain the managed
+        // InstallationId while having neither AgentId nor token. Updating only
+        // ServerOrigin in that state fails with agent_configuration_invalid.
+        // Recover exactly that missing-identity case via the admin-only
+        // re-enroll endpoint; revoked credentials continue to take the
+        // REENROLL_REQUIRED branch above and are never restored automatically.
+        var enrollmentToken = enrollment.Token;
+        if (string.IsNullOrWhiteSpace(enrollmentToken)
+            && (agentHealth.AgentId is null || agentHealth.AgentId == Guid.Empty))
+        {
+            if (DateTimeOffset.UtcNow < _nextCredentialRecoveryAtUtc)
+                return new(false, true, false, "AGENT_RECOVERY_RETRY_LATER", "Восстановление Recorder Agent уже выполнялось; повтор будет выполнен автоматически.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            // Avoid a token-rotation storm when a local CONFIGURE operation
+            // fails after the server has already issued the one-time token.
+            _nextCredentialRecoveryAtUtc = DateTimeOffset.UtcNow.AddMinutes(2);
+            try
+            {
+                var recovered = await services.Backend.ReenrollAgentAsync(agentId, cancellationToken);
+                if (!Guid.TryParse(recovered.AgentId, out var recoveredAgentId)
+                    || recoveredAgentId != agentId
+                    || string.IsNullOrWhiteSpace(recovered.Token))
+                    return new(false, true, false, "AGENT_RECOVERY_INVALID", "Сервер вернул некорректные данные восстановления Recorder Agent.")
+                    { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+                enrollmentToken = recovered.Token;
+            }
+            catch (DesktopApiException exception)
+            {
+                var requiresAdmin = exception.StatusCode is 401 or 403;
+                return new(false, true, false,
+                    requiresAdmin ? "AGENT_RECOVERY_REQUIRES_ADMIN" : exception.ErrorCode,
+                    requiresAdmin
+                        ? "Для автоматического восстановления Recorder Agent требуется учётная запись администратора."
+                        : $"Сервер не восстановил Recorder Agent: {exception.ErrorCode}.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(enrollmentToken))
+        {
+            var configured = await services.Recorder.ConfigureAgentAsync(
+                services.Backend.ApiUrl,
+                agentId,
+                enrollmentToken,
+                settings.ArchiveRoot ?? DesktopSettings.DefaultArchiveRoot(),
+                settings.MicrophoneDeviceId,
+                settings.SystemAudioDeviceId,
+                cancellationToken);
+            if (!configured.Ok)
+                return new(false, true, offlineEligible, configured.Error ?? "AGENT_CONFIGURE_FAILED", "Recorder Agent не подтвердил конфигурацию.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+            _nextCredentialRecoveryAtUtc = DateTimeOffset.MinValue;
+        }
+        else
+        {
+            // Existing Agents keep their token. Only the managed ServerOrigin
+            // changes, persisted atomically by the Recorder with the existing
+            // DPAPI-protected identity and device settings.
+            var updated = await services.Recorder.UpdateServerUrlAsync(services.Backend.ApiUrl, cancellationToken);
+            if (!updated.Ok)
+                return new(false, true, offlineEligible, updated.Error ?? "AGENT_ORIGIN_UPDATE_FAILED", "Recorder Agent не подтвердил адрес LAN-сервера.")
+                { Authenticated = true, PipeReachable = true, InstallationIdPresent = true, InstallationId = installationId, AgentId = agentId };
+        }
+
+        // Bootstrap is not proof that the local token is usable. The Agent must
+        // send a fresh heartbeat with the same identity before recording is
+        // advertised as ready.
+        AgentIpcResponse verifiedHealth = health;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            verifiedHealth = await services.Recorder.GetHealthAsync(cancellationToken);
+            var currentHealth = verifiedHealth.Health;
+            var agentMatches = currentHealth?.AgentId == agentId;
+            var heartbeatFresh = currentHealth?.LastHeartbeatAtUtc is { } heartbeat
+                && DateTimeOffset.UtcNow - heartbeat.ToUniversalTime() <= TimeSpan.FromSeconds(90);
+            var connected = string.Equals(currentHealth?.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase);
+            if (verifiedHealth.IsReachable && agentMatches && connected && heartbeatFresh)
+            {
+                var current = services.Settings.Load();
+                services.Settings.Save(current with
+                {
+                    ApiUrl = services.Backend.ApiUrl,
+                    Username = user.Username,
+                    OwnerUserId = user.Id,
+                    AgentBootstrapConfirmed = true
+                });
+                return new(true, true, true, "READY", "Пользователь привязан к Recorder Agent.")
+                {
+                    Authenticated = true,
+                    PipeReachable = true,
+                    InstallationIdPresent = true,
+                    AgentConfigured = true,
+                    UserLinked = true,
+                    ServerConnected = true,
+                    HeartbeatFresh = true,
+                    AgentId = agentId,
+                    InstallationId = installationId
+                };
+            }
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+
+        var finalHealth = verifiedHealth.Health;
+        var finalConnected = string.Equals(finalHealth?.ServerConnectionState, "CONNECTED", StringComparison.OrdinalIgnoreCase);
+        var finalHeartbeatFresh = finalHealth?.LastHeartbeatAtUtc is { } finalHeartbeat
+            && DateTimeOffset.UtcNow - finalHeartbeat.ToUniversalTime() <= TimeSpan.FromSeconds(90);
+        return new(false, true, offlineEligible, finalConnected ? "AGENT_HEARTBEAT_STALE" : "AGENT_SERVER_UNAVAILABLE",
+            finalConnected ? "Recorder Agent не подтвердил свежий heartbeat за 15 секунд." : "Recorder Agent не подключился к LAN-серверу.")
+        {
+            Authenticated = true,
+            PipeReachable = true,
+            InstallationIdPresent = true,
+            AgentConfigured = finalHealth?.AgentId == agentId,
+            UserLinked = true,
+            ServerConnected = finalConnected,
+            HeartbeatFresh = finalHeartbeatFresh,
+            AgentId = agentId,
+            InstallationId = installationId
+        };
+    }
+}

@@ -1,0 +1,21 @@
+[
+  {
+    "name": "summit-business-center-instructions",
+    "relativePath": "SUMMIT_ бизнес-центр инструктажи.m4a",
+    "rootEnv": "REGRESSION_AUDIO_ROOT",
+    "sha256": "29fa011349d30e81bf04cc0dbf00460ccf5d45b45121cbd20b683343ead07a2f",
+    "durationSeconds": 2210.794667,
+    "format": "m4a/aac",
+    "channels": 1,
+    "sampleRate": 48000,
+    "audioNotCommitted": true,
+    "minimum": {
+      "durationSeconds": 2000,
+      "segments": 5,
+      "textCharacters": 100,
+      "qualityScore": 65,
+      "allowedStatuses": ["READY", "PARTIAL_READY"]
+    },
+    "notes": "Локальный regression-файл. Не копировать в Git, artifacts или внешние сервисы. Использовать через параметр AudioPath."
+  }
+]

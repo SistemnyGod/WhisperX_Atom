@@ -1,0 +1,515 @@
+name: whisperx-atom
+
+x-media-volumes: &media-volumes
+  - ${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data
+  - ${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox
+  - ${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive
+x-api-volumes: &api-volumes
+  - ${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data
+  - ${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox
+  - ${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive
+  - ${WHISPERX_UPDATES_HOST:-C:/ProgramData/WhisperXAtom/Server/Updates}:/updates:ro
+
+services:
+  postgres:
+    profiles: ["core", "gpu", "llm"]
+    image: postgres:17.5-alpine3.21
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whisperx_atom}
+      POSTGRES_USER: ${POSTGRES_USER:-whisperx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whisperx} -d ${POSTGRES_DB:-whisperx_atom}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    profiles: ["core", "gpu", "llm"]
+    image: nats:2.11.6-alpine3.21
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats_data:/data
+    ports:
+      - "127.0.0.1:${NATS_HOST_PORT:-4222}:4222"
+      - "127.0.0.1:${NATS_MONITORING_HOST_PORT:-8222}:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  tusd:
+    profiles: ["core", "gpu"]
+    image: tusproject/tusd:v2.6.0
+    restart: unless-stopped
+    # Docker Desktop exposes Windows bind mounts as root-owned. tusd normally
+    # runs as uid 1000 and cannot create /data/uploads on this target.
+    user: "0:0"
+    command: ["-host", "0.0.0.0", "-port", "1080", "-upload-dir", "/data/uploads", "-hooks-http", "http://api:8080/api/internal/tusd/hooks?secret=${TUS_HOOK_SECRET}"]
+    environment:
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET}
+    ports:
+      - "127.0.0.1:1080:1080"
+    volumes: *media-volumes
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    profiles: ["core", "gpu"]
+    image: whisperx-atom-api:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: ./apps/server/WhisperX.Atom.Api
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      # This file is development-only. Production uses compose.prod.yml.
+      ASPNETCORE_ENVIRONMENT: Development
+      DOTNET_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
+      POSTGRES_CONNECTION: Host=postgres;Port=5432;Database=${POSTGRES_DB:-whisperx_atom};Username=${POSTGRES_USER:-whisperx};Password=${POSTGRES_PASSWORD}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      TUS_HOOK_SECRET: ${TUS_HOOK_SECRET}
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
+      AGENT_ENROLLMENT_SECRET: ${AGENT_ENROLLMENT_SECRET}
+      VOICE_HOST_TOKEN: ${VOICE_HOST_TOKEN}
+      SUPERVISOR_HEALTH_TOKEN: ${SUPERVISOR_HEALTH_TOKEN}
+      WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      CLIENT_UPDATE_ROOT: /updates
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
+      AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
+      MEETING_TIMEZONE: ${MEETING_TIMEZONE:-Asia/Yekaterinburg}
+      MEETING_READ_SCOPE: ${MEETING_READ_SCOPE:-OWNER}
+      COOKIE_SECURE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Development API is intentionally reachable only by the local Desktop.
+      - "127.0.0.1:8080:8080"
+    volumes: *api-volumes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  outbox-relay:
+    profiles: ["core", "gpu"]
+    image: whisperx-atom-outbox-relay:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/outbox_relay/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      NATS_URL: nats://nats:4222
+      # Keep the durable heartbeat name explicit in Compose as well as in the
+      # image.  This prevents stale images from reporting an always-unhealthy
+      # runtime_healthcheck after a Docker restart.
+      WORKER_NAME: outbox-relay
+      WORKER_INSTANCE_ID: outbox-relay
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  import-worker:
+    profiles: ["core", "gpu"]
+    image: whisperx-atom-import-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/import_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:8080
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      IMPORT_WORKER_TOKEN: ${IMPORT_WORKER_TOKEN}
+      INBOX_ROOT: /data/inbox
+      STAGING_ROOT: /data/staging
+      ARCHIVE_ROOT: /data/archive
+      REJECTED_ROOT: /data/rejected
+      IMPORT_INTERVAL_SECONDS: ${IMPORT_INTERVAL_SECONDS:-5}
+      IMPORT_BATCH_SIZE: ${IMPORT_BATCH_SIZE:-8}
+      IMPORT_MAX_STABLE_PATHS: ${IMPORT_MAX_STABLE_PATHS:-2048}
+      # Do not rely solely on Dockerfile ENV: LAN deployments may reuse an
+      # older image while the healthcheck contract is already updated.
+      WORKER_NAME: import-worker
+      WORKER_INSTANCE_ID: import-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes: *media-volumes
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  media-worker:
+    profiles: ["core", "gpu"]
+    image: whisperx-atom-media-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/media_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      MEDIA_ROOT: /data
+      # No wall-clock recording limit by default. Set a positive value only
+      # when a deployment explicitly wants a media policy cap.
+      MAX_MEDIA_DURATION_MS: "${MAX_MEDIA_DURATION_MS:-0}"
+      # V1 ASR starts as soon as the canonical audio is ready. Deployments may
+      # opt into a positive durable delay explicitly through the environment.
+      TRANSCRIPTION_START_DELAY_SECONDS: ${TRANSCRIPTION_START_DELAY_SECONDS:-0}
+      NATS_URL: nats://nats:4222
+      WORKER_NAME: media-worker
+      WORKER_INSTANCE_ID: media-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes: *media-volumes
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  gpu-worker:
+    profiles: ["gpu"]
+    image: whisperx-atom-gpu-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/ml_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Release/runtime must never resolve an absent diarization snapshot from
+      # Hugging Face. The immutable /models mount is the only model source;
+      # readiness reports the missing asset instead of downloading it.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      WHISPERX_MODEL: ${WHISPERX_MODEL:-large-v3}
+      WHISPERX_MODEL_REPOSITORY: ${WHISPERX_MODEL_REPOSITORY:-Systran/faster-whisper-large-v3}
+      WHISPERX_MODEL_REVISION: ${WHISPERX_MODEL_REVISION:-}
+      WHISPERX_MODEL_PATH: ${WHISPERX_MODEL_PATH:-}
+      WHISPERX_MODEL_SHA256: ${WHISPERX_MODEL_SHA256:-}
+      WHISPERX_MODEL_LOCAL_ONLY: ${WHISPERX_MODEL_LOCAL_ONLY:-false}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      DIARIZATION_MODEL_REVISION: ${DIARIZATION_MODEL_REVISION:-}
+      DIARIZATION_MODEL_PATH: ${DIARIZATION_MODEL_PATH:-}
+      DIARIZATION_MODEL_SHA256: ${DIARIZATION_MODEL_SHA256:-}
+      ALIGNMENT_MODEL: ${ALIGNMENT_MODEL:-}
+      ALIGNMENT_MODEL_REVISION: ${ALIGNMENT_MODEL_REVISION:-}
+      ALIGNMENT_MODEL_PATH: ${ALIGNMENT_MODEL_PATH:-}
+      ALIGNMENT_MODEL_SHA256: ${ALIGNMENT_MODEL_SHA256:-}
+      DEVICE: ${DEVICE:-cuda}
+      COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
+      BATCH_SIZE: ${BATCH_SIZE:-8}
+      ENABLE_ALIGNMENT: ${ENABLE_ALIGNMENT:-true}
+      ENABLE_DIARIZATION: ${ENABLE_DIARIZATION:-true}
+      REQUIRE_CUDA: ${REQUIRE_CUDA:-true}
+      GPU_CONCURRENCY: "1"
+      GPU_WORKER_MODE: ${GPU_WORKER_MODE:-container}
+      GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
+      GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+      GPU_DUPLICATE_NAK_DELAY_SECONDS: ${GPU_DUPLICATE_NAK_DELAY_SECONDS:-15}
+      GPU_RUNTIME_COORDINATION_ENABLED: ${GPU_RUNTIME_COORDINATION_ENABLED:-true}
+      GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS: ${GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS:-90}
+      GPU_LLM_PREEMPT_TIMEOUT_SECONDS: ${GPU_LLM_PREEMPT_TIMEOUT_SECONDS:-120}
+      WORKER_INSTANCE_ID: ${GPU_WORKER_INSTANCE_ID:-gpu-worker}
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      # pyannote 3.3.2 checkpoints are trusted local/HF artifacts and require the pre-2.6 torch.load behavior.
+      # Do not share the GPU with the manually started diagnostic LLM server.
+      GPU_ENFORCE_NO_RESIDENT_LLM: "true"
+      LLM_HEALTH_HOST: llama-server
+      LLM_HEALTH_PORT: "8080"
+      AUTO_SUMMARY_ENABLED: ${AUTO_SUMMARY_ENABLED:-false}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
+      ASSISTANT_GPU_LEASE_WAIT_SECONDS: ${ASSISTANT_GPU_LEASE_WAIT_SECONDS:-10}
+      ASSISTANT_GPU_WAIT_RETRY_SECONDS: ${ASSISTANT_GPU_WAIT_RETRY_SECONDS:-15}
+      ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS: ${ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS:-3600}
+      ASSISTANT_QUEUE_TIMEOUT_SECONDS: ${ASSISTANT_QUEUE_TIMEOUT_SECONDS:-3600}
+      ASSISTANT_FTS_ANCHOR_LIMIT: ${ASSISTANT_FTS_ANCHOR_LIMIT:-64}
+      ASSISTANT_SEMANTIC_CANDIDATE_LIMIT: ${ASSISTANT_SEMANTIC_CANDIDATE_LIMIT:-512}
+      ASSISTANT_FINAL_TOP_K: ${ASSISTANT_FINAL_TOP_K:-12}
+      ASSISTANT_NEIGHBOUR_LIMIT: ${ASSISTANT_NEIGHBOUR_LIMIT:-36}
+      DIARIZATION_MODE: ${DIARIZATION_MODE:-preferred}
+      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE:-auto}
+      DIARIZATION_MIN_SPEAKERS: ${DIARIZATION_MIN_SPEAKERS:-1}
+      DIARIZATION_MAX_SPEAKERS: ${DIARIZATION_MAX_SPEAKERS:-8}
+      DIARIZATION_CPU_FALLBACK: ${DIARIZATION_CPU_FALLBACK:-true}
+      DIARIZATION_RELEASE_ASR_ON_LOW_VRAM: ${DIARIZATION_RELEASE_ASR_ON_LOW_VRAM:-true}
+      DIARIZATION_MIN_FREE_VRAM_MB: ${DIARIZATION_MIN_FREE_VRAM_MB:-2048}
+      TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - '${WHISPERX_DATA_HOST:-C:/WhisperXAtom/Data}:/data'
+      - '${WHISPERX_INBOX_HOST:-C:/WhisperXAtom/Inbox}:/data/inbox'
+      - '${WHISPERX_ARCHIVE_HOST:-C:/WhisperXAtom/Archive}:/data/archive'
+      - '${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro'
+      - model_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.ml_worker.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  llama-server:
+    profiles: ["llm-diagnostic"]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b9445@sha256:39f4f2c5fd4537f85208f905e70269b5b691fbc6de00fd916c37a60a710b7d52
+    restart: unless-stopped
+    command:
+      - --model
+      - /models/${LLM_MODEL_DIR:-qwen3-8b}/${LLM_MODEL_FILE:-Qwen3-8B-Q5_K_M.gguf}
+      - --alias
+      - qwen3-8b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "${LLM_CONTEXT_SIZE:-16384}"
+      # This is only for an isolated manual smoke; it always uses GPU offload.
+      # Never leave it running while gpu-worker is processing a meeting.
+      - --n-gpu-layers
+      - "${LLM_DIAGNOSTIC_GPU_LAYERS:-99}"
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --parallel
+      - "1"
+      - --jinja
+      - --reasoning
+      - "off"
+      - --chat-template-kwargs
+      - '{"enable_thinking":false}'
+      - --metrics
+    ports:
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  summary-worker:
+    healthcheck:
+      test: ["CMD", "python3.12", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    profiles: ["llm"]
+    image: whisperx-atom-summary-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/summary_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      NATS_URL: nats://nats:4222
+      LLM_MODEL_ROOT: /models
+      LLM_MODEL_DIR: ${LLM_MODEL_DIR:-qwen3-8b}
+      LLM_MODEL_FILE: ${LLM_MODEL_FILE:-Qwen3-8B-Q5_K_M.gguf}
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH:-}
+      LLM_MODEL_MANIFEST: ${LLM_MODEL_MANIFEST:-}
+      LLM_MODEL_REVISION: ${LLM_MODEL_REVISION:-7c41481f57cb95916b40956ab2f0b139b296d974}
+      LLM_MODEL_SHA256: ${LLM_MODEL_SHA256:-068BAE163FAA96AD48032DAF4E071A6A28FE67D8DCC95367609C2FF165E52738}
+      LLM_GPU_LAYERS: ${LLM_GPU_LAYERS:-99}
+      LLM_REQUIRE_GPU: ${LLM_REQUIRE_GPU:-true}
+      LLM_CONTEXT_SIZE: ${LLM_CONTEXT_SIZE:-16384}
+      LLM_MODEL_ALIAS: ${LLM_MODEL_ALIAS:-qwen3-8b}
+      LLM_BLOCK_MAX_CHARS: ${LLM_BLOCK_MAX_CHARS:-16000}
+      ASSISTANT_CONTEXT_SIZE: ${ASSISTANT_CONTEXT_SIZE:-8192}
+      MEETING_TIMEZONE: ${MEETING_TIMEZONE:-Asia/Yekaterinburg}
+      MEETING_READ_SCOPE: ${MEETING_READ_SCOPE:-OWNER}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-3072}
+      ASSISTANT_MAX_OUTPUT_TOKENS: ${ASSISTANT_MAX_OUTPUT_TOKENS:-384}
+      ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS: ${ASSISTANT_GROUNDING_RETRY_MAX_OUTPUT_TOKENS:-512}
+      GPU_LEASE_KEY: ${GPU_LEASE_KEY:-whisperx-atom-gpu-0}
+      GPU_LEASE_WAIT_SECONDS: ${GPU_LEASE_WAIT_SECONDS:-1800}
+      GPU_RUNTIME_COORDINATION_ENABLED: ${GPU_RUNTIME_COORDINATION_ENABLED:-true}
+      GPU_COORDINATION_POLL_SECONDS: ${GPU_COORDINATION_POLL_SECONDS:-1}
+      GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS: ${GPU_PRIORITY_RUNNING_FRESHNESS_SECONDS:-90}
+      GPU_LLM_OWNER_HEARTBEAT_SECONDS: ${GPU_LLM_OWNER_HEARTBEAT_SECONDS:-5}
+      GPU_LLM_OWNER_STALE_SECONDS: ${GPU_LLM_OWNER_STALE_SECONDS:-30}
+      LLM_RESIDENT_ENABLED: ${LLM_RESIDENT_ENABLED:-true}
+      LLM_IDLE_UNLOAD_SECONDS: ${LLM_IDLE_UNLOAD_SECONDS:-900}
+      WORKER_INSTANCE_ID: summary-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-true}
+      ASSISTANT_GPU_LEASE_WAIT_SECONDS: ${ASSISTANT_GPU_LEASE_WAIT_SECONDS:-10}
+      ASSISTANT_GPU_WAIT_RETRY_SECONDS: ${ASSISTANT_GPU_WAIT_RETRY_SECONDS:-15}
+      ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS: ${ASSISTANT_GPU_QUEUE_TIMEOUT_SECONDS:-3600}
+      ASSISTANT_QUEUE_TIMEOUT_SECONDS: ${ASSISTANT_QUEUE_TIMEOUT_SECONDS:-3600}
+      ASSISTANT_FTS_ANCHOR_LIMIT: ${ASSISTANT_FTS_ANCHOR_LIMIT:-64}
+      ASSISTANT_SEMANTIC_CANDIDATE_LIMIT: ${ASSISTANT_SEMANTIC_CANDIDATE_LIMIT:-512}
+      ASSISTANT_FINAL_TOP_K: ${ASSISTANT_FINAL_TOP_K:-12}
+      ASSISTANT_NEIGHBOUR_LIMIT: ${ASSISTANT_NEIGHBOUR_LIMIT:-36}
+      ASSISTANT_HYBRID_MIN_SCORE: ${ASSISTANT_HYBRID_MIN_SCORE:-0.30}
+      ASSISTANT_HYBRID_EMBEDDING_MIN: ${ASSISTANT_HYBRID_EMBEDDING_MIN:-0.72}
+      ASSISTANT_EMBEDDING_PROVIDER: ${ASSISTANT_EMBEDDING_PROVIDER:-onnx}
+      ASSISTANT_EMBEDDING_ONNX_PATH: ${ASSISTANT_EMBEDDING_ONNX_PATH:-/models/embeddings/paraphrase-multilingual-MiniLM-L12-v2.onnx}
+      ASSISTANT_EMBEDDING_TOKENIZER_PATH: ${ASSISTANT_EMBEDDING_TOKENIZER_PATH:-/models/embeddings/tokenizer.json}
+      ASSISTANT_EMBEDDING_ONNX_SHA256: ${ASSISTANT_EMBEDDING_ONNX_SHA256:-}
+      ASSISTANT_EMBEDDING_TOKENIZER_SHA256: ${ASSISTANT_EMBEDDING_TOKENIZER_SHA256:-}
+      ASSISTANT_EMBEDDING_REQUIRE_VERIFIED: ${ASSISTANT_EMBEDDING_REQUIRE_VERIFIED:-false}
+    volumes:
+      - ${WHISPERX_MODELS_HOST:-C:/WhisperXAtom/Models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  memory-worker:
+    profiles: ["memory"]
+    image: whisperx-atom-memory-worker:${WHISPERX_RELEASE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: workers/memory_worker/Dockerfile
+      args:
+        WHISPERX_RELEASE_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+        WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+        WHISPERX_REVISION: ${WHISPERX_REVISION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: host=postgres port=5432 dbname=${POSTGRES_DB:-whisperx_atom} user=${POSTGRES_USER:-whisperx} password=${POSTGRES_PASSWORD}
+      NATS_URL: nats://nats:4222
+      WORKER_INSTANCE_ID: memory-worker
+      APP_VERSION: ${WHISPERX_RELEASE_VERSION:-dev}
+      WHISPERX_BUILD_IDENTITY: ${WHISPERX_BUILD_IDENTITY:-dev}
+      MEMORY_WORKER_ENABLED: ${MEETING_MEMORY_ENABLED:-true}
+      MEETING_READ_SCOPE: ${MEETING_READ_SCOPE:-OWNER}
+      MEMORY_MAX_SUBJECTS_PER_JOB: ${MEMORY_MAX_SUBJECTS_PER_JOB:-64}
+      MEMORY_MAX_FACTS_PER_SUBJECT: ${MEMORY_MAX_FACTS_PER_SUBJECT:-512}
+      MEMORY_MAX_FACTS_PER_JOB: ${MEMORY_MAX_FACTS_PER_JOB:-4096}
+    healthcheck:
+      test: ["CMD", "python", "-m", "workers.runtime_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  # Optional diagnostics only. The product UI is the Windows Desktop app.
+  web:
+    profiles: ["diagnostic-web"]
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Optional browser diagnostics only; not part of the Desktop product runtime.
+  gateway:
+    profiles: ["diagnostic-web"]
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:80"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+      tusd:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  nats_data:
+  model_cache:
