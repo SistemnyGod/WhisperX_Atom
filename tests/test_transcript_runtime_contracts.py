@@ -103,7 +103,8 @@ def test_processing_pipeline_queues_are_created_only_by_async_start():
     assert "def process" in processing
     pipeline = read("app/transcription_pipeline.py")
     assert "created lazily by start()" in pipeline
-    assert "self.audio_queue = asyncio.Queue()" in pipeline
+    assert "self.audio_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)" in pipeline
+    assert "self.asr_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)" in pipeline
 
 
 def test_pre_alignment_quality_warnings_are_not_persisted_after_repair():

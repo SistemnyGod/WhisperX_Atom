@@ -25,7 +25,10 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
             if (info is null || !string.Equals(info.PlayableAudioState, "READY", StringComparison.OrdinalIgnoreCase)) return false;
             var files = await spool.GetPlayableFilesAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (files.Count == 0 || string.IsNullOrWhiteSpace(info.PlayableAudioPath)) return false;
-            if (!File.Exists(Path.Combine(info.PlayableAudioPath, "recording.json"))) return false;
+            var manifest = File.Exists(Path.Combine(info.PlayableAudioPath, "recording.json"))
+                ? Path.Combine(info.PlayableAudioPath, "recording.json")
+                : Path.Combine(info.PlayableAudioPath, ".whisperx", "recording.json");
+            if (!File.Exists(manifest)) return false;
             foreach (var file in files)
             {
                 if (!File.Exists(file.LocalPath)) return false;
@@ -82,6 +85,13 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
             var maxEnd = groups.SelectMany(g => g).Max(x => checked(x.StartSample + x.SampleCount));
             var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken).ConfigureAwait(false))
                 .Select(x => x.Profile).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? "ROOM";
+            // New archives keep the generated WAV fallback and its manifest in
+            // the hidden technical directory. The user-visible root contains
+            // the canonical FLAC; WAV/MP3 are created only through Export.
+            var outputDirectory = Directory.Exists(Path.Combine(directory, ".whisperx"))
+                ? Path.Combine(directory, ".whisperx")
+                : directory;
+            Directory.CreateDirectory(outputDirectory);
             await spool.SetPlayableAudioStateAsync(sessionId, "BUILDING", path: directory, clearError: true, clearNextRetry: true, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             foreach (var group in groups)
@@ -94,13 +104,13 @@ public sealed class LocalPlayableAudioWriter(SpoolStore spool, AgentStorageSetti
                 var totalSamples = string.Equals(profile, "ONLINE", StringComparison.OrdinalIgnoreCase)
                     ? maxEnd : checked(chunks[^1].StartSample + chunks[^1].SampleCount);
                 var name = ResolveFileName(profile, groups.Length, first.TrackType);
-                var finalPath = Path.Combine(directory, name);
+                var finalPath = Path.Combine(outputDirectory, name);
                 await WriteWaveAsync(chunks, finalPath, format, totalSamples, cancellationToken).ConfigureAwait(false);
                 var size = new FileInfo(finalPath).Length;
                 files.Add(new PlayableAudioFile(sessionId, first.TrackId, first.TrackType, name, finalPath, size, totalSamples, format.SampleRate, format.Channels, format.Encoding, await Sha256Async(finalPath, cancellationToken).ConfigureAwait(false)));
             }
 
-            var manifestPath = Path.Combine(directory, "recording.json");
+            var manifestPath = Path.Combine(outputDirectory, "recording.json");
             var manifestPart = manifestPath + ".part";
             await File.WriteAllTextAsync(manifestPart, JsonSerializer.Serialize(new
             {

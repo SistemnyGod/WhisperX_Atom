@@ -546,6 +546,19 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             }
             await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", Guid.NewGuid().ToString("N"), cancellationToken, ownerUserId, localOnly).ConfigureAwait(false);
             startedSessionId = sessionId;
+            // Reserve the user-visible directory before opening the device so
+            // the path can be shown immediately. Archive creation is derived
+            // work: a protected/unavailable archive must never prevent durable
+            // PCM capture, which can be recovered later.
+            try { await _archive.ReserveAsync(sessionId, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception archiveException)
+            {
+                _logger.LogWarning(archiveException, "User archive reservation failed; capture will continue in the durable local spool. Session={SessionId}", sessionId);
+            }
             // The existing spool schema enforces UNIQUE(track_id, sequence)
             // without session_id. Keep the semantic TrackType stable, but make
             // the local track identity session-scoped so sequence 0 from a new
@@ -625,7 +638,8 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 null,
                 meetingId,
                 needsMicrophone ? _engine.CurrentMediaTimeMs : _systemEngine.CurrentMediaTimeMs,
-                AgentIpcProtocol.Version);
+                AgentIpcProtocol.Version,
+                SessionStatus: await GetSessionStatusAsync(sessionId, cancellationToken).ConfigureAwait(false));
         }
         catch (Exception ex)
         {
@@ -1536,12 +1550,18 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
                 ? (string.IsNullOrWhiteSpace(rawBacklog.LastErrorCode) ? "WAITING_FOR_ENCODER" : "ENCODE_FAILED")
                 : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
+        var archiveReady = info is not null
+            && await _archive.IsReadyAsync(sessionId, info.ArchivePath ?? info.PlayableAudioPath, cancellationToken).ConfigureAwait(false);
+        var archivePending = info?.ArchiveErrorCode is "ENCODING_PENDING" or "LOCAL_ARCHIVE_PENDING";
         var archiveState = info?.LocalFinalizeState == "LOCAL_FAILED"
-            || !string.IsNullOrWhiteSpace(info?.ArchiveErrorCode)
             ? "FAILED"
-            : string.IsNullOrWhiteSpace(info?.ArchivePath)
-                ? info?.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
-                : "READY";
+            : archiveReady
+                ? "READY"
+                : !string.IsNullOrWhiteSpace(info?.ArchiveErrorCode) && !archivePending
+                    ? "FAILED"
+                    : string.IsNullOrWhiteSpace(info?.ArchivePath)
+                        ? info?.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
+                        : "PENDING";
         return new RecordingSessionStatus(
             sessionId,
             info?.MeetingId,
@@ -1581,7 +1601,30 @@ public sealed class RecorderHostRuntime : IAsyncDisposable
             RawFinalizerCapacity: rawBacklog.FinalizerCapacity,
             ArchiveErrorCode: archiveState == "FAILED" ? info?.ArchiveErrorCode : null,
             ArchiveErrorDetail: archiveState == "FAILED" ? info?.ArchiveErrorDetail : null,
-            RawTerminalFailedCount: rawBacklog.TerminalFailed);
+            RawTerminalFailedCount: rawBacklog.TerminalFailed,
+            PlayableAudioState: info?.PlayableAudioState ?? "NOT_REQUIRED",
+            PlayableAudioPath: info?.PlayableAudioPath,
+            PlayableAudioFiles: await _spool.GetPlayableFilesAsync(sessionId, cancellationToken).ConfigureAwait(false),
+            PlayableAudioError: info?.PlayableAudioError,
+            PlayableAudioCreatedAtUtc: info?.PlayableAudioCreatedAtUtc);
+    }
+
+    public async Task<AgentIpcResponse> ListLocalSessionsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var sessions = await _spool.ListLocalSessionsAsync(Math.Clamp(limit, 1, 500), cancellationToken).ConfigureAwait(false);
+        return new AgentIpcResponse(true, "IDLE", null, null, null,
+            ProtocolVersion: AgentIpcProtocol.Version, LocalSessions: sessions);
+    }
+
+    public async Task<AgentIpcResponse> ExportLocalAudioAsync(
+        string sessionId,
+        string? format,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        var exported = await _archive.ExportAsync(sessionId, format, destinationPath, cancellationToken).ConfigureAwait(false);
+        return new AgentIpcResponse(true, "EXPORTED", sessionId, null, null,
+            ProtocolVersion: AgentIpcProtocol.Version, ExportedPath: exported);
     }
 
     public async ValueTask DisposeAsync()
@@ -2334,6 +2377,12 @@ public sealed class RecorderHostPipeServer : BackgroundService
                 "START" => await _runtime.StartAsync(ReadGuid(request.Payload, "meetingId"), ReadGuid(request.Payload, "ownerUserId"), ReadString(request.Payload, "title"), ReadBool(request.Payload, "localOnly"), cancellationToken).ConfigureAwait(false),
                 "STOP" => await _runtime.StopAsync(cancellationToken).ConfigureAwait(false),
                 "RETRY_UPLOAD" => await _runtime.RetryUploadAsync(ReadString(request.Payload, "sessionId") ?? throw new InvalidOperationException("session_required"), cancellationToken).ConfigureAwait(false),
+                "LIST_LOCAL_SESSIONS" => await _runtime.ListLocalSessionsAsync(ReadInt(request.Payload, "limit", 100), cancellationToken).ConfigureAwait(false),
+                "EXPORT_LOCAL_AUDIO" => await _runtime.ExportLocalAudioAsync(
+                    ReadString(request.Payload, "sessionId") ?? throw new InvalidOperationException("session_required"),
+                    ReadString(request.Payload, "format"),
+                    ReadString(request.Payload, "destinationPath") ?? throw new InvalidOperationException("destination_path_required"),
+                    cancellationToken).ConfigureAwait(false),
                 "GET_SESSION_STATUS" => await SessionStatusAsync(ReadString(request.Payload, "sessionId"), cancellationToken).ConfigureAwait(false),
                 "MARKER" or "DECISION" or "ACTION_ITEM" => await _runtime.RecordEventAsync(command, request.Payload, ReadString(request.Payload, "localSessionId"), cancellationToken).ConfigureAwait(false),
                 "VOICE_EVENT" => await _runtime.RecordEventAsync(ReadString(request.Payload, "eventType") ?? "VOICE_COMMAND", request.Payload, ReadString(request.Payload, "localSessionId"), cancellationToken).ConfigureAwait(false),
@@ -2389,6 +2438,13 @@ public sealed class RecorderHostPipeServer : BackgroundService
            && value.TryGetInt32(out var durationMs)
             ? Math.Clamp(durationMs, 1000, 10000)
             : 3000;
+
+    private static int ReadInt(JsonElement payload, string name, int fallback)
+        => payload.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetInt32(out var number)
+            ? Math.Clamp(number, 1, 500)
+            : fallback;
 
     private static int ReadDurationSeconds(JsonElement payload)
         => payload.TryGetProperty("durationSeconds", out var value)

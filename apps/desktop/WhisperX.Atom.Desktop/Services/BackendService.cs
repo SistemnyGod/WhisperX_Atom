@@ -19,12 +19,21 @@ public sealed class BackendService : IBackendService
     public DateTimeOffset? SessionExpiresAtUtc => _client.SessionExpiresAtUtc;
     public bool CanUseOffline
     {
+        get => CanRecordLocally;
+    }
+
+    public bool CanRecordLocally
+    {
         get
         {
             var settings = new DesktopSettingsStore().Load();
-            return !string.IsNullOrWhiteSpace(settings.ProtectedSessionCookie)
-                && settings.OwnerUserId is not null
-                && settings.AgentBootstrapConfirmed;
+            // The protected cookie is the current-user, DPAPI-backed cached
+            // sign-in marker. A stale/expired cookie is intentionally
+            // sufficient: local capture must not depend on the server
+            // renewing authentication or confirming Agent heartbeat. Do not
+            // use the plain owner GUID as an entitlement by itself; that
+            // would let a hand-edited settings file bypass explicit logout.
+            return !string.IsNullOrWhiteSpace(settings.UnprotectSessionCookie());
         }
     }
 

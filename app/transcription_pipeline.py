@@ -5,7 +5,6 @@ import gc
 import os
 import re
 import subprocess
-import traceback
 import time
 import wave
 from dataclasses import dataclass, field
@@ -16,13 +15,18 @@ import torch
 import whisperx
 from whisperx.diarize import DiarizationPipeline as WhisperXDiarizationPipeline
 
-from whisperx_atom.runtime_state import read_job_json, write_job_json
+from whisperx_atom.runtime_state import JOBS_DIR, read_job_json, write_job_json
 from glossary_utils import apply_glossary_rules, load_glossary_text, load_hotwords_text, parse_glossary_rules
 from media_binaries import media_has_audio_stream, require_binary
 from processing_runtime import VIDEO_EXTENSIONS
 from transcription_quality import preprocess_filter, preprocess_output_path
 from whisperx_atom.audio_signal import AudioSignalMetrics, analyze_wav
 from whisperx_atom.diarization_policy import env_bool, env_int, is_cuda_oom, should_release_asr
+from whisperx_atom.legacy_compat import (
+    assign_speaker_result,
+    assign_speakers_by_overlap,
+    recover_interrupted_jobs,
+)
 
 
 _IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
@@ -442,6 +446,11 @@ class ModelCacheManager:
 
 
 class TranscriptionPipeline:
+    # This module is a compatibility surface, not the production queue.  Keep
+    # it deliberately small and bounded so a slow legacy model cannot grow an
+    # unbounded in-memory backlog.
+    LEGACY_QUEUE_CAPACITY = 2
+
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
         self.config = config or PipelineConfig.from_env()
         self.project_root = Path(__file__).resolve().parent.parent
@@ -464,11 +473,12 @@ class TranscriptionPipeline:
     async def start(self) -> None:
         if self._running:
             return
-        self.audio_queue = asyncio.Queue()
-        self.asr_queue = asyncio.Queue()
-        self.alignment_queue = asyncio.Queue()
-        self.diar_queue = asyncio.Queue()
-        self.postprocess_queue = asyncio.Queue()
+        self._recover_interrupted_jobs()
+        self.audio_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.asr_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.alignment_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.diar_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
+        self.postprocess_queue = asyncio.Queue(maxsize=self.LEGACY_QUEUE_CAPACITY)
         self._running = True
         self._workers = [
             asyncio.create_task(self.worker_audio(), name="worker_audio"),
@@ -481,12 +491,23 @@ class TranscriptionPipeline:
     async def stop(self) -> None:
         if not self._running:
             return
+        # Stop accepting new work first, then drain the linear pipeline.  A
+        # sentinel is sent only after the preceding worker has consumed its
+        # queue; this prevents downstream workers from exiting before the last
+        # context emitted by an upstream stage arrives.
         self._running = False
-        for q in (self.audio_queue, self.asr_queue, self.alignment_queue, self.diar_queue, self.postprocess_queue):
+        queues = (self.audio_queue, self.asr_queue, self.alignment_queue, self.diar_queue, self.postprocess_queue)
+        for q in queues:
             if q is not None:
+                await q.join()
                 await q.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        self.audio_queue = None
+        self.asr_queue = None
+        self.alignment_queue = None
+        self.diar_queue = None
+        self.postprocess_queue = None
 
     async def submit(self, job_id: str) -> None:
         if not self._running or self.audio_queue is None:
@@ -505,6 +526,26 @@ class TranscriptionPipeline:
         elif status == "running":
             data["error"] = None
         write_job_json(job_id, data)
+
+    def _recover_interrupted_jobs(self) -> None:
+        """Fail closed for jobs left running by a legacy process restart.
+
+        The server-first workers have durable recovery of their own.  This
+        compatibility runtime must not pretend that its in-memory queues can
+        be recovered, nor should it silently duplicate a long ASR run.
+        """
+        recover_interrupted_jobs(JOBS_DIR, read_job_json, write_job_json)
+
+    async def _fail_stage(self, ctx: PipelineContext, stage: str, exc: BaseException) -> None:
+        """Persist a path-safe stage error and release derived files."""
+        ctx.error = f"LEGACY_PIPELINE_{stage.upper()}_FAILED:{type(exc).__name__}"
+        try:
+            await self._set_status(ctx.job_id, "error", stage, ctx.error)
+        finally:
+            # Cleanup is intentionally idempotent and never removes the source
+            # recording.  Calling it from every stage closes the old leak where
+            # early failures left .asr/.diar derivatives behind.
+            self._cleanup_ctx(ctx)
 
     async def worker_audio(self) -> None:
         while True:
@@ -536,12 +577,7 @@ class TranscriptionPipeline:
                 ctx.diar_audio_path = ctx.register_temp(diar_path)
                 await self.asr_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "audio",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "audio", exc)
             finally:
                 self.audio_queue.task_done()
 
@@ -557,12 +593,7 @@ class TranscriptionPipeline:
                 ctx.asr_result = result
                 await self.alignment_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "asr",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "asr", exc)
             finally:
                 self.asr_queue.task_done()
 
@@ -581,12 +612,7 @@ class TranscriptionPipeline:
                     ctx.aligned_result = ctx.asr_result
                 await self.diar_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "alignment",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "alignment", exc)
             finally:
                 self.alignment_queue.task_done()
 
@@ -604,12 +630,7 @@ class TranscriptionPipeline:
                 ctx.aligned_result = result
                 await self.postprocess_queue.put(ctx)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "diarization",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "diarization", exc)
             finally:
                 self.diar_queue.task_done()
 
@@ -629,12 +650,7 @@ class TranscriptionPipeline:
                 write_payload.update({"status": "done", "stage": "done", "result": result, "error": None})
                 write_job_json(ctx.job_id, write_payload)
             except Exception as exc:
-                await self._set_status(
-                    ctx.job_id,
-                    "error",
-                    "postprocess",
-                    f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-                )
+                await self._fail_stage(ctx, "postprocess", exc)
             finally:
                 self._cleanup_ctx(ctx)
                 self.postprocess_queue.task_done()
@@ -847,53 +863,17 @@ class TranscriptionPipeline:
         if self.config.enable_speaker_clustering and speaker_embeddings:
             self._cluster_speakers(ctx)
 
-        if "word_segments" in result:
-            try:
-                result = whisperx.assign_word_speakers(diarize_df, result, speaker_embeddings)
-            except Exception:
-                result["segments"] = self._assign_speakers_by_overlap(
-                    result.get("segments", []),
-                    ctx.diar_segments,
-                )
-                return result
+        return self._assign_speaker_result(result, diarize_df, speaker_embeddings, ctx.diar_segments)
 
-            if not result.get("segments"):
-                result["segments"] = self._assign_speakers_by_overlap(
-                    result.get("segments", []),
-                    ctx.diar_segments,
-                )
-            return result
-
-        result["segments"] = self._assign_speakers_by_overlap(result.get("segments", []), ctx.diar_segments)
-        return result
+    def _assign_speaker_result(self, result: dict, diarize_df, speaker_embeddings, diar_segments) -> dict:
+        return assign_speaker_result(
+            result,
+            lambda payload: whisperx.assign_word_speakers(diarize_df, payload, speaker_embeddings),
+            diar_segments,
+        )
 
     def _assign_speakers_by_overlap(self, segments, diar_segments):
-        if not segments or not diar_segments:
-            return segments
-
-        diar_segments = sorted(diar_segments, key=lambda item: (item["start"], item["end"]))
-        out = []
-        for seg in segments:
-            start = float(seg.get("start", 0))
-            end = float(seg.get("end", start))
-
-            best_overlap = 0.0
-            best_speaker = "UNKNOWN"
-            for item in diar_segments:
-                overlap = min(end, item["end"]) - max(start, item["start"])
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = item.get("speaker", "UNKNOWN")
-            if best_overlap <= 0:
-                mid = (start + end) / 2
-                for item in diar_segments:
-                    if item["start"] <= mid <= item["end"]:
-                        best_speaker = item.get("speaker", "UNKNOWN")
-                        break
-            new_seg = dict(seg)
-            new_seg["speaker"] = best_speaker
-            out.append(new_seg)
-        return out
+        return assign_speakers_by_overlap(segments, diar_segments)
 
     def _cluster_speakers(self, ctx: PipelineContext) -> None:
         try:

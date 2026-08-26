@@ -117,6 +117,16 @@ public partial class App : Application
                 }
                 ShowMainWindow();
             }
+            else if (_services.Backend.CanRecordLocally)
+            {
+                // A cached sign-in is a local capability, not a promise that
+                // the current server session is still valid.  Keep the shell
+                // reachable after a 401/expired cookie so the user can make
+                // and finish local recordings, while Assistant and delivery
+                // continue to advertise that a fresh login is required.
+                WriteStartupLog("CACHED_SESSION_LOCAL_ONLY", null);
+                ShowMainWindow();
+            }
             else
             {
                 ShowLoginWindow(_services.Backend.AuthState == DesktopAuthState.LoginRequired
@@ -148,6 +158,8 @@ public partial class App : Application
     private Task OnAuthenticatedAsync(AgentBootstrapStatus status)
     {
         ShowMainWindow();
+        if (_services?.Settings.Load().VoiceAlwaysListening == true)
+            _ = StartVoiceHostAsync(_services);
         return Task.CompletedTask;
     }
 
@@ -177,8 +189,44 @@ public partial class App : Application
         catch (Exception exception) { WriteStartupLog("VOICE_HOST_START_FAILED", exception); }
     }
 
-    private void HandleLoggedOut()
+    private async void HandleLoggedOut()
     {
+        // Voice Host is a local command source. Stop it when the user logs out
+        // so a stale wake-word process cannot create a new recording after the
+        // Desktop entitlement has been revoked. The Recorder Host itself is
+        // deliberately left alive: an active recording still needs a local
+        // STOP path and may finish its durable spool offline.
+        try { if (_services is not null) await _services.VoiceHost.StopAsync(); }
+        catch (Exception exception) { WriteStartupLog("VOICE_HOST_STOP_AFTER_LOGOUT_FAILED", exception); }
+
+        // Logout revokes server access, but it must never strand an active
+        // local recording without a STOP control. Check the local Host before
+        // closing the shell; if its state is unknown, keep the shell visible
+        // because safety is preferable to hiding the only stop path.
+        AgentIpcResponse? health = null;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            if (_services is not null)
+                health = await _services.Recorder.GetHealthAsync(timeout.Token);
+        }
+        catch (Exception exception)
+        {
+            WriteStartupLog("LOGOUT_RECORDER_STATE_UNKNOWN", exception);
+        }
+
+        var state = health?.State?.ToUpperInvariant();
+        var active = health is null
+            || state is "STARTING" or "RECORDING" or "PAUSED" or "FINALIZING"
+            || !string.IsNullOrWhiteSpace(health.SessionId)
+            || !string.IsNullOrWhiteSpace(health.Health?.ActiveSessionId);
+        if (active)
+        {
+            if (_window is null) ShowMainWindow();
+            _window?.NavigateTo("recording");
+            ShowLoginWindow("Выполнен выход. Текущую запись можно остановить и сохранить локально; для новой записи войдите снова.");
+            return;
+        }
         if (_window is not null)
         {
             _window.Close();

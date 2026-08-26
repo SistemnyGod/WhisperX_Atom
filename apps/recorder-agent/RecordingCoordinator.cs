@@ -43,6 +43,7 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
     private readonly string _dataRoot;
     private readonly RawEncoderWakeSignal _encoderWake;
     private readonly RawFinalizerQueueMetrics _rawFinalizerMetrics;
+    private readonly LocalArchiveWriter _archive;
     // RecorderToolPaths.Ffmpeg/Ffprobe are resolved by GlobalRawEncoderWorker;
     // capture itself never probes or launches the encoder.
     private readonly object _gate = new();
@@ -53,7 +54,7 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
     private AudioSourceTestResult? _lastMicrophoneProbe;
     private AudioSourceTestResult? _lastSystemAudioProbe;
 
-    public LegacyRecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, ILogger<RecordingCoordinator> logger)
+    public LegacyRecordingCoordinator(SpoolStore spool, AgentStateMachine state, AgentStorageSettings storage, RawEncoderWakeSignal encoderWake, RawFinalizerQueueMetrics rawFinalizerMetrics, LocalArchiveWriter archive, ILogger<RecordingCoordinator> logger)
     {
         _spool = spool;
         _state = state;
@@ -63,6 +64,7 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WhisperXAtom", "Agent");
         _encoderWake = encoderWake;
         _rawFinalizerMetrics = rawFinalizerMetrics;
+        _archive = archive;
     }
 
     public string? SessionId => _sessionId;
@@ -153,6 +155,22 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
             // Offline sessions deliberately keep meeting_id NULL. The server meeting is
             // created later by BindSessionAsync and persisted back into the spool.
             await _spool.CreateSessionAsync(sessionId, meetingId, title ?? $"Совещание {DateTime.Now:dd.MM.yyyy HH:mm}", pipelineCorrelationId, cancellationToken, ownerUserId, localOnly, acousticProfile);
+            try
+            {
+                await _archive.ReserveAsync(sessionId, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception archiveException)
+            {
+                // The user-facing archive is derived output. Keep the legacy
+                // capture path available when both archive roots are
+                // temporarily unavailable; durable PCM can be finalized by
+                // recovery after the disk/path is repaired.
+                _logger.LogWarning(archiveException, "User archive reservation failed; legacy capture continues in the durable spool. Session={SessionId}", sessionId);
+            }
             await _spool.AddEventAsync(sessionId, "RECORDING_STARTED", cancellationToken: cancellationToken);
             // Publish the local session id before starting WASAPI. A first callback
             // can fail immediately; the failure handler must still be able to
@@ -305,15 +323,37 @@ public sealed class LegacyRecordingCoordinator : IAsyncDisposable
         var dataWatermark = policy.Evaluate(drive.AvailableFreeSpace, drive.TotalSize);
         if (!dataWatermark.AllowsRecording)
             throw new IOException($"recording_storage_low:{dataWatermark.FreeBytes}:{dataWatermark.BlockFreeBytes}");
-        var archiveRoot = Path.GetFullPath(_storage.ArchiveRoot);
-        Directory.CreateDirectory(Path.Combine(archiveRoot, "Meetings"));
-        var archiveDriveRoot = Path.GetPathRoot(archiveRoot);
-        if (string.IsNullOrWhiteSpace(archiveDriveRoot)) throw new IOException("archive_storage_root_unavailable");
-        var archiveDrive = new DriveInfo(archiveDriveRoot);
-        if (!archiveDrive.IsReady) throw new IOException("archive_storage_root_unavailable");
-        var archiveWatermark = policy.Evaluate(archiveDrive.AvailableFreeSpace, archiveDrive.TotalSize);
-        if (!archiveWatermark.AllowsRecording)
-            throw new IOException($"archive_storage_low:{archiveWatermark.FreeBytes}:{archiveWatermark.BlockFreeBytes}");
+        // The user-facing archive is created by LocalArchiveWriter in the
+        // year/month/meeting hierarchy. Do not recreate the old `Meetings`
+        // directory during preflight. If the configured archive drive is
+        // unavailable or full, validate the explicit ProgramData fallback so
+        // capture can continue and the resulting path can be surfaced to the
+        // user instead of failing START.
+        var archiveReady = false;
+        long lastArchiveFreeBytes = 0;
+        long lastArchiveBlockBytes = 0;
+        foreach (var candidate in new[] { _storage.ArchiveRoot, LocalMeetingDirectoryResolver.FallbackRoot() }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var archiveRoot = Path.GetFullPath(candidate);
+                Directory.CreateDirectory(archiveRoot);
+                var archiveDriveRoot = Path.GetPathRoot(archiveRoot);
+                if (string.IsNullOrWhiteSpace(archiveDriveRoot)) continue;
+                var archiveDrive = new DriveInfo(archiveDriveRoot);
+                if (!archiveDrive.IsReady) continue;
+                var archiveWatermark = policy.Evaluate(archiveDrive.AvailableFreeSpace, archiveDrive.TotalSize);
+                lastArchiveFreeBytes = archiveWatermark.FreeBytes;
+                lastArchiveBlockBytes = archiveWatermark.BlockFreeBytes;
+                if (!archiveWatermark.AllowsRecording) continue;
+                archiveReady = true;
+                break;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        if (!archiveReady)
+            throw new IOException($"archive_storage_unavailable:{lastArchiveFreeBytes}:{lastArchiveBlockBytes}");
     }
 
     public void ValidatePreflight()

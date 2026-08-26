@@ -136,7 +136,12 @@ public sealed class RecordingDeliveryCoordinator(
             return new FinalizationResult(false, "DELIVERY", "LOCAL_SESSION_NOT_FOUND", false);
 
         var now = DateTimeOffset.UtcNow;
-        var archiveDue = string.IsNullOrWhiteSpace(current.ArchivePath)
+        // ArchivePath is reserved at START for user visibility. It is not an
+        // attestation that FLAC/master and its manifest were completed, so
+        // consult the archive writer's integrity check before suppressing the
+        // finalization task.
+        var archiveReady = await archive.IsReadyAsync(localSessionId, current.ArchivePath ?? current.PlayableAudioPath, cancellationToken).ConfigureAwait(false);
+        var archiveDue = !archiveReady
             && (current.ArchiveNextRetryAtUtc is null || current.ArchiveNextRetryAtUtc <= now);
         var deliveryDue = !string.Equals(current.DeliveryMode, "LOCAL_ONLY", StringComparison.OrdinalIgnoreCase)
             && current.DeliveryState is not ("CONFIRMED" or "COMPLETED")
@@ -148,7 +153,7 @@ public sealed class RecordingDeliveryCoordinator(
         // local FLAC/archive work is still pending.
         var archiveTask = archiveDue
             ? RunArchiveIsolatedAsync(localSessionId, cancellationToken)
-            : Task.FromResult((State: current.ArchivePath is null ? "PENDING" : "READY", ArchivePath: current.ArchivePath));
+            : Task.FromResult((State: archiveReady ? "READY" : "PENDING", ArchivePath: current.ArchivePath));
         var deliveryTask = deliveryDue
             ? RunDeliveryIsolatedAsync(localSessionId, cancellationToken)
             : Task.FromResult(new FinalizationResult(true, "DELIVERY_NOT_DUE", null, true, DeliveryState: current.DeliveryState));

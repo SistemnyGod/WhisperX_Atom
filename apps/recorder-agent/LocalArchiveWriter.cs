@@ -41,6 +41,68 @@ public sealed class LocalArchiveWriter(
         return task;
     }
 
+    /// <summary>Creates the user-facing destination at START.</summary>
+    public async Task<string> ReserveAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken)
+            ?? throw new InvalidOperationException("recording_session_not_found");
+        if (!string.IsNullOrWhiteSpace(info.ArchivePath) && Directory.Exists(info.ArchivePath))
+            return Path.GetFullPath(info.ArchivePath);
+        var directory = LocalMeetingDirectoryResolver.Resolve(storage, info, sessionId);
+        var technicalDirectory = Path.Combine(directory, ".whisperx");
+        Directory.CreateDirectory(technicalDirectory);
+        TryMarkHidden(technicalDirectory);
+        // Keep archive_path as the completion attestation used by the
+        // recovery scheduler. The playable path is already an additive local
+        // field and can safely carry the reserved directory for UI visibility
+        // until the verified FLAC manifest is written.
+        await spool.SetPlayableAudioStateAsync(
+            sessionId,
+            "PENDING",
+            path: directory,
+            clearError: true,
+            clearNextRetry: true,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return directory;
+    }
+
+    /// <summary>
+    /// Checks the durable, user-visible archive rather than the reserved
+    /// directory path. Reservation happens at START so the UI can show a
+    /// destination immediately; it must not be mistaken for a completed FLAC.
+    /// </summary>
+    public async Task<bool> IsReadyAsync(string sessionId, string? reservedPath = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(reservedPath))
+                return await IsReadyAtPathAsync(reservedPath, sessionId, cancellationToken).ConfigureAwait(false);
+            return await LocateArchiveAsync(sessionId, cancellationToken).ConfigureAwait(false) is not null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            logger.LogDebug(exception, "Could not attest local archive yet. Session={SessionId}", sessionId);
+            return false;
+        }
+    }
+
+    private async Task<bool> IsReadyAtPathAsync(string directory, string sessionId, CancellationToken cancellationToken)
+    {
+        var normalized = Path.GetFullPath(directory);
+        var manifestPath = FindManifestPath(normalized);
+        if (!File.Exists(manifestPath)) return false;
+        try
+        {
+            var manifest = JsonSerializer.Deserialize<ArchiveManifest>(
+                await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false), _json);
+            return manifest is not null
+                && string.Equals(manifest.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
+                && IsUsableManifest(normalized, manifest);
+        }
+        catch (JsonException) { return false; }
+    }
+
     public async Task SetUploadStateAsync(string sessionId, string state, string? error, CancellationToken cancellationToken = default)
     {
         var directory = await LocateArchiveAsync(sessionId, cancellationToken);
@@ -49,7 +111,7 @@ public sealed class LocalArchiveWriter(
         var gate = _manifestGates.GetOrAdd(directory, _ => new object());
         lock (gate)
         {
-            var manifestPath = Path.Combine(directory, "manifest.json");
+            var manifestPath = FindManifestPath(directory);
             if (!File.Exists(manifestPath)) return;
             var manifest = JsonSerializer.Deserialize<ArchiveManifest>(File.ReadAllText(manifestPath), _json);
             if (manifest is null) return;
@@ -57,7 +119,7 @@ public sealed class LocalArchiveWriter(
             WriteJsonAtomically(manifestPath, updated);
         }
 
-        var stateDbPath = Path.Combine(directory, "upload-state.db");
+        var stateDbPath = StateDbPath(directory, IsLegacyLayout(directory));
         await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = stateDbPath }.ToString());
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
@@ -66,6 +128,84 @@ public sealed class LocalArchiveWriter(
         command.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
         command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Converts the permanent local master (or the playable WAV fallback) to a
+    /// user-selected destination. This operation is local-only and never
+    /// changes the archive, spool or server delivery state.
+    /// </summary>
+    public async Task<string> ExportAsync(
+        string sessionId,
+        string? format,
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) throw new ArgumentException("session_required", nameof(sessionId));
+        if (string.IsNullOrWhiteSpace(destinationPath)) throw new ArgumentException("destination_path_required", nameof(destinationPath));
+
+        var normalizedFormat = string.IsNullOrWhiteSpace(format) ? "WAV" : format.Trim().ToUpperInvariant();
+        if (normalizedFormat is not ("WAV" or "MP3"))
+            throw new InvalidOperationException("LOCAL_AUDIO_EXPORT_FORMAT_UNSUPPORTED");
+
+        var info = await spool.GetSessionInfoAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("session_not_found");
+        var source = await ResolveExportSourceAsync(info, sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("LOCAL_AUDIO_NOT_READY");
+
+        var destination = Path.GetFullPath(destinationPath.Trim());
+        var extension = normalizedFormat == "WAV" ? ".wav" : ".mp3";
+        if (!string.Equals(Path.GetExtension(destination), extension, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("LOCAL_AUDIO_EXPORT_EXTENSION_INVALID");
+        if (string.Equals(Path.GetFullPath(source), destination, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("LOCAL_AUDIO_EXPORT_SOURCE_EQUALS_DESTINATION");
+
+        var parent = Path.GetDirectoryName(destination);
+        if (string.IsNullOrWhiteSpace(parent)) throw new InvalidOperationException("LOCAL_AUDIO_EXPORT_PATH_INVALID");
+        Directory.CreateDirectory(parent);
+        var part = destination + ".whisperx.part";
+        DeleteIfExists(part);
+        try
+        {
+            var arguments = normalizedFormat == "WAV"
+                ? new[] { "-y", "-i", source, "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", "-f", "wav", part }
+                : new[] { "-y", "-i", source, "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", part };
+            await RunFfmpegAsync(arguments, cancellationToken).ConfigureAwait(false);
+            if (!File.Exists(part) || new FileInfo(part).Length == 0)
+                throw new InvalidOperationException("LOCAL_AUDIO_EXPORT_EMPTY");
+            File.Move(part, destination, true);
+            return destination;
+        }
+        finally
+        {
+            DeleteIfExists(part);
+        }
+    }
+
+    private async Task<string?> ResolveExportSourceAsync(
+        RecordingSessionInfo info,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(info.ArchivePath))
+        {
+            var archive = Path.GetFullPath(info.ArchivePath);
+            foreach (var candidate in new[]
+            {
+                Path.Combine(archive, "Аудиозапись.flac"),
+                Path.Combine(archive, "export", "master.flac")
+            })
+            {
+                if (File.Exists(candidate) && new FileInfo(candidate).Length > 0) return candidate;
+            }
+        }
+
+        var playable = await spool.GetPlayableFilesAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        return playable
+            .Where(file => File.Exists(file.LocalPath))
+            .OrderBy(file => file.TrackType.Contains("microphone", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .Select(file => file.LocalPath)
+            .FirstOrDefault();
     }
 
     private async Task<string> CreateCoreAsync(string sessionId, CancellationToken cancellationToken)
@@ -84,12 +224,16 @@ public sealed class LocalArchiveWriter(
         // directory. The resolver also applies the configured-root/fallback
         // policy before any files are created.
         var directory = LocalMeetingDirectoryResolver.Resolve(storage, info, sessionId);
-        var sourceDirectory = Path.Combine(directory, "source");
-        var exportDirectory = Path.Combine(directory, "export");
+        var legacyLayout = IsLegacyLayout(directory);
+        var technicalDirectory = legacyLayout ? directory : Path.Combine(directory, ".whisperx");
+        var sourceDirectory = legacyLayout ? Path.Combine(directory, "source") : Path.Combine(directory, "Дорожки");
+        var exportDirectory = legacyLayout ? Path.Combine(directory, "export") : directory;
         try
         {
             Directory.CreateDirectory(sourceDirectory);
             Directory.CreateDirectory(exportDirectory);
+            Directory.CreateDirectory(technicalDirectory);
+            if (!legacyLayout) TryMarkHidden(technicalDirectory);
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or DirectoryNotFoundException or IOException)
         {
@@ -103,33 +247,41 @@ public sealed class LocalArchiveWriter(
         var trackFiles = new List<ArchiveFileEntry>();
         var masterInputs = new List<MasterTrackInput>();
         var trackAssemblyModes = new List<string>();
+        var friendlyTrackCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in chunks.GroupBy(item => new { item.TrackId, item.TrackType, item.SampleRate, item.Channels }).OrderBy(item => item.Key.TrackType))
         {
             var ordered = group.OrderBy(item => item.Sequence).ToArray();
             ValidateTrack(ordered);
-            var trackPath = Path.Combine(sourceDirectory, $"track-{Sanitize(group.Key.TrackType)}-{Sanitize(group.Key.TrackId[..Math.Min(8, group.Key.TrackId.Length)])}.flac");
+            var friendlyName = FriendlyTrackName(group.Key.TrackType);
+            friendlyTrackCounts.TryGetValue(friendlyName, out var friendlyCount);
+            friendlyCount++;
+            friendlyTrackCounts[friendlyName] = friendlyCount;
+            var trackFileName = legacyLayout
+                ? $"track-{Sanitize(group.Key.TrackType)}-{Sanitize(group.Key.TrackId[..Math.Min(8, group.Key.TrackId.Length)])}.flac"
+                : friendlyCount == 1 ? $"{friendlyName}.flac" : $"{friendlyName} ({friendlyCount}).flac";
+            var trackPath = Path.Combine(sourceDirectory, trackFileName);
             trackAssemblyModes.Add(await ConcatTrackAsync(ordered, trackPath, cancellationToken));
-            var entry = await DescribeFileAsync(trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken);
+            var entry = await DescribeFileAsync(directory, trackPath, "source", group.Key.TrackType, group.Key.SampleRate, group.Key.Channels, ordered.Sum(item => item.SampleCount), cancellationToken);
             trackFiles.Add(entry);
             masterInputs.Add(new MasterTrackInput(trackPath, group.Key.TrackType, group.Key.SampleRate, ordered[0].StartSample, ordered.Sum(item => item.SampleCount)));
         }
 
         var profile = (await spool.GetTrackInfosAsync(sessionId, cancellationToken)).Select(track => track.Profile).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "ROOM";
-        var masterPath = Path.Combine(exportDirectory, "master.flac");
+        var masterPath = Path.Combine(exportDirectory, legacyLayout ? "master.flac" : "Аудиозапись.flac");
         var assemblyResult = await CreateMasterAsync(masterInputs, masterPath, profile, trackAssemblyModes, cancellationToken);
         var exportFiles = new List<ArchiveFileEntry>
         {
-            await DescribeFileAsync(masterPath, "export", "master", 48000, 1, null, cancellationToken)
+            await DescribeFileAsync(directory, masterPath, "export", "master", 48000, 1, null, cancellationToken)
         };
-        var assemblyResultPath = Path.Combine(exportDirectory, "assembly-result.json");
+        var assemblyResultPath = Path.Combine(technicalDirectory, "assembly-result.json");
         WriteJsonAtomically(assemblyResultPath, assemblyResult);
-        exportFiles.Add(await DescribeFileAsync(assemblyResultPath, "export", "assembly-result", 0, 0, null, cancellationToken));
+        exportFiles.Add(await DescribeFileAsync(directory, assemblyResultPath, "export", "assembly-result", 0, 0, null, cancellationToken));
 
-        var previewPath = Path.Combine(exportDirectory, "preview.opus");
+        var previewPath = Path.Combine(technicalDirectory, "preview.opus");
         try
         {
             await RunFfmpegAsync(["-i", masterPath, "-c:a", "libopus", "-b:a", "48k", previewPath], cancellationToken);
-            exportFiles.Add(await DescribeFileAsync(previewPath, "export", "preview", 48000, 1, null, cancellationToken));
+            exportFiles.Add(await DescribeFileAsync(directory, previewPath, "export", "preview", 48000, 1, null, cancellationToken));
         }
         catch (Exception ex)
         {
@@ -146,8 +298,9 @@ public sealed class LocalArchiveWriter(
             "WAITING_FOR_API",
             null,
             trackFiles.Concat(exportFiles).ToArray());
-        WriteJsonAtomically(Path.Combine(directory, "manifest.json"), manifest);
-        await InitializeUploadStateAsync(Path.Combine(directory, "upload-state.db"), cancellationToken);
+        var manifestPath = ManifestPath(directory, legacyLayout);
+        WriteJsonAtomically(manifestPath, manifest);
+        await InitializeUploadStateAsync(StateDbPath(directory, legacyLayout), cancellationToken);
         await SetUploadStateAsync(sessionId, "WAITING_FOR_API", null, cancellationToken);
         logger.LogInformation("Permanent local audio archive created. Session={SessionId}, Directory={Directory}", sessionId, directory);
         return directory;
@@ -158,31 +311,65 @@ public sealed class LocalArchiveWriter(
         if (_writes.TryGetValue(sessionId, out var pending) && pending.IsValueCreated && pending.Value.IsCompletedSuccessfully)
             return await pending.Value;
 
-        var meetingsRoots = new[]
+        var roots = new[] { storage.ArchiveRoot, FallbackArchiveRoot() }.Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var directory in roots.SelectMany(EnumerateArchiveDirectories).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            Path.Combine(storage.ArchiveRoot, "Meetings"),
-            Path.Combine(FallbackArchiveRoot(), "Meetings")
-        }.Distinct(StringComparer.OrdinalIgnoreCase);
-        foreach (var meetingsRoot in meetingsRoots)
-        {
-            if (!Directory.Exists(meetingsRoot)) continue;
-            foreach (var directory in Directory.EnumerateDirectories(meetingsRoot))
+            cancellationToken.ThrowIfCancellationRequested();
+            var manifestPath = FindManifestPath(directory);
+            if (!File.Exists(manifestPath)) continue;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var manifestPath = Path.Combine(directory, "manifest.json");
-                if (!File.Exists(manifestPath)) continue;
-                try
-                {
-                    var manifest = JsonSerializer.Deserialize<ArchiveManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), _json);
-                    if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
-                        && manifest is not null
-                        && IsUsableManifest(directory, manifest))
-                        return directory;
-                }
-                catch (JsonException) { logger.LogWarning("Ignoring malformed archive manifest {ManifestPath}", manifestPath); }
+                var manifest = JsonSerializer.Deserialize<ArchiveManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), _json);
+                if (string.Equals(manifest?.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)
+                    && manifest is not null
+                    && IsUsableManifest(directory, manifest))
+                    return directory;
             }
+            catch (JsonException) { logger.LogWarning("Ignoring malformed archive manifest {ManifestPath}", manifestPath); }
         }
         return null;
+    }
+
+    private static IEnumerable<string> EnumerateArchiveDirectories(string root)
+    {
+        if (!Directory.Exists(root)) yield break;
+        foreach (var directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
+            // Yield the meeting directory for both layouts.  Returning the
+            // hidden `.whisperx` child itself would make FindManifestPath look
+            // for `.whisperx/.whisperx/manifest.json` and break restart/recovery
+            // discovery of a valid new archive.
+            if (File.Exists(Path.Combine(directory, "manifest.json"))
+                || File.Exists(Path.Combine(directory, ".whisperx", "manifest.json")))
+                yield return directory;
+    }
+
+    private static bool IsLegacyLayout(string directory) =>
+        Directory.Exists(Path.Combine(directory, "source"))
+        || Directory.Exists(Path.Combine(directory, "export"))
+        || File.Exists(Path.Combine(directory, "manifest.json"));
+
+    private static string ManifestPath(string directory, bool legacy) => legacy
+        ? Path.Combine(directory, "manifest.json")
+        : Path.Combine(directory, ".whisperx", "manifest.json");
+
+    private static string FindManifestPath(string directory) =>
+        File.Exists(Path.Combine(directory, "manifest.json"))
+            ? Path.Combine(directory, "manifest.json")
+            : Path.Combine(directory, ".whisperx", "manifest.json");
+
+    private static string StateDbPath(string directory, bool legacy) => legacy
+        ? Path.Combine(directory, "upload-state.db")
+        : Path.Combine(directory, ".whisperx", "upload-state.db");
+
+    private static string FriendlyTrackName(string trackType) =>
+        trackType.Contains("system", StringComparison.OrdinalIgnoreCase) || trackType.Contains("loopback", StringComparison.OrdinalIgnoreCase)
+            ? "Системный звук"
+            : "Микрофон";
+
+    private static void TryMarkHidden(string path)
+    {
+        try { File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.Hidden); }
+        catch (Exception) { }
     }
 
     private static string FallbackArchiveRoot() => Path.Combine(
@@ -493,10 +680,10 @@ public sealed class LocalArchiveWriter(
         }
     }
 
-    private static Task<ArchiveFileEntry> DescribeFileAsync(string path, string kind, string name, int sampleRate, int channels, long? sampleCount, CancellationToken cancellationToken)
+    private static Task<ArchiveFileEntry> DescribeFileAsync(string archiveDirectory, string path, string kind, string name, int sampleRate, int channels, long? sampleCount, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new ArchiveFileEntry(kind, name, Path.GetRelativePath(Path.GetDirectoryName(Path.GetDirectoryName(path)!)!, path), new FileInfo(path).Length, ComputeSha256(path), sampleRate, channels, sampleCount));
+        return Task.FromResult(new ArchiveFileEntry(kind, name, Path.GetRelativePath(archiveDirectory, path), new FileInfo(path).Length, ComputeSha256(path), sampleRate, channels, sampleCount));
     }
 
     private static async Task InitializeUploadStateAsync(string path, CancellationToken cancellationToken)

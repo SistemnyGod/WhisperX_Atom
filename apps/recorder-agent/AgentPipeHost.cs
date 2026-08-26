@@ -12,6 +12,7 @@ public sealed class AgentPipeHost(
     SpoolStore spool,
     AgentApiClient api,
     AgentStorageSettings storage,
+    LocalArchiveWriter archive,
     RecordingDeliveryCoordinator delivery,
     DeviceHealthMonitor deviceHealth,
     RawFinalizerQueueMetrics rawFinalizerMetrics,
@@ -130,6 +131,22 @@ public sealed class AgentPipeHost(
                         ? Math.Clamp(requestedLimit, 1, 500) : 100;
                     return new AgentIpcResponse(true, "IDLE", null, null, null, ProtocolVersion: AgentIpcProtocol.Version,
                         LocalSessions: await spool.ListLocalSessionsAsync(limit, cancellationToken));
+                case "EXPORT_LOCAL_AUDIO":
+                    var exportSessionId = ReadString(request.Payload, "sessionId");
+                    var exportFormat = ReadString(request.Payload, "format");
+                    var exportDestination = ReadString(request.Payload, "destinationPath");
+                    if (string.IsNullOrWhiteSpace(exportSessionId) || string.IsNullOrWhiteSpace(exportDestination))
+                        return Error("local_audio_export_parameters_required");
+                    try
+                    {
+                        var exported = await archive.ExportAsync(exportSessionId, exportFormat, exportDestination, cancellationToken);
+                        return new AgentIpcResponse(true, "EXPORTED", exportSessionId, null, null,
+                            ProtocolVersion: AgentIpcProtocol.Version, ExportedPath: exported);
+                    }
+                    catch (Exception exception)
+                    {
+                        return Error(MapError(exception));
+                    }
                 case "CONFIGURE":
                     var serverUrl = ReadString(request.Payload, "serverUrl");
                     var agentToken = ReadString(request.Payload, "token");
@@ -224,7 +241,9 @@ public sealed class AgentPipeHost(
                         // "Recorder Agent did not answer" error.
                         logger.LogWarning(exception, "Recording started but meeting binding could not be read immediately. Session={SessionId}", sessionId);
                     }
-                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, null, null, boundMeetingId);
+                    return new AgentIpcResponse(true, state.State.ToString(), sessionId, null, null, boundMeetingId,
+                        ProtocolVersion: AgentIpcProtocol.Version,
+                        SessionStatus: await BuildSessionStatusAsync(sessionId, cancellationToken));
                 case "PAUSE":
                     await recorder.PauseAsync(cancellationToken);
                     return Status();
@@ -277,7 +296,7 @@ public sealed class AgentPipeHost(
     private static bool IsMutatingCommand(string command) => command is
         "CONFIGURE" or "UPDATE_SERVER_URL" or "SET_ARCHIVE_ROOT" or "SET_AUDIO_DEVICES" or "SET_RECORDING_PROFILE" or
         "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "STOP_DELIVERY" or "MARKER" or "DECISION" or
-        "ACTION_ITEM" or "VOICE_EVENT";
+        "ACTION_ITEM" or "VOICE_EVENT" or "EXPORT_LOCAL_AUDIO";
 
     private static bool IsCaptureOrDeliveryCommand(string command) => command is
         "START" or "PAUSE" or "RESUME" or "STOP" or "RETRY_UPLOAD" or "STOP_DELIVERY" or
@@ -532,11 +551,17 @@ public sealed class AgentPipeHost(
                  ? (string.IsNullOrWhiteSpace(rawBacklog.LastErrorCode) ? "WAITING_FOR_ENCODER" : "ENCODE_FAILED")
                  : "ENCODING"
             : rawBacklog.ReadyForUpload > 0 ? "FLAC_READY" : "IDLE";
+        var archiveReady = await archive.IsReadyAsync(sessionId, info.ArchivePath ?? info.PlayableAudioPath, cancellationToken);
+        var archivePending = info.ArchiveErrorCode is "ENCODING_PENDING" or "LOCAL_ARCHIVE_PENDING";
         var archiveState = info.LocalFinalizeState == "LOCAL_FAILED"
             ? "FAILED"
-            : string.IsNullOrWhiteSpace(info.ArchivePath)
-                ? info.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
-                : "READY";
+            : archiveReady
+                ? "READY"
+                : !string.IsNullOrWhiteSpace(info.ArchiveErrorCode) && !archivePending
+                    ? "FAILED"
+                    : string.IsNullOrWhiteSpace(info.ArchivePath)
+                        ? info.LocalFinalizeState == "LOCAL_READY" ? "PENDING" : "NOT_STARTED"
+                        : "PENDING";
         return new RecordingSessionStatus(sessionId, info.MeetingId, capture, delivery,
             counts.Total, counts.Confirmed, counts.Pending, error, serverSessionId,
             info.LocalFinalizeState, info.ArchivePath, errorCode, IsRetryableCode(errorCode), info.NextRetryAtUtc,
@@ -676,7 +701,10 @@ public sealed class AgentPipeHost(
             "AUDIO_SOURCE_FAILED", "AUDIO_DEVICE_UNAVAILABLE", "AUDIO_DEVICE_NOT_FOUND",
             "AUDIO_DEVICE_ACCESS_DENIED", "AUDIO_INPUT_NODE_CREATE_FAILED",
             "AUDIO_GRAPH_CREATE_FAILED", "AUDIO_PIPELINE_OVERRUN", "AUDIO_BUFFER_FORMAT_MISMATCH",
-            "RAW_FINALIZER_BACKLOG_EXCEEDED", "RAW_DURABILITY_FAILED", "RAW_RECOVERY_PENDING"
+            "RAW_FINALIZER_BACKLOG_EXCEEDED", "RAW_DURABILITY_FAILED", "RAW_RECOVERY_PENDING",
+            "LOCAL_AUDIO_EXPORT_PARAMETERS_REQUIRED", "LOCAL_AUDIO_EXPORT_FORMAT_UNSUPPORTED",
+            "LOCAL_AUDIO_EXPORT_EXTENSION_INVALID", "LOCAL_AUDIO_EXPORT_SOURCE_EQUALS_DESTINATION",
+            "LOCAL_AUDIO_NOT_READY", "LOCAL_AUDIO_EXPORT_EMPTY", "LOCAL_AUDIO_EXPORT_FAILED"
         })
         {
             if (message.Contains(code, StringComparison.OrdinalIgnoreCase)) return code;

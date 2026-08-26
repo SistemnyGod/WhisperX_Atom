@@ -60,10 +60,13 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
 
     private async Task<AgentBootstrapStatus> EnsureAgentReadyCoreAsync(CancellationToken cancellationToken)
     {
+        // Capture permission survives an expired session and a temporary LAN
+        // outage. AgentBootstrapConfirmed is delivery state, not a local
+        // microphone safety prerequisite.
+        // Keep the legacy CanUseOffline reference for older contract clients;
+        // both properties now describe the cached local-capture entitlement.
+        var offlineEligible = services.Backend.CanRecordLocally || services.Backend.CanUseOffline;
         var settings = services.Settings.Load();
-        var offlineEligible = services.Backend.CanUseOffline
-            && settings.OwnerUserId is not null
-            && settings.AgentBootstrapConfirmed;
 
         // Local capture is a prerequisite, not a consequence, of a successful
         // network round trip. Start/verify the current-user Host before asking
@@ -227,7 +230,6 @@ public sealed class AgentBootstrapCoordinator(FrontendServices services)
 
         if (!string.IsNullOrWhiteSpace(enrollmentToken))
         {
-            settings = services.Settings.Load();
             var configured = await services.Recorder.ConfigureAgentAsync(
                 services.Backend.ApiUrl,
                 agentId,

@@ -167,7 +167,8 @@ public sealed record LocalSessionSummary(
     DateTimeOffset? NextRetryAtUtc,
     DateTimeOffset? PlayableAudioNextRetryAtUtc,
     IReadOnlyList<PlayableAudioFile> PlayableFiles,
-    Guid? MeetingId = null);
+    Guid? MeetingId = null,
+    string? ArchivePath = null);
 
 public sealed record RecordingManifest(Guid ServerSessionId, IReadOnlyList<RecordingManifestTrack> Tracks);
 
@@ -551,10 +552,10 @@ public sealed class SpoolStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,meeting_id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
+        command.CommandText = "SELECT id,meeting_id,title,started_at,state,local_finalize_state,delivery_state,playable_audio_state,playable_audio_path,playable_audio_error,playable_audio_created_at,next_retry_at,playable_audio_next_retry_at,archive_path FROM recording_sessions WHERE state NOT IN ('CANCELLED') ORDER BY started_at DESC LIMIT $limit";
         command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
         var result = new List<LocalSessionSummary>();
-        var rows = new List<(string Id, Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext)>();
+        var rows = new List<(string Id, Guid? MeetingId, string? Title, DateTimeOffset? StartedAt, string State, string Local, string Delivery, string Playable, string? Path, string? Error, DateTimeOffset? Created, DateTimeOffset? Next, DateTimeOffset? PlayableNext, string? ArchivePath)>();
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -562,7 +563,7 @@ public sealed class SpoolStore
                 DateTimeOffset? Parse(int ordinal) => reader.IsDBNull(ordinal) || !DateTimeOffset.TryParse(reader.GetString(ordinal), out var value) ? null : value;
                 rows.Add((reader.GetString(0), reader.IsDBNull(1) || !Guid.TryParse(reader.GetString(1), out var meetingId) ? null : meetingId,
                     reader.IsDBNull(2) ? null : reader.GetString(2), Parse(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), Parse(10), Parse(11), Parse(12)));
+                    reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), Parse(10), Parse(11), Parse(12), reader.IsDBNull(13) ? null : reader.GetString(13)));
             }
         }
 
@@ -588,7 +589,7 @@ public sealed class SpoolStore
 
         foreach (var row in rows)
             result.Add(new LocalSessionSummary(row.Id, row.Title, row.StartedAt, row.State, row.Local, row.Delivery, row.Playable,
-                row.Path, row.Error, row.Created, row.Next, row.PlayableNext, filesBySession[row.Id], row.MeetingId));
+                row.Path, row.Error, row.Created, row.Next, row.PlayableNext, filesBySession[row.Id], row.MeetingId, row.ArchivePath));
         return result;
     }
 
@@ -710,6 +711,23 @@ public sealed class SpoolStore
         command.CommandText = "UPDATE recording_sessions SET archive_error_code=NULL,archive_error_detail=NULL,archive_retry_count=0,archive_next_retry_at=NULL WHERE id=$id";
         command.Parameters.AddWithValue("$id", sessionId);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Persists the user-facing archive destination before capture starts.
+    /// This does not change finalization or delivery state; the raw PCM spool
+    /// remains the durability boundary until the master is verified.
+    /// </summary>
+    public async Task SetArchivePathAsync(string sessionId, string archivePath, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(archivePath)) return;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE recording_sessions SET archive_path=COALESCE(archive_path,$path) WHERE id=$id";
+        command.Parameters.AddWithValue("$id", sessionId);
+        command.Parameters.AddWithValue("$path", archivePath);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<RecordingSessionInfo?> GetSessionInfoAsync(string sessionId, CancellationToken cancellationToken = default)
@@ -2601,9 +2619,17 @@ public sealed class SpoolStore
             if (reader.IsDBNull(1) || !DateTimeOffset.TryParse(reader.GetString(2), out var purgeAfter)) continue;
             var directory = reader.GetString(1);
             if (!IsValidatedArchivePath(directory)) continue;
-            // Metadata remains in manifest.json; only derived/local audio can be
-            // reclaimed after the server copy is confirmed.
-            var paths = new[] { Path.Combine(directory, "export", "master.flac"), Path.Combine(directory, "export", "preview.opus") }
+            // Metadata remains in the manifest (hidden for new archives); only
+            // derived/local audio can be reclaimed after the server copy is
+            // confirmed. Keep both layouts readable so upgrading the Host does
+            // not strand retention candidates indefinitely.
+            var paths = new[]
+                {
+                    Path.Combine(directory, "export", "master.flac"),
+                    Path.Combine(directory, "export", "preview.opus"),
+                    Path.Combine(directory, "Аудиозапись.flac"),
+                    Path.Combine(directory, ".whisperx", "preview.opus")
+                }
                 .Where(File.Exists).ToArray();
             var bytes = paths.Sum(path => new FileInfo(path).Length);
             result.Add(new RetentionCandidate(reader.GetString(0), "localArchive", paths, bytes, purgeAfter));
@@ -2617,8 +2643,14 @@ public sealed class SpoolStore
         try
         {
             var root = Path.GetFullPath(directory);
-            var master = Path.Combine(root, "export", "master.flac");
-            var manifest = Path.Combine(root, "manifest.json");
+            var isLegacy = File.Exists(Path.Combine(root, "manifest.json"))
+                || File.Exists(Path.Combine(root, "export", "master.flac"));
+            var master = isLegacy
+                ? Path.Combine(root, "export", "master.flac")
+                : Path.Combine(root, "Аудиозапись.flac");
+            var manifest = isLegacy
+                ? Path.Combine(root, "manifest.json")
+                : Path.Combine(root, ".whisperx", "manifest.json");
             if (!Directory.Exists(root) || !File.Exists(master) || !File.Exists(manifest)) return false;
             if (new FileInfo(master).Length <= 0) return false;
             using var document = JsonDocument.Parse(File.ReadAllText(manifest));

@@ -90,7 +90,7 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
                                     <FontIcon Glyph="&#xE8D7;" Foreground="{StaticResource AccentBrush}" />
-                                    <StackPanel Spacing="1"><TextBlock Text="Сеть необязательна" FontWeight="SemiBold" /><TextBlock Text="Доставка продолжится после восстановления" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" /></StackPanel>
+                                    <StackPanel Spacing="1"><TextBlock Text="Сеть необязательна" FontWeight="SemiBold" /><TextBlock Text="{Binding LocalRecordingStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" /></StackPanel>
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -152,6 +152,11 @@
                                     <controls:OperationalStatusItem Title="Доставка" Status="{Binding DeliveryStatusLabel}" Description="Сервер необязателен для записи" Severity="warning" />
                                     <controls:OperationalStatusItem Title="WhisperX" Status="{Binding ProcessingStatus}" Description="Обработка начнётся после завершения записи" Severity="neutral" />
                                     <controls:OperationalStatusItem Title="Мифодий" Status="{Binding VoiceStatus}" Description="Голосовые команды работают независимо от доставки аудио" Severity="info" />
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Text="Папка записи" Style="{StaticResource CaptionStyle}" />
+                                        <TextBlock Text="{Binding ArchivePath}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding ArchivePath}" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding ArchiveWarningLabel}" Visibility="{Binding ArchiveWarningVisibility}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -217,6 +222,7 @@
                             </Grid>
                         </Border>
                         <TextBlock Text="{Binding LocalRecordingFooterLabel}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding ArchiveWarningLabel}" Visibility="{Binding ArchiveWarningVisibility}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
                     </StackPanel>
 
                     <InfoBar x:Name="ErrorInfoBar" IsOpen="False" IsClosable="False" Severity="Error">
@@ -225,6 +231,13 @@
                         </InfoBar.ActionButton>
                     </InfoBar>
                     <InfoBar x:Name="WarningInfoBar" IsOpen="False" IsClosable="False" Severity="Warning" />
+                    <InfoBar x:Name="LocalSavedInfoBar" IsOpen="False" IsClosable="False" Severity="Success" Message="Запись сохранена локально">
+                        <InfoBar.ActionButton>
+                            <Button Content="Открыть файл" Style="{StaticResource SecondaryButtonStyle}" Click="OpenSavedAudioButton_Click" AutomationProperties.Name="Открыть сохранённый файл записи" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
+                    <InfoBar x:Name="ExportInfoBar" IsOpen="False" IsClosable="True" Severity="Error" Title="Экспорт не выполнен" AutomationProperties.Name="Ошибка экспорта локальной записи" />
+                    <Button x:Name="OpenSavedFolderButton" Content="Открыть папку записи" Style="{StaticResource GhostButtonStyle}" Visibility="Collapsed" Click="OpenSavedFolderButton_Click" AutomationProperties.Name="Открыть папку сохранённой записи" HorizontalAlignment="Left" />
                 </StackPanel>
             </Border>
 
@@ -246,6 +259,53 @@
                     </StackPanel>
                 </Border>
             </StackPanel>
+
+            <Border Style="{StaticResource CardStyle}" Padding="18,16">
+                <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Локальные записи" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Доступны без сервера. Здесь отображаются только безопасные метаданные и готовые аудиофайлы." Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Обновить" Style="{StaticResource GhostButtonStyle}" Click="RefreshLocalLibraryButton_Click" AutomationProperties.Name="Обновить список локальных записей" />
+                    </Grid>
+                    <TextBlock Text="Локальных записей пока нет." Style="{StaticResource CaptionStyle}" Visibility="{Binding LocalRecordingsEmptyVisibility}" />
+                    <ListView ItemsSource="{Binding LocalRecordings}" SelectionMode="None" BorderThickness="0" AutomationProperties.Name="Список локальных записей" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,3">
+                                    <Grid RowDefinitions="Auto,Auto" RowSpacing="8">
+                                        <StackPanel Spacing="2" Grid.Row="0">
+                                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Title}" />
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <TextBlock Text="{Binding StartedLabel}" Style="{StaticResource CaptionStyle}" />
+                                                <TextBlock Text="·" Style="{StaticResource CaptionStyle}" />
+                                                <TextBlock Text="{Binding DurationLabel}" Style="{StaticResource CaptionStyle}" />
+                                                <TextBlock Text="·" Style="{StaticResource CaptionStyle}" />
+                                                <TextBlock Text="{Binding SizeLabel}" Style="{StaticResource CaptionStyle}" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <TextBlock Text="{Binding LocalStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                                <TextBlock Text="· доставка:" Style="{StaticResource CaptionStyle}" />
+                                                <TextBlock Text="{Binding DeliveryStatus}" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding ArchivePath}" Style="{StaticResource CaptionStyle}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding ArchivePath}" />
+                                            <TextBlock Text="{Binding ArchiveWarning}" Style="{StaticResource CaptionStyle}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Visibility="{Binding ArchiveWarningVisibility}" />
+                                        </StackPanel>
+                                        <Grid Grid.Row="1" ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="6" RowSpacing="6" HorizontalAlignment="Left">
+                                            <Button Content="Воспроизвести" Style="{StaticResource CardButtonStyle}" Tag="{Binding}" IsEnabled="{Binding CanPlay}" Click="LocalPlayButton_Click" AutomationProperties.Name="Воспроизвести локальную запись" />
+                                            <Button Grid.Column="1" Content="Папка" Style="{StaticResource GhostButtonStyle}" Tag="{Binding}" Click="LocalFolderButton_Click" AutomationProperties.Name="Открыть папку локальной записи" />
+                                            <Button Grid.Column="2" Content="WAV" Style="{StaticResource GhostButtonStyle}" Tag="{Binding}" IsEnabled="{Binding CanPlay}" Click="LocalExportWavButton_Click" AutomationProperties.Name="Экспортировать локальную запись в WAV" />
+                                            <Button Grid.Row="1" Content="MP3" Style="{StaticResource GhostButtonStyle}" Tag="{Binding}" IsEnabled="{Binding CanPlay}" Click="LocalExportMp3Button_Click" AutomationProperties.Name="Экспортировать локальную запись в MP3" />
+                                            <Button Grid.Row="1" Grid.Column="1" Content="Повторить отправку" Style="{StaticResource GhostButtonStyle}" Tag="{Binding}" IsEnabled="{Binding CanRetry}" Click="LocalRetryButton_Click" AutomationProperties.Name="Повторить отправку локальной записи" />
+                                        </Grid>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </Border>
 
             <Expander x:Name="DetailsExpander" Header="Подробности сохранения и доставки" IsExpanded="False">
                 <StackPanel Spacing="{StaticResource CardGap}" Padding="0,10,0,0">

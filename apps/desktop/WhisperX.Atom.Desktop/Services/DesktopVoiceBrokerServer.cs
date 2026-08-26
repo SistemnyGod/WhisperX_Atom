@@ -316,7 +316,14 @@ public sealed class DesktopVoiceBrokerServer : IAsyncDisposable
         {
             response = intent.ToUpperInvariant() switch
             {
-                "STARTRECORDING" => await _commands.StartAsync("Голосовая запись", null, cancellationToken: cancellationToken).ConfigureAwait(false),
+                // Keep the cached owner on the local spool even when the LAN
+                // server is offline. Delivery can bind this exact session
+                // after reconnect; a voice START must not create an
+                // ownerless server record or require an HTTP round-trip.
+                "STARTRECORDING" => await _commands.StartAsync(
+                    "Голосовая запись",
+                    new DesktopSettingsStore().Load().OwnerUserId,
+                    cancellationToken: cancellationToken).ConfigureAwait(false),
                 "STOPRECORDING" => await _commands.StopAsync(cancellationToken).ConfigureAwait(false),
                 "PAUSERECORDING" => await _commands.PauseAsync(cancellationToken).ConfigureAwait(false),
                 "RESUMERECORDING" => await _commands.ResumeAsync(cancellationToken).ConfigureAwait(false),

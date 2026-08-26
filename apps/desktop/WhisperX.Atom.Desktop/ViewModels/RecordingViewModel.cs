@@ -7,6 +7,28 @@ using WhisperX_Atom_Desktop.Services;
 
 namespace WhisperX_Atom_Desktop.ViewModels;
 
+/// <summary>
+/// A privacy-safe, local-only row for the recording library. It intentionally
+/// contains metadata and user-selected paths, never PCM or transcript text.
+/// </summary>
+public sealed record LocalRecordingItem(
+    string SessionId,
+    string Title,
+    DateTimeOffset? StartedAt,
+    string StartedLabel,
+    string DurationLabel,
+    string SizeLabel,
+    string ArchivePath,
+    string? AudioPath,
+    string LocalStatus,
+    string DeliveryStatus,
+    bool CanPlay,
+    bool CanRetry,
+    string ArchiveWarning)
+{
+    public string ArchiveWarningVisibility => string.IsNullOrWhiteSpace(ArchiveWarning) ? "Collapsed" : "Visible";
+}
+
 public sealed class RecordingViewModel : ObservableObject
 {
     private readonly FrontendServices _services;
@@ -117,6 +139,8 @@ public sealed class RecordingViewModel : ObservableObject
     private long _storageCaptureReserveBytes;
     private long _storagePostProcessingReserveBytes;
     private long _storageEmergencyStopFreeBytes;
+    private readonly Dictionary<string, LocalSessionSummary> _localSessionsById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _localLibraryGate = new(1, 1);
 
     public RecordingViewModel(FrontendServices services)
     {
@@ -136,6 +160,9 @@ public sealed class RecordingViewModel : ObservableObject
 
     public ObservableCollection<AudioDeviceOption> Microphones { get; } = [];
     public ObservableCollection<AudioDeviceOption> SystemAudioDevices { get; } = [];
+    public ObservableCollection<LocalRecordingItem> LocalRecordings { get; } = [];
+    public bool HasLocalRecordings => LocalRecordings.Count > 0;
+    public string LocalRecordingsEmptyVisibility => HasLocalRecordings ? "Collapsed" : "Visible";
     public IReadOnlyList<RecordingProfileOption> RecordingProfiles { get; } =
     [
         new("ROOM", "Комната — микрофон"),
@@ -184,7 +211,18 @@ public sealed class RecordingViewModel : ObservableObject
     public string WarningMessage { get => _warningMessage; private set { if (SetProperty(ref _warningMessage, value)) OnPropertyChanged(nameof(HasWarning)); } }
     public bool HasWarning => !string.IsNullOrWhiteSpace(WarningMessage);
     public string ArchiveRoot { get => _archiveRoot; private set => SetProperty(ref _archiveRoot, value); }
-    public string? ArchivePath { get => _archivePath; private set { if (SetProperty(ref _archivePath, value)) { OnPropertyChanged(nameof(CanOpenLocalArchive)); NotifyPlayableAudioSelectionChanged(); } } }
+    public string? ArchivePath
+    {
+        get => _archivePath;
+        private set
+        {
+            if (!SetProperty(ref _archivePath, value)) return;
+            OnPropertyChanged(nameof(CanOpenLocalArchive));
+            OnPropertyChanged(nameof(ArchiveWarningLabel));
+            OnPropertyChanged(nameof(ArchiveWarningVisibility));
+            NotifyPlayableAudioSelectionChanged();
+        }
+    }
     public string LocalFinalizeState
     {
         get => _localFinalizeState;
@@ -251,7 +289,9 @@ public sealed class RecordingViewModel : ObservableObject
             if (string.IsNullOrWhiteSpace(_archivePath)) return null;
             var candidate = File.Exists(_archivePath)
                 ? _archivePath
-                : Path.Combine(_archivePath, "export", "master.flac");
+                : File.Exists(Path.Combine(_archivePath, "Аудиозапись.flac"))
+                    ? Path.Combine(_archivePath, "Аудиозапись.flac")
+                    : Path.Combine(_archivePath, "export", "master.flac");
             return File.Exists(candidate) ? candidate : null;
         }
     }
@@ -323,6 +363,10 @@ public sealed class RecordingViewModel : ObservableObject
         "PENDING" => "Собирается после записи",
         _ => "Архив ожидает"
     };
+    public string ArchiveWarningLabel => IsFallbackArchivePath(ArchivePath)
+        ? $"Основная папка архива недоступна. Эта запись сохранена в резервной папке: {ArchivePath}"
+        : string.Empty;
+    public string ArchiveWarningVisibility => string.IsNullOrWhiteSpace(ArchiveWarningLabel) ? "Collapsed" : "Visible";
     public string DeliveryDiagnosticLabel => string.IsNullOrWhiteSpace(_sessionErrorCode)
         ? "Причина доставки: —"
         : $"Причина: {_sessionErrorCode}{(_nextRetryAtUtc is DateTimeOffset retry ? $" · следующая попытка {retry.ToLocalTime():HH:mm:ss}" : string.Empty)}";
@@ -459,7 +503,14 @@ public sealed class RecordingViewModel : ObservableObject
     // capture while the LAN server is offline. It is still not advertised as
     // server-ready, but the persisted owner makes the local path safe.
     public bool AgentReady => _services.AgentBootstrap.LastStatus.Authenticated
-        || _services.AgentBootstrap.LastStatus.OfflineEligible;
+        || _services.AgentBootstrap.LastStatus.OfflineEligible
+        || _services.Backend.CanRecordLocally;
+    public bool LocalRecordingAllowed => _services.Backend.CanRecordLocally;
+    public string LocalRecordingStatus => LocalRecordingAllowed
+        ? (_services.Backend.HasSession
+            ? "Локальная запись доступна; серверная доставка работает отдельно."
+            : "Локальная запись доступна в офлайн-режиме.")
+        : "Выполните вход, чтобы разрешить локальную запись на этом компьютере.";
     public string AgentStatus => _lastAgentResponse is { } response
         ? AgentStatusFormatter.Format(response)
         : State == RecordingState.Unavailable ? "Recorder Agent недоступен" : "Проверка Recorder Agent…";
@@ -475,7 +526,7 @@ public sealed class RecordingViewModel : ObservableObject
         _ => "Готово к записи"
     };
     public bool CanStart => (State is RecordingState.Idle or RecordingState.Error)
-        && _recorderRuntimeReady && _hasAudioSource && _localStorageReady && AgentReady;
+        && _recorderRuntimeReady && _hasAudioSource && _localStorageReady && LocalRecordingAllowed;
     public bool CanAttemptStart => State is RecordingState.Idle or RecordingState.Error or RecordingState.Unavailable;
     public string StartReadinessMessage => CanStart
         ? "Recorder и микрофон готовы. Запись сохраняется локально даже при временной недоступности сервера."
@@ -497,6 +548,7 @@ public sealed class RecordingViewModel : ObservableObject
     {
         await RefreshAsync();
         await RestoreLatestLocalSessionAsync();
+        await RefreshLocalLibraryAsync();
         if (_pollCts is not null) return;
         _pollCts = new CancellationTokenSource();
         _pollTask = PollLoopAsync(_pollCts.Token);
@@ -547,6 +599,7 @@ public sealed class RecordingViewModel : ObservableObject
             DeliveryState = local.DeliveryState;
             PlayableAudioState = local.PlayableAudioState;
             PlayableAudioPath = local.PlayableAudioPath;
+            ArchivePath = local.ArchivePath ?? local.PlayableAudioPath;
             PlayableAudioError = local.PlayableAudioError;
             PlayableAudioFiles = local.PlayableFiles;
             State = RecordingState.Idle;
@@ -574,7 +627,132 @@ public sealed class RecordingViewModel : ObservableObject
     private async Task PollLoopAsync(CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
-        while (await timer.WaitForNextTickAsync(cancellationToken)) await RefreshAsync(cancellationToken);
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            await RefreshAsync(cancellationToken);
+            await RefreshLocalLibraryAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>Refreshes the local library without requiring API reachability.</summary>
+    public async Task RefreshLocalLibraryAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await _localLibraryGate.WaitAsync(0, cancellationToken).ConfigureAwait(true)) return;
+        try
+        {
+            var response = await _services.Recorder.ListLocalSessionsAsync(200, cancellationToken).ConfigureAwait(true);
+            // LIST_LOCAL_SESSIONS is additive. Older Hosts return an
+            // unsupported-command response; do not erase a library already
+            // shown by a newer Host in that case.
+            if (!response.Ok && response.LocalSessions is null) return;
+            _localSessionsById.Clear();
+            LocalRecordings.Clear();
+            foreach (var session in response.LocalSessions ?? Array.Empty<LocalSessionSummary>())
+            {
+                _localSessionsById[session.SessionId] = session;
+                if (string.Equals(session.SessionId, SessionId, StringComparison.OrdinalIgnoreCase))
+                    ArchivePath = session.ArchivePath ?? session.PlayableAudioPath;
+                LocalRecordings.Add(ToLocalRecordingItem(session));
+            }
+            OnPropertyChanged(nameof(HasLocalRecordings));
+            OnPropertyChanged(nameof(LocalRecordingsEmptyVisibility));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            // Local library is optional UI. A legacy Host may not implement
+            // the additive command; capture and delivery remain unaffected.
+            Debug.WriteLine($"Unable to refresh local recording library: {ex.Message}");
+        }
+        finally
+        {
+            _localLibraryGate.Release();
+        }
+    }
+
+    public LocalSessionSummary? GetLocalSession(string sessionId)
+        => _localSessionsById.TryGetValue(sessionId, out var session) ? session : null;
+
+    private static bool IsFallbackArchivePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var fallbackRoot = Path.GetFullPath(LocalMeetingDirectoryResolver.FallbackRoot())
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(path)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            return candidate.StartsWith(fallbackRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+        catch (NotSupportedException) { return false; }
+    }
+
+    private static LocalRecordingItem ToLocalRecordingItem(LocalSessionSummary session)
+    {
+        var title = string.IsNullOrWhiteSpace(session.Title) ? "Запись" : session.Title.Trim();
+        var files = session.PlayableFiles ?? Array.Empty<PlayableAudioFile>();
+        var durationSeconds = files
+            .Where(file => file.SampleRate > 0 && file.SampleCount > 0)
+            .Select(file => file.SampleCount / (double)file.SampleRate)
+            .DefaultIfEmpty(0d)
+            .Max();
+        var size = files
+            .Select(file => file.LocalPath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => File.Exists(path) ? new FileInfo(path).Length : 0L)
+            .Sum();
+        var archive = session.ArchivePath ?? session.PlayableAudioPath;
+        string? audio = null;
+        if (!string.IsNullOrWhiteSpace(archive) && Directory.Exists(archive))
+        {
+            archive = Path.GetFullPath(archive);
+            foreach (var candidate in new[] { Path.Combine(archive, "Аудиозапись.flac"), Path.Combine(archive, "export", "master.flac") })
+            {
+                if (!File.Exists(candidate)) continue;
+                // The visible lossless master is the default playback source.
+                // Hidden WAV files under .whisperx are only a recovery/export
+                // fallback and should not be presented as the archive itself.
+                audio = candidate;
+                size = new FileInfo(candidate).Length;
+                break;
+            }
+        }
+        audio ??= files
+            .Where(file => File.Exists(file.LocalPath))
+            .OrderBy(file => file.TrackType.Contains("microphone", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .Select(file => file.LocalPath)
+            .FirstOrDefault();
+        var localStatus = session.PlayableAudioState.ToUpperInvariant() switch
+        {
+            "READY" => "Сохранено локально",
+            "RECOVERY_PENDING" => "Ожидает восстановления",
+            "FAILED" => "Ошибка локального файла",
+            "BUILDING" or "PENDING" => "Сохраняется локально",
+            _ when session.LocalFinalizeState.Equals("LOCAL_READY", StringComparison.OrdinalIgnoreCase) => "Сохранено локально",
+            _ => "Подготовка локального файла"
+        };
+        var delivery = DisplayDeliveryState(session.DeliveryState);
+        var canRetry = session.DeliveryState is not ("CONFIRMED" or "COMPLETED")
+            && session.State is not ("CANCELLED" or "FAILED");
+        var usingFallback = IsFallbackArchivePath(archive);
+        return new LocalRecordingItem(
+            session.SessionId,
+            title,
+            session.StartedAt,
+            session.StartedAt?.ToLocalTime().ToString("dd.MM.yyyy HH:mm") ?? "Дата неизвестна",
+            durationSeconds > 0 ? FormatMediaTime((long)Math.Round(durationSeconds * 1000d)) : "—",
+            size > 0 ? FormatBytes(size) : "—",
+            archive ?? (audio is not null ? Path.GetDirectoryName(audio!) ?? string.Empty : string.Empty),
+            audio,
+            localStatus,
+            delivery,
+            audio is not null,
+            canRetry,
+            usingFallback ? $"Основная папка недоступна. Запись сохранена в резервной папке: {archive}" : string.Empty);
     }
 
     private async Task DeviceSubscriptionLoopAsync(CancellationToken cancellationToken)
@@ -790,14 +968,14 @@ public sealed class RecordingViewModel : ObservableObject
             }
 
             var title = string.IsNullOrWhiteSpace(Title) ? "Новая запись" : Title.Trim();
-            var bootstrap = _services.AgentBootstrap.LastStatus;
-            if (!bootstrap.Authenticated && !bootstrap.OfflineEligible)
+            if (!LocalRecordingAllowed)
             {
                 State = RecordingState.Error;
-                ErrorMessage = MapRecordingError(bootstrap.Code);
-                StatusMessage = bootstrap.Message;
+                ErrorMessage = "LOCAL_RECORDING_LOGIN_REQUIRED";
+                StatusMessage = "Выполните вход в приложение перед локальной записью.";
                 return false;
             }
+            var bootstrap = _services.AgentBootstrap.LastStatus;
             if (!bootstrap.Ready || !bootstrap.ServerConnected)
             {
                 WarningMessage = "Сервер недоступен: запись будет сохранена локально и доставлена автоматически после восстановления связи.";
@@ -817,6 +995,11 @@ public sealed class RecordingViewModel : ObservableObject
             if (response.Preflight is { Warnings.Count: > 0 })
                 WarningMessage = string.Join("; ", response.Preflight.Warnings.Select(MapRecordingError));
             ApplyResponse(response);
+            // The Host reserves the user-facing archive directory before the
+            // first capture frame. Refresh the local-only library in the
+            // background so the path is visible immediately without adding a
+            // server or HTTP round trip to START.
+            if (response.Ok) _ = RefreshLocalLibraryAsync();
             if (!response.Ok)
             {
                 State = RecordingState.Error;
@@ -899,6 +1082,47 @@ public sealed class RecordingViewModel : ObservableObject
             return response.Ok;
         }
         catch (Exception ex) { ErrorMessage = SafeError(ex); return false; }
+    }
+
+    public async Task<bool> RetryLocalUploadAsync(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) return false;
+        try
+        {
+            var response = await _services.Recorder.RetryUploadAsync(sessionId).ConfigureAwait(true);
+            if (!response.Ok && response.SessionStatus is null)
+            {
+                ErrorMessage = MapRecordingError(response.Error);
+                return false;
+            }
+            await RefreshLocalLibraryAsync().ConfigureAwait(true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> ExportLocalAudioAsync(string sessionId, string format, string destinationPath)
+    {
+        try
+        {
+            var response = await _services.Recorder.ExportLocalAudioAsync(sessionId, format, destinationPath).ConfigureAwait(true);
+            if (!response.Ok)
+            {
+                ErrorMessage = MapRecordingError(response.Error ?? "LOCAL_AUDIO_EXPORT_FAILED");
+                return false;
+            }
+            StatusMessage = $"Экспорт завершён: {response.ExportedPath ?? destinationPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = SafeError(ex);
+            return false;
+        }
     }
 
     public async Task SetMicrophoneAsync(string? id)
@@ -1291,7 +1515,7 @@ public sealed class RecordingViewModel : ObservableObject
         EncodingState = session.EncodingState;
         ArchiveState = session.ArchiveState;
         DeliveryState = session.DeliveryState;
-        ArchivePath = session.ArchivePath;
+        ArchivePath = session.ArchivePath ?? session.PlayableAudioPath;
         PlayableAudioState = session.PlayableAudioState;
         PlayableAudioPath = session.PlayableAudioPath;
         PlayableAudioError = session.PlayableAudioError;
@@ -1847,6 +2071,8 @@ public sealed class RecordingViewModel : ObservableObject
             OnPropertyChanged(nameof(SystemAudioTelemetryStale));
             }
             OnPropertyChanged(nameof(AgentReady));
+            OnPropertyChanged(nameof(LocalRecordingAllowed));
+            OnPropertyChanged(nameof(LocalRecordingStatus));
             OnPropertyChanged(nameof(CanStart));
         StatusMessage = State switch
         {
@@ -2075,8 +2301,8 @@ public sealed class RecordingViewModel : ObservableObject
             return "Микрофон не готов. Проверьте устройство или выберите микрофон заново.";
         if (!_localStorageReady)
             return "Недостаточно свободного места либо папка локального архива недоступна.";
-        if (!AgentReady)
-            return MapRecordingError(_services.AgentBootstrap.LastStatus.Code);
+        if (!LocalRecordingAllowed)
+            return "Выполните вход в приложение. После входа запись будет доступна без сервера.";
         return "Recorder пока не готов к запуску записи.";
     }
 

@@ -109,7 +109,8 @@ public sealed record AgentIpcResponse(
     AgentIpcAudioTelemetry? AudioTelemetry = null,
     IReadOnlyList<LocalSessionSummary>? LocalSessions = null,
     AudioCaptureAbResult? AudioCaptureAb = null,
-    RoomAcousticCheckResult? RoomCheck = null)
+    RoomAcousticCheckResult? RoomCheck = null,
+    string? ExportedPath = null)
 {
     /// <summary>
     /// True when the local IPC endpoint answered with a state payload. Health

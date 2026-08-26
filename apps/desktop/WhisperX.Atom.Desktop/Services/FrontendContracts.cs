@@ -32,6 +32,8 @@ public interface IRecorderService
     Task<AgentIpcResponse> PreflightAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> GetSessionStatusAsync(string sessionId, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ListLocalSessionsAsync(int limit = 100, CancellationToken cancellationToken = default);
+    /// <summary>Exports an existing local recording without contacting the server.</summary>
+    Task<AgentIpcResponse> ExportLocalAudioAsync(string sessionId, string format, string destinationPath, CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> StartAsync(string title, Guid? meetingId = null, Guid? ownerUserId = null, bool localOnly = false, CancellationToken cancellationToken = default, string acousticProfile = "AUTO");
     Task<AgentIpcResponse> PauseAsync(CancellationToken cancellationToken = default);
     Task<AgentIpcResponse> ResumeAsync(CancellationToken cancellationToken = default);
@@ -57,6 +59,12 @@ public interface IBackendService : IDisposable
     string? LastConnectionErrorCode { get; }
     DateTimeOffset? SessionExpiresAtUtc { get; }
     bool CanUseOffline { get; }
+    /// <summary>
+    /// Local capture permission is based on the cached signed-in identity,
+    /// not on current API reachability or session expiry. It is cleared only
+    /// by an explicit logout or an origin/user change.
+    /// </summary>
+    bool CanRecordLocally { get; }
     void ApplySettings(DesktopSettings settings);
     Task<bool> CheckReadyAsync(CancellationToken cancellationToken = default);
     Task<DesktopSystemStatus?> GetSystemStatusAsync(CancellationToken cancellationToken = default);

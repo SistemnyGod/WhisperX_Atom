@@ -19,6 +19,7 @@ public sealed partial class RecordingPage : Page
     private PageLayoutMode? _lastLayoutMode;
     private bool? _lastActionCompact;
     private RecordingState? _lastRecordedState;
+    private CancellationTokenSource? _localSavedNotificationCts;
 
     public RecordingPage()
     {
@@ -41,6 +42,9 @@ public sealed partial class RecordingPage : Page
 
     protected override async void OnNavigatedFrom(NavigationEventArgs e)
     {
+        _localSavedNotificationCts?.Cancel();
+        _localSavedNotificationCts?.Dispose();
+        _localSavedNotificationCts = null;
         if (ViewModel is not null) await ViewModel.StopPollingAsync();
         base.OnNavigatedFrom(e);
     }
@@ -58,6 +62,8 @@ public sealed partial class RecordingPage : Page
             or nameof(RecordingViewModel.LocalFinalizeStatusLabel)) UpdateFinalizeOutcomeVisual();
         if (e.PropertyName is nameof(RecordingViewModel.State))
         {
+            if (ViewModel?.State == RecordingState.Finalizing && _lastRecordedState is RecordingState.Recording or RecordingState.Paused)
+                ShowLocalSavedNotification();
             RecordSessionState(ViewModel?.State);
             UpdateStateIndicator();
             UpdateActionButtons();
@@ -137,6 +143,9 @@ public sealed partial class RecordingPage : Page
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
+        LocalSavedInfoBar.IsOpen = false;
+        ExportInfoBar.IsOpen = false;
+        OpenSavedFolderButton.Visibility = Visibility.Collapsed;
         ViewModel.SessionEvents.Clear();
         _lastRecordedState = null;
         await ViewModel.StartRecordingAsync();
@@ -154,8 +163,107 @@ public sealed partial class RecordingPage : Page
     private async void MarkerButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync()) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлена метка"); UpdateError(); }
     private async void DecisionButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync("DECISION")) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлено решение"); UpdateError(); }
     private async void TaskButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null && await ViewModel.AddMarkerAsync("ACTION_ITEM")) ViewModel.SessionEvents.Add($"{DateTime.Now:HH:mm:ss}  Добавлено поручение"); UpdateError(); }
-    private async void StopButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.StopRecordingAsync(); UpdateError(); }
+    private async void StopButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var stopped = await ViewModel.StopRecordingAsync();
+        if (stopped || ViewModel.LocalFinalizeState is "FINALIZING_LOCAL" or "LOCAL_READY" or "RECOVERY_PENDING")
+            ShowLocalSavedNotification();
+        UpdateError();
+    }
     private async void RetryUploadButton_Click(object sender, RoutedEventArgs e) { if (ViewModel is not null) await ViewModel.RetryUploadAsync(); UpdateError(); }
+
+    private async void RefreshLocalLibraryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        await ViewModel.RefreshLocalLibraryAsync();
+    }
+
+    private void LocalPlayButton_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not LocalRecordingItem item || string.IsNullOrWhiteSpace(item.AudioPath) || !File.Exists(item.AudioPath)) return;
+        Process.Start(new ProcessStartInfo { FileName = item.AudioPath, UseShellExecute = true });
+    }
+
+    private void LocalFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not LocalRecordingItem item) return;
+        var path = !string.IsNullOrWhiteSpace(item.ArchivePath) && Directory.Exists(item.ArchivePath)
+            ? item.ArchivePath
+            : !string.IsNullOrWhiteSpace(item.AudioPath) ? Path.GetDirectoryName(item.AudioPath) : null;
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+    }
+
+    private async void LocalExportWavButton_Click(object sender, RoutedEventArgs e) => await ExportLocalAudioAsync(sender, "WAV");
+
+    private async void LocalExportMp3Button_Click(object sender, RoutedEventArgs e) => await ExportLocalAudioAsync(sender, "MP3");
+
+    private async Task ExportLocalAudioAsync(object sender, string format)
+    {
+        if (ViewModel is null || (sender as Button)?.Tag is not LocalRecordingItem item) return;
+        try
+        {
+            var extension = format.Equals("MP3", StringComparison.OrdinalIgnoreCase) ? ".mp3" : ".wav";
+            var picker = new FileSavePicker
+            {
+                SuggestedStartLocation = PickerLocationId.MusicLibrary,
+                SuggestedFileName = SanitizeFileName(item.Title) + extension
+            };
+            InitializeWithWindow.Initialize(picker, App.MainWindow.GetWindowHandle());
+            picker.FileTypeChoices.Add(format.Equals("MP3", StringComparison.OrdinalIgnoreCase) ? "MP3 аудио" : "WAV аудио", new List<string> { extension });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+            var exported = await ViewModel.ExportLocalAudioAsync(item.SessionId, format, file.Path);
+            if (!exported)
+            {
+                ExportInfoBar.Message = "Исходная запись не изменена. Проверьте, что локальный FLAC готов и на диске достаточно места.";
+                ExportInfoBar.IsOpen = true;
+                return;
+            }
+            ExportInfoBar.IsOpen = false;
+            UpdateError();
+        }
+        catch (Exception ex)
+        {
+            ExportInfoBar.Message = UiErrorFormatter.Format(ex, "Не удалось экспортировать локальную запись. Исходная запись не изменена.");
+            ExportInfoBar.IsOpen = true;
+        }
+    }
+
+    private async void LocalRetryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || (sender as Button)?.Tag is not LocalRecordingItem item) return;
+        await ViewModel.RetryLocalUploadAsync(item.SessionId);
+        UpdateError();
+    }
+
+    private void OpenSavedAudioButton_Click(object sender, RoutedEventArgs e) => OpenPlayableAudioButton_Click(sender, e);
+
+    private void OpenSavedFolderButton_Click(object sender, RoutedEventArgs e) => OpenArchiveButton_Click(sender, e);
+
+    private void ShowLocalSavedNotification()
+    {
+        LocalSavedInfoBar.IsOpen = true;
+        OpenSavedFolderButton.Visibility = Visibility.Visible;
+        _localSavedNotificationCts?.Cancel();
+        _localSavedNotificationCts?.Dispose();
+        _localSavedNotificationCts = new CancellationTokenSource();
+        var token = _localSavedNotificationCts.Token;
+        _ = HideLocalSavedNotificationAsync(token);
+    }
+
+    private async Task HideLocalSavedNotificationAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(8), cancellationToken);
+            if (cancellationToken.IsCancellationRequested) return;
+            LocalSavedInfoBar.IsOpen = false;
+            OpenSavedFolderButton.Visibility = Visibility.Collapsed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
 
     private void OpenSettingsButton_Click(object sender, RoutedEventArgs e) => App.MainWindow.NavigateTo("settings");
 
@@ -298,6 +406,13 @@ public sealed partial class RecordingPage : Page
         ActiveRecordingPanel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         FinalizingPanel.Visibility = finalizing ? Visibility.Visible : Visibility.Collapsed;
         ProcessingPanel.Visibility = showProcessing ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var clean = new string((value ?? "Запись").Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(clean) ? "Запись" : clean.Length > 80 ? clean[..80] : clean;
     }
 
     private void UpdateStateIndicator()

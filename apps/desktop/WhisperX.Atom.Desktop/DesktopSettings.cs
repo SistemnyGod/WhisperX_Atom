@@ -174,7 +174,24 @@ public sealed record DesktopSettings(
 
         if (string.Equals(settings.ApiUrl, configuredUrl, StringComparison.Ordinal)) return settings;
 
-        var migrated = settings with { ApiUrl = configuredUrl };
+        // A cached sign-in is scoped to the API origin.  Do not silently carry
+        // a cookie/owner into a different managed server (for example after a
+        // laptop is moved between installations); that would incorrectly
+        // grant offline capture under the old identity.
+        var existingApiUrl = settings.ApiUrl ?? string.Empty;
+        var originChanged = IsHttpUrl(existingApiUrl)
+            && !IsUnconfiguredUrl(existingApiUrl)
+            && !string.Equals(existingApiUrl.TrimEnd('/'), configuredUrl, StringComparison.OrdinalIgnoreCase);
+        var migrated = originChanged
+            ? settings with
+            {
+                ApiUrl = configuredUrl,
+                ProtectedSessionCookie = null,
+                SessionExpiresAtUtc = null,
+                OwnerUserId = null,
+                AgentBootstrapConfirmed = false
+            }
+            : settings with { ApiUrl = configuredUrl };
         try
         {
             var sessionCookie = migrated.UnprotectSessionCookie();
